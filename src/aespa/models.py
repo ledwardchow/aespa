@@ -111,6 +111,7 @@ class CrawledPage(SQLModel, table=True):
     status: str = Field(default="crawled")            # crawled | failed
     error_message: Optional[str] = Field(default=None)
     in_scope: bool = Field(default=True)
+    scan_status: str = Field(default="pending")   # pending | running | complete
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 

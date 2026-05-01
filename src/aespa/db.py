@@ -46,6 +46,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
