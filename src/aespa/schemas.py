@@ -174,6 +174,11 @@ class TestRunSummary(BaseModel):
     error_message: str | None
 
 
+class ScopeUpdate(BaseModel):
+    in_scope: bool
+    cascade: bool = False
+
+
 class CrawledPageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -185,6 +190,7 @@ class CrawledPageOut(BaseModel):
     depth: int
     status: str
     error_message: str | None
+    in_scope: bool = True
     discovered_at: datetime
     # screenshot returned separately via /pages/{id} to keep list responses light
 
@@ -201,6 +207,7 @@ class GraphNode(BaseModel):
     depth: int
     status: str
     context: str | None
+    in_scope: bool = True
 
 
 class GraphLink(BaseModel):
