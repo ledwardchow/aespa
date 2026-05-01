@@ -31,9 +31,9 @@ export default function App() {
         <div className="sidebar-brand">
           <div className="logo">
             <div className="logo-icon">A</div>
-            <span className="logo-text">AESPA</span>
+            <span className="logo-text">ESPA</span>
           </div>
-          <div className="logo-sub">LLM Pentesting Agent</div>
+          <div className="logo-sub">Educational Security Pentesting Agent</div>
         </div>
 
         <nav className="sidebar-nav">
