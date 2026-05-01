@@ -1,0 +1,134 @@
+from fastapi.testclient import TestClient
+
+
+def test_get_llm_config_initially_null(client: TestClient):
+    r = client.get("/api/settings/llm")
+    assert r.status_code == 200
+    assert r.json() is None
+
+
+def test_get_default_models(client: TestClient):
+    r = client.get("/api/settings/llm/models")
+    assert r.status_code == 200
+    data = r.json()
+    assert "anthropic" in data
+    assert "openai" in data
+    assert "openai_compatible" in data
+    assert isinstance(data["anthropic"], list)
+
+
+def test_upsert_anthropic(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "anthropic",
+        "api_key": "sk-ant-test",
+        "model": "claude-opus-4-5",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "anthropic"
+    assert data["api_key"] == "sk-ant-test"
+    assert data["model"] == "claude-opus-4-5"
+    assert data["base_url"] is None
+
+
+def test_upsert_openai(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openai",
+        "api_key": "sk-test",
+        "model": "gpt-4o",
+        "max_tokens": 2048,
+        "temperature": 0.5,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "openai"
+    assert data["temperature"] == 0.5
+
+
+def test_upsert_openai_compatible(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openai_compatible",
+        "base_url": "http://localhost:1234/v1",
+        "model": "llama-3.1-8b-instruct",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "openai_compatible"
+    assert data["base_url"] == "http://localhost:1234/v1"
+    assert data["api_key"] is None
+
+
+def test_upsert_openai_compatible_strips_trailing_slash(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openai_compatible",
+        "base_url": "http://localhost:1234/v1/",
+        "model": "llama-3",
+        "max_tokens": 1024,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    assert r.json()["base_url"] == "http://localhost:1234/v1"
+
+
+def test_upsert_is_idempotent(client: TestClient):
+    payload = {
+        "provider": "anthropic",
+        "api_key": "sk-ant-1",
+        "model": "claude-opus-4-5",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    }
+    client.put("/api/settings/llm", json=payload)
+    payload["api_key"] = "sk-ant-2"
+    r = client.put("/api/settings/llm", json=payload)
+    assert r.status_code == 200
+    assert r.json()["api_key"] == "sk-ant-2"
+
+    r2 = client.get("/api/settings/llm")
+    assert r2.json()["api_key"] == "sk-ant-2"
+
+
+def test_upsert_anthropic_missing_api_key(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "anthropic",
+        "model": "claude-opus-4-5",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_openai_compatible_missing_base_url(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openai_compatible",
+        "model": "llama-3",
+        "max_tokens": 1024,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_invalid_temperature(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "anthropic",
+        "api_key": "sk-ant-x",
+        "model": "claude-opus-4-5",
+        "max_tokens": 4096,
+        "temperature": 5.0,  # > 2
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_invalid_max_tokens(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openai",
+        "api_key": "sk-x",
+        "model": "gpt-4o",
+        "max_tokens": 99999,  # > 32768
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
