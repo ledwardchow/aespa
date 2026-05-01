@@ -108,7 +108,19 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
 
 
 def delete_site(session: Session, site_id: int) -> None:
+    from aespa.models import CrawledPage, PageLink, TestRun
+
     site = get_site(session, site_id)
+    # Manually cascade to test runs and their children (SQLite FK off by default)
+    runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
+    for run in runs:
+        links = session.exec(select(PageLink).where(PageLink.test_run_id == run.id)).all()
+        for lnk in links:
+            session.delete(lnk)
+        pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run.id)).all()
+        for pg in pages:
+            session.delete(pg)
+        session.delete(run)
     session.delete(site)
     session.commit()
 

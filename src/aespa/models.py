@@ -110,6 +110,7 @@ class CrawledPage(SQLModel, table=True):
     depth: int = Field(default=0)
     status: str = Field(default="crawled")            # crawled | failed
     error_message: Optional[str] = Field(default=None)
+    in_scope: bool = Field(default=True)
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 

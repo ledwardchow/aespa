@@ -30,6 +30,7 @@ def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
     cfg.model       = payload.model
     cfg.max_tokens  = payload.max_tokens
     cfg.temperature = payload.temperature
+    cfg.use_vision  = payload.use_vision
     cfg.updated_at  = _utcnow()
 
     session.add(cfg)
