@@ -446,9 +446,12 @@ function TestRunForm({ siteId }) {
 
 // ── Test run detail + D3 graph ────────────────────────────────────────────────
 
-const SCOPE_IN_COLOR  = "#3b82f6";   // blue  — in scope
-const SCOPE_OUT_COLOR = "#ef4444";   // red   — out of scope
+const SCOPE_IN_COLOR  = "#3b82f6";
+const SCOPE_OUT_COLOR = "#ef4444";
 const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLOR;
+
+const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
+const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
 
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
@@ -457,6 +460,7 @@ function TestRunDetail({ runId }) {
   const [pageDetail, setPageDetail] = useState(null);
   const [cascade, setCascade]   = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
+  const [activeTab, setActiveTab] = useState("sitemap");
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
@@ -497,8 +501,18 @@ function TestRunDetail({ runId }) {
     const W = svgRef.current.clientWidth || 800;
     const H = svgRef.current.clientHeight || 500;
 
-    const nodes = graph.nodes.map(n => ({...n}));
-    const links = graph.links.map(l => ({...l}));
+    // Scan tab: only in-scope nodes; site map: all nodes.
+    const isScan = activeTab === "scan";
+    const inScopeIds = isScan
+      ? new Set(graph.nodes.filter(n => n.in_scope !== false).map(n => n.id))
+      : null;
+
+    const nodes = (isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes)
+      .map(n => ({...n}));
+    const links = (isScan
+      ? graph.links.filter(l => inScopeIds.has(l.source) && inScopeIds.has(l.target))
+      : graph.links
+    ).map(l => ({...l}));
 
     const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => g.attr("transform", e.transform));
     svg.call(zoom);
@@ -531,7 +545,7 @@ function TestRunDetail({ runId }) {
 
     node.append("circle")
       .attr("r", 10)
-      .attr("fill", d => scopeColor(d))
+      .attr("fill", d => isScan ? scanColor(d) : scopeColor(d))
       .attr("stroke", d => d.status === "failed" ? "#fbbf24" : "var(--bg)")
       .attr("stroke-width", 2);
 
@@ -573,7 +587,7 @@ function TestRunDetail({ runId }) {
 
     simRef.current = sim;
     return () => sim.stop();
-  }, [graph]);
+  }, [graph, activeTab]);
 
   const onToggleScope = async () => {
     if (!selectedNode || scopeBusy) return;
@@ -623,16 +637,24 @@ function TestRunDetail({ runId }) {
         ${run && html`<span style=${{marginLeft:8,fontSize:12,color:STATUS_COLOR[run.status]||"var(--muted)"}}>● ${run.status}</span>`}
       </div>
       <div className="topbar-actions">
-        ${canStart   && html`<button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
-        ${canRestart && html`<button className="btn danger-outline" onClick=${onRestart}>↺ Clear & restart</button>`}
-        ${canStop    && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
       </div>
     </div>
 
     <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
 
-      ${run && html`
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
+          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
+        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
+          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+        <div style=${{flex:1}}></div>
+        ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
+        ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
+      </div>
+
+      ${activeTab==="sitemap" && run && html`
         <div className="run-meta">
           <div className="run-stat"><span className="run-stat-val">${run.pages_discovered}</span><span className="run-stat-lbl">Pages found</span></div>
           <div className="run-stat"><span className="run-stat-val">${run.max_depth}</span><span className="run-stat-lbl">Max depth</span></div>
@@ -645,7 +667,7 @@ function TestRunDetail({ runId }) {
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
-              ${run?.status==="pending"
+              ${activeTab==="sitemap" && run?.status==="pending"
                 ? html`<div style=${{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
                     <span>Ready to crawl.</span>
                     <button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>
@@ -655,9 +677,15 @@ function TestRunDetail({ runId }) {
           <svg ref=${svgRef} className="graph-svg" width="100%" height="100%"></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
-              <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_IN_COLOR}}></span>In Scope</div>
-              <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_OUT_COLOR}}></span>Out of Scope</div>
-              <div className="legend-item"><span className="legend-dot" style=${{background:"var(--bg)",border:"2px solid #fbbf24"}}></span>Failed</div>
+              ${activeTab === "sitemap" ? html`
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_IN_COLOR}}></span>In Scope</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_OUT_COLOR}}></span>Out of Scope</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:"var(--bg)",border:"2px solid #fbbf24"}}></span>Failed</div>
+              ` : html`
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.pending}}></span>Not scanned</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.running}}></span>Scanning…</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.complete}}></span>Complete</div>
+              `}
             </div>`}
         </div>
 

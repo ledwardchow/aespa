@@ -231,6 +231,7 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             status=p.status,
             context=p.llm_context,
             in_scope=p.in_scope,
+            scan_status=p.scan_status,
         )
         for p in pages
     ]
