@@ -208,6 +208,7 @@ class GraphNode(BaseModel):
     status: str
     context: str | None
     in_scope: bool = True
+    scan_status: str = "pending"
 
 
 class GraphLink(BaseModel):
