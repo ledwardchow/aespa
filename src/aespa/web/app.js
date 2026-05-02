@@ -826,8 +826,8 @@ function TestRunDetail({ runId }) {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
-const PROVIDER_LABELS = { anthropic:"Anthropic", openai:"OpenAI", openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)" };
-const PROVIDER_PLACEHOLDERS = { anthropic:"claude-opus-4-5", openai:"gpt-4o", openai_compatible:"e.g. llama-3.1-8b-instruct" };
+const PROVIDER_LABELS = { anthropic:"Anthropic", openai:"OpenAI", openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)", google:"Google Gemini" };
+const PROVIDER_PLACEHOLDERS = { anthropic:"claude-opus-4-5", openai:"gpt-4o", openai_compatible:"e.g. llama-3.1-8b-instruct", google:"gemini-2.5-flash-preview-04-17" };
 
 function SettingsPage() {
   const [form, setForm]     = useState(null);
