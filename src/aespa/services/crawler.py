@@ -1,13 +1,13 @@
-"""Playwright-based BFS web crawler with LLM page analysis."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 log = logging.getLogger("aespa.crawler")
 logging.basicConfig(
@@ -19,7 +19,7 @@ logging.basicConfig(
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PageLink, TestRun, TestRunStatus
+from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, TestRunStatus
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
@@ -28,7 +28,7 @@ from aespa.services.settings import get_llm_config
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 _stop_requested: set[int] = set()
-_active_tasks: dict[int, asyncio.Task] = {}  # run_id → Task
+_active_tasks: dict[int, asyncio.Task] = {}
 
 
 def request_stop(run_id: int) -> None:
@@ -46,7 +46,6 @@ def _utcnow() -> datetime:
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def start_crawl(run_id: int) -> None:
-    """Schedule a background crawl task (idempotent — no-op if already running)."""
     if run_id in _active_tasks:
         return
     task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
@@ -72,15 +71,18 @@ async def _crawl_task(run_id: int) -> None:
         _stop_requested.discard(run_id)
 
 
-# ── Core crawler ──────────────────────────────────────────────────────────────
+# ── Shared state for parallel crawlers ───────────────────────────────────────
+
+class _CrawlShared:
+    def __init__(self, crawled_norms: dict, pages_done: int) -> None:
+        self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
+        self.lock: asyncio.Lock = asyncio.Lock()
+        self.pages_done: int = pages_done
+
+
+# ── Core orchestrator ─────────────────────────────────────────────────────────
 
 async def _do_crawl(run_id: int) -> None:
-    from playwright.async_api import async_playwright
-
-    # Load everything we need from DB, then expunge all objects so that
-    # their attributes remain accessible after the session closes.
-    # (SQLAlchemy's session.close() expires every attribute on all objects
-    # still attached to the session — expunge() prevents that.)
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
         if run is None:
@@ -88,68 +90,105 @@ async def _do_crawl(run_id: int) -> None:
         from aespa.models import Site
         site = s.get(Site, run.site_id)
         llm_cfg = get_llm_config(s)
-        creds = list(site.credentials)   # force-load the relationship
-
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
+        creds = list(site.credentials)
+        for obj in [*creds, site, llm_cfg, run]:
+            s.expunge(obj)
 
-        # Expunge before the session closes to keep loaded attribute values.
-        for cred in creds:
-            s.expunge(cred)
-        s.expunge(site)
-        s.expunge(llm_cfg)
-        s.expunge(run)
-
-    # Extract all needed primitive values from the expunged ORM objects so
-    # we never touch SQLAlchemy state again outside a session block.
     base_url      = site.base_url.rstrip("/")
-    login_url     = site.login_url
+    login_url     = site.login_url or ""
     requires_auth = site.requires_auth
     max_depth     = run.max_depth
     max_pages     = run.max_pages
-    _parsed_base  = urlparse(base_url)
-    base_netloc   = _parsed_base.netloc
-    _bp = _parsed_base.path
+    _parsed       = urlparse(base_url)
+    base_netloc   = _parsed.netloc
+    _bp           = _parsed.path
     base_path: str = (_bp if _bp.endswith("/") else _bp + "/") if _bp else "/"
 
-    log.info("=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s ===",
-             run_id, base_url, max_depth, max_pages)
-    log.info("base_netloc=%s  base_path=%s  requires_auth=%s",
-             base_netloc, base_path, requires_auth)
+    log.info("=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s creds=%d ===",
+             run_id, base_url, max_depth, max_pages, len(creds))
 
-    # Load existing pages so we can append instead of wiping.
-    # prev_visited maps normalised URL → CrawledPage.id for all already-crawled pages.
     with Session(get_engine()) as s:
-        existing = s.exec(
-            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-        ).all()
+        existing = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
         for ep in existing:
             s.expunge(ep)
 
-    prev_visited: dict[str, Optional[int]] = {_norm(ep.url): ep.id for ep in existing}
-    pages_done = len(existing)
-    crawled_norms: dict[str, int] = dict(prev_visited)
-
-    log.info("Existing pages in this run: %d (prev_visited keys: %d)",
-             pages_done, len(prev_visited))
-
-    _update_run(
-        run_id,
-        status=TestRunStatus.running,
-        started_at=_utcnow(),
-        completed_at=None,
-        error_message=None,
-        pages_discovered=pages_done,
-        current_url=base_url,
+    shared = _CrawlShared(
+        crawled_norms={_norm(ep.url): ep.id for ep in existing},
+        pages_done=len(existing),
     )
 
-    # `queued` deduplicates queue entries (like `visited` in a normal BFS).
-    # prev_visited URLs are allowed into the queue so we can fast-traverse them
-    # and discover links to pages that weren't crawled in earlier runs.
-    queued: set[str] = set()
-    queue: deque[tuple[str, int, Optional[int]]] = deque()
-    queued.add(_norm(base_url))
-    queue.append((base_url, 0, None))
+    _update_run(run_id, status=TestRunStatus.running, started_at=_utcnow(),
+                completed_at=None, error_message=None,
+                pages_discovered=shared.pages_done, current_url=base_url)
+
+    phases = creds if (requires_auth and creds) else [None]
+
+    tasks = [
+        asyncio.create_task(
+            _crawl_as_credential(
+                run_id=run_id, cred=cred, shared=shared,
+                base_url=base_url, login_url=login_url,
+                requires_auth=requires_auth, max_depth=max_depth,
+                max_pages=max_pages, llm_cfg=llm_cfg,
+                base_netloc=base_netloc, base_path=base_path,
+                phase_idx=idx, total_phases=len(phases),
+            ),
+            name=f"crawl-{run_id}-cred{idx}",
+        )
+        for idx, cred in enumerate(phases)
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception):
+            log.error("Crawl task raised: %s", r)
+
+    # OR-merge page categories from all credential views into each CrawledPage.
+    _merge_all_categories(run_id)
+
+    final_status = TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
+    log.info("=== Crawl done: run_id=%s status=%s pages=%d ===",
+             run_id, final_status, shared.pages_done)
+    _update_run(run_id, status=final_status, completed_at=_utcnow(),
+                current_url=None, pages_discovered=shared.pages_done)
+    events_svc.emit(run_id, {
+        "type": "run_update", "status": final_status,
+        "pages_discovered": shared.pages_done, "current_url": None,
+    })
+
+
+# ── Per-credential BFS ────────────────────────────────────────────────────────
+
+async def _crawl_as_credential(
+    *,
+    run_id: int,
+    cred,
+    shared: _CrawlShared,
+    base_url: str,
+    login_url: str,
+    requires_auth: bool,
+    max_depth: int,
+    max_pages: int,
+    llm_cfg,
+    base_netloc: str,
+    base_path: str,
+    phase_idx: int,
+    total_phases: int,
+) -> None:
+    from playwright.async_api import async_playwright
+
+    username      = cred.username if cred else None
+    credential_id = cred.id if cred else None
+
+    log.info("=== Phase %d/%d: user=%s ===", phase_idx + 1, total_phases, username or "anonymous")
+    events_svc.emit(run_id, {
+        "type": "crawl_phase",
+        "phase": phase_idx + 1,
+        "total_phases": total_phases,
+        "username": username,
+    })
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -161,310 +200,306 @@ async def _do_crawl(run_id: int) -> None:
             ),
             ignore_https_errors=True,
         )
-        traffic_svc.setup_playwright_logging(ctx, run_id)
+        traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
 
-        # Always visit the base URL first so the browser has a clean session on
-        # the main domain before we touch the auth flow.  Without this, navigating
-        # to the login URL first can leave cookies / server-side session state that
-        # causes the brochureware root to return 403 on the subsequent visit.
-        log.info("Pre-loading base_url to establish clean session: %s", base_url)
         try:
-            pre_resp = await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
-            log.info("Pre-load response: HTTP %s  page.url=%s",
-                     pre_resp.status if pre_resp else "no-resp", page.url)
-        except Exception as pre_err:
-            log.warning("Pre-load failed (continuing): %s", pre_err)
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception as e:
+            log.warning("Pre-load failed for user=%s: %s", username, e)
 
-        if requires_auth and creds:
-            log.info("Authenticating at %s (user=%s)", login_url, creds[0].username)
-            await _authenticate(page, login_url, creds[0])
-            log.info("Auth complete. page.url after auth = %s", page.url)
-        else:
-            log.info("No auth required / no credentials.")
+        if requires_auth and cred:
+            log.info("Authenticating as %s", cred.username)
+            await _authenticate(page, login_url, cred)
 
-        while queue and max_pages > pages_done:
-            if _stop_requested.issuperset({run_id}):
+        queued: set[str] = {_norm(base_url)}
+        queue: deque[tuple[str, int, Optional[int]]] = deque([(base_url, 0, None)])
+
+        while queue:
+            if run_id in _stop_requested:
                 break
 
             url, depth, parent_id = queue.popleft()
             norm = _norm(url)
 
-            if norm in prev_visited:
-                # Already crawled in a prior run. Fast-traverse: navigate to
-                # extract outgoing links and enqueue any that are new.
-                if depth < max_depth:
-                    existing_id = prev_visited[norm]
-                    try:
-                        log.debug("Fast-traverse (prev): %s", url)
-                        await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5_000)
-                        except Exception:
-                            pass
-                        hrefs: list[str] = await page.evaluate(
-                            "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
-                        )
-                        new_from_ft = 0
-                        for href in hrefs:
-                            n = _norm(href)
-                            if n not in queued and _same_domain(href, base_netloc):
-                                queued.add(n)
-                                queue.append((href, depth + 1, existing_id))
-                                new_from_ft += 1
-                        log.debug("  fast-traverse found %d hrefs, enqueued %d new", len(hrefs), new_from_ft)
-                    except Exception as ft_err:
-                        log.warning("  fast-traverse error: %s", ft_err)
+            # ── Reserve or look up page in shared state ───────────────────────
+            page_id: int
+            is_first: bool
+            async with shared.lock:
+                if norm in shared.crawled_norms:
+                    page_id = shared.crawled_norms[norm]
+                    is_first = False
+                elif shared.pages_done >= max_pages or depth > max_depth:
+                    continue
+                else:
+                    page_id = _save_page_placeholder(run_id, url, depth)
+                    shared.crawled_norms[norm] = page_id
+                    shared.pages_done += 1
+                    is_first = True
+
+            _update_run(run_id, current_url=url, pages_discovered=shared.pages_done)
+
+            # ── Navigate ──────────────────────────────────────────────────────
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8_000)
+                except Exception:
+                    pass
+            except Exception as nav_err:
+                if is_first:
+                    _update_page(page_id, status="failed", error_message=str(nav_err)[:500])
                 continue
 
-            if depth > max_depth:
-                log.debug("Skipping (depth %d > max %d): %s", depth, max_depth, url)
+            if resp is not None and resp.status >= 400:
+                if is_first:
+                    _update_page(page_id, status="failed",
+                                 error_message=f"HTTP {resp.status}")
                 continue
 
-            log.info("[%d/%d] Crawling depth=%d: %s", pages_done + 1, max_pages, depth, url)
-            _update_run(run_id, current_url=url)
+            # ── SPA URL guard + redirect deduplication ────────────────────────
+            raw_final = page.url
+            if _same_domain(raw_final, base_netloc) and not _in_base_scope(raw_final, base_netloc, base_path):
+                final_url = url
+            else:
+                final_url = raw_final
 
-            page_id, final_url, is_new = await _process_page(
-                page=page,
-                url=url,
-                depth=depth,
-                parent_id=parent_id,
-                run_id=run_id,
-                llm_cfg=llm_cfg,
-                base_netloc=base_netloc,
-                base_path=base_path,
-                crawled_norms=crawled_norms,
+            norm_final = _norm(final_url)
+            if norm_final != norm:
+                async with shared.lock:
+                    if norm_final in shared.crawled_norms:
+                        existing_id = shared.crawled_norms[norm_final]
+                        if is_first:
+                            _update_page(page_id, status="redirect")
+                            shared.crawled_norms[norm] = existing_id
+                            shared.pages_done -= 1
+                        page_id = existing_id
+                        is_first = False
+                    elif is_first:
+                        _update_page(page_id, url=final_url)
+                        shared.crawled_norms[norm_final] = page_id
+
+            # ── DOM-based accessibility check (login form = not accessible) ───
+            try:
+                pw_loc = page.locator("input[type='password']").first
+                on_login = (await pw_loc.count() > 0) and (await pw_loc.is_visible())
+            except Exception:
+                on_login = False
+
+            if on_login:
+                if is_first:
+                    _update_page(page_id, status="crawled")
+                log.debug("  Login form for %s (user=%s) — inaccessible", final_url, username)
+                continue
+
+            # ── Content extraction ────────────────────────────────────────────
+            await page.wait_for_timeout(2000)
+            title = await page.title()
+            try:
+                text = await page.evaluate("() => document.body.innerText")
+            except Exception:
+                text = ""
+
+            screenshot_b64: Optional[str] = None
+            try:
+                raw = await page.screenshot(type="png", full_page=False)
+                screenshot_b64 = base64.b64encode(raw).decode()
+            except Exception:
+                pass
+
+            try:
+                raw_links: list[dict] = await page.evaluate(
+                    """() => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                        href: a.href,
+                        text: (a.textContent || '').trim().slice(0, 80)
+                    }))"""
+                )
+            except Exception:
+                raw_links = []
+
+            same_domain_links = [
+                (r["href"], r["text"])
+                for r in raw_links
+                if _same_domain(r["href"], base_netloc)
+            ]
+
+            # ── LLM analysis ──────────────────────────────────────────────────
+            cats: dict = {
+                "req_auth": None, "takes_input": None,
+                "has_object_ref": None, "has_business_logic": None,
+            }
+            context = ""
+            suggested: list[str] = []
+            if _is_api_page(final_url, text):
+                context = "[API endpoint — LLM analysis skipped]"
+            else:
+                try:
+                    context, suggested, cats = await llm_svc.analyse_page(
+                        llm_cfg, final_url, title, text[:8000], screenshot_b64
+                    )
+                    log.info("  LLM ok for %s (user=%s) cats=%s", final_url, username, cats)
+                except Exception as e:
+                    log.warning("  LLM failed for %s: %s", final_url, e)
+                    context = f"[LLM failed: {e}]"
+
+            # ── Persist per-credential view ───────────────────────────────────
+            _save_credential_view(
+                page_id, run_id, credential_id, username,
+                screenshot_b64, context, text[:10_000], cats,
             )
-            queued.add(_norm(final_url))
+            _update_accessible_by(page_id, credential_id)
 
-            log.info("  → page_id=%s  final_url=%s  is_new=%s", page_id, final_url, is_new)
+            # ── Update main CrawledPage if first to fill it ───────────────────
+            with Session(get_engine()) as s:
+                cp = s.get(CrawledPage, page_id)
+                fill_main = cp is not None and cp.status in ("processing", "crawled") and not cp.title
+                first_success = cp is not None and cp.status == "processing"
 
-            if page_id is None:
-                log.info("  → 4xx/5xx, skipping.")
-                continue
+            if is_first or fill_main:
+                _update_page(
+                    page_id, url=final_url, title=title,
+                    page_text=text[:10_000], screenshot_b64=screenshot_b64,
+                    llm_context=context, status="crawled", depth=depth,
+                    req_auth=cats["req_auth"], takes_input=cats["takes_input"],
+                    has_object_ref=cats["has_object_ref"],
+                    has_business_logic=cats["has_business_logic"],
+                )
+                if is_first:
+                    _save_link(run_id, parent_id, page_id, final_url)
 
-            if not is_new:
-                log.info("  → redirect duplicate, skipping.")
-                continue
+            # ── SSE ───────────────────────────────────────────────────────────
+            with Session(get_engine()) as s:
+                cp = s.get(CrawledPage, page_id)
+                ab = json.loads(cp.accessible_by if cp else "[]")
 
-            crawled_norms[_norm(final_url)] = page_id
-            pages_done += 1
-            _update_run(run_id, pages_discovered=pages_done)
+            if is_first or first_success:
+                events_svc.emit(run_id, {
+                    "type": "page_added",
+                    "node": {
+                        "id": page_id, "url": final_url, "title": title,
+                        "depth": depth, "status": "crawled",
+                        "context": context, "in_scope": True,
+                        "scan_status": "pending", "accessible_by": ab,
+                    },
+                    "link": {"source": parent_id, "target": page_id, "link_text": None}
+                            if parent_id else None,
+                })
+            else:
+                events_svc.emit(run_id, {
+                    "type": "node_accessible_by",
+                    "page_id": page_id, "username": username,
+                })
 
-            # Stream the new page to connected clients so the graph updates live.
-            with Session(get_engine()) as _s:
-                _cp = _s.get(CrawledPage, page_id)
-                if _cp:
-                    events_svc.emit(run_id, {
-                        "type": "page_added",
-                        "node": {
-                            "id": _cp.id, "url": _cp.url, "title": _cp.title,
-                            "depth": _cp.depth, "status": _cp.status,
-                            "context": _cp.llm_context, "in_scope": _cp.in_scope,
-                            "scan_status": _cp.scan_status,
-                        },
-                        "link": {"source": parent_id, "target": _cp.id, "link_text": None}
-                              if parent_id else None,
-                    })
-                    events_svc.emit(run_id, {
-                        "type": "run_update",
-                        "status": "running",
-                        "pages_discovered": pages_done,
-                        "current_url": url,
-                    })
+            events_svc.emit(run_id, {
+                "type": "run_update", "status": "running",
+                "pages_discovered": shared.pages_done,
+                "current_url": url, "username": username,
+            })
 
-            page_links, suggested = _get_queued_links(page_id, run_id)
-            enqueued = 0
-            for link_url in reversed(suggested):
-                n = _norm(link_url)
-                if n not in queued and _same_domain(link_url, base_netloc):
-                    queued.add(n)
-                    queue.appendleft((link_url, depth + 1, page_id))
-                    enqueued += 1
-            for link_url in page_links:
-                n = _norm(link_url)
-                if n not in queued and _same_domain(link_url, base_netloc):
-                    queued.add(n)
-                    queue.append((link_url, depth + 1, page_id))
-                    enqueued += 1
-            log.info("  → enqueued %d new links (suggested=%d, extracted=%d). queue size=%d",
-                     enqueued, len(suggested), len(page_links), len(queue))
+            # ── Enqueue links ─────────────────────────────────────────────────
+            if depth < max_depth:
+                for sugg_url in reversed(suggested):
+                    n = _norm(sugg_url)
+                    if n not in queued and _same_domain(sugg_url, base_netloc):
+                        queued.add(n)
+                        queue.appendleft((sugg_url, depth + 1, page_id))
+                for link_url, _ in same_domain_links:
+                    n = _norm(link_url)
+                    if n not in queued and _same_domain(link_url, base_netloc):
+                        queued.add(n)
+                        queue.append((link_url, depth + 1, page_id))
 
         await browser.close()
 
-    final_status = (
-        TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
-    )
-    log.info("=== Crawl finished: run_id=%s status=%s pages_done=%d ===",
-             run_id, final_status, pages_done)
-    _update_run(run_id, status=final_status, completed_at=_utcnow(), current_url=None)
-    events_svc.emit(run_id, {"type": "run_update", "status": final_status, "pages_discovered": pages_done, "current_url": None})
 
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
-# ── Page processing ───────────────────────────────────────────────────────────
-
-def _is_api_page(url: str, text: str) -> bool:
-    """Return True if the page looks like an API / JSON endpoint."""
-    path = urlparse(url).path.lower()
-    if any(pat in path for pat in ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql", "/swagger", "/openapi")):
-        return True
-    stripped = (text or "").lstrip()
-    return len(stripped) > 2 and stripped[0] in ("{", "[")
-
-
-async def _process_page(
-    *,
-    page,
-    url: str,
-    depth: int,
-    parent_id: Optional[int],
-    run_id: int,
-    llm_cfg,
-    base_netloc: str,
-    base_path: str,
-    crawled_norms: dict,
-) -> tuple[Optional[int], str, bool]:
-    """Navigate, extract, analyse, persist.
-    Returns (page_id, final_url, is_new).
-    is_new=False when final_url was already crawled (redirect loop) — no new
-    CrawledPage is created; a link to the existing page is recorded instead."""
-    # Navigate
-    try:
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-        status_code = resp.status if resp is not None else "no-resp"
-        log.debug("  goto %s → HTTP %s", url, status_code)
-        if resp is not None and resp.status >= 400:
-            log.info("  HTTP %s — skipping (not added to sitemap): %s", resp.status, url)
-            return None, url, True
-        try:
-            await page.wait_for_load_state("networkidle", timeout=8_000)
-        except Exception:
-            pass
-    except Exception as nav_err:
-        log.warning("  Navigation error for %s: %s", url, nav_err)
-        cp = _save_page(run_id, url=url, depth=depth, status="failed",
-                        error_message=str(nav_err)[:500])
-        _save_link(run_id, parent_id, cp.id, url)
-        return cp.id, url, True
-
-    raw_final = page.url
-    if _same_domain(raw_final, base_netloc) and not _in_base_scope(raw_final, base_netloc, base_path):
-        log.info("  SPA URL guard triggered: raw_final=%s is outside base_path=%s → keeping url=%s",
-                 raw_final, base_path, url)
-        final_url = url
-    else:
-        if raw_final != url:
-            log.debug("  Followed redirect: %s → %s", url, raw_final)
-        final_url = raw_final
-
-    norm_final = _norm(final_url)
-    if norm_final in crawled_norms:
-        log.debug("  Redirect loop detected: %s already in crawled_norms", final_url)
-        existing_id = crawled_norms[norm_final]
-        _save_link(run_id, parent_id, existing_id, final_url)
-        return existing_id, final_url, False
-
-    title = await page.title()
-
-    # Text content
-    try:
-        text = await page.evaluate("() => document.body.innerText")
-    except Exception:
-        text = ""
-
-    # Brief pause so the UI can finish rendering before we screenshot.
-    try:
-        await page.wait_for_timeout(2000)
-    except Exception:
-        pass
-
-    # Screenshot (always captured; sent to LLM only if use_vision is on)
-    screenshot_b64: Optional[str] = None
-    try:
-        raw = await page.screenshot(type="png", full_page=False)
-        screenshot_b64 = base64.b64encode(raw).decode()
-    except Exception:
-        pass
-
-    # Extract same-domain links
-    try:
-        raw_links: list[dict] = await page.evaluate(
-            """() => Array.from(document.querySelectorAll('a[href]')).map(a => ({
-                href: a.href,
-                text: (a.textContent || '').trim().slice(0, 80)
-            }))"""
-        )
-    except Exception:
-        raw_links = []
-
-    same_domain = [
-        (r["href"], r["text"])
-        for r in raw_links
-        if _same_domain(r["href"], base_netloc)
-    ]
-    log.info("  final_url=%s  title=%r  raw_links=%d  same_domain=%d",
-             final_url, title, len(raw_links), len(same_domain))
-    if raw_links and not same_domain:
-        sample = [r["href"] for r in raw_links[:5]]
-        log.warning("  All %d links filtered out. Sample hrefs: %s", len(raw_links), sample)
-
-    # LLM analysis — skipped for API / JSON endpoints
-    cats: dict = {"req_auth": None, "takes_input": None, "has_object_ref": None, "has_business_logic": None}
-    if _is_api_page(final_url, text):
-        log.info("  API/JSON page — skipping LLM")
-        context = "[API endpoint — LLM analysis skipped]"
-        suggested: list[str] = []
-    else:
-        log.debug("  Calling LLM for %s …", final_url)
-        try:
-            context, suggested, cats = await llm_svc.analyse_page(
-                llm_cfg, final_url, title, text[:8000], screenshot_b64,
-            )
-            log.info("  LLM suggested %d links, categories=%s", len(suggested), cats)
-        except Exception as llm_err:
-            log.warning("  LLM error: %s", llm_err)
-            context = f"[LLM analysis failed: {llm_err}]"
-            suggested = []
-
-    # Persist
-    cp = _save_page(
-        run_id, url=final_url, title=title,
-        page_text=text[:10_000], screenshot_b64=screenshot_b64,
-        llm_context=context, depth=depth, status="crawled",
-        req_auth=cats["req_auth"],
-        takes_input=cats["takes_input"],
-        has_object_ref=cats["has_object_ref"],
-        has_business_logic=cats["has_business_logic"],
-    )
-    _save_link(run_id, parent_id, cp.id, final_url)
-
-    _store_extracted_links(cp.id, same_domain, suggested)
-    return cp.id, final_url, True
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-# Temporary in-memory store for per-page extracted links (avoid re-querying DB)
-_page_links_cache: dict[int, tuple[list[str], list[str]]] = {}
-
-
-def _store_extracted_links(page_id: int, links: list[tuple[str, str]], suggested: list[str]) -> None:
-    _page_links_cache[page_id] = ([l[0] for l in links], suggested)
-
-
-def _get_queued_links(page_id: int, run_id: int) -> tuple[list[str], list[str]]:
-    return _page_links_cache.pop(page_id, ([], []))
-
-
-def _save_page(run_id: int, **kwargs) -> CrawledPage:
+def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
+    """Atomically create a stub CrawledPage and return its ID."""
     with Session(get_engine()) as s:
-        cp = CrawledPage(test_run_id=run_id, **kwargs)
+        cp = CrawledPage(
+            test_run_id=run_id, url=url, depth=depth,
+            status="processing", accessible_by="[]",
+        )
         s.add(cp)
         s.commit()
         s.refresh(cp)
-        # Expunge so attributes (esp. cp.id) survive session.close().
         s.expunge(cp)
-        return cp
+        return cp.id
+
+
+def _update_page(page_id: int, **kwargs) -> None:
+    with Session(get_engine()) as s:
+        cp = s.get(CrawledPage, page_id)
+        if cp is None:
+            return
+        for k, v in kwargs.items():
+            setattr(cp, k, v)
+        s.add(cp)
+        s.commit()
+
+
+def _save_credential_view(
+    page_id: int,
+    run_id: int,
+    credential_id: Optional[int],
+    username: Optional[str],
+    screenshot_b64: Optional[str],
+    llm_context: Optional[str],
+    page_text: Optional[str],
+    cats: dict,
+) -> None:
+    with Session(get_engine()) as s:
+        view = PageCredentialView(
+            page_id=page_id,
+            test_run_id=run_id,
+            credential_id=credential_id,
+            username=username,
+            screenshot_b64=screenshot_b64,
+            llm_context=llm_context,
+            page_text=page_text,
+            req_auth=cats.get("req_auth"),
+            takes_input=cats.get("takes_input"),
+            has_object_ref=cats.get("has_object_ref"),
+            has_business_logic=cats.get("has_business_logic"),
+        )
+        s.add(view)
+        s.commit()
+
+
+def _merge_all_categories(run_id: int) -> None:
+    """OR-merge LLM categories from all credential views into each CrawledPage."""
+    with Session(get_engine()) as s:
+        pages = s.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+        ).all()
+        for cp in pages:
+            views = s.exec(
+                select(PageCredentialView).where(PageCredentialView.page_id == cp.id)
+            ).all()
+            if not views:
+                continue
+            for attr in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
+                vals = [getattr(v, attr) for v in views if getattr(v, attr) is not None]
+                if vals:
+                    setattr(cp, attr, any(vals))
+            s.add(cp)
+        s.commit()
+
+
+def _update_accessible_by(page_id: int, credential_id: Optional[int]) -> None:
+    if credential_id is None:
+        return
+    with Session(get_engine()) as s:
+        cp = s.get(CrawledPage, page_id)
+        if cp is None:
+            return
+        ab: list[int] = json.loads(cp.accessible_by or "[]")
+        if credential_id not in ab:
+            ab.append(credential_id)
+            cp.accessible_by = json.dumps(ab)
+            s.add(cp)
+            s.commit()
 
 
 def _save_link(run_id: int, source_id: Optional[int], target_id: int, target_url: str) -> None:
@@ -497,6 +532,11 @@ def _clear_pages(run_id: int) -> None:
         links = s.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
         for l in links:
             s.delete(l)
+        views = s.exec(
+            select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)
+        ).all()
+        for v in views:
+            s.delete(v)
         pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
         for p in pages:
             s.delete(p)
@@ -506,15 +546,9 @@ def _clear_pages(run_id: int) -> None:
 # ── URL utilities ─────────────────────────────────────────────────────────────
 
 def _norm(url: str) -> str:
-    """Normalise URL for deduplication.
-    - Lowercases scheme + host.
-    - Collapses trailing path slashes so '/banking/' == '/banking'.
-    - Strips plain anchors (#section) but preserves SPA hash-routes (#/path)
-      because those identify distinct pages in hash-router SPAs."""
     try:
         p = urlparse(url)
         path = p.path.rstrip("/") or "/"
-        # Keep '#/...' fragments (SPA routes); discard plain anchors like '#top'
         frag = p.fragment if p.fragment.startswith("/") else ""
         return urlunparse((p.scheme.lower(), p.netloc.lower(), path, p.params, p.query, frag))
     except Exception:
@@ -522,7 +556,6 @@ def _norm(url: str) -> str:
 
 
 def _same_domain(url: str, base_netloc: str) -> bool:
-    """Return True when *url* is on the same host (any path)."""
     try:
         parsed = urlparse(url)
         return parsed.scheme in ("http", "https") and parsed.netloc.lower() == base_netloc.lower()
@@ -531,8 +564,6 @@ def _same_domain(url: str, base_netloc: str) -> bool:
 
 
 def _in_base_scope(url: str, base_netloc: str, base_path: str) -> bool:
-    """Return True when *url* is on the same host AND under the base path.
-    Used only by the SPA-pushState URL guard, not for link filtering."""
     if not _same_domain(url, base_netloc):
         return False
     if base_path == "/":
@@ -541,32 +572,32 @@ def _in_base_scope(url: str, base_netloc: str, base_path: str) -> bool:
     return p.startswith(base_path) or p == base_path.rstrip("/")
 
 
+def _is_api_page(url: str, text: str) -> bool:
+    path = urlparse(url).path.lower()
+    if any(pat in path for pat in ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql", "/swagger", "/openapi")):
+        return True
+    stripped = (text or "").lstrip()
+    return len(stripped) > 2 and stripped[0] in ("{", "[")
+
+
 # ── Authentication ────────────────────────────────────────────────────────────
 
 async def _authenticate(page, login_url: str, credential) -> None:
-    """Best-effort form-based login. Fills username first, then password."""
+    """Best-effort form-based login."""
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
-        # For SPA hash routes the login form is rendered by JavaScript.
-        # Wait up to 8 seconds for any visible input to appear before
-        # trying to interact with the form.
         try:
             await page.wait_for_selector("input", state="visible", timeout=8_000)
         except Exception:
-            log.warning("  _authenticate: no <input> became visible after 8s at %s", login_url)
-        await page.wait_for_timeout(300)  # small buffer after the selector resolves
+            log.warning("  _authenticate: no <input> visible at %s", login_url)
+        await page.wait_for_timeout(300)
 
-        # ── Step 1: fill username ─────────────────────────────────────────────
+        # Fill username
         username_filled = False
         for sel in [
-            "input[autocomplete='username']",
-            "input[autocomplete='email']",
-            "input[type='email']",
-            "input[name*='user' i]",
-            "input[name*='email' i]",
-            "input[id*='user' i]",
-            "input[id*='email' i]",
-            "input[type='text']",
+            "input[autocomplete='username']", "input[autocomplete='email']",
+            "input[type='email']", "input[name*='user' i]", "input[name*='email' i]",
+            "input[id*='user' i]", "input[id*='email' i]", "input[type='text']",
         ]:
             try:
                 loc = page.locator(sel).first
@@ -578,17 +609,13 @@ async def _authenticate(page, login_url: str, credential) -> None:
                 pass
 
         if not username_filled:
-            log.warning("  _authenticate: could not find username field — aborting auth")
+            log.warning("  _authenticate: could not find username field")
             return
 
-        # ── Step 2: some forms hide the password until Next is clicked ────────
+        # Reveal password field if hidden
         pass_loc = page.locator("input[type='password']").first
         if not (await pass_loc.count() > 0 and await pass_loc.is_visible()):
-            for sel in [
-                "button:has-text('Next')",
-                "button:has-text('Continue')",
-                "button[type='submit']",
-            ]:
+            for sel in ["button:has-text('Next')", "button:has-text('Continue')", "button[type='submit']"]:
                 try:
                     loc = page.locator(sel).first
                     if await loc.count() > 0 and await loc.is_visible():
@@ -598,7 +625,7 @@ async def _authenticate(page, login_url: str, credential) -> None:
                 except Exception:
                     pass
 
-        # ── Step 3: fill password ─────────────────────────────────────────────
+        # Fill password
         try:
             pass_loc = page.locator("input[type='password']").first
             if await pass_loc.count() > 0 and await pass_loc.is_visible():
@@ -606,25 +633,44 @@ async def _authenticate(page, login_url: str, credential) -> None:
         except Exception:
             pass
 
-        # ── Step 4: submit ────────────────────────────────────────────────────
+        # Submit
+        submitted = False
         for sel in [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Log in')",
-            "button:has-text('Login')",
-            "button:has-text('Sign in')",
-            "button:has-text('Submit')",
+            "button[type='submit']", "input[type='submit']",
+            "button:has-text('Log in')", "button:has-text('Login')",
+            "button:has-text('Sign in')", "button:has-text('Submit')",
             "button:has-text('Continue')",
         ]:
             try:
                 loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
                     await loc.click()
+                    submitted = True
                     break
             except Exception:
                 pass
 
-        await page.wait_for_load_state("networkidle", timeout=10_000)
-        log.info("  _authenticate: done. page.url=%s", page.url)
+        if not submitted:
+            log.warning("  _authenticate: could not find submit button")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=12_000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+
+        try:
+            pw_visible = (
+                await page.locator("input[type='password']").first.count() > 0
+                and await page.locator("input[type='password']").first.is_visible()
+            )
+        except Exception:
+            pw_visible = False
+
+        if pw_visible:
+            log.warning("  _authenticate: password field still visible — auth likely failed. page.url=%s", page.url)
+        else:
+            log.info("  _authenticate: success — login form gone. page.url=%s", page.url)
+
     except Exception as auth_err:
         log.warning("  _authenticate: exception: %s", auth_err)

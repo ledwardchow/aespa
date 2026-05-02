@@ -167,6 +167,14 @@ class TestRunUpdate(BaseModel):
     max_pages: int = Field(ge=5, le=500)
 
 
+class CredentialSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    label: str | None
+
+
 class TestRunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -183,6 +191,7 @@ class TestRunSummary(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+    credentials: list[CredentialSummary] = []
 
 
 class ScopeUpdate(BaseModel):
@@ -224,6 +233,7 @@ class GraphNode(BaseModel):
     context: str | None
     in_scope: bool = True
     scan_status: str = "pending"
+    accessible_by: list[int] = []
 
 
 class GraphLink(BaseModel):
@@ -251,6 +261,7 @@ class TrafficEntryOut(BaseModel):
     response_headers: dict
     response_body: str | None
     duration_ms: int | None
+    username: str | None
 
 
 class ScanFindingOut(BaseModel):
@@ -267,6 +278,20 @@ class ScanFindingOut(BaseModel):
     evidence: str
     screenshot_b64: str | None
     created_at: datetime
+
+
+class PageCredentialViewOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    credential_id: int | None
+    username: str | None
+    screenshot_b64: str | None
+    llm_context: str | None
+    req_auth: bool | None
+    takes_input: bool | None
+    has_object_ref: bool | None
+    has_business_logic: bool | None
 
 
 class ScanStatusOut(BaseModel):
