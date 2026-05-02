@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin, urlparse, urlunparse
+
+log = logging.getLogger("aespa.crawler")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 from sqlmodel import Session, select
 
@@ -99,10 +107,13 @@ async def _do_crawl(run_id: int) -> None:
     max_pages     = run.max_pages
     _parsed_base  = urlparse(base_url)
     base_netloc   = _parsed_base.netloc
-    # Scope crawl to the base URL's path prefix (e.g. "/banking/").
-    # Links that escape to a different path root are ignored.
     _bp = _parsed_base.path
     base_path: str = (_bp if _bp.endswith("/") else _bp + "/") if _bp else "/"
+
+    log.info("=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s ===",
+             run_id, base_url, max_depth, max_pages)
+    log.info("base_netloc=%s  base_path=%s  requires_auth=%s",
+             base_netloc, base_path, requires_auth)
 
     # Load existing pages so we can append instead of wiping.
     # prev_visited maps normalised URL → CrawledPage.id for all already-crawled pages.
@@ -115,9 +126,10 @@ async def _do_crawl(run_id: int) -> None:
 
     prev_visited: dict[str, Optional[int]] = {_norm(ep.url): ep.id for ep in existing}
     pages_done = len(existing)
-    # crawled_norms tracks every final URL crawled this session (including prior
-    # runs loaded above) so redirect-loop duplicates are never re-indexed.
     crawled_norms: dict[str, int] = dict(prev_visited)
+
+    log.info("Existing pages in this run: %d (prev_visited keys: %d)",
+             pages_done, len(prev_visited))
 
     _update_run(
         run_id,
@@ -149,8 +161,24 @@ async def _do_crawl(run_id: int) -> None:
         )
         page = await ctx.new_page()
 
+        # Always visit the base URL first so the browser has a clean session on
+        # the main domain before we touch the auth flow.  Without this, navigating
+        # to the login URL first can leave cookies / server-side session state that
+        # causes the brochureware root to return 403 on the subsequent visit.
+        log.info("Pre-loading base_url to establish clean session: %s", base_url)
+        try:
+            pre_resp = await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+            log.info("Pre-load response: HTTP %s  page.url=%s",
+                     pre_resp.status if pre_resp else "no-resp", page.url)
+        except Exception as pre_err:
+            log.warning("Pre-load failed (continuing): %s", pre_err)
+
         if requires_auth and creds:
+            log.info("Authenticating at %s (user=%s)", login_url, creds[0].username)
             await _authenticate(page, login_url, creds[0])
+            log.info("Auth complete. page.url after auth = %s", page.url)
+        else:
+            log.info("No auth required / no credentials.")
 
         while queue and max_pages > pages_done:
             if _stop_requested.issuperset({run_id}):
@@ -165,6 +193,7 @@ async def _do_crawl(run_id: int) -> None:
                 if depth < max_depth:
                     existing_id = prev_visited[norm]
                     try:
+                        log.debug("Fast-traverse (prev): %s", url)
                         await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
                         try:
                             await page.wait_for_load_state("networkidle", timeout=5_000)
@@ -173,18 +202,23 @@ async def _do_crawl(run_id: int) -> None:
                         hrefs: list[str] = await page.evaluate(
                             "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
                         )
+                        new_from_ft = 0
                         for href in hrefs:
                             n = _norm(href)
-                            if n not in queued and _same_domain(href, base_netloc, base_path):
+                            if n not in queued and _same_domain(href, base_netloc):
                                 queued.add(n)
                                 queue.append((href, depth + 1, existing_id))
-                    except Exception:
-                        pass
+                                new_from_ft += 1
+                        log.debug("  fast-traverse found %d hrefs, enqueued %d new", len(hrefs), new_from_ft)
+                    except Exception as ft_err:
+                        log.warning("  fast-traverse error: %s", ft_err)
                 continue
 
             if depth > max_depth:
+                log.debug("Skipping (depth %d > max %d): %s", depth, max_depth, url)
                 continue
 
+            log.info("[%d/%d] Crawling depth=%d: %s", pages_done + 1, max_pages, depth, url)
             _update_run(run_id, current_url=url)
 
             page_id, final_url, is_new = await _process_page(
@@ -200,9 +234,14 @@ async def _do_crawl(run_id: int) -> None:
             )
             queued.add(_norm(final_url))
 
+            log.info("  → page_id=%s  final_url=%s  is_new=%s", page_id, final_url, is_new)
+
+            if page_id is None:
+                log.info("  → 4xx/5xx, skipping.")
+                continue
+
             if not is_new:
-                # Redirect landed on an already-crawled page — don't count it
-                # or enqueue its children again.
+                log.info("  → redirect duplicate, skipping.")
                 continue
 
             crawled_norms[_norm(final_url)] = page_id
@@ -210,22 +249,29 @@ async def _do_crawl(run_id: int) -> None:
             _update_run(run_id, pages_discovered=pages_done)
 
             page_links, suggested = _get_queued_links(page_id, run_id)
+            enqueued = 0
             for link_url in reversed(suggested):
                 n = _norm(link_url)
-                if n not in queued and _same_domain(link_url, base_netloc, base_path):
+                if n not in queued and _same_domain(link_url, base_netloc):
                     queued.add(n)
                     queue.appendleft((link_url, depth + 1, page_id))
+                    enqueued += 1
             for link_url in page_links:
                 n = _norm(link_url)
-                if n not in queued and _same_domain(link_url, base_netloc, base_path):
+                if n not in queued and _same_domain(link_url, base_netloc):
                     queued.add(n)
                     queue.append((link_url, depth + 1, page_id))
+                    enqueued += 1
+            log.info("  → enqueued %d new links (suggested=%d, extracted=%d). queue size=%d",
+                     enqueued, len(suggested), len(page_links), len(queue))
 
         await browser.close()
 
     final_status = (
         TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
     )
+    log.info("=== Crawl finished: run_id=%s status=%s pages_done=%d ===",
+             run_id, final_status, pages_done)
     _update_run(run_id, status=final_status, completed_at=_utcnow(), current_url=None)
 
 
@@ -259,37 +305,35 @@ async def _process_page(
     # Navigate
     try:
         resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-        # Skip 4xx/5xx responses — don't add them to the sitemap at all.
+        status_code = resp.status if resp is not None else "no-resp"
+        log.debug("  goto %s → HTTP %s", url, status_code)
         if resp is not None and resp.status >= 400:
+            log.info("  HTTP %s — skipping (not added to sitemap): %s", resp.status, url)
             return None, url, True
         try:
             await page.wait_for_load_state("networkidle", timeout=8_000)
         except Exception:
-            pass  # networkidle timeout is fine; page may have long-polling
+            pass
     except Exception as nav_err:
+        log.warning("  Navigation error for %s: %s", url, nav_err)
         cp = _save_page(run_id, url=url, depth=depth, status="failed",
                         error_message=str(nav_err)[:500])
         _save_link(run_id, parent_id, cp.id, url)
         return cp.id, url, True
 
     raw_final = page.url
-    # Guard against SPA routers that rewrite the URL outside the base scope
-    # via history.pushState after networkidle (e.g. /banking/#/dashboard →
-    # /dashboard).  When that happens, keep the URL we actually navigated to.
-    if (
-        base_path != "/"
-        and urlparse(raw_final).netloc.lower() == base_netloc.lower()
-        and not _same_domain(raw_final, base_netloc, base_path)
-    ):
+    if _same_domain(raw_final, base_netloc) and not _in_base_scope(raw_final, base_netloc, base_path):
+        log.info("  SPA URL guard triggered: raw_final=%s is outside base_path=%s → keeping url=%s",
+                 raw_final, base_path, url)
         final_url = url
     else:
+        if raw_final != url:
+            log.debug("  Followed redirect: %s → %s", url, raw_final)
         final_url = raw_final
 
-    # Redirect-loop guard: if we've already crawled this URL (possibly via a
-    # different entry URL that resolved to the same final destination), link to
-    # the existing page rather than creating a duplicate node.
     norm_final = _norm(final_url)
     if norm_final in crawled_norms:
+        log.debug("  Redirect loop detected: %s already in crawled_norms", final_url)
         existing_id = crawled_norms[norm_final]
         _save_link(run_id, parent_id, existing_id, final_url)
         return existing_id, final_url, False
@@ -330,19 +374,28 @@ async def _process_page(
     same_domain = [
         (r["href"], r["text"])
         for r in raw_links
-        if _same_domain(r["href"], base_netloc, base_path)
+        if _same_domain(r["href"], base_netloc)
     ]
+    log.info("  final_url=%s  title=%r  raw_links=%d  same_domain=%d",
+             final_url, title, len(raw_links), len(same_domain))
+    if raw_links and not same_domain:
+        sample = [r["href"] for r in raw_links[:5]]
+        log.warning("  All %d links filtered out. Sample hrefs: %s", len(raw_links), sample)
 
     # LLM analysis — skipped for API / JSON endpoints
     if _is_api_page(final_url, text):
+        log.info("  API/JSON page — skipping LLM")
         context = "[API endpoint — LLM analysis skipped]"
         suggested: list[str] = []
     else:
+        log.debug("  Calling LLM for %s …", final_url)
         try:
             context, suggested = await llm_svc.analyse_page(
                 llm_cfg, final_url, title, text[:8000], screenshot_b64,
             )
+            log.info("  LLM suggested %d links", len(suggested))
         except Exception as llm_err:
+            log.warning("  LLM error: %s", llm_err)
             context = f"[LLM analysis failed: {llm_err}]"
             suggested = []
 
@@ -437,22 +490,24 @@ def _norm(url: str) -> str:
         return url
 
 
-def _same_domain(url: str, base_netloc: str, base_path: str = "/") -> bool:
-    """Return True when *url* is on the same host and under the same path scope."""
+def _same_domain(url: str, base_netloc: str) -> bool:
+    """Return True when *url* is on the same host (any path)."""
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        if parsed.netloc.lower() != base_netloc.lower():
-            return False
-        # Enforce path prefix when the base URL is deployed under a sub-path.
-        if base_path != "/":
-            p = parsed.path
-            if not (p.startswith(base_path) or p == base_path.rstrip("/")):
-                return False
-        return True
+        return parsed.scheme in ("http", "https") and parsed.netloc.lower() == base_netloc.lower()
     except Exception:
         return False
+
+
+def _in_base_scope(url: str, base_netloc: str, base_path: str) -> bool:
+    """Return True when *url* is on the same host AND under the base path.
+    Used only by the SPA-pushState URL guard, not for link filtering."""
+    if not _same_domain(url, base_netloc):
+        return False
+    if base_path == "/":
+        return True
+    p = urlparse(url).path
+    return p.startswith(base_path) or p == base_path.rstrip("/")
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -461,7 +516,14 @@ async def _authenticate(page, login_url: str, credential) -> None:
     """Best-effort form-based login. Fills username first, then password."""
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
-        await page.wait_for_timeout(800)  # let JS initialise the form
+        # For SPA hash routes the login form is rendered by JavaScript.
+        # Wait up to 8 seconds for any visible input to appear before
+        # trying to interact with the form.
+        try:
+            await page.wait_for_selector("input", state="visible", timeout=8_000)
+        except Exception:
+            log.warning("  _authenticate: no <input> became visible after 8s at %s", login_url)
+        await page.wait_for_timeout(300)  # small buffer after the selector resolves
 
         # ── Step 1: fill username ─────────────────────────────────────────────
         username_filled = False
@@ -485,7 +547,8 @@ async def _authenticate(page, login_url: str, credential) -> None:
                 pass
 
         if not username_filled:
-            return  # can't locate username field; abort
+            log.warning("  _authenticate: could not find username field — aborting auth")
+            return
 
         # ── Step 2: some forms hide the password until Next is clicked ────────
         pass_loc = page.locator("input[type='password']").first
@@ -531,5 +594,6 @@ async def _authenticate(page, login_url: str, credential) -> None:
                 pass
 
         await page.wait_for_load_state("networkidle", timeout=10_000)
-    except Exception:
-        pass  # best-effort; crawl continues unauthenticated
+        log.info("  _authenticate: done. page.url=%s", page.url)
+    except Exception as auth_err:
+        log.warning("  _authenticate: exception: %s", auth_err)

@@ -600,6 +600,52 @@ legend {
   flex-shrink: 0;
 }
 
+/* ── Crawl progress animations ──────────────────────────────── */
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.run-status-badge {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.run-status-badge.running {
+  animation: status-pulse 1.6s ease-in-out infinite;
+}
+
+.crawl-progress-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.crawl-progress-fill {
+  height: 100%;
+  background: var(--warn);
+  border-radius: 2px;
+  transition: width 1s ease;
+}
+
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.85; }
+  100% { transform: scale(2.8); opacity: 0;    }
+}
+
+.node-crawl-pulse {
+  fill: none;
+  stroke: #eab308;
+  stroke-width: 2.5;
+  pointer-events: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulse-ring 1.4s ease-out infinite;
+}
+
 /* ── Tab bar ────────────────────────────────────────────────── */
 
 .tab-bar {
