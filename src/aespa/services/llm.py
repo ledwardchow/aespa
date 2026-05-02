@@ -323,9 +323,12 @@ Return ONLY valid JSON — an array of findings (empty array [] if none found, n
     "severity": "high",
     "title": "Reflected XSS in search parameter",
     "description": "The search parameter reflects user input without encoding, allowing script injection.",
-    "evidence": "REQUEST: GET /search?q=<script>alert(1)</script>\\nRESPONSE (200): ...reflected payload..."
+    "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
+    "evidence": "The payload was reflected verbatim in the response body at position 234."
   }}
 ]
+
+The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \

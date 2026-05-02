@@ -20,7 +20,9 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import CrawledPage, PageLink, TestRun, TestRunStatus
+from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ async def _do_crawl(run_id: int) -> None:
             ),
             ignore_https_errors=True,
         )
+        traffic_svc.setup_playwright_logging(ctx, run_id)
         page = await ctx.new_page()
 
         # Always visit the base URL first so the browser has a clean session on
@@ -248,6 +251,28 @@ async def _do_crawl(run_id: int) -> None:
             pages_done += 1
             _update_run(run_id, pages_discovered=pages_done)
 
+            # Stream the new page to connected clients so the graph updates live.
+            with Session(get_engine()) as _s:
+                _cp = _s.get(CrawledPage, page_id)
+                if _cp:
+                    events_svc.emit(run_id, {
+                        "type": "page_added",
+                        "node": {
+                            "id": _cp.id, "url": _cp.url, "title": _cp.title,
+                            "depth": _cp.depth, "status": _cp.status,
+                            "context": _cp.llm_context, "in_scope": _cp.in_scope,
+                            "scan_status": _cp.scan_status,
+                        },
+                        "link": {"source": parent_id, "target": _cp.id, "link_text": None}
+                              if parent_id else None,
+                    })
+                    events_svc.emit(run_id, {
+                        "type": "run_update",
+                        "status": "running",
+                        "pages_discovered": pages_done,
+                        "current_url": url,
+                    })
+
             page_links, suggested = _get_queued_links(page_id, run_id)
             enqueued = 0
             for link_url in reversed(suggested):
@@ -273,6 +298,7 @@ async def _do_crawl(run_id: int) -> None:
     log.info("=== Crawl finished: run_id=%s status=%s pages_done=%d ===",
              run_id, final_status, pages_done)
     _update_run(run_id, status=final_status, completed_at=_utcnow(), current_url=None)
+    events_svc.emit(run_id, {"type": "run_update", "status": final_status, "pages_discovered": pages_done, "current_url": None})
 
 
 # ── Page processing ───────────────────────────────────────────────────────────

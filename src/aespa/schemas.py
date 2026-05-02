@@ -237,6 +237,22 @@ class GraphData(BaseModel):
     links: list[GraphLink]
 
 
+class TrafficEntryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source: str
+    created_at: datetime
+    method: str
+    url: str
+    request_headers: dict
+    request_body: str | None
+    status: int | None
+    response_headers: dict
+    response_body: str | None
+    duration_ms: int | None
+
+
 class ScanFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -247,7 +263,9 @@ class ScanFindingOut(BaseModel):
     severity: str
     title: str
     description: str
+    affected_url: str
     evidence: str
+    screenshot_b64: str | None
     created_at: datetime
 
 

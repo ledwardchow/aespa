@@ -33,6 +33,9 @@ const api = {
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getFindings:      (id)          => req(`/api/test-runs/${id}/findings`),
+  deleteFinding:    (id,fid)      => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
+  scanPage:         (id,pgId)     => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
+  getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
 };
 
 async function req(url, opts = {}) {
@@ -470,12 +473,20 @@ function TestRunDetail({ runId }) {
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
-  const [scanStatus, setScanStatus] = useState(null);
-  const [findings, setFindings]     = useState([]);
+  const [scanStatus, setScanStatus]         = useState(null);
+  const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
+  const [traffic, setTraffic]               = useState([]);
+  const [selectedTraffic, setSelectedTraffic] = useState(null);
+  const [trafficFilter, setTrafficFilter]   = useState("");
+  const [autoScroll, setAutoScroll]         = useState(true);
+  const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
+  const lastTrafficIdRef                    = useRef(0);
+  const trafficTableRef                     = useRef(null);
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
+  const prevGraphKeyRef                     = useRef("");
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -486,36 +497,61 @@ function TestRunDetail({ runId }) {
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // Poll while running
+  // SSE: receive incremental graph + status updates — no graph polling needed
+  useEffect(() => {
+    const es = new EventSource(`/api/test-runs/${runId}/events`);
+    es.onmessage = (msg) => {
+      let evt;
+      try { evt = JSON.parse(msg.data); } catch { return; }
+
+      if (evt.type === "page_added") {
+        setGraph(prev => {
+          if (!prev) return prev;
+          const exists = prev.nodes.some(n => n.id === evt.node.id);
+          if (exists) return prev;
+          const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
+          return { nodes: [...prev.nodes, evt.node], links: newLinks };
+        });
+      } else if (evt.type === "run_update") {
+        setRun(prev => prev ? { ...prev, ...evt } : prev);
+      } else if (evt.type === "node_scan_status") {
+        setGraph(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            nodes: prev.nodes.map(n =>
+              n.id === evt.page_id ? { ...n, scan_status: evt.scan_status } : n
+            ),
+          };
+        });
+      } else if (evt.type === "scan_update") {
+        setScanStatus(evt);
+      }
+    };
+    es.onerror = () => { /* auto-reconnects */ };
+    return () => es.close();
+  }, [runId]);
+
+  // Lightweight fallback poll: run metadata only (no graph fetch)
   useEffect(() => {
     if (run?.status !== "running") return;
-    const iv = setInterval(async () => {
-      try {
-        const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
-        setRun(r); setGraph(g);
-      } catch(_) {}
-    }, 3000);
+    const iv = setInterval(() => {
+      api.getRun(runId).then(r => setRun(r)).catch(() => {});
+    }, 5000);
     return () => clearInterval(iv);
   }, [run?.status, runId]);
 
-  // Poll scan status while scan is running
+  // Poll findings while scan is running or on findings tab
   useEffect(() => {
-    const poll = async () => {
-      try {
-        const [s, g] = await Promise.all([api.getScanStatus(runId), api.getGraph(runId)]);
-        setScanStatus(s);
-        setGraph(g);
-        if (s.status === "running" || activeTab === "findings") {
-          const f = await api.getFindings(runId);
-          setFindings(f);
-        }
-      } catch(_) {}
+    const needsFindings = scanStatus?.status === "running" || activeTab === "findings";
+    if (!needsFindings) return;
+    const poll = () => {
+      api.getFindings(runId).then(setFindings).catch(() => {});
+      if (!scanStatus) api.getScanStatus(runId).then(setScanStatus).catch(() => {});
     };
     poll();
-    if (scanStatus?.status === "running") {
-      const iv = setInterval(poll, 3000);
-      return () => clearInterval(iv);
-    }
+    const iv = setInterval(poll, 4000);
+    return () => clearInterval(iv);
   }, [runId, scanStatus?.status, activeTab]);
 
   // Fetch findings when switching to findings tab
@@ -524,6 +560,39 @@ function TestRunDetail({ runId }) {
     api.getFindings(runId).then(setFindings).catch(()=>{});
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
   }, [activeTab, runId]);
+
+  // Traffic log polling — always active while crawling or scanning; also when on the tab
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const entries = await api.getTraffic(runId, lastTrafficIdRef.current);
+        if (entries.length > 0) {
+          lastTrafficIdRef.current = entries[entries.length - 1].id;
+          setTraffic(prev => {
+            const base = prev.length;
+            const stamped = entries.map((e, i) => ({ ...e, _seq: base + i + 1 }));
+            const next = [...prev, ...stamped];
+            return next.length > 2000 ? next.slice(-2000) : next;
+          });
+        }
+      } catch(_) {}
+    };
+    const isActive = (
+      activeTab === "traffic" ||
+      run?.status === "running" ||
+      scanStatus?.status === "running"
+    );
+    if (!isActive) return;
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [activeTab, run?.status, scanStatus?.status, runId]);
+
+  // Auto-scroll traffic table to bottom when new entries arrive
+  useEffect(() => {
+    if (!autoScroll || activeTab !== "traffic" || !trafficTableRef.current) return;
+    trafficTableRef.current.scrollTop = trafficTableRef.current.scrollHeight;
+  }, [traffic.length, activeTab, autoScroll]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -534,14 +603,31 @@ function TestRunDetail({ runId }) {
   // D3 force graph
   useEffect(() => {
     if (!graph || !svgRef.current) return;
+
+    const isScan = activeTab === "scan";
+    const visibleNodes = isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes;
+    const structureKey = `${activeTab}:${visibleNodes.length}:${graph.links.length}`;
+
+    // Status-only change (same nodes/links, just colour updates) — update in-place.
+    if (structureKey === prevGraphKeyRef.current && simRef.current) {
+      const simNodes = simRef.current.nodes();
+      graph.nodes.forEach(updated => {
+        const sn = simNodes.find(n => n.id === updated.id);
+        if (sn) Object.assign(sn, updated);
+      });
+      d3.select(svgRef.current).selectAll("circle")
+        .filter(d => d && d.id != null)
+        .attr("fill", d => isScan ? scanColor(d) : scopeColor(d));
+      return;
+    }
+
+    prevGraphKeyRef.current = structureKey;
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
 
     const W = svgRef.current.clientWidth || 800;
     const H = svgRef.current.clientHeight || 500;
 
-    // Scan tab: only in-scope nodes; site map: all nodes.
-    const isScan = activeTab === "scan";
     const inScopeIds = isScan
       ? new Set(graph.nodes.filter(n => n.in_scope !== false).map(n => n.id))
       : null;
@@ -643,12 +729,74 @@ function TestRunDetail({ runId }) {
         .attr("r", 10);
   }, [run?.current_url, graph]);
 
+  // ── Traffic helpers ────────────────────────────────────────────────────────
+  const fmtRequest = (e) => {
+    if (!e) return "";
+    const u = new URL(e.url);
+    const path = u.pathname + u.search;
+    const hdrs = Object.entries(e.request_headers||{})
+      .map(([k,v])=>`${k}: ${v}`).join("\n");
+    return `${e.method} ${path} HTTP/1.1\nHost: ${u.host}\n${hdrs}${e.request_body?"\n\n"+e.request_body:""}`;
+  };
+  const fmtResponse = (e) => {
+    if (!e) return "";
+    const hdrs = Object.entries(e.response_headers||{})
+      .map(([k,v])=>`${k}: ${v}`).join("\n");
+    return `HTTP/1.1 ${e.status??""}\n${hdrs}${e.response_body?"\n\n"+e.response_body:""}`;
+  };
+  const statusClass = (s) => !s ? "" : s<300 ? "tr-2xx" : s<400 ? "tr-3xx" : s<500 ? "tr-4xx" : "tr-5xx";
+  const filteredTraffic = (() => {
+    let list = trafficFilter
+      ? traffic.filter(e =>
+          e.url.toLowerCase().includes(trafficFilter.toLowerCase()) ||
+          (e.method||"").toLowerCase().includes(trafficFilter.toLowerCase()) ||
+          String(e.status||"").includes(trafficFilter) ||
+          (e.source||"").toLowerCase().includes(trafficFilter.toLowerCase()))
+      : traffic;
+    const { field, dir } = trafficSort;
+    const mul = dir === "asc" ? 1 : -1;
+    const numeric = new Set(["_seq", "status", "duration_ms", "id"]);
+    list = [...list].sort((a, b) => {
+      let av = a[field], bv = b[field];
+      if (numeric.has(field)) {
+        av = av ?? -1; bv = bv ?? -1;
+        return (av - bv) * mul;
+      }
+      return String(av ?? "").localeCompare(String(bv ?? "")) * mul;
+    });
+    return list;
+  })();
+  const onTrafficSort = (field) => setTrafficSort(prev =>
+    prev.field === field ? { field, dir: prev.dir === "asc" ? "desc" : "asc" } : { field, dir: "asc" }
+  );
+  const sortArrow = (field) => trafficSort.field === field
+    ? html`<span className="sort-arrow">${trafficSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
+  const fmtTs = (iso) => { try { const d = new Date(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
+
   const onStartScan = async () => {
     try {
       const s = await api.startScan(runId);
       setScanStatus(s);
     } catch(e) { setError(e.message); }
   };
+
+  const onScanPage = async () => {
+    if (!selectedNode || scopeBusy) return;
+    setScopeBusy(true);
+    try {
+      const s = await api.scanPage(runId, selectedNode.id);
+      setScanStatus(s);
+    } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
+  };
+  const onDeleteFinding = async (e, findingId) => {
+    e.stopPropagation();
+    try {
+      await api.deleteFinding(runId, findingId);
+      setFindings(prev => prev.filter(f => f.id !== findingId));
+      if (expandedFinding === findingId) setExpandedFinding(null);
+    } catch(err) { setError(err.message); }
+  };
+
   const onStopScan = async () => {
     try {
       const s = await api.stopScan(runId);
@@ -747,6 +895,10 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
+          onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); }}>
+          Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
+        </button>
         <div style=${{flex:1}}></div>
         ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
@@ -797,7 +949,7 @@ function TestRunDetail({ runId }) {
             <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
           </div>`}`}
 
-      <div className="graph-layout" style=${{display: activeTab==="findings" ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -844,6 +996,16 @@ function TestRunDetail({ runId }) {
                   <button className="btn danger-outline sm" onClick=${onDeleteNode} disabled=${scopeBusy}
                     title="Delete this node (and children if checkbox is ticked)">🗑</button>
                 </div>
+                ${activeTab==="scan" && selectedNode.in_scope !== false && html`
+                  <div style=${{marginTop:10}}>
+                    <button className="btn sm" onClick=${onScanPage} disabled=${scopeBusy||scanStatus?.status==="running"}>
+                      ${scopeBusy ? "Starting…" : scanStatus?.status==="running" ? "Scan running…" : "▶ Scan this page"}
+                    </button>
+                    ${selectedNode.scan_status && html`
+                      <span className=${"scan-node-status scan-node-"+selectedNode.scan_status}>
+                        ${selectedNode.scan_status}
+                      </span>`}
+                  </div>`}
                 <label className="scope-cascade-label">
                   <input type="checkbox" checked=${cascade} onChange=${e=>setCascade(e.target.checked)}/>
                   Also apply to all children
@@ -905,6 +1067,7 @@ function TestRunDetail({ runId }) {
                       <th>OWASP</th>
                       <th>Title</th>
                       <th>URL</th>
+                      <th style=${{width:36}}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -914,19 +1077,92 @@ function TestRunDetail({ runId }) {
                         <td><span className=${"sev-badge sev-"+f.severity}>${f.severity}</span></td>
                         <td><span className="owasp-badge">${f.owasp_category}</span></td>
                         <td className="finding-title">${f.title}</td>
-                        <td className="finding-url mono">${truncUrl(f.url||"",48)}</td>
+                        <td className="finding-url mono" title=${f.affected_url}>${truncUrl(f.affected_url||"",48)}</td>
+                        <td><button className="btn ghost sm finding-del-btn" title="Delete finding"
+                          onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button></td>
                       </tr>
                       ${expandedFinding===f.id && html`
                         <tr key=${"ev-"+f.id} className="finding-evidence-row">
                           <td colSpan="4">
                             <div className="finding-description">${f.description}</div>
+                            ${f.affected_url && html`
+                              <div className="finding-affected-url">
+                                <span className="finding-affected-label">Affected URL</span>
+                                <span className="mono">${f.affected_url}</span>
+                              </div>`}
                             ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                            ${f.screenshot_b64 && html`
+                              <div className="finding-screenshot-wrap">
+                                <div className="finding-affected-label">Screenshot</div>
+                                <img src=${"data:image/png;base64,"+f.screenshot_b64}
+                                  className="finding-screenshot" alt="proof screenshot"/>
+                              </div>`}
                           </td>
                         </tr>`}
                     `)}
                   </tbody>
                 </table>
               </div>`}
+        </div>`}
+      ${activeTab==="traffic" && html`
+        <div className="traffic-panel">
+          <div className="traffic-toolbar">
+            <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…"
+              value=${trafficFilter} onInput=${e=>setTrafficFilter(e.target.value)}/>
+            <span className="traffic-count-label">${filteredTraffic.length} request${filteredTraffic.length!==1?"s":""}</span>
+            <label className="traffic-autoscroll">
+              <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
+              Auto-scroll
+            </label>
+            <button className="btn ghost sm" onClick=${()=>{ setTraffic([]); lastTrafficIdRef.current=0; setSelectedTraffic(null); }}>Clear</button>
+          </div>
+
+          <div className="traffic-table-wrap" ref=${trafficTableRef}>
+            <table className="traffic-table">
+              <thead>
+                <tr>
+                  <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}</th>
+                  <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}</th>
+                  <th className="sortable" style=${{width:80}} onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}</th>
+                  <th className="sortable" style=${{width:60}} onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}</th>
+                  <th className="sortable" style=${{width:54}} onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}</th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}</th>
+                  <th className="sortable tr-dur" onClick=${()=>onTrafficSort("duration_ms")}>Duration${sortArrow("duration_ms")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filteredTraffic.map((e,i) => html`
+                  <tr key=${e.id}
+                    className=${"traffic-row"+(selectedTraffic?.id===e.id?" selected":"")}
+                    onClick=${()=>setSelectedTraffic(selectedTraffic?.id===e.id?null:e)}>
+                    <td className="tr-num">${e._seq??i+1}</td>
+                    <td className="tr-ts">${fmtTs(e.created_at)}</td>
+                    <td><span className=${"src-badge src-"+e.source}>${e.source}</span></td>
+                    <td className="tr-method">${e.method}</td>
+                    <td><span className=${"status-pill "+statusClass(e.status)}>${e.status??"-"}</span></td>
+                    <td className="tr-url" title=${e.url}>${e.url}</td>
+                    <td className="tr-dur">${e.duration_ms!=null?e.duration_ms+"ms":"-"}</td>
+                  </tr>`)}
+              </tbody>
+            </table>
+            ${filteredTraffic.length===0 && html`
+              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                ${run?.status==="running"||scanStatus?.status==="running"
+                  ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
+              </div>`}
+          </div>
+
+          ${selectedTraffic && html`
+            <div className="traffic-detail">
+              <div className="traffic-pane">
+                <div className="traffic-pane-label">REQUEST — ${selectedTraffic.method} ${selectedTraffic.url}</div>
+                <pre className="traffic-raw">${fmtRequest(selectedTraffic)}</pre>
+              </div>
+              <div className="traffic-pane">
+                <div className="traffic-pane-label">RESPONSE — ${selectedTraffic.status??"-"} ${selectedTraffic.duration_ms!=null?"("+selectedTraffic.duration_ms+"ms)":""}</div>
+                <pre className="traffic-raw">${fmtResponse(selectedTraffic)}</pre>
+              </div>
+            </div>`}
         </div>`}
     </div>`;
 }

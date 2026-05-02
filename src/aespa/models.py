@@ -134,6 +134,25 @@ class PageLink(SQLModel, table=True):
     link_text: Optional[str] = Field(default=None)
 
 
+class TrafficEntry(SQLModel, table=True):
+    """One HTTP request/response pair captured during a crawl or scan."""
+
+    __tablename__ = "traffic_entry"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    source: str                                   # "playwright" | "httpx"
+    created_at: datetime = Field(default_factory=_utcnow)
+    method: str
+    url: str
+    request_headers: str = Field(default="{}")    # JSON
+    request_body: Optional[str] = Field(default=None)
+    status: Optional[int] = Field(default=None)
+    response_headers: str = Field(default="{}")   # JSON
+    response_body: Optional[str] = Field(default=None)
+    duration_ms: Optional[int] = Field(default=None)
+
+
 class ScanFinding(SQLModel, table=True):
     """A security vulnerability found during an active scan."""
 
@@ -146,5 +165,7 @@ class ScanFinding(SQLModel, table=True):
     severity: str                              # critical | high | medium | low | info
     title: str
     description: str
-    evidence: str = Field(default="")          # trimmed request + response excerpt
+    affected_url: str = Field(default="")      # specific URL where the issue was observed
+    evidence: str = Field(default="")          # formatted request + response excerpt
+    screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     created_at: datetime = Field(default_factory=_utcnow)

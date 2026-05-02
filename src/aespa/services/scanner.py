@@ -23,7 +23,9 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import CrawledPage, ScanFinding, Site, TestRun, TestRunStatus
+from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config
 
 log = logging.getLogger("aespa.scanner")
@@ -55,19 +57,23 @@ def is_running(run_id: int) -> bool:
     return run_id in _active_tasks
 
 
-async def start_scan(run_id: int) -> None:
+async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
+    """Start a scan. Pass page_ids to scan only specific pages; omit to scan all in-scope pages."""
     if run_id in _active_tasks:
         return
-    task = asyncio.create_task(_scan_task(run_id), name=f"scan-{run_id}")
+    task = asyncio.create_task(
+        _scan_task(run_id, page_ids=page_ids),
+        name=f"scan-{run_id}",
+    )
     _active_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
 
-async def _scan_task(run_id: int) -> None:
+async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
     try:
-        await _do_scan(run_id)
+        await _do_scan(run_id, page_ids=page_ids)
     except Exception as exc:
         log.exception("Scan task failed for run_id=%s", run_id)
         _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
@@ -77,7 +83,7 @@ async def _scan_task(run_id: int) -> None:
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
 
-async def _do_scan(run_id: int) -> None:
+async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     from playwright.async_api import async_playwright
 
     # Load site, credentials, and LLM config (expunge before session closes).
@@ -99,22 +105,30 @@ async def _do_scan(run_id: int) -> None:
 
     log.info("=== Scan start: run_id=%s base_url=%s ===", run_id, base_url)
 
-    # Mark all in-scope pages as scan_status=pending, clear old findings.
+    # Mark target pages as scan_status=pending; clear their existing findings.
     with Session(get_engine()) as s:
-        pages = s.exec(
+        q = (
             select(CrawledPage)
             .where(CrawledPage.test_run_id == run_id)
             .where(CrawledPage.in_scope != False)  # noqa: E712
-        ).all()
-        page_ids = [p.id for p in pages]
+        )
+        if page_ids:
+            q = q.where(CrawledPage.id.in_(page_ids))
+        pages = s.exec(q).all()
+        target_ids = [p.id for p in pages]
         for p in pages:
             p.scan_status = "pending"
             s.add(p)
-        # Delete previous findings for this run.
-        old = s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
+        # Clear existing findings only for the pages we're about to scan.
+        old = s.exec(
+            select(ScanFinding)
+            .where(ScanFinding.test_run_id == run_id)
+            .where(ScanFinding.page_id.in_(target_ids))
+        ).all()
         for f in old:
             s.delete(f)
         s.commit()
+        page_ids = target_ids  # use resolved list from here on
 
     if not page_ids:
         log.info("No in-scope pages to scan.")
@@ -133,6 +147,7 @@ async def _do_scan(run_id: int) -> None:
             ),
             ignore_https_errors=True,
         )
+        traffic_svc.setup_playwright_logging(ctx, run_id)
         pw_page = await ctx.new_page()
 
         # ── Auth bootstrap ────────────────────────────────────────────────────
@@ -185,6 +200,7 @@ async def _do_scan(run_id: int) -> None:
             timeout=REQUEST_TIMEOUT,
             follow_redirects=True,
             verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(run_id),
         ) as hx:
             # ── Per-page scanning ─────────────────────────────────────────────
             for page_id in page_ids:
@@ -195,6 +211,7 @@ async def _do_scan(run_id: int) -> None:
 
     stopped = run_id in _stop_requested
     _mark_run(run_id, scan_status="stopped" if stopped else "complete")
+    _emit_scan_update(run_id)
     log.info("=== Scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
 
@@ -226,6 +243,7 @@ async def _scan_page(
         s.add(page)
         s.commit()
 
+    events_svc.emit(run_id, {"type": "node_scan_status", "page_id": page_id, "scan_status": "running"})
     log.info("Scanning page: %s", page_url)
 
     # Determine applicable OWASP checks based on page categories.
@@ -287,9 +305,21 @@ async def _scan_page(
 
     log.info("  %d findings for %s", len(raw_findings), page_url)
 
+    # Build a URL→result lookup so we can attach evidence + screenshot to each finding.
+    result_by_url: dict[str, dict] = {}
+    for r in results:
+        if r.get("url"):
+            result_by_url[r["url"]] = r
+
     # Persist findings and mark page complete.
     with Session(get_engine()) as s:
         for f in raw_findings:
+            affected_url = f.get("affected_url") or page_url
+            matched = result_by_url.get(affected_url, {})
+            # Use the pre-built evidence from the probe result if available;
+            # fall back to what the LLM wrote.
+            evidence = matched.get("evidence") or f.get("evidence", "")
+            screenshot = matched.get("screenshot_b64")
             finding = ScanFinding(
                 test_run_id=run_id,
                 page_id=page_id,
@@ -297,7 +327,9 @@ async def _scan_page(
                 severity=f.get("severity", "info"),
                 title=f.get("title", "Untitled finding"),
                 description=f.get("description", ""),
-                evidence=f.get("evidence", "")[:4000],
+                affected_url=affected_url,
+                evidence=evidence[:4000],
+                screenshot_b64=screenshot,
                 created_at=_utcnow(),
             )
             s.add(finding)
@@ -306,6 +338,8 @@ async def _scan_page(
             pg.scan_status = "complete"
             s.add(pg)
         s.commit()
+
+    events_svc.emit(run_id, {"type": "node_scan_status", "page_id": page_id, "scan_status": "complete"})
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────
@@ -346,12 +380,21 @@ async def _passive_checks(
         except Exception:
             pass
 
+        headers_text = "\n".join(f"{k}: {v}" for k, v in headers.items())
+        evidence = (
+            f"REQUEST:\nGET {url} HTTP/1.1\n\n"
+            f"RESPONSE:\nHTTP/1.1 {status}\n{headers_text}\n\n{body}"
+            + (f"\n\nMISSING SECURITY HEADERS: {', '.join(missing)}" if missing else "")
+            + (f"\n\nANON REQUEST STATUS: {auth_bypass_status}" if auth_bypass_status else "")
+        )
         results.append({
             "desc": "Passive: headers + auth-bypass check",
             "url": url,
             "status": status,
             "headers": headers,
             "body": body,
+            "evidence": evidence,
+            "screenshot_b64": None,
             "missing_security_headers": missing,
             "auth_bypass_status": auth_bypass_status,
         })
@@ -372,12 +415,15 @@ async def _passive_checks(
                 if issues:
                     cookie_issues.append(f"{name}: {', '.join(issues)}")
             if cookie_issues:
+                issue_text = " | ".join(cookie_issues)
                 results.append({
                     "desc": "Passive: cookie attribute check",
                     "url": url,
                     "status": status,
                     "headers": {},
-                    "body": " | ".join(cookie_issues),
+                    "body": issue_text,
+                    "evidence": f"REQUEST:\nGET {url}\n\nCOOKIE ISSUES:\n{issue_text}",
+                    "screenshot_b64": None,
                 })
 
     except Exception as e:
@@ -393,31 +439,45 @@ async def _run_http_probe(
     probe: dict,
     page_url: str,
 ) -> Optional[dict]:
-    method  = probe.get("method", "GET").upper()
-    url     = probe.get("url") or page_url
-    params  = probe.get("params") or {}
-    body    = probe.get("body")
-    headers = probe.get("headers") or {}
-    desc    = probe.get("desc", url)
+    method       = probe.get("method", "GET").upper()
+    url          = probe.get("url") or page_url
+    params       = probe.get("params") or {}
+    body         = probe.get("body")
+    extra_hdrs   = probe.get("headers") or {}
+    desc         = probe.get("desc", url)
 
     try:
-        resp = await hx.request(
+        req = hx.build_request(
             method, url,
             params=params,
             content=body.encode() if isinstance(body, str) else body,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
+            headers=extra_hdrs,
         )
-        body_text = resp.text[:500]
+        resp = await hx.send(req, follow_redirects=True)
+        resp_body = resp.text[:1000]
+
+        # Build a readable request/response block for evidence.
+        req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
+                                     if k.lower() not in ("cookie",))  # omit cookie value
+        resp_headers_text = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+        evidence = (
+            f"REQUEST:\n{method} {req.url} HTTP/1.1\n{req_headers_text}\n"
+            + (f"\n{body[:200]}" if body else "")
+            + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{resp_body}"
+        )
+
         return {
             "desc": desc,
             "url": str(resp.url),
             "status": resp.status_code,
             "headers": dict(resp.headers),
-            "body": body_text,
+            "body": resp_body,
+            "evidence": evidence,
+            "screenshot_b64": None,
         }
     except Exception as e:
-        return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e)}
+        return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
+                "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None}
 
 
 # ── Playwright form probe execution ───────────────────────────────────────────
@@ -464,6 +524,22 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
                 pass
             response_body = (await pw_page.content())[:500]
 
+        # Always take a screenshot so findings can show visual proof.
+        screenshot_b64: Optional[str] = None
+        try:
+            raw_png = await pw_page.screenshot(full_page=False)
+            import base64 as _b64
+            screenshot_b64 = _b64.b64encode(raw_png).decode()
+        except Exception:
+            pass
+
+        evidence = (
+            f"FORM PROBE:\nURL: {url}\nField selector: {selector}\n"
+            f"Payload: {payload}\n\n"
+            f"RESPONSE STATUS: {response_status}\n\n"
+            f"RESPONSE BODY (truncated):\n{response_body}"
+        )
+
         return {
             "desc": desc,
             "url": url,
@@ -471,6 +547,8 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
             "status": response_status,
             "headers": {},
             "body": response_body,
+            "evidence": evidence,
+            "screenshot_b64": screenshot_b64,
         }
     except Exception as e:
         log.debug("Form probe error (%s): %s", desc, e)
@@ -599,6 +677,11 @@ def _applicable_checks(categories: dict) -> list[str]:
     if categories.get("has_business_logic"):
         checks.append("A04")
     return sorted(set(checks))
+
+
+def _emit_scan_update(run_id: int) -> None:
+    status = get_scan_status(run_id)
+    events_svc.emit(run_id, {"type": "scan_update", **status})
 
 
 def _mark_run(run_id: int, scan_status: str, error: str = "") -> None:
