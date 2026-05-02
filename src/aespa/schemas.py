@@ -85,7 +85,7 @@ class SiteDetail(BaseModel):
 
 # ── LLM config schemas ────────────────────────────────────────────────────
 
-LLMProviderLiteral = Literal["anthropic", "openai", "openai_compatible"]
+LLMProviderLiteral = Literal["anthropic", "openai", "openai_compatible", "google"]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "anthropic": [
@@ -99,6 +99,12 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "o3-mini",
     ],
     "openai_compatible": [],
+    "google": [
+        "gemini-2.5-flash-preview-04-17",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    ],
 }
 
 
@@ -115,7 +121,7 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_provider_fields(self) -> "LLMConfigIn":
-        if self.provider in ("anthropic", "openai") and not self.api_key:
+        if self.provider in ("anthropic", "openai", "google") and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider == "openai_compatible" and not self.base_url:
             raise ValueError("base_url is required for openai_compatible provider")
