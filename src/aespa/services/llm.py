@@ -8,6 +8,61 @@ from typing import Any, Optional
 
 from aespa.models import LLMConfig
 
+
+def _extract_json(raw: str, expect: type = list) -> Any:
+    """Robustly extract JSON from an LLM response.
+
+    Handles:
+    - <think>...</think> reasoning blocks (Gemma, QwQ, DeepSeek-R1, etc.)
+    - Markdown code fences (```json ... ```)
+    - Preamble / explanation text before the JSON
+    - Trailing prose after the closing bracket
+    """
+    if not raw:
+        raise ValueError("empty response")
+
+    # Strip thinking/reasoning blocks
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    # Strip markdown fences
+    text = re.sub(r"```(?:json|python)?\s*", "", text).strip().rstrip("`").strip()
+
+    # Fast path: the whole string is valid JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the outermost JSON container matching `expect`
+    open_ch  = "[" if expect is list else "{"
+    close_ch = "]" if expect is list else "}"
+    start = text.find(open_ch)
+    if start == -1:
+        raise ValueError(f"no '{open_ch}' found in LLM response")
+
+    depth = 0
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : i + 1])
+
+    raise ValueError("could not extract balanced JSON from LLM response")
+
 _ANALYSIS_PROMPT = """\
 You are a web application security analyst performing reconnaissance on a target web application.
 
@@ -75,8 +130,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
     if not raw:
         return "", [], dict(_EMPTY_CATS)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
-        data = json.loads(clean)
+        data = _extract_json(raw, expect=dict)
         if not isinstance(data, dict):
             return raw.strip(), [], dict(_EMPTY_CATS)
         context = str(data.get("context") or raw)
@@ -228,13 +282,21 @@ Return ONLY valid JSON — an array of probe objects (no markdown fences):
     "payload": "<script>alert(1)</script>",
     "submit_selector": "button[type=submit]",
     "desc": "XSS in search field"
+  }},
+  {{
+    "type": "idor",
+    "url": "https://app.com/users/42",
+    "desc": "IDOR on user ID — scanner will test adjacent and crawled IDs automatically"
   }}
 ]
 
 General rules:
 - Maximum 30 probes total.
-- "http" probes: sent directly via HTTP client (IDOR, auth bypass, header checks, URL param injection, SSRF).
+- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL param injection, SSRF).
 - "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
+- "idor" probes: mark a URL that contains an object ID for IDOR testing. Use ONE per URL — the \
+scanner automatically finds peer IDs from the crawl and tests a ±500 range. \
+Do NOT generate individual http probes for each sequential ID.
 - For auth bypass probes: include a version with empty Cookie and Authorization headers.
 - For injection payloads use safe, non-destructive test strings:
   - SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1; SELECT 1--
@@ -253,15 +315,13 @@ def _build_category_guidance(categories: dict) -> str:
     if categories.get("has_object_ref"):
         sections.append(
             "OBJECT REFERENCE — HIGH PRIORITY (A01):\n"
-            "This page references objects by ID. From the URL and context, identify every ID "
-            "parameter (path segments like /users/123 and query params like ?account=456).\n"
-            "For each ID:\n"
-            "  • Enumerate adjacent IDs (orig-1, orig+1, 0, 1, 9999, 99999).\n"
-            "  • Repeat each probe WITHOUT auth credentials (Cookie: '', Authorization: '') "
-            "to test for broken access control.\n"
-            "  • Try string IDs where numeric is expected ('admin', 'null', '../../etc').\n"
-            "  • If it's a POST/PUT endpoint, replay with a different user's ID in the body.\n"
-            "Generate at least 10 IDOR probes."
+            "This page contains numeric object IDs in the URL. Emit ONE 'idor' type probe per "
+            "URL that contains an ID. The scanner will look up peer IDs from other crawled users "
+            "and test a ±500 range automatically — do NOT generate individual http probes for "
+            "each sequential ID.\n"
+            "Additionally, generate 'http' probes for:\n"
+            "  • String IDs where numeric is expected ('admin', 'null', '../../etc/passwd').\n"
+            "  • POST/PUT replay with a different user's ID substituted in the request body."
         )
 
     if categories.get("takes_input"):
@@ -361,8 +421,7 @@ async def plan_probes(
     )
     raw = await _call(config, prompt, None)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
-        probes = json.loads(clean)
+        probes = _extract_json(raw or "", expect=list)
         if not isinstance(probes, list):
             return []
         return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
@@ -388,8 +447,7 @@ async def analyse_probes(
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
     raw = await _call(config, prompt, None)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
-        findings = json.loads(clean)
+        findings = _extract_json(raw or "", expect=list)
         if not isinstance(findings, list):
             return []
         required = {"owasp_category", "severity", "title", "description", "evidence"}

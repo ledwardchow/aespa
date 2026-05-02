@@ -42,6 +42,12 @@ REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
 MIN_DELAY = 0.2               # ~5 req/s
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -82,6 +88,42 @@ async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
+
+async def _export_cred_session(
+    base_url: str, login_url: Optional[str], cred
+) -> tuple[dict[str, str], Optional[str]]:
+    """Launch a throw-away Playwright browser, authenticate as cred, and return
+    (cookie_jar, auth_token) so httpx can impersonate that session."""
+    from playwright.async_api import async_playwright
+    from aespa.services.crawler import _authenticate
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        page = await ctx.new_page()
+        try:
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+        if login_url:
+            await _authenticate(page, login_url, cred)
+        raw = await ctx.cookies()
+        cookies = {c["name"]: c["value"] for c in raw}
+        token: Optional[str] = None
+        for key in ["access_token", "token", "jwt", "auth_token", "id_token",
+                    "authToken", "accessToken"]:
+            try:
+                val = await page.evaluate(
+                    f"() => localStorage.getItem('{key}') || sessionStorage.getItem('{key}')"
+                )
+                if val:
+                    token = val
+                    break
+            except Exception:
+                pass
+        await browser.close()
+    return cookies, token
+
 
 async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     from playwright.async_api import async_playwright
@@ -189,17 +231,30 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
 
+        # ── Build per-credential sessions for BAC checks ──────────────────────
+        # cred_sessions maps credential_id → {username, cookies, extra_headers}
+        cred_sessions: dict[int, dict] = {}
+        if requires_auth and creds:
+            cred_sessions[creds[0].id] = {
+                "username": creds[0].username,
+                "cookies": cookie_jar,
+                "extra_headers": extra_headers,
+            }
+            for extra_cred in creds[1:]:
+                log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
+                ec_cookies, ec_token = await _export_cred_session(
+                    base_url, login_url, extra_cred
+                )
+                cred_sessions[extra_cred.id] = {
+                    "username": extra_cred.username,
+                    "cookies": ec_cookies,
+                    "extra_headers": {"Authorization": f"Bearer {ec_token}"} if ec_token else {},
+                }
+
         # Build httpx client with exported auth state.
         async with httpx.AsyncClient(
             cookies=cookie_jar,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                **extra_headers,
-            },
+            headers={"User-Agent": _UA, **extra_headers},
             timeout=REQUEST_TIMEOUT,
             follow_redirects=True,
             verify=False,
@@ -210,7 +265,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                 if run_id in _stop_requested:
                     log.info("Stop requested — aborting scan.")
                     break
-                await _scan_page(run_id, page_id, hx, pw_page, llm_cfg, base_url)
+                await _scan_page(run_id, page_id, hx, pw_page, llm_cfg, base_url,
+                                 cred_sessions=cred_sessions)
 
     stopped = run_id in _stop_requested
     _mark_run(run_id, scan_status="stopped" if stopped else "complete")
@@ -227,6 +283,7 @@ async def _scan_page(
     pw_page,
     llm_cfg,
     base_url: str,
+    cred_sessions: dict | None = None,
 ) -> None:
     # Load page details.
     with Session(get_engine()) as s:
@@ -236,6 +293,7 @@ async def _scan_page(
         page_url    = page.url
         page_title  = page.title or ""
         page_ctx    = page.llm_context or ""
+        accessible_by: list[int] = json.loads(page.accessible_by or "[]")
         categories  = {
             "req_auth":          page.req_auth,
             "takes_input":       page.takes_input,
@@ -261,22 +319,36 @@ async def _scan_page(
         log.warning("plan_probes failed for %s: %s", page_url, e)
         probes = []
 
-    # Inject hard-coded probes before the LLM probes so they always run.
+    # Inject hard-coded probe templates before the LLM probes so they always run.
     deterministic: list[dict] = []
     if categories.get("has_object_ref"):
-        idor = _idor_probes(page_url)
-        log.info("  IDOR probes generated: %d", len(idor))
-        deterministic.extend(idor)
+        # Emit a single "idor" marker; it gets expanded below after deduplication.
+        deterministic.append({"type": "idor", "url": page_url, "desc": "IDOR (deterministic)"})
     if categories.get("takes_input"):
         iv = _input_validation_probes(page_url)
-        log.info("  Input-validation probes generated: %d", len(iv))
+        log.info("  Input-validation probes: %d", len(iv))
         deterministic.extend(iv)
 
-    # Combine: deterministic first, then LLM probes, capped at MAX_PROBES_PER_PAGE.
-    all_probes = deterministic + probes
+    # Combine deterministic + LLM probes, then expand all "idor" markers.
+    combined = deterministic + probes
+
+    # Expand "idor" markers — deduplicate by URL so the same page isn't expanded twice.
+    all_probes: list[dict] = []
+    expanded_idor_urls: set[str] = set()
+    for probe in combined:
+        if probe.get("type") != "idor":
+            all_probes.append(probe)
+            continue
+        idor_url = probe.get("url") or page_url
+        if idor_url in expanded_idor_urls:
+            continue
+        expanded_idor_urls.add(idor_url)
+        expanded = _idor_expand(idor_url, run_id, accessible_by)
+        log.info("  IDOR expand %s → %d probes (url=%s)", probe.get("desc", ""), len(expanded), idor_url)
+        all_probes.extend(expanded)
+
     all_probes = all_probes[:MAX_PROBES_PER_PAGE]
-    log.info("  %d total probes for %s (%d deterministic, %d llm)",
-             len(all_probes), page_url, len(deterministic), len(probes))
+    log.info("  %d total probes for %s", len(all_probes), page_url)
 
     # Phase 2: Execute probes.
     results: list[dict] = []
@@ -356,6 +428,129 @@ async def _scan_page(
         s.commit()
 
     events_svc.emit(run_id, {"type": "node_scan_status", "page_id": page_id, "scan_status": "complete"})
+
+    # ── Phase 4: Broken Access Control checks ────────────────────────────────
+    # Only meaningful when multiple credentials exist and this page was not
+    # accessible to at least one of them during the crawl.
+    if (
+        cred_sessions
+        and len(cred_sessions) > 1
+        and accessible_by  # skip pages no-one could access (no ground truth)
+        and len(accessible_by) < len(cred_sessions)
+    ):
+        log.info("  Running BAC checks for %s (accessible_by=%s)", page_url, accessible_by)
+        bac_findings = await _run_bac_checks(
+            run_id=run_id,
+            page_id=page_id,
+            page_url=page_url,
+            accessible_by=accessible_by,
+            cred_sessions=cred_sessions,
+        )
+        if bac_findings:
+            with Session(get_engine()) as s:
+                for bf in bac_findings:
+                    s.add(bf)
+                s.commit()
+            log.info("  BAC: %d finding(s) saved for %s", len(bac_findings), page_url)
+            _emit_scan_update(run_id)
+
+
+# ── Broken Access Control checks ─────────────────────────────────────────────
+
+_LOGIN_MARKERS = [
+    'type="password"', "type='password'", "input[type=password]",
+    "login", "sign in", "sign_in", "forgot password",
+]
+
+async def _run_bac_checks(
+    run_id: int,
+    page_id: int,
+    page_url: str,
+    accessible_by: list[int],
+    cred_sessions: dict[int, dict],
+) -> list[ScanFinding]:
+    """For each credential that was NOT able to access this page during the crawl,
+    try a direct GET request with that credential's session cookies. A 200 response
+    whose body does not look like a login form indicates a Broken Access Control
+    vulnerability."""
+    findings: list[ScanFinding] = []
+
+    unauthorized = {
+        cid: cs for cid, cs in cred_sessions.items()
+        if cid not in accessible_by
+    }
+    if not unauthorized:
+        return findings
+
+    for cred_id, session in unauthorized.items():
+        username = session["username"]
+        cookies  = session["cookies"]
+        hdrs     = {"User-Agent": _UA, **session.get("extra_headers", {})}
+
+        try:
+            async with httpx.AsyncClient(
+                cookies=cookies, headers=hdrs,
+                follow_redirects=True, verify=False, timeout=REQUEST_TIMEOUT,
+            ) as client:
+                resp = await client.get(page_url)
+
+            if resp.status_code not in (200, 201, 202):
+                log.debug("  BAC: %s as '%s' → HTTP %s (expected, access denied)",
+                          page_url, username, resp.status_code)
+                continue
+
+            body_lower = resp.text[:2000].lower()
+            login_hits = sum(1 for m in _LOGIN_MARKERS if m in body_lower)
+            if login_hits >= 2:
+                log.debug("  BAC: %s as '%s' → login page detected (score=%d)",
+                          page_url, username, login_hits)
+                continue
+
+            # Server returned 200 without a login form — likely real access.
+            log.info("  BAC: POSSIBLE — %s returned HTTP %s for unauthorized user '%s'",
+                     page_url, resp.status_code, username)
+
+            # Build evidence block.
+            cookie_preview = "; ".join(
+                f"{k}={v[:12]}…" for k, v in list(cookies.items())[:4]
+            ) or "(none)"
+            evidence = (
+                f"BROKEN ACCESS CONTROL — Unauthorized access probe\n"
+                f"Tested as: {username} (this user lacked access during crawl)\n\n"
+                f"REQUEST:\n"
+                f"GET {page_url} HTTP/1.1\n"
+                f"Cookie: {cookie_preview}\n\n"
+                f"RESPONSE:\n"
+                f"HTTP/1.1 {resp.status_code}\n"
+                f"Content-Type: {resp.headers.get('content-type', '')}\n"
+                f"Content-Length: {len(resp.content)}\n\n"
+                f"{resp.text[:600]}"
+            )
+
+            findings.append(ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category="A01",
+                severity="high",
+                title="Broken Access Control — Unauthorized Page Access",
+                description=(
+                    f"User '{username}' received HTTP {resp.status_code} when directly "
+                    f"requesting a page that was inaccessible to them during the authenticated "
+                    f"crawl. The server did not return a login redirect or 403, suggesting "
+                    f"access control is enforced only client-side (e.g. hidden navigation) "
+                    f"rather than on the server.\n\n"
+                    f"For single-page applications, verify manually that the response body "
+                    f"contains real restricted content rather than just the SPA shell."
+                ),
+                affected_url=page_url,
+                evidence=evidence[:4000],
+                created_at=_utcnow(),
+            ))
+
+        except Exception as e:
+            log.debug("  BAC check error for %s as '%s': %s", page_url, username, e)
+
+    return findings
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────
@@ -573,53 +768,129 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _idor_probes(url: str) -> list[dict]:
-    """Generate IDOR probes by extracting numeric IDs from the URL path and query string."""
+_IDOR_STEPS = [1, 2, 3, 5, 10, 25, 50, 100, 250, 500]
+
+
+def _idor_candidates(orig: int) -> list[int]:
+    """Spread of IDs within ±500 of orig, skipping non-positive values."""
+    seen: set[int] = set()
+    for step in _IDOR_STEPS:
+        for candidate in (orig - step, orig + step):
+            if candidate > 0 and candidate != orig:
+                seen.add(candidate)
+    return sorted(seen)
+
+
+def _find_crawled_ids(
+    run_id: int,
+    url: str,
+    path_pos: int,
+    current_id: int,
+    my_accessible_by: list[int],
+) -> list[int]:
+    """Return IDs found in other crawled pages that share the same URL structure
+    as `url` but differ only at path position `path_pos`.
+
+    Cross-user IDs (pages owned by different credentials) come first so IDOR
+    tests against real peer data are prioritised over sequential guessing.
+    """
+    parsed  = urlparse(url)
+    parts   = parsed.path.split("/")
+
+    with Session(get_engine()) as s:
+        pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)   # noqa: E712
+        ).all()
+
+    cross_user: list[int] = []
+    same_user:  list[int] = []
+
+    for page in pages:
+        pp = urlparse(page.url)
+        if pp.netloc != parsed.netloc:
+            continue
+        pparts = pp.path.split("/")
+        if len(pparts) != len(parts):
+            continue
+        # All segments must match except the one at path_pos
+        if not all(
+            i == path_pos or pparts[i] == parts[i]
+            for i in range(len(parts))
+        ):
+            continue
+        candidate_str = pparts[path_pos]
+        if not re.match(r"^\d+$", candidate_str):
+            continue
+        cid = int(candidate_str)
+        if cid == current_id:
+            continue
+
+        page_accessible = json.loads(page.accessible_by or "[]")
+        # Cross-user: page was reachable by at least one cred NOT in my set
+        if any(c not in my_accessible_by for c in page_accessible):
+            cross_user.append(cid)
+        else:
+            same_user.append(cid)
+
+    return cross_user + same_user
+
+
+def _idor_expand(url: str, run_id: int, my_accessible_by: list[int]) -> list[dict]:
+    """Expand an IDOR marker into concrete HTTP probe dicts.
+
+    For each numeric ID in the URL:
+      1. Query the crawl DB for IDs found on other users' pages (same URL pattern).
+         These are the highest-confidence IDOR candidates.
+      2. Fall back to a ±500 spread if no crawled IDs are available.
+    Each candidate is tested both authenticated (IDOR) and unauthenticated (auth-bypass).
+    """
     probes: list[dict] = []
     parsed = urlparse(url)
+    parts  = parsed.path.split("/")
 
-    # ── Path segments ──────────────────────────────────────────────────────────
-    parts = parsed.path.split("/")
     for i, part in enumerate(parts):
         if not re.match(r"^\d+$", part):
             continue
         orig = int(part)
-        candidates = sorted({0, 1, max(0, orig - 1), orig + 1, 9999, 99999} - {orig})
-        for cid in candidates[:6]:
+
+        known = _find_crawled_ids(run_id, url, i, orig, my_accessible_by)
+        candidates = known[:20] if known else _idor_candidates(orig)
+        source = "crawled" if known else "range"
+
+        for cid in candidates:
             new_parts = parts.copy()
             new_parts[i] = str(cid)
             test_url = urlunparse(parsed._replace(path="/".join(new_parts)))
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {}, "body": None,
-                "desc": f"IDOR: path /{part} → /{cid}",
+                "desc": f"IDOR [{source}]: /{part}→/{cid}",
             })
-            # Also test without auth cookies to check access control.
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {"Cookie": "", "Authorization": ""}, "body": None,
-                "desc": f"IDOR+auth-bypass: path /{part} → /{cid} (no auth)",
+                "desc": f"IDOR+unauth [{source}]: /{part}→/{cid}",
             })
 
     # ── Query parameters ───────────────────────────────────────────────────────
     qs = parse_qs(parsed.query, keep_blank_values=True)
+    base_params = {k: v[0] for k, v in qs.items()}
     for param, vals in qs.items():
         if not (vals and re.match(r"^\d+$", vals[0])):
             continue
         orig = int(vals[0])
-        base_params = {k: v[0] for k, v in qs.items()}
-        candidates = sorted({0, 1, max(0, orig - 1), orig + 1, 9999} - {orig})
-        for cid in candidates[:5]:
-            np = dict(base_params)
-            np[param] = str(cid)
+        for cid in _idor_candidates(orig):
+            np = {**base_params, param: str(cid)}
             test_url = urlunparse(parsed._replace(query=urlencode(np)))
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {}, "body": None,
-                "desc": f"IDOR: ?{param}={vals[0]} → {cid}",
+                "desc": f"IDOR [range]: ?{param}={vals[0]}→{cid}",
             })
 
-    return probes[:20]  # cap to avoid flooding
+    return probes
 
 
 # Common injection payloads used for takes_input pages.
