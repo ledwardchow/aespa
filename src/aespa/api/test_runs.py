@@ -14,6 +14,7 @@ from aespa.schemas import (
     ScopeUpdate,
     TestRunCreate,
     TestRunSummary,
+    TestRunUpdate,
 )
 from aespa.services import crawler as crawler_svc
 from aespa.services.settings import get_llm_config
@@ -107,6 +108,25 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(p)
     session.delete(run)
     session.commit()
+
+
+# ── Update run settings ───────────────────────────────────────────────────────
+
+@router.patch("/api/test-runs/{run_id}", response_model=TestRunSummary)
+def update_test_run(
+    run_id: int,
+    payload: TestRunUpdate,
+    session: Session = Depends(get_session),
+) -> TestRunSummary:
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Cannot edit settings while crawl is running")
+    run.max_depth = payload.max_depth
+    run.max_pages = payload.max_pages
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return TestRunSummary.model_validate(run)
 
 
 # ── Crawl control ─────────────────────────────────────────────────────────────
@@ -290,3 +310,46 @@ def update_page_scope(
 
     session.commit()
     return {"updated": updated}
+
+
+@router.delete("/api/test-runs/{run_id}/pages/{page_id}", status_code=204)
+def delete_page(
+    run_id: int,
+    page_id: int,
+    cascade: bool = False,
+    session: Session = Depends(get_session),
+) -> None:
+    _get_run_or_404(session, run_id)
+    page = session.get(CrawledPage, page_id)
+    if page is None or page.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    if cascade:
+        from collections import deque
+        to_delete: set[int] = {page_id}
+        queue: deque[int] = deque([page_id])
+        while queue:
+            pid = queue.popleft()
+            children = session.exec(
+                select(PageLink.target_page_id)
+                .where(PageLink.test_run_id == run_id)
+                .where(PageLink.source_page_id == pid)
+            ).all()
+            for cid in children:
+                if cid is not None and cid not in to_delete:
+                    to_delete.add(cid)
+                    queue.append(cid)
+    else:
+        to_delete = {page_id}
+
+    # Delete links touching any of the pages being removed, then the pages.
+    ids = list(to_delete)
+    for link in session.exec(
+        select(PageLink).where(
+            (PageLink.source_page_id.in_(ids)) | (PageLink.target_page_id.in_(ids))
+        )
+    ).all():
+        session.delete(link)
+    for p in session.exec(select(CrawledPage).where(CrawledPage.id.in_(ids))).all():
+        session.delete(p)
+    session.commit()

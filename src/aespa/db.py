@@ -47,6 +47,10 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")
+    _ensure_column(engine, "crawled_page", "req_auth", "INTEGER")
+    _ensure_column(engine, "crawled_page", "takes_input", "INTEGER")
+    _ensure_column(engine, "crawled_page", "has_object_ref", "INTEGER")
+    _ensure_column(engine, "crawled_page", "has_business_logic", "INTEGER")
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:

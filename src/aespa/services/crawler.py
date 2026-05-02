@@ -383,6 +383,7 @@ async def _process_page(
         log.warning("  All %d links filtered out. Sample hrefs: %s", len(raw_links), sample)
 
     # LLM analysis — skipped for API / JSON endpoints
+    cats: dict = {"req_auth": None, "takes_input": None, "has_object_ref": None, "has_business_logic": None}
     if _is_api_page(final_url, text):
         log.info("  API/JSON page — skipping LLM")
         context = "[API endpoint — LLM analysis skipped]"
@@ -390,10 +391,10 @@ async def _process_page(
     else:
         log.debug("  Calling LLM for %s …", final_url)
         try:
-            context, suggested = await llm_svc.analyse_page(
+            context, suggested, cats = await llm_svc.analyse_page(
                 llm_cfg, final_url, title, text[:8000], screenshot_b64,
             )
-            log.info("  LLM suggested %d links", len(suggested))
+            log.info("  LLM suggested %d links, categories=%s", len(suggested), cats)
         except Exception as llm_err:
             log.warning("  LLM error: %s", llm_err)
             context = f"[LLM analysis failed: {llm_err}]"
@@ -404,6 +405,10 @@ async def _process_page(
         run_id, url=final_url, title=title,
         page_text=text[:10_000], screenshot_b64=screenshot_b64,
         llm_context=context, depth=depth, status="crawled",
+        req_auth=cats["req_auth"],
+        takes_input=cats["takes_input"],
+        has_object_ref=cats["has_object_ref"],
+        has_business_logic=cats["has_business_logic"],
     )
     _save_link(run_id, parent_id, cp.id, final_url)
 
