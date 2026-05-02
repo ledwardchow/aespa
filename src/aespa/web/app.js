@@ -26,6 +26,7 @@ const api = {
   getGraph:         (id)          => req(`/api/test-runs/${id}/graph`),
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
+  getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
@@ -462,20 +463,41 @@ const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLO
 const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
 const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
 
+// Per-user palette (index into credentials array)
+const USER_PALETTE = ["#f97316","#06b6d4","#a855f7","#f59e0b","#10b981","#ec4899"];
+const USER_BOTH_COLOR = "#6366f1";   // accessible to all users
+const USER_NONE_COLOR = "#6b7691";   // not tagged (pre-multi-user crawl)
+const userColor = (d, credentials) => {
+  const ab = d.accessible_by || [];
+  if (!credentials || credentials.length === 0 || ab.length === 0) return USER_NONE_COLOR;
+  if (ab.length >= credentials.length) return USER_BOTH_COLOR;
+  const idx = credentials.findIndex(c => ab.includes(c.id));
+  return idx >= 0 ? USER_PALETTE[idx % USER_PALETTE.length] : USER_NONE_COLOR;
+};
+
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
+  const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState("sitemap");
+  const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
+  const [crawlUsername, setCrawlUsername]   = useState(null);
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
+  const [expandedGroups, setExpandedGroups]   = useState(new Set());
+  const toggleGroup = (title) => setExpandedGroups(prev => {
+    const next = new Set(prev);
+    next.has(title) ? next.delete(title) : next.add(title);
+    return next;
+  });
   const [traffic, setTraffic]               = useState([]);
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter]   = useState("");
@@ -509,11 +531,18 @@ function TestRunDetail({ runId }) {
           if (!prev) return prev;
           const exists = prev.nodes.some(n => n.id === evt.node.id);
           if (exists) return prev;
+          const node = { ...evt.node, accessible_by: evt.node.accessible_by || [] };
           const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
-          return { nodes: [...prev.nodes, evt.node], links: newLinks };
+          return { nodes: [...prev.nodes, node], links: newLinks };
         });
+      } else if (evt.type === "crawl_phase") {
+        setCrawlUsername(evt.username || null);
+      } else if (evt.type === "node_accessible_by") {
+        // Re-fetch graph to get updated accessible_by (simple approach)
+        api.getGraph(runId).then(setGraph).catch(()=>{});
       } else if (evt.type === "run_update") {
         setRun(prev => prev ? { ...prev, ...evt } : prev);
+        if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "node_scan_status") {
         setGraph(prev => {
           if (!prev) return prev;
@@ -596,8 +625,9 @@ function TestRunDetail({ runId }) {
 
   // Fetch page detail when node selected
   useEffect(() => {
-    if (!selectedNode) { setPageDetail(null); return; }
+    if (!selectedNode) { setPageDetail(null); setPageViews([]); return; }
     api.getPage(runId, selectedNode.id).then(setPageDetail).catch(()=>{});
+    api.getPageViews(runId, selectedNode.id).then(setPageViews).catch(()=>setPageViews([]));
   }, [selectedNode, runId]);
 
   // D3 force graph
@@ -606,7 +636,7 @@ function TestRunDetail({ runId }) {
 
     const isScan = activeTab === "scan";
     const visibleNodes = isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes;
-    const structureKey = `${activeTab}:${visibleNodes.length}:${graph.links.length}`;
+    const structureKey = `${activeTab}:${graphView}:${visibleNodes.length}:${graph.links.length}`;
 
     // Status-only change (same nodes/links, just colour updates) — update in-place.
     if (structureKey === prevGraphKeyRef.current && simRef.current) {
@@ -617,7 +647,7 @@ function TestRunDetail({ runId }) {
       });
       d3.select(svgRef.current).selectAll("circle")
         .filter(d => d && d.id != null)
-        .attr("fill", d => isScan ? scanColor(d) : scopeColor(d));
+        .attr("fill", nodeColorFn);
       return;
     }
 
@@ -670,7 +700,7 @@ function TestRunDetail({ runId }) {
 
     node.append("circle")
       .attr("r", 10)
-      .attr("fill", d => isScan ? scanColor(d) : scopeColor(d))
+      .attr("fill", nodeColorFn)
       .attr("stroke", d => d.status === "failed" ? "#fbbf24" : "var(--bg)")
       .attr("stroke-width", 2);
 
@@ -712,7 +742,7 @@ function TestRunDetail({ runId }) {
 
     simRef.current = sim;
     return () => sim.stop();
-  }, [graph, activeTab]);
+  }, [graph, activeTab, graphView]);
 
   // Highlight the node whose URL is currently being crawled.
   // Runs after the D3 graph effect so the SVG is already populated.
@@ -728,6 +758,14 @@ function TestRunDetail({ runId }) {
         .attr("class", "node-crawl-pulse")
         .attr("r", 10);
   }, [run?.current_url, graph]);
+
+  // Compute the fill colour for a graph node based on current view mode.
+  const nodeColorFn = (d) => {
+    const isScan = activeTab === "scan";
+    if (isScan) return scanColor(d);
+    if (graphView === "user") return userColor(d, run?.credentials);
+    return scopeColor(d);
+  };
 
   // ── Traffic helpers ────────────────────────────────────────────────────────
   const fmtRequest = (e) => {
@@ -900,6 +938,13 @@ function TestRunDetail({ runId }) {
           Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
+        ${(activeTab==="sitemap"||activeTab==="scan") && run?.credentials?.length > 1 && html`
+          <div className="view-toggle" style=${{margin:"auto 8px auto 0"}}>
+            <button className=${"btn ghost sm"+(graphView==="scope"?" active":"")}
+              onClick=${()=>setGraphView("scope")}>By Scope</button>
+            <button className=${"btn ghost sm"+(graphView==="user"?" active":"")}
+              onClick=${()=>setGraphView("user")}>By User</button>
+          </div>`}
         ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
         ${activeTab==="scan" && scanStatus?.status==="running" && html`
@@ -941,7 +986,8 @@ function TestRunDetail({ runId }) {
               <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
                 title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}
           `}
-          ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Crawling</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
+          ${crawlUsername&&html`<div className="run-stat"><span className="run-stat-lbl">Crawling as</span><span className="run-stat-val" style=${{fontSize:14}}>${crawlUsername}</span></div>`}
+          ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Current URL</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
         ${run.status==="running" && html`
@@ -963,14 +1009,21 @@ function TestRunDetail({ runId }) {
           <svg ref=${svgRef} className="graph-svg" width="100%" height="100%"></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
-              ${activeTab === "sitemap" ? html`
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_IN_COLOR}}></span>In Scope</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_OUT_COLOR}}></span>Out of Scope</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:"var(--bg)",border:"2px solid #fbbf24"}}></span>Failed</div>
-              ` : html`
+              ${activeTab === "scan" ? html`
                 <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.pending}}></span>Not scanned</div>
                 <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.running}}></span>Scanning…</div>
                 <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.complete}}></span>Complete</div>
+              ` : graphView === "user" && run?.credentials?.length > 1 ? html`
+                ${(run.credentials||[]).map((c,i) => html`
+                  <div key=${c.id} className="legend-item">
+                    <span className="legend-dot" style=${{background:USER_PALETTE[i%USER_PALETTE.length]}}></span>
+                    ${c.label||c.username}
+                  </div>`)}
+                <div className="legend-item"><span className="legend-dot" style=${{background:USER_BOTH_COLOR}}></span>All users</div>
+              ` : html`
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_IN_COLOR}}></span>In Scope</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:SCOPE_OUT_COLOR}}></span>Out of Scope</div>
+                <div className="legend-item"><span className="legend-dot" style=${{background:"var(--bg)",border:"2px solid #fbbf24"}}></span>Failed</div>
               `}
             </div>`}
         </div>
@@ -1029,12 +1082,30 @@ function TestRunDetail({ runId }) {
                   })}
                 </div>
 
-                <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
-                <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>
-                ${pageDetail.screenshot_b64 && html`
-                  <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
-                  <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
-                    style=${{width:"100%",borderRadius:6,border:"1px solid var(--border)"}} alt="screenshot"/>`}
+                ${pageViews.length > 0 ? html`
+                  <div className="graph-panel-section-label" style=${{marginTop:14}}>
+                    Views by User
+                  </div>
+                  ${pageViews.map(v => html`
+                    <div key=${v.id} className="credential-view-card">
+                      <div className="credential-view-label">
+                        ${v.username || "Anonymous"}
+                      </div>
+                      ${v.screenshot_b64 && html`
+                        <img src=${"data:image/png;base64,"+v.screenshot_b64}
+                          className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
+                      <div className="credential-view-context">
+                        ${v.llm_context || "No context."}
+                      </div>
+                    </div>`)}
+                ` : html`
+                  <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
+                  <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>
+                  ${pageDetail.screenshot_b64 && html`
+                    <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
+                    <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
+                      style=${{width:"100%",borderRadius:6,border:"1px solid var(--border)"}} alt="screenshot"/>`}
+                `}
               </div>` : html`<div className="subtle" style=${{padding:12}}>Loading…</div>`}
           </div>`}
       </div>
@@ -1059,49 +1130,72 @@ function TestRunDetail({ runId }) {
                 ${scanStatus?.status==="running" ? "Scanning… findings will appear here." : "No findings yet. Start a scan from the Scan Status tab."}
               </div>`
             : html`
-              <div className="findings-table-wrap">
+              <div className="findings-table-wrap">${(()=>{
+                const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
+                const map = {};
+                for (const f of findings) {
+                  (map[f.title] = map[f.title]||[]).push(f);
+                }
+                const groups = Object.entries(map).map(([title, items]) => {
+                  const topSev = items.reduce((b,f)=>
+                    (SEV_ORDER[f.severity]??99)<(SEV_ORDER[b]??99)?f.severity:b, items[0].severity);
+                  return { title, items, topSev, count:items.length, owasp:items[0].owasp_category };
+                }).sort((a,b)=>(SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99));
+                return html`
                 <table className="findings-table">
                   <thead>
                     <tr>
-                      <th>Severity</th>
-                      <th>OWASP</th>
+                      <th style=${{width:80}}>Severity</th>
+                      <th style=${{width:52}}>OWASP</th>
                       <th>Title</th>
-                      <th>URL</th>
+                      <th style=${{width:28}}>#</th>
                       <th style=${{width:36}}></th>
                     </tr>
                   </thead>
                   <tbody>
-                    ${findings.map(f => html`
-                      <tr key=${f.id} className="finding-row"
-                        onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
-                        <td><span className=${"sev-badge sev-"+f.severity}>${f.severity}</span></td>
-                        <td><span className="owasp-badge">${f.owasp_category}</span></td>
-                        <td className="finding-title">${f.title}</td>
-                        <td className="finding-url mono" title=${f.affected_url}>${truncUrl(f.affected_url||"",48)}</td>
-                        <td><button className="btn ghost sm finding-del-btn" title="Delete finding"
-                          onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button></td>
+                    ${groups.map(g => html`
+                      <tr key=${g.title} className="finding-group-row"
+                        onClick=${()=>toggleGroup(g.title)}>
+                        <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
+                        <td><span className="owasp-badge">${g.owasp}</span></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(g.title)?"▾":"▸"}</span>
+                          ${g.title}
+                        </td>
+                        <td><span className="finding-count-badge">${g.count}</span></td>
+                        <td></td>
                       </tr>
-                      ${expandedFinding===f.id && html`
-                        <tr key=${"ev-"+f.id} className="finding-evidence-row">
-                          <td colSpan="4">
-                            <div className="finding-description">${f.description}</div>
-                            ${f.affected_url && html`
-                              <div className="finding-affected-url">
-                                <span className="finding-affected-label">Affected URL</span>
-                                <span className="mono">${f.affected_url}</span>
-                              </div>`}
-                            ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
-                            ${f.screenshot_b64 && html`
-                              <div className="finding-screenshot-wrap">
-                                <div className="finding-affected-label">Screenshot</div>
-                                <img src=${"data:image/png;base64,"+f.screenshot_b64}
-                                  className="finding-screenshot" alt="proof screenshot"/>
-                              </div>`}
+                      ${expandedGroups.has(g.title) && g.items.map(f => html`
+                        <tr key=${f.id} className="finding-instance-row"
+                          onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
+                          <td></td>
+                          <td></td>
+                          <td colSpan="2">
+                            <span className="instance-chevron">${expandedFinding===f.id?"▾":"▸"}</span>
+                            <span className="finding-affected-label" style=${{marginRight:6}}>Affected URL</span>
+                            <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${f.affected_url||"—"}</span>
                           </td>
-                        </tr>`}
+                          <td><button className="btn ghost sm finding-del-btn" title="Delete"
+                            onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button></td>
+                        </tr>
+                        ${expandedFinding===f.id && html`
+                          <tr key=${"ev-"+f.id} className="finding-evidence-row">
+                            <td colSpan="5">
+                              <div className="finding-description">${f.description}</div>
+                              ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                              ${f.screenshot_b64 && html`
+                                <div className="finding-screenshot-wrap">
+                                  <div className="finding-affected-label">Screenshot</div>
+                                  <img src=${"data:image/png;base64,"+f.screenshot_b64}
+                                    className="finding-screenshot" alt="proof screenshot"/>
+                                </div>`}
+                            </td>
+                          </tr>`}
+                      `)}
                     `)}
                   </tbody>
-                </table>
+                </table>`;
+              })()}
               </div>`}
         </div>`}
       ${activeTab==="traffic" && html`
@@ -1124,6 +1218,7 @@ function TestRunDetail({ runId }) {
                   <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}</th>
                   <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}</th>
                   <th className="sortable" style=${{width:80}} onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}</th>
+                  <th className="sortable" style=${{width:90}} onClick=${()=>onTrafficSort("username")}>User${sortArrow("username")}</th>
                   <th className="sortable" style=${{width:60}} onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}</th>
                   <th className="sortable" style=${{width:54}} onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}</th>
                   <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}</th>
@@ -1138,6 +1233,7 @@ function TestRunDetail({ runId }) {
                     <td className="tr-num">${e._seq??i+1}</td>
                     <td className="tr-ts">${fmtTs(e.created_at)}</td>
                     <td><span className=${"src-badge src-"+e.source}>${e.source}</span></td>
+                    <td className="tr-user">${e.username||"-"}</td>
                     <td className="tr-method">${e.method}</td>
                     <td><span className=${"status-pill "+statusClass(e.status)}>${e.status??"-"}</span></td>
                     <td className="tr-url" title=${e.url}>${e.url}</td>

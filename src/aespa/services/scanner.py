@@ -110,7 +110,10 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         q = (
             select(CrawledPage)
             .where(CrawledPage.test_run_id == run_id)
-            .where(CrawledPage.in_scope != False)  # noqa: E712
+            .where(CrawledPage.in_scope != False)   # noqa: E712
+            .where(CrawledPage.status == "crawled") # skip failed navigations
+            .where(CrawledPage.page_text != None)   # noqa: E711  skip content-less pages
+            .where(CrawledPage.page_text != "")
         )
         if page_ids:
             q = q.where(CrawledPage.id.in_(page_ids))
@@ -200,7 +203,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             timeout=REQUEST_TIMEOUT,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id),
+            event_hooks=traffic_svc.make_httpx_hooks(run_id, username=creds[0].username if creds else None),
         ) as hx:
             # ── Per-page scanning ─────────────────────────────────────────────
             for page_id in page_ids:
@@ -311,10 +314,23 @@ async def _scan_page(
         if r.get("url"):
             result_by_url[r["url"]] = r
 
+    probe_urls = list(result_by_url.keys())  # ordered list of actually-probed URLs
+
     # Persist findings and mark page complete.
     with Session(get_engine()) as s:
         for f in raw_findings:
-            affected_url = f.get("affected_url") or page_url
+            llm_url = (f.get("affected_url") or "").strip()
+            if llm_url and llm_url != page_url:
+                # LLM returned a specific probe URL — use it directly.
+                affected_url = llm_url
+            elif probe_urls:
+                # LLM returned the page URL or nothing; prefer the first probe URL
+                # whose evidence string or URL appears in the finding description.
+                desc = (f.get("description", "") + " " + f.get("title", "")).lower()
+                match = next((u for u in probe_urls if u.lower() in desc), probe_urls[0])
+                affected_url = match
+            else:
+                affected_url = page_url
             matched = result_by_url.get(affected_url, {})
             # Use the pre-built evidence from the probe result if available;
             # fall back to what the LLM wrote.

@@ -36,6 +36,7 @@ def _write(
     response_headers: dict,
     response_body: Optional[str],
     duration_ms: Optional[int],
+    username: Optional[str] = None,
 ) -> None:
     from aespa.models import TrafficEntry
     with Session(get_engine()) as s:
@@ -51,6 +52,7 @@ def _write(
             response_headers=json.dumps(response_headers),
             response_body=(response_body or "")[:BODY_LIMIT] or None,
             duration_ms=duration_ms,
+            username=username,
         )
         s.add(entry)
         s.commit()
@@ -81,6 +83,7 @@ def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
                 "response_headers": json.loads(e.response_headers or "{}"),
                 "response_body": e.response_body,
                 "duration_ms": e.duration_ms,
+                "username": e.username,
             }
             for e in entries
         ]
@@ -88,7 +91,7 @@ def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
 
 # ── httpx event hooks ─────────────────────────────────────────────────────────
 
-def make_httpx_hooks(run_id: int) -> dict:
+def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
     """Return an httpx event_hooks dict that logs every request/response."""
     _pending: dict[int, float] = {}  # id(request) → monotonic start time
 
@@ -126,6 +129,7 @@ def make_httpx_hooks(run_id: int) -> dict:
             dict(response.headers),
             resp_body,
             duration_ms,
+            username,
         )
 
     return {"request": [on_request], "response": [on_response]}
@@ -133,17 +137,21 @@ def make_httpx_hooks(run_id: int) -> dict:
 
 # ── Playwright BrowserContext handler ─────────────────────────────────────────
 
-def setup_playwright_logging(ctx, run_id: int) -> None:
+def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -> None:
     """Register request/response listeners on a Playwright BrowserContext."""
     _pending: dict[int, float] = {}
     _req_data: dict[int, dict] = {}
 
-    def on_request(request) -> None:
+    async def on_request(request) -> None:
         rid = id(request)
         _pending[rid] = time.monotonic()
+        try:
+            hdrs = await request.all_headers()
+        except Exception:
+            hdrs = dict(request.headers)
         _req_data[rid] = {
             "method": request.method,
-            "headers": dict(request.headers),
+            "headers": hdrs,
             "post_data": request.post_data,
         }
 
@@ -165,6 +173,11 @@ def setup_playwright_logging(ctx, run_id: int) -> None:
         except Exception:
             resp_body = None
 
+        try:
+            all_resp_hdrs = await response.all_headers()
+        except Exception:
+            all_resp_hdrs = dict(response.headers)
+
         await asyncio.to_thread(
             _write,
             run_id,
@@ -174,9 +187,10 @@ def setup_playwright_logging(ctx, run_id: int) -> None:
             req_data.get("headers", {}),
             req_data.get("post_data"),
             response.status,
-            dict(response.headers),
+            all_resp_hdrs,
             resp_body,
             duration_ms,
+            username,
         )
 
     ctx.on("request", on_request)

@@ -118,6 +118,7 @@ class CrawledPage(SQLModel, table=True):
     takes_input: Optional[bool] = Field(default=None)      # Takes User Input
     has_object_ref: Optional[bool] = Field(default=None)   # Contains Object Reference
     has_business_logic: Optional[bool] = Field(default=None)  # Contains Business Functionality
+    accessible_by: str = Field(default="[]")  # JSON list of credential IDs that can access this page
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -151,6 +152,26 @@ class TrafficEntry(SQLModel, table=True):
     response_headers: str = Field(default="{}")   # JSON
     response_body: Optional[str] = Field(default=None)
     duration_ms: Optional[int] = Field(default=None)
+    username: Optional[str] = Field(default=None)      # credential username that made the request
+
+
+class PageCredentialView(SQLModel, table=True):
+    """Per-credential snapshot of a crawled page: screenshot, LLM context, and raw categories."""
+
+    __tablename__ = "page_credential_view"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    page_id: int = Field(foreign_key="crawled_page.id", index=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    credential_id: Optional[int] = Field(default=None)
+    username: Optional[str] = Field(default=None)
+    screenshot_b64: Optional[str] = Field(default=None)
+    llm_context: Optional[str] = Field(default=None)
+    page_text: Optional[str] = Field(default=None)
+    req_auth: Optional[bool] = Field(default=None)
+    takes_input: Optional[bool] = Field(default=None)
+    has_object_ref: Optional[bool] = Field(default=None)
+    has_business_logic: Optional[bool] = Field(default=None)
 
 
 class ScanFinding(SQLModel, table=True):
