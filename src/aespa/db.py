@@ -51,6 +51,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "takes_input", "INTEGER")
     _ensure_column(engine, "crawled_page", "has_object_ref", "INTEGER")
     _ensure_column(engine, "crawled_page", "has_business_logic", "INTEGER")
+    _ensure_column(engine, "scan_finding", "affected_url", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
