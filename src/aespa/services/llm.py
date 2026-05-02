@@ -1,6 +1,7 @@
-"""Abstract LLM client — wraps Anthropic, OpenAI, and OpenAI-compatible APIs."""
+"""Abstract LLM client — wraps Anthropic, OpenAI, OpenAI-compatible, and Google Gemini APIs."""
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Optional
@@ -97,6 +98,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     if config.provider == "anthropic":
         return await _anthropic(config, prompt, screenshot_b64)
+    if config.provider == "google":
+        return await _google(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
@@ -124,6 +127,30 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
         if text is not None:
             return str(text)
     return ""
+
+
+async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=config.api_key)
+    parts: list = []
+    if screenshot_b64:
+        parts.append(types.Part.from_bytes(
+            data=base64.b64decode(screenshot_b64),
+            mime_type="image/png",
+        ))
+    parts.append(prompt)
+
+    resp = await client.aio.models.generate_content(
+        model=config.model,
+        contents=parts,
+        config=types.GenerateContentConfig(
+            max_output_tokens=min(config.max_tokens, 8192),
+            temperature=config.temperature,
+        ),
+    )
+    return resp.text or ""
 
 
 async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
