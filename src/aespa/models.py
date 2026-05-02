@@ -112,6 +112,11 @@ class CrawledPage(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     in_scope: bool = Field(default=True)
     scan_status: str = Field(default="pending")   # pending | running | complete
+    # LLM-assessed page categories (populated after analysis)
+    req_auth: Optional[bool] = Field(default=None)         # Authentication Required
+    takes_input: Optional[bool] = Field(default=None)      # Takes User Input
+    has_object_ref: Optional[bool] = Field(default=None)   # Contains Object Reference
+    has_business_logic: Optional[bool] = Field(default=None)  # Contains Business Functionality
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 
