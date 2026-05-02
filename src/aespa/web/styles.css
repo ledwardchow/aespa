@@ -540,6 +540,10 @@ legend {
 .run-stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .run-stat-url { flex: 1; min-width: 0; }
 .run-stat-url-val { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-stat-edit { display: flex; align-items: center; gap: 16px; }
+.run-stat-edit-field { display: flex; flex-direction: column; gap: 3px; }
+.run-stat-edit-field label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.run-stat-edit-field input { background: var(--input); border: 1px solid var(--border); border-radius: 5px; color: var(--text); padding: 4px 6px; font-size: 14px; font-weight: 700; }
 
 /* ── Graph layout ───────────────────────────────────────────── */
 
@@ -733,6 +737,42 @@ legend {
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+/* ── Page categories ──────────────────────────────────────────── */
+
+.page-cats {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cat-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.cat-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  min-width: 28px;
+  text-align: center;
+}
+
+.cat-badge.cat-yes     { background: rgba(59,130,246,0.18); color: #93c5fd; }
+.cat-badge.cat-no      { background: rgba(100,116,139,0.18); color: var(--muted); }
+.cat-badge.cat-unknown { background: rgba(100,116,139,0.12); color: var(--muted); }
 
 /* ── Scope toggle ─────────────────────────────────────────────── */
 

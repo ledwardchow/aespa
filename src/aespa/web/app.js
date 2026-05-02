@@ -27,6 +27,8 @@ const api = {
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
+  deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
+  updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
 };
 
 async function req(url, opts = {}) {
@@ -458,9 +460,12 @@ function TestRunDetail({ runId }) {
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
-  const [cascade, setCascade]   = useState(false);
+  const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState("sitemap");
+  const [editingSettings, setEditingSettings] = useState(false);
+  const [editDepth, setEditDepth] = useState("");
+  const [editPages, setEditPages] = useState("");
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
@@ -604,6 +609,22 @@ function TestRunDetail({ runId }) {
         .attr("r", 10);
   }, [run?.current_url, graph]);
 
+  const onEditSettings = () => {
+    setEditDepth(String(run.max_depth));
+    setEditPages(String(run.max_pages));
+    setEditingSettings(true);
+  };
+  const onSaveSettings = async () => {
+    const d = parseInt(editDepth, 10);
+    const p = parseInt(editPages, 10);
+    if (!d || !p || d < 1 || d > 10 || p < 5 || p > 500) return;
+    try {
+      const r = await api.updateRun(runId, { max_depth: d, max_pages: p });
+      setRun(r);
+      setEditingSettings(false);
+    } catch(e) { setError(e.message); }
+  };
+
   const onToggleScope = async () => {
     if (!selectedNode || scopeBusy) return;
     setScopeBusy(true);
@@ -614,6 +635,17 @@ function TestRunDetail({ runId }) {
       setGraph(g);
       const updated = g.nodes.find(n => n.id === selectedNode.id);
       if (updated) setSelNode(updated);
+    } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
+  };
+
+  const onDeleteNode = async () => {
+    if (!selectedNode || scopeBusy) return;
+    setScopeBusy(true);
+    try {
+      await api.deletePage(runId, selectedNode.id, cascade);
+      const g = await api.getGraph(runId);
+      setGraph(g);
+      setSelNode(null);
     } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
   };
 
@@ -672,8 +704,36 @@ function TestRunDetail({ runId }) {
       ${activeTab==="sitemap" && run && html`
         <div className="run-meta">
           <div className="run-stat"><span className="run-stat-val">${run.pages_discovered}</span><span className="run-stat-lbl">Pages found</span></div>
-          <div className="run-stat"><span className="run-stat-val">${run.max_depth}</span><span className="run-stat-lbl">Max depth</span></div>
-          <div className="run-stat"><span className="run-stat-val">${run.max_pages}</span><span className="run-stat-lbl">Max pages</span></div>
+          ${editingSettings ? html`
+            <div className="run-stat-edit">
+              <div className="run-stat-edit-field">
+                <label>Max depth</label>
+                <input type="number" min="1" max="10" value=${editDepth}
+                  onInput=${e=>setEditDepth(e.target.value)} style=${{width:54}}/>
+              </div>
+              <div className="run-stat-edit-field">
+                <label>Max pages</label>
+                <input type="number" min="5" max="500" value=${editPages}
+                  onInput=${e=>setEditPages(e.target.value)} style=${{width:64}}/>
+              </div>
+              <div style=${{display:"flex",gap:6,alignItems:"center"}}>
+                <button className="btn sm" onClick=${onSaveSettings}>Save</button>
+                <button className="btn ghost sm" onClick=${()=>setEditingSettings(false)}>Cancel</button>
+              </div>
+            </div>
+          ` : html`
+            <div className="run-stat">
+              <span className="run-stat-val">${run.max_depth}</span>
+              <span className="run-stat-lbl">Max depth</span>
+            </div>
+            <div className="run-stat">
+              <span className="run-stat-val">${run.max_pages}</span>
+              <span className="run-stat-lbl">Max pages</span>
+            </div>
+            ${run.status !== "running" && html`
+              <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
+                title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}
+          `}
           ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Crawling</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
@@ -726,11 +786,31 @@ function TestRunDetail({ runId }) {
                   <button className="btn sm" onClick=${onToggleScope} disabled=${scopeBusy}>
                     ${scopeBusy ? "…" : (selectedNode.in_scope === false ? "Mark in scope" : "Mark out of scope")}
                   </button>
+                  <button className="btn danger-outline sm" onClick=${onDeleteNode} disabled=${scopeBusy}
+                    title="Delete this node (and children if checkbox is ticked)">🗑</button>
                 </div>
                 <label className="scope-cascade-label">
                   <input type="checkbox" checked=${cascade} onChange=${e=>setCascade(e.target.checked)}/>
                   Also apply to all children
                 </label>
+
+                <div className="graph-panel-section-label" style=${{marginTop:14}}>Page Categories</div>
+                <div className="page-cats">
+                  ${[
+                    ["req_auth",          "Auth Required"],
+                    ["takes_input",       "Takes Input"],
+                    ["has_object_ref",    "Object Reference"],
+                    ["has_business_logic","Business Logic"],
+                  ].map(([key, label]) => {
+                    const val = pageDetail[key];
+                    const cls = val === true ? "cat-yes" : val === false ? "cat-no" : "cat-unknown";
+                    const badge = val === true ? "Yes" : val === false ? "No" : "?";
+                    return html`<div key=${key} className="cat-row">
+                      <span className="cat-label">${label}</span>
+                      <span className=${"cat-badge " + cls}>${badge}</span>
+                    </div>`;
+                  })}
+                </div>
 
                 <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
                 <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>

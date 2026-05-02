@@ -156,6 +156,11 @@ class TestRunCreate(BaseModel):
     max_pages: int = Field(default=50, ge=5, le=500)
 
 
+class TestRunUpdate(BaseModel):
+    max_depth: int = Field(ge=1, le=10)
+    max_pages: int = Field(ge=5, le=500)
+
+
 class TestRunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -191,6 +196,10 @@ class CrawledPageOut(BaseModel):
     status: str
     error_message: str | None
     in_scope: bool = True
+    req_auth: bool | None = None
+    takes_input: bool | None = None
+    has_object_ref: bool | None = None
+    has_business_logic: bool | None = None
     discovered_at: datetime
     # screenshot returned separately via /pages/{id} to keep list responses light
 

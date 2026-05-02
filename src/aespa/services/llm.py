@@ -21,12 +21,36 @@ Page content:
 Return ONLY valid JSON in this exact format (no markdown fences):
 {{
   "context": "2-4 sentence description of the page's purpose and the functionality it offers to users",
-  "suggested_links": ["absolute_url_1", "absolute_url_2"]
+  "suggested_links": ["absolute_url_1", "absolute_url_2"],
+  "categories": {{
+    "req_auth": true,
+    "takes_input": false,
+    "has_object_ref": false,
+    "has_business_logic": false
+  }}
 }}
 
 For suggested_links: include up to 10 absolute URLs from this page (same domain) that reveal the most \
 important or interesting application functionality. Prefer links to forms, features, user actions, \
-admin areas, API endpoints, etc. over navigation links already visible on every page."""
+admin areas, API endpoints, etc. over navigation links already visible on every page.
+
+For categories — answer true/false to each:
+- req_auth: Does accessing or using this page require the user to be authenticated/logged in?
+- takes_input: Does this page contain forms, input fields, search boxes, or otherwise accept data from the user?
+- has_object_ref: Does the URL or page content reference a specific object by ID \
+(e.g. id=1 in a query param, /accounts/42/ in the path, or a resource identifier in a POST body)?
+- has_business_logic: Can this page trigger transactions, modify account data, transfer funds, \
+create/update/delete records, or perform other business-significant operations?"""
+
+
+PageCategories = dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
+
+_EMPTY_CATS: PageCategories = {
+    "req_auth": None,
+    "takes_input": None,
+    "has_object_ref": None,
+    "has_business_logic": None,
+}
 
 
 async def analyse_page(
@@ -35,8 +59,8 @@ async def analyse_page(
     title: str,
     text: str,
     screenshot_b64: Optional[str] = None,
-) -> tuple[str, list[str]]:
-    """Return (context_description, suggested_links_list)."""
+) -> tuple[str, list[str], PageCategories]:
+    """Return (context_description, suggested_links_list, categories_dict)."""
     prompt = _ANALYSIS_PROMPT.format(
         url=url,
         title=title or "(no title)",
@@ -46,23 +70,28 @@ async def analyse_page(
     return _parse(raw, url)
 
 
-def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str]]:
+def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCategories]:
     if not raw:
-        return "", []
+        return "", [], dict(_EMPTY_CATS)
     try:
         clean = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
         data = json.loads(clean)
         if not isinstance(data, dict):
-            # Model returned a JSON array or scalar — use raw text as context
-            return raw.strip(), []
+            return raw.strip(), [], dict(_EMPTY_CATS)
         context = str(data.get("context") or raw)
         links = data.get("suggested_links") or []
         if not isinstance(links, list):
             links = []
-        return context, [str(l) for l in links if isinstance(l, str) and l.startswith("http")]
+        safe_links = [str(l) for l in links if isinstance(l, str) and l.startswith("http")]
+        # Parse categories — each value coerced to bool or None
+        raw_cats = data.get("categories") or {}
+        cats: PageCategories = {}
+        for key in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
+            val = raw_cats.get(key)
+            cats[key] = bool(val) if val is not None else None
+        return context, safe_links, cats
     except Exception:
-        # Any parse failure: return the raw text as-is for context
-        return raw.strip(), []
+        return raw.strip(), [], dict(_EMPTY_CATS)
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
