@@ -53,6 +53,27 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "has_business_logic", "INTEGER")
     _ensure_column(engine, "scan_finding", "affected_url", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
+    _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    # page_credential_view — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS page_credential_view (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL,
+                test_run_id INTEGER NOT NULL,
+                credential_id INTEGER,
+                username TEXT,
+                screenshot_b64 TEXT,
+                llm_context TEXT,
+                page_text TEXT,
+                req_auth INTEGER,
+                takes_input INTEGER,
+                has_object_ref INTEGER,
+                has_business_logic INTEGER
+            )
+        """))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
