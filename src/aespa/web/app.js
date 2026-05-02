@@ -29,6 +29,10 @@ const api = {
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
+  startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
+  stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
+  getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
+  getFindings:      (id)          => req(`/api/test-runs/${id}/findings`),
 };
 
 async function req(url, opts = {}) {
@@ -466,6 +470,9 @@ function TestRunDetail({ runId }) {
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
+  const [scanStatus, setScanStatus] = useState(null);
+  const [findings, setFindings]     = useState([]);
+  const [expandedFinding, setExpandedFinding] = useState(null);
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
@@ -490,6 +497,33 @@ function TestRunDetail({ runId }) {
     }, 3000);
     return () => clearInterval(iv);
   }, [run?.status, runId]);
+
+  // Poll scan status while scan is running
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const [s, g] = await Promise.all([api.getScanStatus(runId), api.getGraph(runId)]);
+        setScanStatus(s);
+        setGraph(g);
+        if (s.status === "running" || activeTab === "findings") {
+          const f = await api.getFindings(runId);
+          setFindings(f);
+        }
+      } catch(_) {}
+    };
+    poll();
+    if (scanStatus?.status === "running") {
+      const iv = setInterval(poll, 3000);
+      return () => clearInterval(iv);
+    }
+  }, [runId, scanStatus?.status, activeTab]);
+
+  // Fetch findings when switching to findings tab
+  useEffect(() => {
+    if (activeTab !== "findings") return;
+    api.getFindings(runId).then(setFindings).catch(()=>{});
+    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+  }, [activeTab, runId]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -609,6 +643,19 @@ function TestRunDetail({ runId }) {
         .attr("r", 10);
   }, [run?.current_url, graph]);
 
+  const onStartScan = async () => {
+    try {
+      const s = await api.startScan(runId);
+      setScanStatus(s);
+    } catch(e) { setError(e.message); }
+  };
+  const onStopScan = async () => {
+    try {
+      const s = await api.stopScan(runId);
+      setScanStatus(s);
+    } catch(e) { setError(e.message); }
+  };
+
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
@@ -696,12 +743,20 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+        <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
+          onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
+          Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
+        </button>
         <div style=${{flex:1}}></div>
         ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
+        ${activeTab==="scan" && scanStatus?.status==="running" && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan}>◼ Stop scan</button>`}
+        ${activeTab==="scan" && (scanStatus?.status==="idle"||scanStatus?.status==="complete"||scanStatus?.status==="stopped"||scanStatus?.status==null) && run?.status!=="running" && html`
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
       </div>
 
-      ${activeTab==="sitemap" && run && html`
+      ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
         <div className="run-meta">
           <div className="run-stat"><span className="run-stat-val">${run.pages_discovered}</span><span className="run-stat-lbl">Pages found</span></div>
           ${editingSettings ? html`
@@ -742,7 +797,7 @@ function TestRunDetail({ runId }) {
             <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
           </div>`}`}
 
-      <div className="graph-layout">
+      <div className="graph-layout" style=${{display: activeTab==="findings" ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -821,6 +876,58 @@ function TestRunDetail({ runId }) {
               </div>` : html`<div className="subtle" style=${{padding:12}}>Loading…</div>`}
           </div>`}
       </div>
+
+      ${activeTab==="findings" && html`
+        <div className="findings-panel">
+          ${scanStatus && html`
+            <div className="findings-status-bar">
+              <span className=${"scan-status-badge scan-status-"+scanStatus.status}>
+                ${scanStatus.status==="running" ? "Scanning…" :
+                  scanStatus.status==="complete" ? "Scan complete" :
+                  scanStatus.status==="stopped"  ? "Scan stopped" :
+                  scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
+              </span>
+              ${scanStatus.status==="running" && html`
+                <span className="subtle" style=${{fontSize:12}}>
+                  ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
+                </span>`}
+            </div>`}
+          ${findings.length === 0
+            ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+                ${scanStatus?.status==="running" ? "Scanning… findings will appear here." : "No findings yet. Start a scan from the Scan Status tab."}
+              </div>`
+            : html`
+              <div className="findings-table-wrap">
+                <table className="findings-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th>
+                      <th>OWASP</th>
+                      <th>Title</th>
+                      <th>URL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${findings.map(f => html`
+                      <tr key=${f.id} className="finding-row"
+                        onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
+                        <td><span className=${"sev-badge sev-"+f.severity}>${f.severity}</span></td>
+                        <td><span className="owasp-badge">${f.owasp_category}</span></td>
+                        <td className="finding-title">${f.title}</td>
+                        <td className="finding-url mono">${truncUrl(f.url||"",48)}</td>
+                      </tr>
+                      ${expandedFinding===f.id && html`
+                        <tr key=${"ev-"+f.id} className="finding-evidence-row">
+                          <td colSpan="4">
+                            <div className="finding-description">${f.description}</div>
+                            ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                          </td>
+                        </tr>`}
+                    `)}
+                  </tbody>
+                </table>
+              </div>`}
+        </div>`}
     </div>`;
 }
 

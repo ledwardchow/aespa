@@ -235,3 +235,24 @@ class GraphLink(BaseModel):
 class GraphData(BaseModel):
     nodes: list[GraphNode]
     links: list[GraphLink]
+
+
+class ScanFindingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    page_id: int
+    owasp_category: str
+    severity: str
+    title: str
+    description: str
+    evidence: str
+    created_at: datetime
+
+
+class ScanStatusOut(BaseModel):
+    total_pages: int
+    pages_done: int
+    findings_count: int
+    status: str   # idle | running | complete | stopped | failed
