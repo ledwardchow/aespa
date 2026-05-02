@@ -132,3 +132,19 @@ class PageLink(SQLModel, table=True):
     target_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
     target_url: str
     link_text: Optional[str] = Field(default=None)
+
+
+class ScanFinding(SQLModel, table=True):
+    """A security vulnerability found during an active scan."""
+
+    __tablename__ = "scan_finding"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    page_id: int = Field(foreign_key="crawled_page.id", index=True)
+    owasp_category: str = Field(index=True)   # "A01" … "A10"
+    severity: str                              # critical | high | medium | low | info
+    title: str
+    description: str
+    evidence: str = Field(default="")          # trimmed request + response excerpt
+    created_at: datetime = Field(default_factory=_utcnow)

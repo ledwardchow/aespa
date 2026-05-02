@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from aespa.models import LLMConfig
 
@@ -188,3 +188,208 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
     if message is None:
         return ""
     return getattr(message, "content", None) or ""
+
+
+# ── Scanner LLM functions ─────────────────────────────────────────────────────
+
+_PLAN_PROMPT = """\
+You are a web application penetration tester. Given the page details below, generate a list \
+of HTTP probes to test for OWASP Top 10 vulnerabilities.
+
+URL: {url}
+Title: {title}
+LLM Context: {context}
+
+Page categories:
+- Authentication Required: {req_auth}
+- Takes User Input: {takes_input}
+- Contains Object Reference: {has_object_ref}
+- Contains Business Logic: {has_business_logic}
+
+Applicable OWASP checks: {applicable}
+
+{category_guidance}
+
+Return ONLY valid JSON — an array of probe objects (no markdown fences):
+[
+  {{
+    "type": "http",
+    "method": "GET",
+    "url": "https://...",
+    "params": {{}},
+    "headers": {{}},
+    "body": null,
+    "desc": "Brief description of what this probe tests"
+  }},
+  {{
+    "type": "form",
+    "url": "https://...",
+    "selector": "input[name='search']",
+    "payload": "<script>alert(1)</script>",
+    "submit_selector": "button[type=submit]",
+    "desc": "XSS in search field"
+  }}
+]
+
+General rules:
+- Maximum 30 probes total.
+- "http" probes: sent directly via HTTP client (IDOR, auth bypass, header checks, URL param injection, SSRF).
+- "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
+- For auth bypass probes: include a version with empty Cookie and Authorization headers.
+- For injection payloads use safe, non-destructive test strings:
+  - SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1; SELECT 1--
+  - XSS: <script>alert(1)</script>  /  "><img src=x onerror=alert(1)>
+  - SSTI: {{7*7}}  /  ${{7*7}}
+  - Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd
+  - SSRF: http://169.254.169.254/latest/meta-data/
+  - CMDi: ; echo aespa_probe  /  $(echo aespa_probe)
+- Do NOT generate probes for checks not in the applicable list.
+- Only generate probes relevant to this specific page."""
+
+
+def _build_category_guidance(categories: dict) -> str:
+    sections: list[str] = []
+
+    if categories.get("has_object_ref"):
+        sections.append(
+            "OBJECT REFERENCE — HIGH PRIORITY (A01):\n"
+            "This page references objects by ID. From the URL and context, identify every ID "
+            "parameter (path segments like /users/123 and query params like ?account=456).\n"
+            "For each ID:\n"
+            "  • Enumerate adjacent IDs (orig-1, orig+1, 0, 1, 9999, 99999).\n"
+            "  • Repeat each probe WITHOUT auth credentials (Cookie: '', Authorization: '') "
+            "to test for broken access control.\n"
+            "  • Try string IDs where numeric is expected ('admin', 'null', '../../etc').\n"
+            "  • If it's a POST/PUT endpoint, replay with a different user's ID in the body.\n"
+            "Generate at least 10 IDOR probes."
+        )
+
+    if categories.get("takes_input"):
+        sections.append(
+            "TAKES INPUT — HIGH PRIORITY (A03, A10):\n"
+            "This page accepts user input. Identify every query parameter, form field, and "
+            "JSON body field from the URL and context.\n"
+            "For each parameter test ALL of the following:\n"
+            "  • SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1 UNION SELECT NULL--\n"
+            "  • XSS: <script>alert(1)</script>  /  \"><img src=x onerror=alert(1)>\n"
+            "  • SSTI: {{7*7}}  /  ${{7*7}}  /  <%= 7*7 %>\n"
+            "  • Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd\n"
+            "  • SSRF: http://169.254.169.254/latest/meta-data/\n"
+            "  • CMDi: ; echo aespa_probe  /  $(echo aespa_probe)\n"
+            "Use 'form' type probes for fields inside HTML forms; 'http' type for URL params.\n"
+            "Generate at least one probe per payload category per input field."
+        )
+
+    if categories.get("req_auth"):
+        sections.append(
+            "REQUIRES AUTH (A07):\n"
+            "  • Access the page with no cookies and no Authorization header — expect 401/403.\n"
+            "  • Try common credential bypass headers: X-Original-URL, X-Forwarded-For: 127.0.0.1.\n"
+            "  • Try path variations: append /.json, ;.css, %20 to the URL.\n"
+            "  • If it's an API, try sending an expired/malformed JWT in the Authorization header."
+        )
+
+    if categories.get("has_business_logic"):
+        sections.append(
+            "BUSINESS LOGIC (A04):\n"
+            "  • Infer the business operation from the context (e.g. transfer, purchase, withdraw).\n"
+            "  • Try negative amounts, zero amounts, and extremely large values.\n"
+            "  • Try replay: re-send the same action twice rapidly.\n"
+            "  • Try skipping steps: access later steps of a multi-step flow directly.\n"
+            "  • Try parameter tampering: change price/amount/quantity fields to 0 or -1."
+        )
+
+    return "\n\n".join(sections) if sections else ""
+
+_ANALYSE_PROMPT = """\
+You are a web application penetration tester reviewing probe results for OWASP vulnerabilities.
+
+Page URL: {url}
+
+Probe results:
+{results}
+
+For each result, determine whether it indicates a real vulnerability. Consider:
+- Unexpected data disclosure (other users' data, admin data)
+- Injection indicators (SQL errors, reflected payloads, template evaluation)
+- Auth bypass (200 on a protected resource without credentials)
+- Misconfiguration (missing security headers, verbose errors, version disclosure)
+- SSRF responses (cloud metadata, internal IP responses)
+
+Return ONLY valid JSON — an array of findings (empty array [] if none found, no markdown fences):
+[
+  {{
+    "owasp_category": "A03",
+    "severity": "high",
+    "title": "Reflected XSS in search parameter",
+    "description": "The search parameter reflects user input without encoding, allowing script injection.",
+    "evidence": "REQUEST: GET /search?q=<script>alert(1)</script>\\nRESPONSE (200): ...reflected payload..."
+  }}
+]
+
+Severity levels: critical, high, medium, low, info
+OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
+A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
+A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
+A09 (Logging/Monitoring), A10 (SSRF)
+
+Be conservative — only report confirmed or highly likely issues, not theoretical ones."""
+
+
+async def plan_probes(
+    config: LLMConfig,
+    url: str,
+    title: str,
+    context: str,
+    categories: dict[str, Any],
+    applicable_checks: list[str],
+) -> list[dict]:
+    """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts."""
+    prompt = _PLAN_PROMPT.format(
+        url=url,
+        title=title or "(no title)",
+        context=context or "(no context)",
+        req_auth=categories.get("req_auth"),
+        takes_input=categories.get("takes_input"),
+        has_object_ref=categories.get("has_object_ref"),
+        has_business_logic=categories.get("has_business_logic"),
+        applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
+        category_guidance=_build_category_guidance(categories),
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
+        probes = json.loads(clean)
+        if not isinstance(probes, list):
+            return []
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+    except Exception:
+        return []
+
+
+async def analyse_probes(
+    config: LLMConfig,
+    url: str,
+    results: list[dict],
+) -> list[dict]:
+    """Ask the LLM to analyse probe results and return a list of findings."""
+    if not results:
+        return []
+    results_text = "\n\n".join(
+        f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
+        f"Status: {r.get('status')}\n"
+        f"Response headers: {json.dumps(r.get('headers', {}))}\n"
+        f"Response body (truncated): {str(r.get('body', ''))[:500]}"
+        for r in results
+    )
+    prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
+    raw = await _call(config, prompt, None)
+    try:
+        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
+        findings = json.loads(clean)
+        if not isinstance(findings, list):
+            return []
+        required = {"owasp_category", "severity", "title", "description", "evidence"}
+        return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
+    except Exception:
+        return []
