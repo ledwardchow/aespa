@@ -47,6 +47,7 @@ class LLMProvider(str, Enum):
     anthropic = "anthropic"
     openai = "openai"
     openai_compatible = "openai_compatible"
+    google = "google"
 
 
 class LLMConfig(SQLModel, table=True):
