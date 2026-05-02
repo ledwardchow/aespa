@@ -45,3 +45,16 @@ Open the app, go to **LLM Settings**, and configure one of:
 - **OpenAI** — requires an OpenAI API key
 - **Google** - requires a Google API key
 - **OpenAI-compatible** — for local models via LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`); no API key required
+
+## Use
+Landing page:
+![Screenshot](docs/images/sites.png)
+
+Site setup:
+![Screenshot](docs/images/sitesetup.png)
+
+Crawler:
+![Screenshot](docs/images/crawler.png)
+
+Scan in progress:
+![Screenshot](docs/images/scanprogress.png)
