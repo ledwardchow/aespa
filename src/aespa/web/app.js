@@ -118,7 +118,7 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="logo"><div className="logo-icon">A</div><span className="logo-text">ESPA</span></div>
-          <div className="logo-sub">Educational Security Pentesting Agent</div>
+          <div className="logo-sub">AI-Enabled Security Pentesting Agent</div>
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-label">Targets</div>
@@ -589,6 +589,21 @@ function TestRunDetail({ runId }) {
     return () => sim.stop();
   }, [graph, activeTab]);
 
+  // Highlight the node whose URL is currently being crawled.
+  // Runs after the D3 graph effect so the SVG is already populated.
+  useEffect(() => {
+    if (!svgRef.current || !graph) return;
+    const svg = d3.select(svgRef.current);
+    svg.selectAll(".node-crawl-pulse").remove();
+    if (!run?.current_url) return;
+    const cur = run.current_url.replace(/\/$/, "");
+    svg.select("g").selectAll("g")
+      .filter(d => d && d.url && d.url.replace(/\/$/, "") === cur)
+      .insert("circle", ":first-child")
+        .attr("class", "node-crawl-pulse")
+        .attr("r", 10);
+  }, [run?.current_url, graph]);
+
   const onToggleScope = async () => {
     if (!selectedNode || scopeBusy) return;
     setScopeBusy(true);
@@ -634,7 +649,7 @@ function TestRunDetail({ runId }) {
         <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
         <span className="breadcrumb-sep"> / </span>
         ${run ? run.name : "…"}
-        ${run && html`<span style=${{marginLeft:8,fontSize:12,color:STATUS_COLOR[run.status]||"var(--muted)"}}>● ${run.status}</span>`}
+        ${run && html`<span className=${"run-status-badge"+(run.status==="running"?" running":"")} style=${{color:STATUS_COLOR[run.status]||"var(--muted)"}}>● ${run.status}</span>`}
       </div>
       <div className="topbar-actions">
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
@@ -661,7 +676,11 @@ function TestRunDetail({ runId }) {
           <div className="run-stat"><span className="run-stat-val">${run.max_pages}</span><span className="run-stat-lbl">Max pages</span></div>
           ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Crawling</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
-        </div>`}
+        </div>
+        ${run.status==="running" && html`
+          <div className="crawl-progress-bar">
+            <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
+          </div>`}`}
 
       <div className="graph-layout">
         <div className="graph-canvas-wrap">
