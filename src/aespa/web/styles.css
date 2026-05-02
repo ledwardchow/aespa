@@ -545,6 +545,35 @@ legend {
 .run-stat-edit-field label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .run-stat-edit-field input { background: var(--input); border: 1px solid var(--border); border-radius: 5px; color: var(--text); padding: 4px 6px; font-size: 14px; font-weight: 700; }
 
+/* ── Findings tab ──────────────────────────────────────────────────────────── */
+.findings-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; background: var(--danger); color: #fff; border-radius: 9px; font-size: 10px; font-weight: 700; margin-left: 4px; }
+.findings-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.findings-status-bar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.scan-status-badge { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 20px; }
+.scan-status-running  { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.scan-status-complete { background: rgba(52,211,153,0.15); color: #34d399; }
+.scan-status-stopped  { background: rgba(148,163,184,0.1); color: var(--muted); }
+.scan-status-failed   { background: rgba(239,68,68,0.15); color: var(--danger); }
+.scan-status-idle     { background: rgba(148,163,184,0.1); color: var(--muted); }
+.findings-table-wrap { flex: 1; overflow-y: auto; }
+.findings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.findings-table th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+.finding-row { cursor: pointer; transition: background 0.1s; }
+.finding-row:hover { background: var(--hover); }
+.finding-row td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, var(--border)); vertical-align: middle; }
+.finding-title { font-weight: 500; }
+.finding-url { color: var(--muted); font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.finding-evidence-row td { padding: 0; }
+.finding-description { padding: 10px 16px; font-size: 13px; color: var(--text-2); border-bottom: 1px solid var(--border); }
+.finding-evidence { margin: 0; padding: 10px 16px; font-family: monospace; font-size: 11px; background: var(--bg); color: var(--text-2); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--border); max-height: 200px; overflow-y: auto; }
+.owasp-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; background: rgba(99,102,241,0.12); color: #818cf8; font-family: monospace; }
+.sev-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+.sev-critical { background: rgba(239,68,68,0.2);   color: #ef4444; }
+.sev-high     { background: rgba(249,115,22,0.2);  color: #f97316; }
+.sev-medium   { background: rgba(234,179,8,0.2);   color: #eab308; }
+.sev-low      { background: rgba(59,130,246,0.2);  color: #3b82f6; }
+.sev-info     { background: rgba(148,163,184,0.15); color: var(--muted); }
+
 /* ── Graph layout ───────────────────────────────────────────── */
 
 .graph-layout {
