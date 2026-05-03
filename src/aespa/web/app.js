@@ -544,52 +544,20 @@ function TestRunDetail({ runId }) {
           const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
           return { nodes: [...prev.nodes, node], links: newLinks };
         });
-        // page_added carries the final (post-redirect) URL and username.
-        // Patch it straight into run.per_user_progress so the render picks it up.
-        if (evt.username) {
-          setRun(prev => {
-            if (!prev) return prev;
-            const pup = { ...(prev.per_user_progress || {}) };
-            pup[evt.username] = {
-              pages_visited: (pup[evt.username]?.pages_visited ?? 0) + 1,
-              current_url: evt.node?.url ?? pup[evt.username]?.current_url ?? null,
-              done: pup[evt.username]?.done ?? false,
-            };
-            return { ...prev, per_user_progress: pup };
-          });
-        }
       } else if (evt.type === "crawl_phase") {
         setCrawlUsername(evt.username || null);
       } else if (evt.type === "node_accessible_by") {
         api.getGraph(runId).then(setGraph).catch(()=>{});
       } else if (evt.type === "run_update") {
-        setRun(prev => {
-          if (!prev) return prev;
-          const next = { ...prev, ...evt };
-          // Also patch per_user_progress for users visiting already-crawled pages
-          // (they emit run_update but not page_added).
-          if (evt.username && evt.current_url) {
-            const pup = { ...(next.per_user_progress || {}) };
-            pup[evt.username] = {
-              pages_visited: pup[evt.username]?.pages_visited ?? 0,
-              current_url: evt.current_url,
-              done: pup[evt.username]?.done ?? false,
-            };
-            next.per_user_progress = pup;
-          }
-          return next;
-        });
+        setRun(prev => prev ? { ...prev, status: evt.status ?? prev.status, pages_discovered: evt.pages_discovered ?? prev.pages_discovered } : prev);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
-        if (evt.username) {
+        // crawl_progress is still used for the done flag
+        if (evt.username && evt.done) {
           setRun(prev => {
             if (!prev) return prev;
             const pup = { ...(prev.per_user_progress || {}) };
-            pup[evt.username] = {
-              pages_visited: evt.pages_visited ?? pup[evt.username]?.pages_visited ?? 0,
-              current_url: evt.current_url ?? pup[evt.username]?.current_url ?? null,
-              done: evt.done ?? false,
-            };
+            pup[evt.username] = { ...pup[evt.username], done: true };
             return { ...prev, per_user_progress: pup };
           });
         }
@@ -619,12 +587,12 @@ function TestRunDetail({ runId }) {
     return () => es.close();
   }, [runId]);
 
-  // Lightweight fallback poll: run metadata only (no graph fetch)
+  // Poll run metadata (including per_user_progress current URLs) while crawling
   useEffect(() => {
     if (run?.status !== "running") return;
     const iv = setInterval(() => {
       api.getRun(runId).then(r => setRun(r)).catch(() => {});
-    }, 5000);
+    }, 2000);
     return () => clearInterval(iv);
   }, [run?.status, runId]);
 
@@ -986,7 +954,9 @@ function TestRunDetail({ runId }) {
     try {
       const r = await api.startRun(runId);
       // Optimistically mark as running so the poll interval starts immediately.
-      setRun({...r, status: "running"});
+      // Clear per_user_progress so stale data from the previous crawl is never
+      // shown — fresh entries arrive via crawl_progress SSE events.
+      setRun({...r, status: "running", per_user_progress: {}});
     } catch(e) { setError(e.message); }
   };
   const onStop = async () => {
@@ -997,9 +967,7 @@ function TestRunDetail({ runId }) {
     try {
       setGraph({nodes:[], links:[]});
       const r = await api.restartRun(runId);
-      // Optimistically mark as running so the poll interval starts immediately
-      // and the empty-graph "Start crawl" button disappears.
-      setRun({...r, status: "running"});
+      setRun({...r, status: "running", per_user_progress: {}});
     } catch(e) { setError(e.message); }
   };
 
@@ -1088,7 +1056,7 @@ function TestRunDetail({ runId }) {
           `}
           ${(()=>{
             const pup = run.per_user_progress || {};
-            const multiUser = run.credentials?.length > 1 && Object.keys(pup).length > 0;
+            const multiUser = run.credentials?.length > 1;
             if (multiUser) return null; // per-user section rendered below
             return html`
               ${crawlUsername&&html`<div className="run-stat"><span className="run-stat-lbl">Crawling as</span><span className="run-stat-val" style=${{fontSize:14}}>${crawlUsername}</span></div>`}
@@ -1098,36 +1066,36 @@ function TestRunDetail({ runId }) {
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
         ${(()=>{
-          const pup = run.per_user_progress || {};
           const credList = run.credentials || [];
-          const multiUser = credList.length > 1 && Object.keys(pup).length > 0;
+          const multiUser = credList.length > 1;
+          // Overall progress bar — pages_discovered is the true total across all users
+          const overallPct = Math.min(100, (run.pages_discovered / run.max_pages) * 100);
+          const progressBar = (run.status === "running" || run.pages_discovered > 0) ? html`
+            <div className="crawl-progress-bar">
+              <div className="crawl-progress-fill" style=${{width: overallPct + "%"}}></div>
+            </div>` : null;
           if (multiUser) {
+            const pup = run.per_user_progress || {};
             return html`
+              ${progressBar}
               <div className="crawl-user-progress">
                 ${credList.map((c, idx) => {
                   const p = pup[c.username] || {};
                   const color = USER_PALETTE[idx % USER_PALETTE.length];
-                  const pct = Math.min(100, ((p.pages_visited || 0) / run.max_pages) * 100);
                   const isActive = run.status === "running" && !p.done;
                   return html`
                     <div key=${c.username} className="crawl-user-row">
                       <span className=${"crawl-user-dot"+(isActive?" active":"")} style=${{background:color}}></span>
                       <span className="crawl-user-name" title=${c.username}>${c.label||c.username}</span>
-                      <div className="crawl-user-bar">
-                        <div className="crawl-user-bar-fill" style=${{width:pct+"%",background:color}}></div>
-                      </div>
                       <span className="crawl-user-pages">${p.pages_visited||0} pg</span>
-                      ${p.current_url
-                        ? html`<span className="crawl-user-url mono">${truncUrl(p.current_url, 42)}</span>`
-                        : html`<span className="crawl-user-url" style=${{color:"var(--muted)"}}>${p.done?"done":"waiting…"}</span>`}
+                      <span className="crawl-user-url mono" title=${p.current_url||""}>
+                        ${p.current_url ? truncUrl(p.current_url, 42) : (p.done ? "done" : "waiting…")}
+                      </span>
                     </div>`;
                 })}
               </div>`;
           }
-          return run.status==="running" ? html`
-            <div className="crawl-progress-bar">
-              <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
-            </div>` : null;
+          return progressBar;
         })()}`}
 
       <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic") ? "none" : "flex"}}>
@@ -1542,7 +1510,7 @@ function fmtDate(iso) {
 function truncUrl(url, maxLen=40) {
   try {
     const u = new URL(url);
-    const s = u.hostname + u.pathname;
+    const s = u.hostname + u.pathname + u.hash;
     return s.length > maxLen ? s.slice(0, maxLen-1) + "…" : s;
   } catch { return url.slice(0, maxLen); }
 }
