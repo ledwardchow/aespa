@@ -1,13 +1,20 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
+## What is this?
+
+An **exploration** into whether a fully LLM-driven, automated web application "penetration test" could work. 
+
+(so far, it doesn't look like it with the qwen3-coder-30b model, which is the only one which will run acceptably on my laptop. anyone got an API key they can lend me?)
+
 ## Requirements
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
+- uv: https://docs.astral.sh/uv/getting-started/installation/
+- Anthropic/OpenAI/Google API key **OR**
+- A local model, you will need a GPU with 20GB+ VRAM or an ARM Macbook Pro with 32GB+ RAM. I recommend LM Studio + a non-thinking model that runs 30+ tok/sec. Thinking models will run too slowly for this app to offer a good experience.
+
 
 ## Setup
-
-Install uv: https://docs.astral.sh/uv/getting-started/installation/
 
 ```bash
 # Install dependencies
@@ -38,6 +45,8 @@ cp .env.example .env
 | `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL |
 | `AESPA_HOST` | `127.0.0.1` | Bind address |
 | `AESPA_PORT` | `8000` | Bind port |
+
+If you don't do this, it will use the values above as the default.
 
 ## LLM Configuration
 
