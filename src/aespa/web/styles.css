@@ -537,9 +537,9 @@ legend {
   display: flex;
   align-items: center;
   gap: 24px;
-  padding: 10px 0 14px;
+  padding: 10px 28px 14px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 0;
+  margin: 0 -28px;
   flex-wrap: wrap;
 }
 .run-stat { display: flex; flex-direction: column; gap: 1px; }
@@ -775,9 +775,10 @@ legend {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 8px 16px 10px;
+  padding: 8px 28px 10px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+  margin: 0 -28px;
 }
 .crawl-user-row {
   display: flex;
@@ -835,9 +836,9 @@ legend {
 .crawl-progress-bar {
   height: 3px;
   background: var(--border);
-  border-radius: 2px;
+  border-radius: 0;
   overflow: hidden;
-  margin-top: 10px;
+  margin: 10px -28px 0;
 }
 
 .crawl-progress-fill {
