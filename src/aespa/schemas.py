@@ -192,6 +192,18 @@ class TestRunSummary(BaseModel):
     completed_at: datetime | None
     error_message: str | None
     credentials: list[CredentialSummary] = []
+    # Per-credential crawl progress: {username: {current_url, pages_visited}}
+    per_user_progress: dict = Field(default_factory=dict)
+
+    @field_validator("per_user_progress", mode="before")
+    @classmethod
+    def _coerce_per_user_progress(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            return _json.loads(v)
+        return v
 
 
 class ScopeUpdate(BaseModel):
@@ -277,7 +289,18 @@ class ScanFindingOut(BaseModel):
     affected_url: str
     evidence: str
     screenshot_b64: str | None
+    validation_status: str
+    validation_note: str | None
     created_at: datetime
+
+
+class ValidationStatusOut(BaseModel):
+    total: int
+    confirmed: int
+    false_positives: int
+    validating: int
+    unvalidated: int
+    status: str   # idle | running | complete
 
 
 class PageCredentialViewOut(BaseModel):

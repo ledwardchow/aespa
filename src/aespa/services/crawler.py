@@ -121,7 +121,8 @@ async def _do_crawl(run_id: int) -> None:
 
     _update_run(run_id, status=TestRunStatus.running, started_at=_utcnow(),
                 completed_at=None, error_message=None,
-                pages_discovered=shared.pages_done, current_url=base_url)
+                pages_discovered=shared.pages_done, current_url=base_url,
+                per_user_progress=None)
 
     phases = creds if (requires_auth and creds) else [None]
 
@@ -190,6 +191,8 @@ async def _crawl_as_credential(
         "username": username,
     })
 
+    local_pages = 0  # pages actually navigated to by this credential
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         ctx = await browser.new_context(
@@ -237,7 +240,14 @@ async def _crawl_as_credential(
                     shared.pages_done += 1
                     is_first = True
 
+            local_pages += 1
             _update_run(run_id, current_url=url, pages_discovered=shared.pages_done)
+            events_svc.emit(run_id, {
+                "type": "crawl_progress",
+                "username": username,
+                "pages_visited": local_pages,
+                "current_url": url,
+            })
 
             # ── Navigate ──────────────────────────────────────────────────────
             try:
@@ -375,6 +385,7 @@ async def _crawl_as_credential(
             if is_first or first_success:
                 events_svc.emit(run_id, {
                     "type": "page_added",
+                    "username": username,
                     "node": {
                         "id": page_id, "url": final_url, "title": title,
                         "depth": depth, "status": "crawled",
@@ -393,8 +404,9 @@ async def _crawl_as_credential(
             events_svc.emit(run_id, {
                 "type": "run_update", "status": "running",
                 "pages_discovered": shared.pages_done,
-                "current_url": url, "username": username,
+                "current_url": final_url, "username": username,
             })
+            _update_credential_progress(run_id, username, final_url, local_pages)
 
             # ── Enqueue links ─────────────────────────────────────────────────
             if depth < max_depth:
@@ -410,6 +422,14 @@ async def _crawl_as_credential(
                         queue.append((link_url, depth + 1, page_id))
 
         await browser.close()
+
+    events_svc.emit(run_id, {
+        "type": "crawl_progress",
+        "username": username,
+        "pages_visited": local_pages,
+        "current_url": None,
+        "done": True,
+    })
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -523,6 +543,23 @@ def _update_run(run_id: int, **kwargs) -> None:
             return
         for k, v in kwargs.items():
             setattr(run, k, v)
+        s.add(run)
+        s.commit()
+
+
+def _update_credential_progress(
+    run_id: int, username: Optional[str], current_url: str, pages_visited: int
+) -> None:
+    """Persist per-credential crawl progress so the UI can read it on load/refresh."""
+    if not username:
+        return
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            return
+        progress = json.loads(run.per_user_progress or "{}")
+        progress[username] = {"current_url": current_url, "pages_visited": pages_visited}
+        run.per_user_progress = json.dumps(progress)
         s.add(run)
         s.commit()
 
