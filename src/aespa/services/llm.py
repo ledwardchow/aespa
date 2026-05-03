@@ -8,6 +8,61 @@ from typing import Any, Optional
 
 from aespa.models import LLMConfig
 
+
+def _extract_json(raw: str, expect: type = list) -> Any:
+    """Robustly extract JSON from an LLM response.
+
+    Handles:
+    - <think>...</think> reasoning blocks (Gemma, QwQ, DeepSeek-R1, etc.)
+    - Markdown code fences (```json ... ```)
+    - Preamble / explanation text before the JSON
+    - Trailing prose after the closing bracket
+    """
+    if not raw:
+        raise ValueError("empty response")
+
+    # Strip thinking/reasoning blocks
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    # Strip markdown fences
+    text = re.sub(r"```(?:json|python)?\s*", "", text).strip().rstrip("`").strip()
+
+    # Fast path: the whole string is valid JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the outermost JSON container matching `expect`
+    open_ch  = "[" if expect is list else "{"
+    close_ch = "]" if expect is list else "}"
+    start = text.find(open_ch)
+    if start == -1:
+        raise ValueError(f"no '{open_ch}' found in LLM response")
+
+    depth = 0
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : i + 1])
+
+    raise ValueError("could not extract balanced JSON from LLM response")
+
 _ANALYSIS_PROMPT = """\
 You are a web application security analyst performing reconnaissance on a target web application.
 
@@ -75,8 +130,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
     if not raw:
         return "", [], dict(_EMPTY_CATS)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
-        data = json.loads(clean)
+        data = _extract_json(raw, expect=dict)
         if not isinstance(data, dict):
             return raw.strip(), [], dict(_EMPTY_CATS)
         context = str(data.get("context") or raw)
@@ -208,6 +262,7 @@ Page categories:
 
 Applicable OWASP checks: {applicable}
 
+{users_section}
 {category_guidance}
 
 Return ONLY valid JSON — an array of probe objects (no markdown fences):
@@ -219,6 +274,7 @@ Return ONLY valid JSON — an array of probe objects (no markdown fences):
     "params": {{}},
     "headers": {{}},
     "body": null,
+    "as_user": null,
     "desc": "Brief description of what this probe tests"
   }},
   {{
@@ -227,14 +283,27 @@ Return ONLY valid JSON — an array of probe objects (no markdown fences):
     "selector": "input[name='search']",
     "payload": "<script>alert(1)</script>",
     "submit_selector": "button[type=submit]",
+    "as_user": null,
     "desc": "XSS in search field"
+  }},
+  {{
+    "type": "idor",
+    "url": "https://app.com/users/42",
+    "as_user": "bob",
+    "desc": "IDOR on user ID tested as low-privilege user"
   }}
 ]
 
 General rules:
 - Maximum 30 probes total.
-- "http" probes: sent directly via HTTP client (IDOR, auth bypass, header checks, URL param injection, SSRF).
+- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL param injection, SSRF).
 - "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
+- "idor" probes: mark a URL that contains an object ID for IDOR testing. Use ONE per URL — the \
+scanner automatically finds peer IDs from the crawl and tests a ±500 range. \
+Do NOT generate individual http probes for each sequential ID.
+- "as_user": set to a username from the available test users list to send the probe authenticated \
+as that specific user. Set to null to use the primary session. Use this for authorization bypass \
+testing — e.g. send a request as a low-privilege user to an endpoint that should be admin-only.
 - For auth bypass probes: include a version with empty Cookie and Authorization headers.
 - For injection payloads use safe, non-destructive test strings:
   - SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1; SELECT 1--
@@ -247,21 +316,42 @@ General rules:
 - Only generate probes relevant to this specific page."""
 
 
-def _build_category_guidance(categories: dict) -> str:
+def _build_users_section(users: list[dict] | None) -> str:
+    if not users:
+        return ""
+    lines = [
+        "Available test users:",
+        "Use the \"as_user\" field with one of these usernames to send a probe authenticated as that user.",
+        "This is essential for testing broken access control (A01) — e.g. accessing admin resources",
+        "as a regular user, or accessing another user's data.",
+        "",
+    ]
+    for u in users:
+        label = f" ({u['label']})" if u.get("label") else ""
+        lines.append(f"  - {u['username']}{label}")
+    return "\n".join(lines)
+
+
+def _build_category_guidance(categories: dict, users: list[dict] | None = None) -> str:
     sections: list[str] = []
 
     if categories.get("has_object_ref"):
+        user_note = ""
+        if users:
+            usernames = ", ".join(f'"{u["username"]}"' for u in users)
+            user_note = (
+                f"\n  • Set 'as_user' on IDOR probes to test cross-user access: use {usernames}."
+            )
         sections.append(
             "OBJECT REFERENCE — HIGH PRIORITY (A01):\n"
-            "This page references objects by ID. From the URL and context, identify every ID "
-            "parameter (path segments like /users/123 and query params like ?account=456).\n"
-            "For each ID:\n"
-            "  • Enumerate adjacent IDs (orig-1, orig+1, 0, 1, 9999, 99999).\n"
-            "  • Repeat each probe WITHOUT auth credentials (Cookie: '', Authorization: '') "
-            "to test for broken access control.\n"
-            "  • Try string IDs where numeric is expected ('admin', 'null', '../../etc').\n"
-            "  • If it's a POST/PUT endpoint, replay with a different user's ID in the body.\n"
-            "Generate at least 10 IDOR probes."
+            "This page contains numeric object IDs in the URL. Emit ONE 'idor' type probe per "
+            "URL that contains an ID. The scanner will look up peer IDs from other crawled users "
+            "and test a ±500 range automatically — do NOT generate individual http probes for "
+            "each sequential ID.\n"
+            "Additionally, generate 'http' probes for:\n"
+            "  • String IDs where numeric is expected ('admin', 'null', '../../etc/passwd').\n"
+            "  • POST/PUT replay with a different user's ID substituted in the request body."
+            + user_note
         )
 
     if categories.get("takes_input"):
@@ -323,9 +413,12 @@ Return ONLY valid JSON — an array of findings (empty array [] if none found, n
     "severity": "high",
     "title": "Reflected XSS in search parameter",
     "description": "The search parameter reflects user input without encoding, allowing script injection.",
-    "evidence": "REQUEST: GET /search?q=<script>alert(1)</script>\\nRESPONSE (200): ...reflected payload..."
+    "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
+    "evidence": "The payload was reflected verbatim in the response body at position 234."
   }}
 ]
+
+The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
@@ -343,8 +436,14 @@ async def plan_probes(
     context: str,
     categories: dict[str, Any],
     applicable_checks: list[str],
+    users: list[dict] | None = None,
 ) -> list[dict]:
-    """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts."""
+    """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts.
+
+    users: optional list of {"username": str, "label": str|None} describing the test accounts
+    available. When provided, the LLM can set "as_user" on each probe to control which
+    authenticated session is used when sending the request.
+    """
     prompt = _PLAN_PROMPT.format(
         url=url,
         title=title or "(no title)",
@@ -354,15 +453,17 @@ async def plan_probes(
         has_object_ref=categories.get("has_object_ref"),
         has_business_logic=categories.get("has_business_logic"),
         applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
-        category_guidance=_build_category_guidance(categories),
+        users_section=_build_users_section(users),
+        category_guidance=_build_category_guidance(categories, users=users),
     )
     raw = await _call(config, prompt, None)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
-        probes = json.loads(clean)
+        probes = _extract_json(raw or "", expect=list)
         if not isinstance(probes, list):
             return []
-        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+        # Include "idor" probes so that as_user set by the LLM is preserved when the
+        # scanner expands them into concrete HTTP requests.
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")]
     except Exception:
         return []
 
@@ -377,6 +478,7 @@ async def analyse_probes(
         return []
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
+        f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
         f"Status: {r.get('status')}\n"
         f"Response headers: {json.dumps(r.get('headers', {}))}\n"
         f"Response body (truncated): {str(r.get('body', ''))[:500]}"
@@ -385,11 +487,135 @@ async def analyse_probes(
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
     raw = await _call(config, prompt, None)
     try:
-        clean = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
-        findings = json.loads(clean)
+        findings = _extract_json(raw or "", expect=list)
         if not isinstance(findings, list):
             return []
         required = {"owasp_category", "severity", "title", "description", "evidence"}
         return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
     except Exception:
         return []
+
+
+# ── Validation LLM functions ──────────────────────────────────────────────────
+
+_VALIDATION_PLAN_PROMPT = """\
+You are a web application penetration tester. A security scanner flagged a potential vulnerability.
+Generate targeted HTTP probes to CONFIRM or REFUTE this specific finding.
+
+Finding:
+- Title: {title}
+- OWASP Category: {owasp_category}
+- Severity: {severity}
+- Affected URL: {affected_url}
+- Description: {description}
+
+Original evidence:
+{evidence}
+
+{users_section}
+
+Strategy:
+- Reproduce the exact condition that triggered the finding.
+- For auth/access control issues: test with both privileged and unprivileged users (set as_user).
+- For injection findings: repeat the exact payload and look for the evaluation marker.
+- For missing header / config issues: re-request the URL and inspect the response.
+- For IDOR: re-request the affected URL with a different user's session (set as_user).
+
+Return ONLY valid JSON — an array of up to 10 probe objects (no markdown fences).
+Use the same probe format as scanning (type, method, url, params, headers, body, as_user, desc).
+Return [] if no targeted probes can be generated."""
+
+
+_VALIDATION_VERDICT_PROMPT = """\
+You are a web application penetration tester reviewing validation probe results.
+
+Original finding:
+- Title: {title}
+- Description: {description}
+
+Original evidence:
+{evidence}
+
+Validation probe results:
+{results}
+
+Based on the probe results, determine whether this finding is CONFIRMED or a FALSE POSITIVE.
+
+Consider:
+- Does any probe reproduce the vulnerability? (injection marker present, access granted, etc.)
+- Does the server behaviour match what the original finding described?
+- Could the original evidence have been a false positive (coincidental keyword, expected redirect)?
+
+Return ONLY valid JSON (no markdown fences):
+{{
+  "verdict": "confirmed",
+  "reasoning": "The validation probe reproduced the issue: the payload was reflected verbatim."
+}}
+
+"verdict" must be exactly "confirmed" or "false_positive".
+"reasoning" should be 1–3 sentences explaining the decision."""
+
+
+async def plan_validation_probes(
+    config: LLMConfig,
+    title: str,
+    description: str,
+    affected_url: str,
+    evidence: str,
+    owasp_category: str,
+    severity: str,
+    users: list[dict] | None = None,
+) -> list[dict]:
+    """Generate targeted probes to confirm or refute a specific finding."""
+    prompt = _VALIDATION_PLAN_PROMPT.format(
+        title=title,
+        owasp_category=owasp_category,
+        severity=severity,
+        affected_url=affected_url,
+        description=description,
+        evidence=evidence[:2000],
+        users_section=_build_users_section(users),
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        probes = _extract_json(raw or "", expect=list)
+        if not isinstance(probes, list):
+            return []
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+    except Exception:
+        return []
+
+
+async def validate_finding_result(
+    config: LLMConfig,
+    title: str,
+    description: str,
+    evidence: str,
+    probe_results: list[dict],
+) -> dict:
+    """Return {"verdict": "confirmed"|"false_positive", "reasoning": str}."""
+    if not probe_results:
+        return {"verdict": "confirmed", "reasoning": "No validation probes were generated; treating original finding as confirmed."}
+    results_text = "\n\n".join(
+        f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
+        f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
+        f"Status: {r.get('status')}\n"
+        f"Response headers: {json.dumps(r.get('headers', {}))}\n"
+        f"Response body (truncated): {str(r.get('body', ''))[:400]}"
+        for r in probe_results
+    )
+    prompt = _VALIDATION_VERDICT_PROMPT.format(
+        title=title,
+        description=description,
+        evidence=evidence[:1500],
+        results=results_text,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        data = _extract_json(raw or "", expect=dict)
+        verdict = data.get("verdict", "")
+        if verdict not in ("confirmed", "false_positive"):
+            verdict = "confirmed"
+        return {"verdict": verdict, "reasoning": str(data.get("reasoning", ""))}
+    except Exception:
+        return {"verdict": "confirmed", "reasoning": "Could not parse LLM validation response."}
