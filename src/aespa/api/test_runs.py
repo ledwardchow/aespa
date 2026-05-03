@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, PageLink, TestRun, TestRunStatus
+from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, TestRunStatus
 from aespa.schemas import (
+    CredentialSummary,
     CrawledPageDetail,
     CrawledPageOut,
     GraphData,
     GraphLink,
     GraphNode,
+    PageCredentialViewOut,
     ScopeUpdate,
     TestRunCreate,
     TestRunSummary,
@@ -29,6 +33,15 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     if run is None:
         raise HTTPException(status_code=404, detail=f"TestRun {run_id} not found")
     return run
+
+
+def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
+    from aespa.models import Site
+    site = session.get(Site, run.site_id)
+    creds = [CredentialSummary.model_validate(c) for c in (site.credentials if site else [])]
+    s = TestRunSummary.model_validate(run)
+    s.credentials = creds
+    return s
 
 
 def _get_site_or_404(session: Session, site_id: int):
@@ -70,7 +83,7 @@ def create_test_run(
     session.add(run)
     session.commit()
     session.refresh(run)
-    return TestRunSummary.model_validate(run)
+    return _run_summary(run, session)
 
 
 @router.get("/api/sites/{site_id}/test-runs", response_model=list[TestRunSummary])
@@ -82,7 +95,7 @@ def list_test_runs(
     runs = session.exec(
         select(TestRun).where(TestRun.site_id == site_id).order_by(TestRun.created_at.desc())
     ).all()
-    return [TestRunSummary.model_validate(r) for r in runs]
+    return [_run_summary(r, session) for r in runs]
 
 
 # ── Single run ────────────────────────────────────────────────────────────────
@@ -90,7 +103,7 @@ def list_test_runs(
 @router.get("/api/test-runs/{run_id}", response_model=TestRunSummary)
 def get_test_run(run_id: int, session: Session = Depends(get_session)) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
-    return TestRunSummary.model_validate(run)
+    return _run_summary(run, session)
 
 
 @router.delete("/api/test-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -126,7 +139,7 @@ def update_test_run(
     session.add(run)
     session.commit()
     session.refresh(run)
-    return TestRunSummary.model_validate(run)
+    return _run_summary(run, session)
 
 
 # ── Crawl control ─────────────────────────────────────────────────────────────
@@ -154,10 +167,13 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    # Clear stale per_user_progress synchronously so the response (and the
+    # first poll) never contains data from a previous crawl.
+    run.per_user_progress = None
+    session.add(run)
+    session.commit()
     await crawler_svc.start_crawl(run_id)
-    # Return immediately; the background task updates status in DB and the
-    # frontend poll will reflect it within a few seconds.
-    return TestRunSummary.model_validate(run)
+    return _run_summary(run, session)
 
 
 @router.post("/api/test-runs/{run_id}/restart", response_model=TestRunSummary)
@@ -186,11 +202,11 @@ async def restart_test_run(
     run.completed_at = None
     run.error_message = None
     run.current_url = None
+    run.per_user_progress = None
     session.add(run)
     session.commit()
     session.refresh(run)
-    # Capture summary before the await to avoid session-boundary issues
-    summary = TestRunSummary.model_validate(run)
+    summary = _run_summary(run, session)
     await crawler_svc.start_crawl(run_id)
     return summary
 
@@ -205,7 +221,7 @@ def stop_test_run(run_id: int, session: Session = Depends(get_session)) -> TestR
     session.add(run)
     session.commit()
     session.refresh(run)
-    return TestRunSummary.model_validate(run)
+    return _run_summary(run, session)
 
 
 # ── Pages + graph ─────────────────────────────────────────────────────────────
@@ -232,6 +248,19 @@ def get_page(
     return CrawledPageDetail.model_validate(page)
 
 
+@router.get("/api/test-runs/{run_id}/pages/{page_id}/views", response_model=list[PageCredentialViewOut])
+def get_page_views(
+    run_id: int, page_id: int, session: Session = Depends(get_session)
+) -> list[PageCredentialViewOut]:
+    _get_run_or_404(session, run_id)
+    views = session.exec(
+        select(PageCredentialView)
+        .where(PageCredentialView.page_id == page_id)
+        .where(PageCredentialView.test_run_id == run_id)
+    ).all()
+    return [PageCredentialViewOut.model_validate(v) for v in views]
+
+
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
     _get_run_or_404(session, run_id)
@@ -252,6 +281,7 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             context=p.llm_context,
             in_scope=p.in_scope,
             scan_status=p.scan_status,
+            accessible_by=json.loads(p.accessible_by or "[]"),
         )
         for p in pages
     ]
