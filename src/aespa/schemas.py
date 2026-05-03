@@ -85,25 +85,52 @@ class SiteDetail(BaseModel):
 
 # ── LLM config schemas ────────────────────────────────────────────────────
 
-LLMProviderLiteral = Literal["anthropic", "openai", "openai_compatible", "google"]
+LLMProviderLiteral = Literal[
+    "anthropic", "openai", "openai_compatible", "google", "azure_openai", "azure_foundry"
+]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "anthropic": [
         "claude-opus-4-5",
         "claude-sonnet-4-5",
+        "claude-3-7-sonnet-20250219",
         "claude-haiku-3-5",
+        "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
         "gpt-4o",
         "gpt-4o-mini",
+        "o4-mini",
+        "o3",
         "o3-mini",
     ],
     "openai_compatible": [],
     "google": [
+        "gemini-2.5-pro-preview-05-06",
         "gemini-2.5-flash-preview-04-17",
         "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+    ],
+    "azure_openai": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+    ],
+    "azure_foundry": [
+        "Meta-Llama-3.3-70B-Instruct",
+        "Meta-Llama-3.1-70B-Instruct",
+        "Mistral-large-2411",
+        "Phi-4",
+        "DeepSeek-R1",
+        "gpt-4o",
+        "o3-mini",
     ],
 }
 
@@ -121,10 +148,12 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_provider_fields(self) -> "LLMConfigIn":
-        if self.provider in ("anthropic", "openai", "google") and not self.api_key:
+        _needs_key = ("anthropic", "openai", "google", "azure_openai", "azure_foundry")
+        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
+        if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
-        if self.provider == "openai_compatible" and not self.base_url:
-            raise ValueError("base_url is required for openai_compatible provider")
+        if self.provider in _needs_url and not self.base_url:
+            raise ValueError(f"base_url is required for provider '{self.provider}'")
         return self
 
     @field_validator("base_url")

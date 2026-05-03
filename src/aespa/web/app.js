@@ -1420,15 +1420,43 @@ function TestRunDetail({ runId }) {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
-const PROVIDER_LABELS = { anthropic:"Anthropic", openai:"OpenAI", openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)", google:"Google Gemini" };
-const PROVIDER_PLACEHOLDERS = { anthropic:"claude-opus-4-5", openai:"gpt-4o", openai_compatible:"e.g. llama-3.1-8b-instruct", google:"gemini-2.5-flash-preview-04-17" };
+const PROVIDER_LABELS = {
+  anthropic:"Anthropic", openai:"OpenAI",
+  openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
+  google:"Google Gemini",
+  azure_openai:"Azure OpenAI",
+  azure_foundry:"Azure AI Foundry",
+};
+const PROVIDER_PLACEHOLDERS = {
+  anthropic:"claude-opus-4-5", openai:"gpt-4.1",
+  openai_compatible:"e.g. llama-3.1-8b-instruct",
+  google:"gemini-2.5-flash-preview-04-17",
+  azure_openai:"Deployment name, e.g. gpt-4o",
+  azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
+};
+const BASE_URL_LABELS = {
+  openai_compatible:"Base URL",
+  azure_openai:"Azure Endpoint",
+  azure_foundry:"Endpoint URL",
+};
+const BASE_URL_PLACEHOLDERS = {
+  openai_compatible:"http://localhost:1234/v1",
+  azure_openai:"https://myresource.openai.azure.com/",
+  azure_foundry:"https://models.inference.ai.azure.com",
+};
+const BASE_URL_HINTS = {
+  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1",
+  azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
+  azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
+};
 
 function SettingsPage() {
-  const [form, setForm]     = useState(null);
-  const [dms, setDMs]       = useState({});
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved]   = useState(false);
-  const [error, setError]   = useState(null);
+  const [form, setForm]           = useState(null);
+  const [dms, setDMs]             = useState({});
+  const [customModel, setCustomModel] = useState(false);
+  const [saving, setSaving]       = useState(false);
+  const [saved, setSaved]         = useState(false);
+  const [error, setError]         = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1445,13 +1473,14 @@ function SettingsPage() {
   }, []);
 
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => { const ms=dms[p]||[]; upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
+  const changeProv = p => { const ms=dms[p]||[]; setCustomModel(false); upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    const needsBaseUrl = ["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
     const payload = {
       provider:form.provider, api_key:form.api_key.trim()||null,
-      base_url:form.provider==="openai_compatible"?form.base_url.trim():null,
+      base_url:needsBaseUrl?form.base_url.trim():null,
       model:form.model.trim(), max_tokens:Number(form.max_tokens),
       temperature:Number(form.temperature), use_vision:form.use_vision,
     };
@@ -1460,7 +1489,9 @@ function SettingsPage() {
   };
 
   const models = form?(dms[form.provider]||[]):[];
-  const isCustom = form&&models.length>0&&!models.includes(form.model)&&form.model!=="";
+  const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
+  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&["anthropic","openai","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     <div className="topbar"><div className="topbar-title">LLM Settings</div></div>
@@ -1479,25 +1510,35 @@ function SettingsPage() {
           </div>
           <div className="divider"/>
           <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
-          ${(form.provider==="anthropic"||form.provider==="openai")&&html`
+          ${needsBaseUrl&&html`
+            <div className="field">
+              <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
+              <input type="url" required value=${form.base_url}
+                placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
+                onChange=${e=>upd({base_url:e.target.value})}/>
+              ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
+            </div>`}
+          ${needsKey&&html`
             <div className="field"><label>API Key</label>
-              <input type="password" required value=${form.api_key} placeholder=${form.provider==="anthropic"?"sk-ant-…":"sk-…"}
+              <input type="password" required value=${form.api_key}
+                placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":""}
                 onChange=${e=>upd({api_key:e.target.value})}/></div>`}
           ${form.provider==="openai_compatible"&&html`
-            <div className="field"><label>Base URL</label>
-              <input type="url" required value=${form.base_url} placeholder="http://localhost:1234/v1" onChange=${e=>upd({base_url:e.target.value})}/>
-              <div className="field-hint">LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1</div></div>
             <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-              <input type="password" value=${form.api_key} placeholder="Leave blank if not required" onChange=${e=>upd({api_key:e.target.value})}/></div>`}
+              <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
+                onChange=${e=>upd({api_key:e.target.value})}/></div>`}
           <div className="field"><label>Model</label>
             ${models.length>0?html`
               <div className="model-select-group">
                 <select className="select" value=${isCustom?"__custom__":form.model}
-                  onChange=${e=>e.target.value!=="__custom__"?upd({model:e.target.value}):upd({model:""})}>
+                  onChange=${e=>{
+                    if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
+                    else{setCustomModel(true);upd({model:""});}
+                  }}>
                   ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
                   <option value="__custom__">Custom…</option>
                 </select>
-                ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Model name" onChange=${e=>upd({model:e.target.value})}/>`}
+                ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
               </div>`:html`
               <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
                 onChange=${e=>upd({model:e.target.value})}/>`}

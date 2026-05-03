@@ -48,6 +48,8 @@ class LLMProvider(str, Enum):
     openai = "openai"
     openai_compatible = "openai_compatible"
     google = "google"
+    azure_openai = "azure_openai"
+    azure_foundry = "azure_foundry"
 
 
 class LLMConfig(SQLModel, table=True):
