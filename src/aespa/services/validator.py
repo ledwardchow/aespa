@@ -24,7 +24,7 @@ from aespa.models import Credential, ScanFinding, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config, get_run_scanner_policy
 
 log = logging.getLogger("aespa.validator")
 
@@ -105,6 +105,7 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
         llm_cfg = get_llm_config(s)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration — configure it in Settings first.")
+        scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -153,7 +154,7 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
 
     # Validate each finding sequentially.
     for finding in findings:
-        await _validate_one(run_id, finding, llm_cfg, user_sessions, users_list)
+        await _validate_one(run_id, finding, llm_cfg, user_sessions, users_list, scanner_policy)
 
 
 async def _validate_one(
@@ -162,6 +163,7 @@ async def _validate_one(
     llm_cfg,
     user_sessions: dict[str, dict],
     users_list: list[dict] | None,
+    scanner_policy,
 ) -> None:
     log.info("Validating finding id=%s: %s", finding.id, finding.title)
 
@@ -191,12 +193,16 @@ async def _validate_one(
         try:
             as_user_name = probe.get("as_user") or None
             session = user_sessions.get(as_user_name) if as_user_name else None
-            result = await _run_validation_probe(probe, primary_session, session)
+            result = await _run_validation_probe(
+                probe, primary_session, session,
+                page_url=finding.affected_url,
+                scanner_policy=scanner_policy,
+            )
             if result:
                 results.append(result)
         except Exception as e:
             log.debug("Validation probe error (%s): %s", probe.get("desc", "?"), e)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(scanner_policy.min_delay_s)
 
     # Phase 3: LLM determines verdict.
     try:
@@ -238,6 +244,8 @@ async def _run_validation_probe(
     probe: dict,
     primary_session: dict | None,
     override_session: dict | None,
+    page_url: str,
+    scanner_policy,
 ) -> Optional[dict]:
     """Execute a single HTTP probe using the appropriate session."""
     method     = probe.get("method", "GET").upper()
@@ -248,6 +256,11 @@ async def _run_validation_probe(
     desc       = probe.get("desc", url)
     as_user    = probe.get("as_user") or None
 
+    rejection = scanner_svc._probe_policy_rejection(probe, page_url, scanner_policy)
+    if rejection:
+        log.info("  Validation probe rejected by policy: %s (%s)", rejection, desc)
+        return None
+
     # Use the override session (specific user) if provided, else the primary.
     session = override_session or primary_session
     cookies = session["cookies"] if session else {}
@@ -257,8 +270,8 @@ async def _run_validation_probe(
         async with httpx.AsyncClient(
             cookies=cookies,
             headers=hdrs,
-            timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
+            timeout=scanner_policy.request_timeout_s,
+            follow_redirects=scanner_policy.follow_redirects,
             verify=False,
         ) as client:
             req = client.build_request(
@@ -267,8 +280,8 @@ async def _run_validation_probe(
                 content=body.encode() if isinstance(body, str) else body,
                 headers=extra_hdrs,
             )
-            resp = await client.send(req, follow_redirects=True)
-            resp_body = resp.text[:800]
+            resp = await client.send(req, follow_redirects=scanner_policy.follow_redirects)
+            resp_body = resp.text[:min(800, scanner_policy.response_body_read_limit_bytes)]
             req_hdrs_text = "\n".join(
                 f"{k}: {v}" for k, v in req.headers.items() if k.lower() != "cookie"
             )
