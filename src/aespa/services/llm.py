@@ -154,6 +154,10 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _anthropic(config, prompt, screenshot_b64)
     if config.provider == "google":
         return await _google(config, prompt, screenshot_b64)
+    if config.provider == "azure_openai":
+        return await _azure_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry":
+        return await _azure_foundry(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
@@ -235,6 +239,71 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         messages=[{"role": "user", "content": msg_content}],
     )
     # Safely access choices — guard against None or empty list
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+    return getattr(message, "content", None) or ""
+
+
+async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    from openai import AsyncAzureOpenAI
+
+    client = AsyncAzureOpenAI(
+        api_key=config.api_key,
+        azure_endpoint=config.base_url,
+        api_version="2024-12-01-preview",
+    )
+
+    if screenshot_b64:
+        msg_content: object = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        msg_content = prompt
+
+    resp = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=min(config.max_tokens, 1024),
+        temperature=config.temperature,
+        messages=[{"role": "user", "content": msg_content}],
+    )
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+    return getattr(message, "content", None) or ""
+
+
+async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    """Azure AI Foundry serverless endpoints are OpenAI-compatible."""
+    from openai import AsyncOpenAI
+
+    base = (config.base_url or "").rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+
+    client = AsyncOpenAI(api_key=config.api_key, base_url=base)
+
+    if screenshot_b64:
+        msg_content: object = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        msg_content = prompt
+
+    resp = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=min(config.max_tokens, 1024),
+        temperature=config.temperature,
+        messages=[{"role": "user", "content": msg_content}],
+    )
     choices = getattr(resp, "choices", None) or []
     if not choices:
         return ""
