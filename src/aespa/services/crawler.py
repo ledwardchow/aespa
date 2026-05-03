@@ -242,6 +242,9 @@ async def _crawl_as_credential(
 
             local_pages += 1
             _update_run(run_id, current_url=url, pages_discovered=shared.pages_done)
+            # Write the intended URL into per_user_progress immediately so the
+            # polling API response reflects what the crawler is currently visiting.
+            _update_credential_progress(run_id, username, url, local_pages)
             events_svc.emit(run_id, {
                 "type": "crawl_progress",
                 "username": username,
@@ -406,7 +409,6 @@ async def _crawl_as_credential(
                 "pages_discovered": shared.pages_done,
                 "current_url": final_url, "username": username,
             })
-            _update_credential_progress(run_id, username, final_url, local_pages)
 
             # ── Enqueue links ─────────────────────────────────────────────────
             if depth < max_depth:
