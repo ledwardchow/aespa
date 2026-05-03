@@ -91,6 +91,8 @@ class TestRun(SQLModel, table=True):
     # Progress
     pages_discovered: int = Field(default=0)
     current_url: Optional[str] = Field(default=None)
+    # JSON: {username: {current_url, pages_visited}} — one entry per crawling credential
+    per_user_progress: Optional[str] = Field(default=None)
     # Timestamps
     created_at: datetime = Field(default_factory=_utcnow)
     started_at: Optional[datetime] = Field(default=None)
@@ -189,4 +191,7 @@ class ScanFinding(SQLModel, table=True):
     affected_url: str = Field(default="")      # specific URL where the issue was observed
     evidence: str = Field(default="")          # formatted request + response excerpt
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
+    # Validation fields
+    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | false_positive
+    validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)

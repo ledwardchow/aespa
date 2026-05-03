@@ -20,3 +20,13 @@ def get_traffic(
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     return traffic_svc.get_traffic(run_id, since_id)
+
+
+@router.delete("/api/test-runs/{run_id}/traffic", status_code=204)
+def clear_traffic(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    if session.get(TestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    traffic_svc.clear_traffic(run_id)

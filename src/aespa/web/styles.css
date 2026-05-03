@@ -599,6 +599,23 @@ legend {
 .finding-instance-row td { padding: 6px 12px 6px 28px; border-bottom: 1px solid var(--border-subtle, var(--border)); font-size: 12px; vertical-align: middle; }
 .finding-instance-row:hover .finding-del-btn { opacity: 1; }
 .instance-chevron { display: inline-block; width: 14px; font-size: 10px; color: var(--muted); user-select: none; }
+
+/* Validation badges */
+.val-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+.val-confirmed  { background: rgba(63,207,112,0.15); color: var(--ok); }
+.val-fp         { background: rgba(107,118,145,0.2); color: var(--muted); }
+.val-validating { background: rgba(245,166,35,0.15); color: var(--warn); animation: val-pulse 1.2s ease-in-out infinite; }
+@keyframes val-pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+/* Validation status badge in findings toolbar */
+.val-status-badge { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 20px; }
+.val-running  { background: rgba(245,166,35,0.12); color: var(--warn); }
+.val-complete { background: rgba(63,207,112,0.12); color: var(--ok); }
+
+/* Validation note in evidence panel */
+.finding-validation-note { padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.val-note-confirmed    { background: rgba(63,207,112,0.07); color: var(--ok); }
+.val-note-false_positive { background: rgba(107,118,145,0.12); color: var(--muted); }
 .scan-node-status { display: inline-block; margin-left: 10px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: capitalize; }
 .view-toggle { display:flex; gap:2px; background:var(--panel-2); border-radius:6px; padding:2px; }
 .view-toggle .btn.active { background:var(--accent); color:#fff; }
@@ -751,6 +768,68 @@ legend {
 
 .run-status-badge.running {
   animation: status-pulse 1.6s ease-in-out infinite;
+}
+
+/* Per-credential crawl progress */
+.crawl-user-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 16px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.crawl-user-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  min-width: 0;
+}
+.crawl-user-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+.crawl-user-dot.active {
+  opacity: 1;
+  animation: cred-dot-pulse 1.4s ease-in-out infinite;
+}
+@keyframes cred-dot-pulse { 0%,100% { opacity:1; } 50% { opacity:0.35; } }
+.crawl-user-name {
+  width: 90px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.crawl-user-bar {
+  width: 120px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.crawl-user-bar-fill { height: 100%; border-radius: 2px; transition: width 0.7s ease; }
+.crawl-user-pages {
+  width: 38px;
+  text-align: right;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.crawl-user-url {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+  font-size: 11px;
 }
 
 .crawl-progress-bar {

@@ -34,6 +34,8 @@ log = logging.getLogger("aespa.scanner")
 
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
+# Populated while a scan is running so the validator can reuse pre-authenticated sessions.
+_active_sessions: dict[int, dict[int, dict]] = {}  # run_id → cred_id → session
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -63,6 +65,11 @@ def is_running(run_id: int) -> bool:
     return run_id in _active_tasks
 
 
+def get_active_sessions(run_id: int) -> dict[int, dict] | None:
+    """Return the pre-authenticated cred_sessions for a currently running scan, or None."""
+    return _active_sessions.get(run_id)
+
+
 async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     """Start a scan. Pass page_ids to scan only specific pages; omit to scan all in-scope pages."""
     if run_id in _active_tasks:
@@ -85,6 +92,7 @@ async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
         _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
     finally:
         _stop_requested.discard(run_id)
+        _active_sessions.pop(run_id, None)
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
@@ -251,6 +259,9 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     "extra_headers": {"Authorization": f"Bearer {ec_token}"} if ec_token else {},
                 }
 
+        # Expose sessions so the validator can reuse them while the scan is active.
+        _active_sessions[run_id] = cred_sessions
+
         # Build httpx client with exported auth state.
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -266,7 +277,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     log.info("Stop requested — aborting scan.")
                     break
                 await _scan_page(run_id, page_id, hx, pw_page, llm_cfg, base_url,
-                                 cred_sessions=cred_sessions)
+                                 cred_sessions=cred_sessions, browser=browser)
 
     stopped = run_id in _stop_requested
     _mark_run(run_id, scan_status="stopped" if stopped else "complete")
@@ -284,6 +295,7 @@ async def _scan_page(
     llm_cfg,
     base_url: str,
     cred_sessions: dict | None = None,
+    browser=None,
 ) -> None:
     # Load page details.
     with Session(get_engine()) as s:
@@ -310,10 +322,20 @@ async def _scan_page(
     # Determine applicable OWASP checks based on page categories.
     applicable = _applicable_checks(categories)
 
+    # Build a username → session lookup for as_user probe resolution.
+    user_sessions: dict[str, dict] = {
+        cs["username"]: cs for cs in (cred_sessions or {}).values()
+    }
+    users_list: list[dict] = [
+        {"username": cs["username"], "label": cs.get("label")}
+        for cs in (cred_sessions or {}).values()
+    ] or None
+
     # Phase 1: LLM plans probes.
     try:
         probes = await llm_svc.plan_probes(
-            llm_cfg, page_url, page_title, page_ctx, categories, applicable
+            llm_cfg, page_url, page_title, page_ctx, categories, applicable,
+            users=users_list,
         )
     except Exception as e:
         log.warning("plan_probes failed for %s: %s", page_url, e)
@@ -332,19 +354,23 @@ async def _scan_page(
     # Combine deterministic + LLM probes, then expand all "idor" markers.
     combined = deterministic + probes
 
-    # Expand "idor" markers — deduplicate by URL so the same page isn't expanded twice.
+    # Expand "idor" markers — deduplicate by (URL, as_user) so the same page can be
+    # expanded once per user context (e.g. primary session + a specific test user).
     all_probes: list[dict] = []
-    expanded_idor_urls: set[str] = set()
+    expanded_idor_keys: set[tuple[str, str | None]] = set()
     for probe in combined:
         if probe.get("type") != "idor":
             all_probes.append(probe)
             continue
         idor_url = probe.get("url") or page_url
-        if idor_url in expanded_idor_urls:
+        as_user  = probe.get("as_user") or None
+        key = (idor_url, as_user)
+        if key in expanded_idor_keys:
             continue
-        expanded_idor_urls.add(idor_url)
-        expanded = _idor_expand(idor_url, run_id, accessible_by)
-        log.info("  IDOR expand %s → %d probes (url=%s)", probe.get("desc", ""), len(expanded), idor_url)
+        expanded_idor_keys.add(key)
+        expanded = _idor_expand(idor_url, run_id, accessible_by, as_user=as_user)
+        log.info("  IDOR expand %s → %d probes (url=%s, as_user=%s)",
+                 probe.get("desc", ""), len(expanded), idor_url, as_user)
         all_probes.extend(expanded)
 
     all_probes = all_probes[:MAX_PROBES_PER_PAGE]
@@ -361,10 +387,13 @@ async def _scan_page(
         if run_id in _stop_requested:
             break
         try:
+            as_user_name = probe.get("as_user") or None
+            session = user_sessions.get(as_user_name) if as_user_name else None
             if probe.get("type") == "form":
-                result = await _run_form_probe(pw_page, probe, page_url)
+                result = await _run_form_probe(pw_page, probe, page_url,
+                                               session=session, browser=browser)
             else:
-                result = await _run_http_probe(hx, probe, page_url)
+                result = await _run_http_probe(hx, probe, page_url, session=session)
             if result:
                 results.append(result)
         except Exception as e:
@@ -649,6 +678,7 @@ async def _run_http_probe(
     hx: httpx.AsyncClient,
     probe: dict,
     page_url: str,
+    session: dict | None = None,
 ) -> Optional[dict]:
     method       = probe.get("method", "GET").upper()
     url          = probe.get("url") or page_url
@@ -656,27 +686,27 @@ async def _run_http_probe(
     body         = probe.get("body")
     extra_hdrs   = probe.get("headers") or {}
     desc         = probe.get("desc", url)
+    as_user      = probe.get("as_user") or None
 
-    try:
-        req = hx.build_request(
+    async def _execute(client: httpx.AsyncClient) -> dict:
+        req = client.build_request(
             method, url,
             params=params,
             content=body.encode() if isinstance(body, str) else body,
             headers=extra_hdrs,
         )
-        resp = await hx.send(req, follow_redirects=True)
+        resp = await client.send(req, follow_redirects=True)
         resp_body = resp.text[:1000]
 
-        # Build a readable request/response block for evidence.
         req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
-                                     if k.lower() not in ("cookie",))  # omit cookie value
+                                     if k.lower() not in ("cookie",))
         resp_headers_text = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+        user_note = f"Sent as user: {as_user}\n" if as_user else ""
         evidence = (
-            f"REQUEST:\n{method} {req.url} HTTP/1.1\n{req_headers_text}\n"
+            f"{user_note}REQUEST:\n{method} {req.url} HTTP/1.1\n{req_headers_text}\n"
             + (f"\n{body[:200]}" if body else "")
             + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{resp_body}"
         )
-
         return {
             "desc": desc,
             "url": str(resp.url),
@@ -685,26 +715,66 @@ async def _run_http_probe(
             "body": resp_body,
             "evidence": evidence,
             "screenshot_b64": None,
+            "as_user": as_user,
         }
+
+    try:
+        if session:
+            async with httpx.AsyncClient(
+                cookies=session["cookies"],
+                headers={"User-Agent": _UA, **session.get("extra_headers", {})},
+                timeout=REQUEST_TIMEOUT,
+                follow_redirects=True,
+                verify=False,
+            ) as session_hx:
+                return await _execute(session_hx)
+        else:
+            return await _execute(hx)
     except Exception as e:
         return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
-                "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None}
+                "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None, "as_user": as_user}
 
 
 # ── Playwright form probe execution ───────────────────────────────────────────
 
-async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]:
+async def _run_form_probe(
+    pw_page,
+    probe: dict,
+    page_url: str,
+    session: dict | None = None,
+    browser=None,
+) -> Optional[dict]:
     url      = probe.get("url") or page_url
     selector = probe.get("selector", "input")
     payload  = probe.get("payload", "")
     submit   = probe.get("submit_selector", "button[type=submit]")
     desc     = probe.get("desc", selector)
+    as_user  = probe.get("as_user") or None
+
+    # If a specific user session is requested and we have a browser, spin up a
+    # temporary context pre-loaded with that user's cookies.
+    target_page = pw_page
+    temp_ctx = None
+    if session and browser:
+        try:
+            temp_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+            cookie_list = [
+                {"name": k, "value": v, "url": url}
+                for k, v in session["cookies"].items()
+            ]
+            if cookie_list:
+                await temp_ctx.add_cookies(cookie_list)
+            target_page = await temp_ctx.new_page()
+        except Exception as e:
+            log.warning("Failed to create browser context for as_user=%s: %s", as_user, e)
+            temp_ctx = None
+            target_page = pw_page
 
     try:
-        await pw_page.goto(url, wait_until="domcontentloaded", timeout=15_000)
-        await pw_page.wait_for_selector(selector, state="visible", timeout=5_000)
+        await target_page.goto(url, wait_until="domcontentloaded", timeout=15_000)
+        await target_page.wait_for_selector(selector, state="visible", timeout=5_000)
 
-        field = pw_page.locator(selector).first
+        field = target_page.locator(selector).first
         await field.fill("")
         await field.type(payload, delay=20)
 
@@ -712,11 +782,11 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
         response_body = ""
         response_status: Optional[int] = None
         try:
-            async with pw_page.expect_response(
+            async with target_page.expect_response(
                 lambda r: r.url.startswith(url.split("?")[0]),
                 timeout=8_000,
             ) as resp_info:
-                sub_btn = pw_page.locator(submit).first
+                sub_btn = target_page.locator(submit).first
                 if await sub_btn.count() > 0:
                     await sub_btn.click()
                 else:
@@ -728,24 +798,23 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
             except Exception:
                 pass
         except Exception:
-            # If we can't intercept a response, capture the resulting page HTML.
             try:
-                await pw_page.wait_for_load_state("networkidle", timeout=6_000)
+                await target_page.wait_for_load_state("networkidle", timeout=6_000)
             except Exception:
                 pass
-            response_body = (await pw_page.content())[:500]
+            response_body = (await target_page.content())[:500]
 
-        # Always take a screenshot so findings can show visual proof.
         screenshot_b64: Optional[str] = None
         try:
-            raw_png = await pw_page.screenshot(full_page=False)
+            raw_png = await target_page.screenshot(full_page=False)
             import base64 as _b64
             screenshot_b64 = _b64.b64encode(raw_png).decode()
         except Exception:
             pass
 
+        user_note = f"Sent as user: {as_user}\n" if as_user else ""
         evidence = (
-            f"FORM PROBE:\nURL: {url}\nField selector: {selector}\n"
+            f"{user_note}FORM PROBE:\nURL: {url}\nField selector: {selector}\n"
             f"Payload: {payload}\n\n"
             f"RESPONSE STATUS: {response_status}\n\n"
             f"RESPONSE BODY (truncated):\n{response_body}"
@@ -760,10 +829,14 @@ async def _run_form_probe(pw_page, probe: dict, page_url: str) -> Optional[dict]
             "body": response_body,
             "evidence": evidence,
             "screenshot_b64": screenshot_b64,
+            "as_user": as_user,
         }
     except Exception as e:
         log.debug("Form probe error (%s): %s", desc, e)
         return None
+    finally:
+        if temp_ctx:
+            await temp_ctx.close()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -837,7 +910,12 @@ def _find_crawled_ids(
     return cross_user + same_user
 
 
-def _idor_expand(url: str, run_id: int, my_accessible_by: list[int]) -> list[dict]:
+def _idor_expand(
+    url: str,
+    run_id: int,
+    my_accessible_by: list[int],
+    as_user: str | None = None,
+) -> list[dict]:
     """Expand an IDOR marker into concrete HTTP probe dicts.
 
     For each numeric ID in the URL:
@@ -845,6 +923,9 @@ def _idor_expand(url: str, run_id: int, my_accessible_by: list[int]) -> list[dic
          These are the highest-confidence IDOR candidates.
       2. Fall back to a ±500 spread if no crawled IDs are available.
     Each candidate is tested both authenticated (IDOR) and unauthenticated (auth-bypass).
+
+    as_user: when set, expanded probes carry this username so the probe runner sends
+    them using that user's pre-authenticated session.
     """
     probes: list[dict] = []
     parsed = urlparse(url)
@@ -866,11 +947,14 @@ def _idor_expand(url: str, run_id: int, my_accessible_by: list[int]) -> list[dic
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {}, "body": None,
-                "desc": f"IDOR [{source}]: /{part}→/{cid}",
+                "as_user": as_user,
+                "desc": f"IDOR [{source}]: /{part}→/{cid}"
+                        + (f" (as {as_user})" if as_user else ""),
             })
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {"Cookie": "", "Authorization": ""}, "body": None,
+                "as_user": None,
                 "desc": f"IDOR+unauth [{source}]: /{part}→/{cid}",
             })
 
@@ -887,7 +971,9 @@ def _idor_expand(url: str, run_id: int, my_accessible_by: list[int]) -> list[dic
             probes.append({
                 "type": "http", "method": "GET", "url": test_url,
                 "params": {}, "headers": {}, "body": None,
-                "desc": f"IDOR [range]: ?{param}={vals[0]}→{cid}",
+                "as_user": as_user,
+                "desc": f"IDOR [range]: ?{param}={vals[0]}→{cid}"
+                        + (f" (as {as_user})" if as_user else ""),
             })
 
     return probes

@@ -33,10 +33,15 @@ const api = {
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
-  getFindings:      (id)          => req(`/api/test-runs/${id}/findings`),
-  deleteFinding:    (id,fid)      => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
-  scanPage:         (id,pgId)     => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
+  getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
+  deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
+  deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
+  validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
+  validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
+  getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
+  scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
+  clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
 };
 
 async function req(url, opts = {}) {
@@ -486,10 +491,14 @@ function TestRunDetail({ runId }) {
   const [activeTab, setActiveTab] = useState("sitemap");
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [crawlUsername, setCrawlUsername]   = useState(null);
+  // per-user crawl progress is read directly from run.per_user_progress (kept in sync
+  // by the periodic poll + SSE run_update events) — no separate state needed.
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
+  const [validateStatus, setValidateStatus] = useState(null);
+  const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
   const [expandedGroups, setExpandedGroups]   = useState(new Set());
@@ -535,14 +544,55 @@ function TestRunDetail({ runId }) {
           const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
           return { nodes: [...prev.nodes, node], links: newLinks };
         });
+        // page_added carries the final (post-redirect) URL and username.
+        // Patch it straight into run.per_user_progress so the render picks it up.
+        if (evt.username) {
+          setRun(prev => {
+            if (!prev) return prev;
+            const pup = { ...(prev.per_user_progress || {}) };
+            pup[evt.username] = {
+              pages_visited: (pup[evt.username]?.pages_visited ?? 0) + 1,
+              current_url: evt.node?.url ?? pup[evt.username]?.current_url ?? null,
+              done: pup[evt.username]?.done ?? false,
+            };
+            return { ...prev, per_user_progress: pup };
+          });
+        }
       } else if (evt.type === "crawl_phase") {
         setCrawlUsername(evt.username || null);
       } else if (evt.type === "node_accessible_by") {
-        // Re-fetch graph to get updated accessible_by (simple approach)
         api.getGraph(runId).then(setGraph).catch(()=>{});
       } else if (evt.type === "run_update") {
-        setRun(prev => prev ? { ...prev, ...evt } : prev);
+        setRun(prev => {
+          if (!prev) return prev;
+          const next = { ...prev, ...evt };
+          // Also patch per_user_progress for users visiting already-crawled pages
+          // (they emit run_update but not page_added).
+          if (evt.username && evt.current_url) {
+            const pup = { ...(next.per_user_progress || {}) };
+            pup[evt.username] = {
+              pages_visited: pup[evt.username]?.pages_visited ?? 0,
+              current_url: evt.current_url,
+              done: pup[evt.username]?.done ?? false,
+            };
+            next.per_user_progress = pup;
+          }
+          return next;
+        });
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
+      } else if (evt.type === "crawl_progress") {
+        if (evt.username) {
+          setRun(prev => {
+            if (!prev) return prev;
+            const pup = { ...(prev.per_user_progress || {}) };
+            pup[evt.username] = {
+              pages_visited: evt.pages_visited ?? pup[evt.username]?.pages_visited ?? 0,
+              current_url: evt.current_url ?? pup[evt.username]?.current_url ?? null,
+              done: evt.done ?? false,
+            };
+            return { ...prev, per_user_progress: pup };
+          });
+        }
       } else if (evt.type === "node_scan_status") {
         setGraph(prev => {
           if (!prev) return prev;
@@ -555,6 +605,14 @@ function TestRunDetail({ runId }) {
         });
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
+      } else if (evt.type === "finding_validation_update") {
+        setFindings(prev => prev.map(f =>
+          f.id === evt.finding_id
+            ? { ...f, validation_status: evt.validation_status, validation_note: evt.validation_note ?? f.validation_note }
+            : f
+        ));
+        // Refresh validation status summary when an individual finding resolves.
+        api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -583,11 +641,24 @@ function TestRunDetail({ runId }) {
     return () => clearInterval(iv);
   }, [runId, scanStatus?.status, activeTab]);
 
+  // Poll validation status while validating is running
+  useEffect(() => {
+    if (validateStatus?.status !== "running" && activeTab !== "findings") return;
+    const iv = setInterval(() => {
+      api.getValidateStatus(runId).then(vs => {
+        setValidateStatus(vs);
+        if (vs.status !== "running") setValidateBusy(false);
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [runId, validateStatus?.status, activeTab]);
+
   // Fetch findings when switching to findings tab
   useEffect(() => {
     if (activeTab !== "findings") return;
     api.getFindings(runId).then(setFindings).catch(()=>{});
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+    api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
@@ -835,6 +906,35 @@ function TestRunDetail({ runId }) {
     } catch(err) { setError(err.message); }
   };
 
+  const onDeleteFindingGroup = async (e, title) => {
+    e.stopPropagation();
+    if (!confirm(`Delete all instances of "${title}"?`)) return;
+    try {
+      await api.deleteFindingGroup(runId, title);
+      setFindings(prev => prev.filter(f => f.title !== title));
+      setExpandedGroups(prev => { const next = new Set(prev); next.delete(title); return next; });
+    } catch(err) { setError(err.message); }
+  };
+
+  const onValidateAll = async () => {
+    if (validateBusy) return;
+    setValidateBusy(true);
+    try {
+      const vs = await api.validateAllFindings(runId);
+      setValidateStatus(vs);
+    } catch(err) { setError(err.message); setValidateBusy(false); }
+  };
+
+  const onValidateFinding = async (e, findingId) => {
+    e.stopPropagation();
+    try {
+      const updated = await api.validateFinding(runId, findingId);
+      setFindings(prev => prev.map(f => f.id === findingId ? { ...f, ...updated } : f));
+      setValidateStatus(vs => vs ? { ...vs, status: "running" } : vs);
+      setValidateBusy(true);
+    } catch(err) { setError(err.message); }
+  };
+
   const onStopScan = async () => {
     try {
       const s = await api.stopScan(runId);
@@ -986,14 +1086,49 @@ function TestRunDetail({ runId }) {
               <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
                 title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}
           `}
-          ${crawlUsername&&html`<div className="run-stat"><span className="run-stat-lbl">Crawling as</span><span className="run-stat-val" style=${{fontSize:14}}>${crawlUsername}</span></div>`}
-          ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Current URL</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
+          ${(()=>{
+            const pup = run.per_user_progress || {};
+            const multiUser = run.credentials?.length > 1 && Object.keys(pup).length > 0;
+            if (multiUser) return null; // per-user section rendered below
+            return html`
+              ${crawlUsername&&html`<div className="run-stat"><span className="run-stat-lbl">Crawling as</span><span className="run-stat-val" style=${{fontSize:14}}>${crawlUsername}</span></div>`}
+              ${run.current_url&&html`<div className="run-stat run-stat-url"><span className="run-stat-lbl">Current URL</span><span className="mono run-stat-url-val">${truncUrl(run.current_url,50)}</span></div>`}
+            `;
+          })()}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
-        ${run.status==="running" && html`
-          <div className="crawl-progress-bar">
-            <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
-          </div>`}`}
+        ${(()=>{
+          const pup = run.per_user_progress || {};
+          const credList = run.credentials || [];
+          const multiUser = credList.length > 1 && Object.keys(pup).length > 0;
+          if (multiUser) {
+            return html`
+              <div className="crawl-user-progress">
+                ${credList.map((c, idx) => {
+                  const p = pup[c.username] || {};
+                  const color = USER_PALETTE[idx % USER_PALETTE.length];
+                  const pct = Math.min(100, ((p.pages_visited || 0) / run.max_pages) * 100);
+                  const isActive = run.status === "running" && !p.done;
+                  return html`
+                    <div key=${c.username} className="crawl-user-row">
+                      <span className=${"crawl-user-dot"+(isActive?" active":"")} style=${{background:color}}></span>
+                      <span className="crawl-user-name" title=${c.username}>${c.label||c.username}</span>
+                      <div className="crawl-user-bar">
+                        <div className="crawl-user-bar-fill" style=${{width:pct+"%",background:color}}></div>
+                      </div>
+                      <span className="crawl-user-pages">${p.pages_visited||0} pg</span>
+                      ${p.current_url
+                        ? html`<span className="crawl-user-url mono">${truncUrl(p.current_url, 42)}</span>`
+                        : html`<span className="crawl-user-url" style=${{color:"var(--muted)"}}>${p.done?"done":"waiting…"}</span>`}
+                    </div>`;
+                })}
+              </div>`;
+          }
+          return run.status==="running" ? html`
+            <div className="crawl-progress-bar">
+              <div className="crawl-progress-fill" style=${{width: Math.min(100, run.pages_discovered / run.max_pages * 100) + "%"}}></div>
+            </div>` : null;
+        })()}`}
 
       <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
@@ -1112,19 +1247,29 @@ function TestRunDetail({ runId }) {
 
       ${activeTab==="findings" && html`
         <div className="findings-panel">
-          ${scanStatus && html`
-            <div className="findings-status-bar">
+          <div className="findings-status-bar">
+            ${scanStatus && html`
               <span className=${"scan-status-badge scan-status-"+scanStatus.status}>
                 ${scanStatus.status==="running" ? "Scanning…" :
                   scanStatus.status==="complete" ? "Scan complete" :
                   scanStatus.status==="stopped"  ? "Scan stopped" :
                   scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
-              </span>
-              ${scanStatus.status==="running" && html`
-                <span className="subtle" style=${{fontSize:12}}>
-                  ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
-                </span>`}
-            </div>`}
+              </span>`}
+            ${scanStatus?.status==="running" && html`
+              <span className="subtle" style=${{fontSize:12}}>
+                ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
+              </span>`}
+            <div style=${{flex:1}}></div>
+            ${validateStatus?.status==="running"
+              ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives}/${validateStatus.total}</span>`
+              : validateStatus?.status==="complete"
+                ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.false_positives} false positive${validateStatus.false_positives!==1?"s":""}</span>`
+                : null}
+            ${findings.length>0 && html`
+              <button className="btn sm" style=${{marginLeft:8}}
+                disabled=${validateBusy||validateStatus?.status==="running"}
+                onClick=${onValidateAll}>✓ Validate Issues</button>`}
+          </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
                 ${scanStatus?.status==="running" ? "Scanning… findings will appear here." : "No findings yet. Start a scan from the Scan Status tab."}
@@ -1149,7 +1294,7 @@ function TestRunDetail({ runId }) {
                       <th style=${{width:52}}>OWASP</th>
                       <th>Title</th>
                       <th style=${{width:28}}>#</th>
-                      <th style=${{width:36}}></th>
+                      <th style=${{width:60}}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1163,25 +1308,43 @@ function TestRunDetail({ runId }) {
                           ${g.title}
                         </td>
                         <td><span className="finding-count-badge">${g.count}</span></td>
-                        <td></td>
+                        <td>
+                          <button className="btn ghost sm finding-del-btn" title="Delete group"
+                            onClick=${e=>onDeleteFindingGroup(e,g.title)}>🗑</button>
+                        </td>
                       </tr>
                       ${expandedGroups.has(g.title) && g.items.map(f => html`
                         <tr key=${f.id} className="finding-instance-row"
                           onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
-                          <td></td>
+                          <td>
+                            ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
+                            ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">false +</span>`}
+                            ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
+                          </td>
                           <td></td>
                           <td colSpan="2">
                             <span className="instance-chevron">${expandedFinding===f.id?"▾":"▸"}</span>
                             <span className="finding-affected-label" style=${{marginRight:6}}>Affected URL</span>
                             <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${f.affected_url||"—"}</span>
                           </td>
-                          <td><button className="btn ghost sm finding-del-btn" title="Delete"
-                            onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button></td>
+                          <td>
+                            <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
+                              ${(f.validation_status==="unvalidated"||f.validation_status==="false_positive") && html`
+                                <button className="btn ghost sm finding-del-btn" title="Validate"
+                                  onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
+                              <button className="btn ghost sm finding-del-btn" title="Delete"
+                                onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button>
+                            </div>
+                          </td>
                         </tr>
                         ${expandedFinding===f.id && html`
                           <tr key=${"ev-"+f.id} className="finding-evidence-row">
                             <td colSpan="5">
                               <div className="finding-description">${f.description}</div>
+                              ${f.validation_note && html`
+                                <div className=${"finding-validation-note val-note-"+f.validation_status}>
+                                  <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                                </div>`}
                               ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
                               ${f.screenshot_b64 && html`
                                 <div className="finding-screenshot-wrap">
@@ -1208,7 +1371,7 @@ function TestRunDetail({ runId }) {
               <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
               Auto-scroll
             </label>
-            <button className="btn ghost sm" onClick=${()=>{ setTraffic([]); lastTrafficIdRef.current=0; setSelectedTraffic(null); }}>Clear</button>
+            <button className="btn ghost sm" onClick=${async ()=>{ try { await api.clearTraffic(runId); } catch(_){} setTraffic([]); lastTrafficIdRef.current=0; setSelectedTraffic(null); }}>Clear</button>
           </div>
 
           <div className="traffic-table-wrap" ref=${trafficTableRef}>

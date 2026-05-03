@@ -1,13 +1,14 @@
-"""Scan API — start/stop/status/findings endpoints."""
+"""Scan API — start/stop/status/findings/validation endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import CrawledPage, ScanFinding, TestRun, TestRunStatus
-from aespa.schemas import ScanFindingOut, ScanStatusOut
+from aespa.schemas import ScanFindingOut, ScanStatusOut, ValidationStatusOut
 from aespa.services import scanner as scanner_svc
+from aespa.services import validator as validator_svc
 
 router = APIRouter(tags=["scan"])
 
@@ -77,6 +78,24 @@ def delete_finding(
     session.commit()
 
 
+@router.delete("/api/test-runs/{run_id}/findings", status_code=204)
+def delete_findings_group(
+    run_id: int,
+    title: str = Query(..., description="Delete all findings with this title"),
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all findings for this run that share the given title (a finding group)."""
+    _get_run_or_404(session, run_id)
+    findings = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.title == title)
+    ).all()
+    for f in findings:
+        session.delete(f)
+    session.commit()
+
+
 @router.get("/api/test-runs/{run_id}/findings", response_model=list[ScanFindingOut])
 def get_findings(
     run_id: int,
@@ -90,3 +109,53 @@ def get_findings(
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
     return [ScanFindingOut.model_validate(f) for f in findings]
+
+
+# ── Validation endpoints ──────────────────────────────────────────────────────
+
+@router.post("/api/test-runs/{run_id}/validate", response_model=ValidationStatusOut)
+async def start_validation(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ValidationStatusOut:
+    """Start background validation of all unvalidated findings for this run."""
+    _get_run_or_404(session, run_id)
+    if validator_svc.is_validating(run_id):
+        raise HTTPException(status_code=409, detail="Validation already running")
+    await validator_svc.start_validation(run_id)
+    return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
+@router.post(
+    "/api/test-runs/{run_id}/findings/{finding_id}/validate",
+    response_model=ScanFindingOut,
+)
+async def validate_single_finding(
+    run_id: int,
+    finding_id: int,
+    session: Session = Depends(get_session),
+) -> ScanFindingOut:
+    """Start background validation of a single finding. Returns immediately with status 'validating'."""
+    _get_run_or_404(session, run_id)
+    finding = session.get(ScanFinding, finding_id)
+    if finding is None or finding.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    if validator_svc.is_validating(run_id):
+        raise HTTPException(status_code=409, detail="Validation already running for this run")
+    # Mark as validating immediately so the UI updates before the task starts.
+    finding.validation_status = "validating"
+    finding.validation_note = None
+    session.add(finding)
+    session.commit()
+    session.refresh(finding)
+    await validator_svc.start_validation(run_id, finding_ids=[finding_id])
+    return ScanFindingOut.model_validate(finding)
+
+
+@router.get("/api/test-runs/{run_id}/validate/status", response_model=ValidationStatusOut)
+def get_validation_status(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ValidationStatusOut:
+    _get_run_or_404(session, run_id)
+    return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
