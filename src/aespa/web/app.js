@@ -1066,6 +1066,30 @@ function TestRunDetail({ runId }) {
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
         ${(()=>{
+          if (activeTab === "scan") {
+            if (!scanStatus || (scanStatus.status === "idle" && scanStatus.pages_done === 0)) return null;
+            const total   = scanStatus.total_pages || 0;
+            const done    = scanStatus.pages_done  || 0;
+            const scanPct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+            const currentPage = graph?.nodes.find(n => n.scan_status === "running");
+            return html`
+              <div className="scan-progress-strip">
+                <div className="scan-progress-bar">
+                  <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
+                </div>
+                <div className="scan-progress-strip-row">
+                  <span className="scan-progress-counts">${done} / ${total} pages scanned</span>
+                  ${scanStatus.findings_count > 0 && html`
+                    <span className="scan-progress-findings">
+                      ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
+                    </span>`}
+                  ${currentPage && html`
+                    <span className="scan-progress-url mono" title=${currentPage.url}>
+                      ${truncUrl(currentPage.url, 48)}
+                    </span>`}
+                </div>
+              </div>`;
+          }
           const credList = run.credentials || [];
           const multiUser = credList.length > 1;
           // Overall progress bar — pages_discovered is the true total across all users

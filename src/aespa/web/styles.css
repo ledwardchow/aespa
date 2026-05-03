@@ -848,6 +848,58 @@ legend {
   transition: width 1s ease;
 }
 
+/* ── Scan progress strip ────────────────────────────────────── */
+
+.scan-progress-strip {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  margin: 0 -28px;
+}
+
+.scan-progress-bar {
+  height: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.scan-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 1s ease;
+}
+
+.scan-progress-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 28px 9px;
+  font-size: 12px;
+}
+
+.scan-progress-counts {
+  font-weight: 600;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.scan-progress-findings {
+  color: var(--danger);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.scan-progress-url {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 @keyframes pulse-ring {
   0%   { transform: scale(1);   opacity: 0.85; }
   100% { transform: scale(2.8); opacity: 0;    }
