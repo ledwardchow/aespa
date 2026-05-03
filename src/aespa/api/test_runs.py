@@ -21,6 +21,7 @@ from aespa.schemas import (
     TestRunUpdate,
 )
 from aespa.services import crawler as crawler_svc
+from aespa.services import settings as settings_service
 from aespa.services.settings import get_llm_config
 
 router = APIRouter(tags=["test_runs"])
@@ -41,6 +42,7 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     creds = [CredentialSummary.model_validate(c) for c in (site.credentials if site else [])]
     s = TestRunSummary.model_validate(run)
     s.credentials = creds
+    s.scanner_policy = settings_service.get_run_scanner_policy(session, run).model_dump(mode="json")
     return s
 
 
@@ -73,12 +75,15 @@ def create_test_run(
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
     name = payload.name or _auto_name(session, site_id)
+    policy = settings_service.get_scanner_policy(session).model_copy(update={"scan_mode": payload.scan_mode})
     run = TestRun(
         site_id=site_id,
         name=name,
         use_screenshots=payload.use_screenshots,
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
+        scan_mode=policy.scan_mode,
+        scanner_policy_json=settings_service.scanner_policy_snapshot(policy),
     )
     session.add(run)
     session.commit()
