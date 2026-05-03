@@ -44,6 +44,7 @@ def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
+    _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")
@@ -53,6 +54,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "has_business_logic", "INTEGER")
     _ensure_column(engine, "scan_finding", "affected_url", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
+    _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
+    _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     # page_credential_view — created as a full table (not an ALTER)

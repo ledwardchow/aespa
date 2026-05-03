@@ -60,6 +60,17 @@ def _write(
 
 # ── Query ─────────────────────────────────────────────────────────────────────
 
+def clear_traffic(run_id: int) -> None:
+    from aespa.models import TrafficEntry
+    with Session(get_engine()) as s:
+        entries = s.exec(
+            select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        ).all()
+        for e in entries:
+            s.delete(e)
+        s.commit()
+
+
 def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
     from aespa.models import TrafficEntry
     with Session(get_engine()) as s:
