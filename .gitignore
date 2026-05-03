@@ -10,3 +10,4 @@ build/
 .ruff_cache/
 docs/.DS_Store
 docs/images/.DS_Store
+.DS_Store
