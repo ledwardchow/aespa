@@ -167,9 +167,12 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    # Clear stale per_user_progress synchronously so the response (and the
+    # first poll) never contains data from a previous crawl.
+    run.per_user_progress = None
+    session.add(run)
+    session.commit()
     await crawler_svc.start_crawl(run_id)
-    # Return immediately; the background task updates status in DB and the
-    # frontend poll will reflect it within a few seconds.
     return _run_summary(run, session)
 
 
@@ -199,6 +202,7 @@ async def restart_test_run(
     run.completed_at = None
     run.error_message = None
     run.current_url = None
+    run.per_user_progress = None
     session.add(run)
     session.commit()
     session.refresh(run)
