@@ -6,8 +6,9 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import CrawledPage, ScanFinding, TestRun, TestRunStatus
-from aespa.schemas import ScanFindingOut, ScanStatusOut, ValidationStatusOut
+from aespa.schemas import RunScannerPolicyOut, ScanFindingOut, ScannerPolicyIn, ScanStatusOut, ValidationStatusOut
 from aespa.services import scanner as scanner_svc
+from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
 
 router = APIRouter(tags=["scan"])
@@ -62,6 +63,28 @@ def stop_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatu
 def scan_status(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
     _get_run_or_404(session, run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
+
+
+@router.get("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
+def get_scan_policy(run_id: int, session: Session = Depends(get_session)) -> RunScannerPolicyOut:
+    run = _get_run_or_404(session, run_id)
+    return settings_service.get_run_scanner_policy(session, run)
+
+
+@router.patch("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
+def update_scan_policy(
+    run_id: int,
+    payload: ScannerPolicyIn,
+    session: Session = Depends(get_session),
+) -> RunScannerPolicyOut:
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Cannot edit scan policy while crawl is running")
+    if scanner_svc.is_running(run_id):
+        raise HTTPException(status_code=409, detail="Cannot edit scan policy while scan is running")
+    if validator_svc.is_validating(run_id):
+        raise HTTPException(status_code=409, detail="Cannot edit scan policy while validation is running")
+    return settings_service.update_run_scanner_policy(session, run, payload)
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
@@ -123,6 +146,17 @@ async def start_validation(
     if validator_svc.is_validating(run_id):
         raise HTTPException(status_code=409, detail="Validation already running")
     await validator_svc.start_validation(run_id)
+    return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
+@router.post("/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut)
+def stop_validation(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ValidationStatusOut:
+    """Stop background validation for this run."""
+    _get_run_or_404(session, run_id)
+    validator_svc.request_stop(run_id)
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
 
 

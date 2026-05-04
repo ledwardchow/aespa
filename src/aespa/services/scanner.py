@@ -26,7 +26,7 @@ from aespa.models import CrawledPage, ScanFinding, Site, TestRun, TestRunStatus
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config, get_run_scanner_policy
 
 log = logging.getLogger("aespa.scanner")
 
@@ -145,6 +145,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         llm_cfg = get_llm_config(s)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
+        scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -266,8 +267,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         async with httpx.AsyncClient(
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
-            timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
+            timeout=scanner_policy.request_timeout_s,
+            follow_redirects=scanner_policy.follow_redirects,
             verify=False,
             event_hooks=traffic_svc.make_httpx_hooks(run_id, username=creds[0].username if creds else None),
         ) as hx:
@@ -277,7 +278,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     log.info("Stop requested — aborting scan.")
                     break
                 await _scan_page(run_id, page_id, hx, pw_page, llm_cfg, base_url,
-                                 cred_sessions=cred_sessions, browser=browser)
+                                 cred_sessions=cred_sessions, browser=browser,
+                                 scanner_policy=scanner_policy)
 
     stopped = run_id in _stop_requested
     _mark_run(run_id, scan_status="stopped" if stopped else "complete")
@@ -296,6 +298,7 @@ async def _scan_page(
     base_url: str,
     cred_sessions: dict | None = None,
     browser=None,
+    scanner_policy=None,
 ) -> None:
     # Load page details.
     with Session(get_engine()) as s:
@@ -304,6 +307,7 @@ async def _scan_page(
             return
         page_url    = page.url
         page_title  = page.title or ""
+        page_text   = page.page_text or ""
         page_ctx    = page.llm_context or ""
         accessible_by: list[int] = json.loads(page.accessible_by or "[]")
         categories  = {
@@ -373,32 +377,40 @@ async def _scan_page(
                  probe.get("desc", ""), len(expanded), idor_url, as_user)
         all_probes.extend(expanded)
 
-    all_probes = all_probes[:MAX_PROBES_PER_PAGE]
+    max_probes = scanner_policy.max_probes_per_page if scanner_policy else MAX_PROBES_PER_PAGE
+    all_probes = all_probes[:max_probes]
     log.info("  %d total probes for %s", len(all_probes), page_url)
 
     # Phase 2: Execute probes.
     results: list[dict] = []
 
     # Always run passive checks regardless of LLM probes.
-    passive = await _passive_checks(hx, page_url, base_url)
+    passive = await _passive_checks(
+        hx, page_url, base_url,
+        timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+    )
     results.extend(passive)
 
     for probe in all_probes:
         if run_id in _stop_requested:
             break
         try:
+            if scanner_policy and scanner_policy.scan_mode == "passive":
+                log.info("  Probe rejected by policy: passive mode (%s)", probe.get("desc", "?"))
+                continue
             as_user_name = probe.get("as_user") or None
             session = user_sessions.get(as_user_name) if as_user_name else None
             if probe.get("type") == "form":
                 result = await _run_form_probe(pw_page, probe, page_url,
                                                session=session, browser=browser)
             else:
-                result = await _run_http_probe(hx, probe, page_url, session=session)
+                result = await _run_http_probe(hx, probe, page_url, session=session,
+                                               scanner_policy=scanner_policy)
             if result:
                 results.append(result)
         except Exception as e:
             log.debug("Probe error (%s): %s", probe.get("desc", "?"), e)
-        await asyncio.sleep(MIN_DELAY)
+        await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
 
     # Phase 3: LLM analyses results and produces findings.
     try:
@@ -416,6 +428,8 @@ async def _scan_page(
             result_by_url[r["url"]] = r
 
     probe_urls = list(result_by_url.keys())  # ordered list of actually-probed URLs
+
+    saved_finding_ids: list[int] = []
 
     # Persist findings and mark page complete.
     with Session(get_engine()) as s:
@@ -447,14 +461,30 @@ async def _scan_page(
                 affected_url=affected_url,
                 evidence=evidence[:4000],
                 screenshot_b64=screenshot,
+                validation_status="validating",
+                validation_note="Validation queued.",
                 created_at=_utcnow(),
             )
             s.add(finding)
+            s.flush()
+            if finding.id is not None:
+                saved_finding_ids.append(finding.id)
         pg = s.get(CrawledPage, page_id)
         if pg:
             pg.scan_status = "complete"
             s.add(pg)
         s.commit()
+
+    if saved_finding_ids:
+        from aespa.services import validator as validator_svc
+        for finding_id in saved_finding_ids:
+            await validator_svc.validate_finding_inline(
+                run_id,
+                finding_id,
+                llm_cfg=llm_cfg,
+                cred_sessions=cred_sessions or {},
+                scanner_policy=scanner_policy,
+            )
 
     events_svc.emit(run_id, {"type": "node_scan_status", "page_id": page_id, "scan_status": "complete"})
 
@@ -472,16 +502,35 @@ async def _scan_page(
             run_id=run_id,
             page_id=page_id,
             page_url=page_url,
+            page_title=page_title,
+            page_text=page_text,
             accessible_by=accessible_by,
             cred_sessions=cred_sessions,
+            timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+            follow_redirects=scanner_policy.follow_redirects if scanner_policy else True,
         )
         if bac_findings:
+            saved_bac_ids: list[int] = []
             with Session(get_engine()) as s:
                 for bf in bac_findings:
+                    bf.validation_status = "validating"
+                    bf.validation_note = "Validation queued."
                     s.add(bf)
+                    s.flush()
+                    if bf.id is not None:
+                        saved_bac_ids.append(bf.id)
                 s.commit()
             log.info("  BAC: %d finding(s) saved for %s", len(bac_findings), page_url)
             _emit_scan_update(run_id)
+            from aespa.services import validator as validator_svc
+            for finding_id in saved_bac_ids:
+                await validator_svc.validate_finding_inline(
+                    run_id,
+                    finding_id,
+                    llm_cfg=llm_cfg,
+                    cred_sessions=cred_sessions or {},
+                    scanner_policy=scanner_policy,
+                )
 
 
 # ── Broken Access Control checks ─────────────────────────────────────────────
@@ -495,13 +544,18 @@ async def _run_bac_checks(
     run_id: int,
     page_id: int,
     page_url: str,
+    page_title: str,
+    page_text: str,
     accessible_by: list[int],
     cred_sessions: dict[int, dict],
+    timeout: float = REQUEST_TIMEOUT,
+    follow_redirects: bool = True,
 ) -> list[ScanFinding]:
     """For each credential that was NOT able to access this page during the crawl,
     try a direct GET request with that credential's session cookies. A 200 response
-    whose body does not look like a login form indicates a Broken Access Control
-    vulnerability."""
+    whose body contains the original page's protected content indicates a Broken
+    Access Control vulnerability. A direct 200 alone is not enough: shared URLs
+    often render user-specific content for each user."""
     findings: list[ScanFinding] = []
 
     unauthorized = {
@@ -519,7 +573,7 @@ async def _run_bac_checks(
         try:
             async with httpx.AsyncClient(
                 cookies=cookies, headers=hdrs,
-                follow_redirects=True, verify=False, timeout=REQUEST_TIMEOUT,
+                follow_redirects=follow_redirects, verify=False, timeout=timeout,
             ) as client:
                 resp = await client.get(page_url)
 
@@ -535,8 +589,21 @@ async def _run_bac_checks(
                           page_url, username, login_hits)
                 continue
 
-            # Server returned 200 without a login form — likely real access.
-            log.info("  BAC: POSSIBLE — %s returned HTTP %s for unauthorized user '%s'",
+            body = resp.text[:BODY_READ_LIMIT]
+            content_type = resp.headers.get("content-type", "")
+            if _looks_like_spa_shell(body, content_type):
+                log.debug("  BAC: %s as '%s' → generic SPA shell, not protected content",
+                          page_url, username)
+                continue
+
+            if not _body_contains_original_page_evidence(body, page_title, page_text):
+                log.debug("  BAC: %s as '%s' → direct access returned different user-specific content",
+                          page_url, username)
+                continue
+
+            # Server returned original protected content to a user who did not
+            # reach it during crawl discovery.
+            log.info("  BAC: POSSIBLE — %s returned original content with HTTP %s for user '%s'",
                      page_url, resp.status_code, username)
 
             # Build evidence block.
@@ -564,12 +631,10 @@ async def _run_bac_checks(
                 title="Broken Access Control — Unauthorized Page Access",
                 description=(
                     f"User '{username}' received HTTP {resp.status_code} when directly "
-                    f"requesting a page that was inaccessible to them during the authenticated "
-                    f"crawl. The server did not return a login redirect or 403, suggesting "
-                    f"access control is enforced only client-side (e.g. hidden navigation) "
-                    f"rather than on the server.\n\n"
-                    f"For single-page applications, verify manually that the response body "
-                    f"contains real restricted content rather than just the SPA shell."
+                    f"requesting a page that was not discovered for them during the authenticated "
+                    f"crawl. The response included recognizable content from the originally "
+                    f"crawled page rather than a login page, denial, generic SPA shell, or "
+                    f"different user-specific page."
                 ),
                 affected_url=page_url,
                 evidence=evidence[:4000],
@@ -582,17 +647,62 @@ async def _run_bac_checks(
     return findings
 
 
+def _looks_like_spa_shell(body: str, content_type: str) -> bool:
+    if "html" not in content_type.lower() and not body.lstrip().lower().startswith("<!doctype html"):
+        return False
+    body_lower = body[:5000].lower()
+    shell_markers = sum(1 for marker in (
+        '<div id="root"', "<div id='root'", '<div id="app"', "<div id='app'",
+        "bundle.js", "main.js", "app.js", "vite", "webpack", "static/js",
+    ) if marker in body_lower)
+    text_only = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", body_lower)
+    words = re.findall(r"[a-z0-9]{3,}", text_only)
+    return shell_markers >= 1 and len(set(words)) < 80
+
+
+def _body_contains_original_page_evidence(body: str, page_title: str, page_text: str) -> bool:
+    body_lower = body.lower()
+    candidates = _protected_content_candidates(page_title, page_text)
+    return any(candidate.lower() in body_lower for candidate in candidates)
+
+
+def _protected_content_candidates(page_title: str, page_text: str) -> list[str]:
+    generic_words = {
+        "dashboard", "home", "profile", "settings", "account", "overview", "welcome",
+        "logout", "sign out", "navigation", "menu", "search", "submit", "cancel",
+    }
+    candidates: list[str] = []
+    for line in (page_text or "").splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if not 24 <= len(line) <= 220:
+            continue
+        lower = line.lower()
+        if lower in generic_words:
+            continue
+        if sum(1 for word in generic_words if word in lower) >= 4:
+            continue
+        candidates.append(line)
+        if len(candidates) >= 12:
+            break
+    if not candidates and page_title and len(page_title.strip()) >= 12:
+        title = page_title.strip()
+        if title.lower() not in generic_words:
+            candidates.append(title)
+    return candidates
+
+
 # ── Passive checks ────────────────────────────────────────────────────────────
 
 async def _passive_checks(
     hx: httpx.AsyncClient,
     url: str,
     base_url: str,
+    timeout: float = REQUEST_TIMEOUT,
 ) -> list[dict]:
     """Fire a single GET to the page and check response headers / cookies."""
     results = []
     try:
-        resp = await hx.get(url, timeout=REQUEST_TIMEOUT)
+        resp = await hx.get(url, timeout=timeout)
         headers = dict(resp.headers)
         body = resp.text[:500]
         status = resp.status_code
@@ -614,7 +724,7 @@ async def _passive_checks(
         # Auth bypass: same request without cookies.
         auth_bypass_status: Optional[int] = None
         try:
-            anon = await hx.get(url, timeout=REQUEST_TIMEOUT,
+            anon = await hx.get(url, timeout=timeout,
                                 headers={"Cookie": "", "Authorization": ""})
             auth_bypass_status = anon.status_code
         except Exception:
@@ -679,6 +789,7 @@ async def _run_http_probe(
     probe: dict,
     page_url: str,
     session: dict | None = None,
+    scanner_policy=None,
 ) -> Optional[dict]:
     method       = probe.get("method", "GET").upper()
     url          = probe.get("url") or page_url
@@ -687,6 +798,11 @@ async def _run_http_probe(
     extra_hdrs   = probe.get("headers") or {}
     desc         = probe.get("desc", url)
     as_user      = probe.get("as_user") or None
+
+    rejection = _probe_policy_rejection(probe, page_url, scanner_policy)
+    if rejection:
+        log.info("  Probe rejected by policy: %s (%s)", rejection, desc)
+        return None
 
     async def _execute(client: httpx.AsyncClient) -> dict:
         req = client.build_request(
@@ -723,8 +839,8 @@ async def _run_http_probe(
             async with httpx.AsyncClient(
                 cookies=session["cookies"],
                 headers={"User-Agent": _UA, **session.get("extra_headers", {})},
-                timeout=REQUEST_TIMEOUT,
-                follow_redirects=True,
+                timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+                follow_redirects=scanner_policy.follow_redirects if scanner_policy else True,
                 verify=False,
             ) as session_hx:
                 return await _execute(session_hx)
@@ -733,6 +849,52 @@ async def _run_http_probe(
     except Exception as e:
         return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
                 "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None, "as_user": as_user}
+
+
+def _probe_policy_rejection(probe: dict, page_url: str, scanner_policy) -> str | None:
+    if scanner_policy is None:
+        return None
+
+    method = str(probe.get("method", "GET")).upper()
+    allowed_methods = scanner_policy.methods_by_mode.get(scanner_policy.scan_mode, [])
+    if method not in allowed_methods:
+        return f"method {method} is not allowed in {scanner_policy.scan_mode} mode"
+
+    url = probe.get("url") or page_url
+    parsed = urlparse(str(url))
+    page = urlparse(page_url)
+    if parsed.scheme and parsed.scheme not in scanner_policy.allowed_schemes:
+        return f"scheme {parsed.scheme} is not allowed"
+    if parsed.netloc:
+        target_host = (parsed.hostname or "").lower()
+        page_host = (page.hostname or "").lower()
+        if target_host != page_host:
+            allowed_subdomain = (
+                scanner_policy.allow_subdomains
+                and page_host
+                and target_host.endswith("." + page_host)
+            )
+            if not allowed_subdomain:
+                return f"host {target_host or parsed.netloc} is outside the page scope"
+
+    headers = probe.get("headers") or {}
+    blocked = {h.lower() for h in scanner_policy.blocked_headers}
+    for header in headers:
+        if str(header).lower() in blocked:
+            return f"header {header} is blocked by policy"
+
+    body = probe.get("body")
+    if body is not None:
+        if isinstance(body, str):
+            body_size = len(body.encode())
+        elif isinstance(body, bytes):
+            body_size = len(body)
+        else:
+            body_size = len(json.dumps(body).encode())
+        if body_size > scanner_policy.max_request_body_bytes:
+            return f"request body is {body_size} bytes; limit is {scanner_policy.max_request_body_bytes}"
+
+    return None
 
 
 # ── Playwright form probe execution ───────────────────────────────────────────
