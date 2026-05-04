@@ -197,6 +197,10 @@ a:hover { color: var(--accent-hover); }
   display: flex;
   flex-direction: column;
 }
+.content.scroll-content {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 
 /* ── Buttons ────────────────────────────────────────────────── */
 
@@ -487,6 +491,61 @@ legend {
 .select option { background: #1d222d; }
 
 .model-select-group { display: flex; flex-direction: column; gap: 8px; }
+
+.settings-tab-bar { margin-bottom: 14px; }
+
+.policy-panel {
+  overflow: auto;
+  padding-bottom: 18px;
+}
+
+.policy-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scan-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-2);
+}
+.scan-mode-badge.mode-passive { color: var(--text-2); background: rgba(107,118,145,0.12); }
+.scan-mode-badge.mode-safe_active { color: var(--ok); background: var(--ok-bg); border-color: rgba(63,207,112,0.22); }
+.scan-mode-badge.mode-aggressive { color: var(--warn); background: rgba(245,166,35,0.12); border-color: rgba(245,166,35,0.25); }
+.scan-mode-badge.mode-destructive { color: var(--danger); background: var(--danger-bg); border-color: rgba(224,92,92,0.25); }
+
+.scan-mode-definitions {
+  display: grid;
+  gap: 8px;
+  margin-top: -2px;
+}
+
+.scan-mode-definition {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255,255,255,0.015);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.scan-mode-definition.selected {
+  border-color: var(--border-2);
+  background: var(--panel-2);
+}
 
 /* ── Settings: two-col row ──────────────────────────────────── */
 

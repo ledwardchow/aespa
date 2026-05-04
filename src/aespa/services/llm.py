@@ -86,9 +86,11 @@ Return ONLY valid JSON in this exact format (no markdown fences):
   }}
 }}
 
-For suggested_links: include up to 10 absolute URLs from this page (same domain) that reveal the most \
-important or interesting application functionality. Prefer links to forms, features, user actions, \
-admin areas, API endpoints, etc. over navigation links already visible on every page.
+For suggested_links: include up to 10 absolute URLs that appear as actual links on this page \
+(same domain) and reveal the most important or interesting application functionality. Do not \
+construct, guess, rewrite, or substitute URLs from IDs/account numbers visible in page text. \
+Prefer links to forms, features, user actions, admin areas, API endpoints, etc. over navigation \
+links already visible on every page.
 
 For categories — answer true/false to each:
 - req_auth: Does accessing or using this page require the user to be authenticated/logged in?
@@ -126,6 +128,64 @@ async def analyse_page(
     return _parse(raw, url)
 
 
+async def judge_page_access(
+    config: LLMConfig,
+    *,
+    url: str,
+    original_title: str,
+    original_text: str,
+    candidate_title: str,
+    candidate_text: str,
+    candidate_username: str,
+    screenshot_b64: Optional[str] = None,
+) -> dict:
+    """Return {"accessible": bool, "reasoning": str} for direct-access reconciliation."""
+    prompt = f"""\
+You are helping a penetration testing crawler decide whether a user truly has access to a page.
+
+The crawler already confirmed the candidate user is authenticated and the browser did not show a login form.
+Your job is to decide whether the candidate response is a successful, legitimate view of the same page/functionality,
+or merely an authenticated error/denial/loading state.
+
+Target URL: {url}
+Candidate user: {candidate_username}
+
+Original page title:
+{original_title or "(no title)"}
+
+Original page text excerpt:
+{(original_text or "")[:4000]}
+
+Candidate page title:
+{candidate_title or "(no title)"}
+
+Candidate page text excerpt:
+{(candidate_text or "")[:4000]}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "accessible": true,
+  "reasoning": "short explanation"
+}}
+
+Rules:
+- Return accessible=true if the candidate page shows the same kind of real page/functionality for that user,
+  even if account names, balances, IDs, or user-specific values differ.
+- Return accessible=false if the candidate page shows a toast/error/denial/loading failure such as
+  "could not load details", "not authorized", "access denied", "not found", blank content,
+  a generic app shell, or anything indicating the requested object did not load.
+- Do not require exact text equality. This is fuzzy semantic judgement about access to equivalent functionality.
+"""
+    raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+    data = _extract_json(raw, expect=dict)
+    if not isinstance(data, dict):
+        return {"accessible": False, "reasoning": "LLM did not return an object."}
+    return {
+        "accessible": bool(data.get("accessible")),
+        "reasoning": str(data.get("reasoning") or ""),
+    }
+
+
 def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCategories]:
     if not raw:
         return "", [], dict(_EMPTY_CATS)
@@ -154,6 +214,10 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _anthropic(config, prompt, screenshot_b64)
     if config.provider == "google":
         return await _google(config, prompt, screenshot_b64)
+    if config.provider == "azure_openai":
+        return await _azure_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry":
+        return await _azure_foundry(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
@@ -235,6 +299,71 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         messages=[{"role": "user", "content": msg_content}],
     )
     # Safely access choices — guard against None or empty list
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+    return getattr(message, "content", None) or ""
+
+
+async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    from openai import AsyncAzureOpenAI
+
+    client = AsyncAzureOpenAI(
+        api_key=config.api_key,
+        azure_endpoint=config.base_url,
+        api_version="2024-12-01-preview",
+    )
+
+    if screenshot_b64:
+        msg_content: object = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        msg_content = prompt
+
+    resp = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=min(config.max_tokens, 1024),
+        temperature=config.temperature,
+        messages=[{"role": "user", "content": msg_content}],
+    )
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+    return getattr(message, "content", None) or ""
+
+
+async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    """Azure AI Foundry serverless endpoints are OpenAI-compatible."""
+    from openai import AsyncOpenAI
+
+    base = (config.base_url or "").rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+
+    client = AsyncOpenAI(api_key=config.api_key, base_url=base)
+
+    if screenshot_b64:
+        msg_content: object = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        msg_content = prompt
+
+    resp = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=min(config.max_tokens, 1024),
+        temperature=config.temperature,
+        messages=[{"role": "user", "content": msg_content}],
+    )
     choices = getattr(resp, "choices", None) or []
     if not choices:
         return ""
@@ -595,7 +724,7 @@ async def validate_finding_result(
 ) -> dict:
     """Return {"verdict": "confirmed"|"false_positive", "reasoning": str}."""
     if not probe_results:
-        return {"verdict": "confirmed", "reasoning": "No validation probes were generated; treating original finding as confirmed."}
+        return {"verdict": "false_positive", "reasoning": "No validation probes reproduced the issue."}
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
         f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
