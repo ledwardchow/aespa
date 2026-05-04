@@ -347,13 +347,13 @@ async def _scan_page(
 
     # Inject hard-coded probe templates before the LLM probes so they always run.
     deterministic: list[dict] = []
-    if categories.get("has_object_ref"):
-        # Emit a single "idor" marker; it gets expanded below after deduplication.
-        deterministic.append({"type": "idor", "url": page_url, "desc": "IDOR (deterministic)"})
     if categories.get("takes_input"):
         iv = _input_validation_probes(page_url)
         log.info("  Input-validation probes: %d", len(iv))
         deterministic.extend(iv)
+    if categories.get("has_object_ref"):
+        # Emit a single "idor" marker; it gets expanded below after deduplication.
+        deterministic.append({"type": "idor", "url": page_url, "desc": "IDOR (deterministic)"})
 
     # Combine deterministic + LLM probes, then expand all "idor" markers.
     combined = deterministic + probes
@@ -378,7 +378,7 @@ async def _scan_page(
         all_probes.extend(expanded)
 
     max_probes = scanner_policy.max_probes_per_page if scanner_policy else MAX_PROBES_PER_PAGE
-    all_probes = all_probes[:max_probes]
+    all_probes = _prioritize_probes_for_cap(all_probes, max_probes, categories)
     log.info("  %d total probes for %s", len(all_probes), page_url)
 
     # Phase 2: Execute probes.
@@ -804,12 +804,14 @@ async def _run_http_probe(
         log.info("  Probe rejected by policy: %s (%s)", rejection, desc)
         return None
 
+    content, request_headers, body_preview = _prepare_probe_body(body, extra_hdrs)
+
     async def _execute(client: httpx.AsyncClient) -> dict:
         req = client.build_request(
             method, url,
             params=params,
-            content=body.encode() if isinstance(body, str) else body,
-            headers=extra_hdrs,
+            content=content,
+            headers=request_headers,
         )
         resp = await client.send(req, follow_redirects=True)
         resp_body = resp.text[:1000]
@@ -820,7 +822,7 @@ async def _run_http_probe(
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
         evidence = (
             f"{user_note}REQUEST:\n{method} {req.url} HTTP/1.1\n{req_headers_text}\n"
-            + (f"\n{body[:200]}" if body else "")
+            + (f"\n{body_preview[:200]}" if body_preview else "")
             + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{resp_body}"
         )
         return {
@@ -849,6 +851,78 @@ async def _run_http_probe(
     except Exception as e:
         return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
                 "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None, "as_user": as_user}
+
+
+def _prepare_probe_body(body, headers: dict | None) -> tuple[bytes | None, dict, str]:
+    request_headers = dict(headers or {})
+    if body is None:
+        return None, request_headers, ""
+
+    if isinstance(body, bytes):
+        return body, request_headers, body.decode("utf-8", errors="replace")
+
+    if isinstance(body, str):
+        return body.encode(), request_headers, body
+
+    body_text = json.dumps(body, separators=(",", ":"))
+    if not any(str(k).lower() == "content-type" for k in request_headers):
+        request_headers["Content-Type"] = "application/json"
+    return body_text.encode(), request_headers, body_text
+
+
+_INJECTION_HINTS = (
+    "sqli", "sql injection", "xss", "script", "onerror", "onload", "alert(1)",
+    "union select", "sleep(", "waitfor delay", "pg_sleep", "or 1=1", "or '1'='1",
+    "order by 999", "extractvalue", "autofocus", "javascript:alert",
+)
+
+
+def _prioritize_probes_for_cap(probes: list[dict], max_probes: int, categories: dict) -> list[dict]:
+    if max_probes <= 0:
+        return []
+    if len(probes) <= max_probes:
+        return probes
+
+    injection: list[dict] = []
+    idor: list[dict] = []
+    auth: list[dict] = []
+    other: list[dict] = []
+
+    for probe in probes:
+        desc = str(probe.get("desc") or "")
+        haystack = " ".join([
+            desc,
+            str(probe.get("url") or ""),
+            json.dumps(probe.get("params") or {}, default=str),
+            json.dumps(probe.get("body"), default=str),
+        ]).lower()
+        if any(hint in haystack for hint in _INJECTION_HINTS):
+            injection.append(probe)
+        elif "idor" in desc.lower():
+            idor.append(probe)
+        elif "auth" in desc.lower() or (probe.get("headers") or {}).get("Authorization") == "":
+            auth.append(probe)
+        else:
+            other.append(probe)
+
+    if categories.get("takes_input"):
+        injection_quota = max(1, min(len(injection), max_probes * 3 // 5))
+    else:
+        injection_quota = min(len(injection), max_probes)
+
+    selected: list[dict] = []
+    selected.extend(injection[:injection_quota])
+    remaining = max_probes - len(selected)
+    selected.extend(other[:remaining])
+    remaining = max_probes - len(selected)
+    selected.extend(auth[:remaining])
+    remaining = max_probes - len(selected)
+    selected.extend(idor[:remaining])
+    remaining = max_probes - len(selected)
+    if remaining > 0 and injection_quota < len(injection):
+        selected.extend(injection[injection_quota:injection_quota + remaining])
+
+    return selected[:max_probes]
 
 
 def _probe_policy_rejection(probe: dict, page_url: str, scanner_policy) -> str | None:
@@ -1145,17 +1219,30 @@ def _idor_expand(
 _SQLI_PAYLOADS = [
     "' OR '1'='1",
     "' OR '1'='1'--",
+    '" OR "1"="1"--',
+    "admin'--",
+    "1 OR 1=1--",
+    "0 OR 1=1",
+    "-1 OR 1=1",
     "1 AND SLEEP(0)--",
+    "1 AND SLEEP(1)--",
+    "'; WAITFOR DELAY '0:0:1'--",
+    "1); SELECT pg_sleep(1)--",
     "1; SELECT 1--",
     "' UNION SELECT NULL--",
     "1' ORDER BY 999--",
+    "' AND extractvalue(1,concat(0x7e,version()))--",
 ]
 _XSS_PAYLOADS = [
     "<script>alert(1)</script>",
+    '"><script>alert(1)</script>',
     '"><img src=x onerror=alert(1)>',
     "javascript:alert(1)",
     "'><svg onload=alert(1)>",
+    "<svg onload=alert(1)>",
     "<details open ontoggle=alert(1)>",
+    "' autofocus onfocus=alert(1) x='",
+    "%3Cscript%3Ealert(1)%3C/script%3E",
 ]
 _SSTI_PAYLOADS = ["{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}"]
 _PATH_TRAVERSAL_PAYLOADS = [
