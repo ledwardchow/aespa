@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -216,6 +217,40 @@ async def _crawl_as_credential(
         )
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
+        observed_api_calls: list[dict] = []
+        auth_check_snapshot: dict | None = None
+
+        async def _record_api_response(response) -> None:
+            try:
+                if not _same_domain(response.url, base_netloc):
+                    return
+                resource_type = response.request.resource_type
+                content_type = response.headers.get("content-type", "")
+                if not _is_api_response_candidate(response.url, resource_type, content_type):
+                    return
+                body = ""
+                if _response_body_is_text(content_type):
+                    try:
+                        body = (await response.text())[:10_000]
+                    except Exception:
+                        body = ""
+                try:
+                    request_headers = await response.request.all_headers()
+                except Exception:
+                    request_headers = dict(response.request.headers)
+                observed_api_calls.append({
+                    "url": response.url,
+                    "method": response.request.method,
+                    "request_headers": request_headers,
+                    "request_body": response.request.post_data,
+                    "status": response.status,
+                    "content_type": content_type,
+                    "body": body,
+                })
+            except Exception as exc:
+                log.debug("API response collection failed: %s", exc)
+
+        page.on("response", _record_api_response)
 
         try:
             await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -225,6 +260,9 @@ async def _crawl_as_credential(
         if requires_auth and cred:
             log.info("Authenticating as %s", cred.username)
             await _authenticate(page, login_url, cred)
+            auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+
+        observed_api_calls.clear()
 
         queued: set[str] = {_norm(base_url)}
         queue: deque[tuple[str, int, Optional[int]]] = deque([(base_url, 0, None)])
@@ -275,6 +313,7 @@ async def _crawl_as_credential(
                     credential=cred,
                     login_url=login_url,
                     username=username,
+                    auth_check_snapshot=auth_check_snapshot,
                 )
             except Exception as nav_err:
                 if is_first:
@@ -424,6 +463,19 @@ async def _crawl_as_credential(
             })
 
             # ── Enqueue links ─────────────────────────────────────────────────
+            await _promote_api_calls(
+                run_id=run_id,
+                calls=observed_api_calls,
+                source_page_id=page_id,
+                source_depth=depth,
+                shared=shared,
+                max_pages=max_pages,
+                credential_id=credential_id,
+                username=username,
+                llm_cfg=llm_cfg,
+            )
+            observed_api_calls.clear()
+
             if depth < max_depth:
                 filtered_suggested = _filter_suggested_links(suggested, same_domain_links, base_netloc)
                 if len(filtered_suggested) < len(suggested):
@@ -515,6 +567,240 @@ def _save_credential_view(
         s.commit()
 
 
+async def _promote_api_calls(
+    *,
+    run_id: int,
+    calls: list[dict],
+    source_page_id: int,
+    source_depth: int,
+    shared: _CrawlShared,
+    max_pages: int,
+    credential_id: Optional[int],
+    username: Optional[str],
+    llm_cfg,
+) -> None:
+    for call in _dedupe_api_calls(calls):
+        url = call.get("url") or ""
+        if not url:
+            continue
+        api_title, api_context, api_categories = await _analyse_api_call(llm_cfg, call, credential_id)
+        norm = _norm(url)
+        async with shared.lock:
+            if norm in shared.crawled_norms:
+                page_id = shared.crawled_norms[norm]
+                is_new = False
+            elif shared.pages_done >= max_pages:
+                continue
+            else:
+                page_id = _save_api_page(
+                    run_id, call, source_depth + 1, credential_id,
+                    title=api_title, context=api_context, categories=api_categories,
+                )
+                shared.crawled_norms[norm] = page_id
+                shared.pages_done += 1
+                is_new = True
+
+        _update_accessible_by(page_id, credential_id)
+        _save_credential_view(
+            page_id,
+            run_id,
+            credential_id,
+            username,
+            None,
+            api_context,
+            _api_page_text(call)[:10_000],
+            api_categories,
+        )
+        _save_link(run_id, source_page_id, page_id, url)
+
+        if is_new:
+            _update_run(run_id, pages_discovered=shared.pages_done)
+            events_svc.emit(run_id, {
+                "type": "page_added",
+                "username": username,
+                "node": {
+                    "id": page_id,
+                    "url": url,
+                    "title": api_title,
+                    "depth": source_depth + 1,
+                    "status": "crawled",
+                    "context": api_context,
+                    "in_scope": True,
+                    "scan_status": "pending",
+                    "accessible_by": [credential_id] if credential_id is not None else [],
+                },
+                "link": {"source": source_page_id, "target": page_id, "link_text": "API call"},
+            })
+        else:
+            events_svc.emit(run_id, {
+                "type": "node_accessible_by",
+                "page_id": page_id,
+                "username": username,
+            })
+
+
+def _dedupe_api_calls(calls: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for call in calls:
+        key = (str(call.get("method") or "GET").upper(), _norm(str(call.get("url") or "")))
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        result.append(call)
+    return result
+
+
+async def _analyse_api_call(llm_cfg, call: dict, credential_id: Optional[int]) -> tuple[str, str, dict]:
+    title = _api_title(call)
+    fallback_context = _api_context(call)
+    fallback_categories = _api_categories(call, credential_id)
+    try:
+        context, _suggested, cats = await llm_svc.analyse_page(
+            llm_cfg,
+            call.get("url") or "",
+            title,
+            _api_analysis_text(call),
+            None,
+        )
+        return title, _combine_api_context(fallback_context, context), _merge_api_categories(fallback_categories, cats)
+    except Exception as exc:
+        log.warning("  LLM API analysis failed for %s: %s", call.get("url"), exc)
+        return title, fallback_context, fallback_categories
+
+
+def _save_api_page(
+    run_id: int,
+    call: dict,
+    depth: int,
+    credential_id: Optional[int],
+    *,
+    title: str,
+    context: str,
+    categories: dict,
+) -> int:
+    with Session(get_engine()) as s:
+        cp = CrawledPage(
+            test_run_id=run_id,
+            url=call.get("url") or "",
+            title=title,
+            page_text=_api_page_text(call)[:10_000],
+            screenshot_b64=None,
+            llm_context=context,
+            depth=depth,
+            status="crawled",
+            req_auth=categories.get("req_auth"),
+            takes_input=categories.get("takes_input"),
+            has_object_ref=categories.get("has_object_ref"),
+            has_business_logic=categories.get("has_business_logic"),
+            accessible_by=json.dumps([credential_id] if credential_id is not None else []),
+        )
+        s.add(cp)
+        s.commit()
+        s.refresh(cp)
+        s.expunge(cp)
+        return cp.id
+
+
+def _api_title(call: dict) -> str:
+    parsed = urlparse(call.get("url") or "")
+    method = str(call.get("method") or "GET").upper()
+    status = call.get("status")
+    status_text = f" {status}" if status is not None else ""
+    return f"API {method}{status_text} {parsed.path or '/'}"
+
+
+def _api_context(call: dict) -> str:
+    method = str(call.get("method") or "GET").upper()
+    status = call.get("status")
+    content_type = call.get("content_type") or ""
+    request_body = (call.get("request_body") or "").strip()
+    context = (
+        f"[API endpoint] Observed {method} request during crawl. "
+        f"HTTP status: {status if status is not None else 'unknown'}. "
+        f"Content-Type: {content_type or 'unknown'}. Screenshot capture was skipped."
+    )
+    if request_body:
+        context += f"\nRequest body excerpt:\n{request_body[:4000]}"
+    return context
+
+
+def _api_analysis_text(call: dict) -> str:
+    return _api_page_text(call)
+
+
+def _api_page_text(call: dict) -> str:
+    method = str(call.get("method") or "GET").upper()
+    status = call.get("status")
+    content_type = call.get("content_type") or ""
+    request_headers = call.get("request_headers") or {}
+    request_content_type = _header_value(request_headers, "content-type") or "unknown"
+    request_body = (call.get("request_body") or "")[:8000]
+    body = (call.get("body") or "")[:8000]
+    return (
+        f"API endpoint observed during crawl.\n"
+        f"Method: {method}\n"
+        f"URL: {call.get('url') or ''}\n"
+        f"Request Content-Type: {request_content_type}\n"
+        f"HTTP status: {status if status is not None else 'unknown'}\n"
+        f"Response Content-Type: {content_type or 'unknown'}\n\n"
+        f"Request body excerpt:\n{request_body or '(none)'}\n\n"
+        f"Response body excerpt:\n{body}"
+    )
+
+
+def _header_value(headers: dict, name: str) -> str | None:
+    wanted = name.lower()
+    for key, value in (headers or {}).items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+def _combine_api_context(fallback_context: str, llm_context: str) -> str:
+    llm_context = (llm_context or "").strip()
+    if not llm_context:
+        return fallback_context
+    return f"{fallback_context}\n\n{llm_context}"
+
+
+def _api_categories(call: dict, credential_id: Optional[int]) -> dict:
+    method = str(call.get("method") or "GET").upper()
+    request_body = call.get("request_body") or ""
+    return {
+        "req_auth": credential_id is not None,
+        "takes_input": method not in ("GET", "HEAD", "OPTIONS") or bool(request_body),
+        "has_object_ref": _url_has_object_ref(call.get("url") or "") or _body_has_object_ref(request_body),
+        "has_business_logic": None,
+    }
+
+
+def _body_has_object_ref(body: str) -> bool:
+    text = (body or "")[:20_000]
+    if not text:
+        return False
+    lowered = text.lower()
+    if re.search(r'"(?:id|[a-z0-9_]*(?:id|account|user|customer|order)[a-z0-9_]*)"\s*:\s*"?\d+', lowered):
+        return True
+    if re.search(r'(?:^|[&?])(?:id|account|accountid|user|userid|customer|customerid|order|orderid)=\d+', lowered):
+        return True
+    return False
+
+
+def _merge_api_categories(fallback: dict, llm_categories: dict) -> dict:
+    merged = dict(fallback)
+    for key in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
+        if llm_categories.get(key) is not None:
+            merged[key] = llm_categories[key]
+    if fallback.get("takes_input"):
+        merged["takes_input"] = True
+    if fallback.get("has_object_ref"):
+        merged["has_object_ref"] = True
+    if fallback.get("req_auth"):
+        merged["req_auth"] = True
+    return merged
+
+
 async def _reconcile_direct_access(
     *,
     run_id: int,
@@ -565,6 +851,7 @@ async def _reconcile_direct_access(
                     except Exception:
                         pass
                     await _authenticate(page, login_url, cred)
+                    auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
 
                     for page_id, page_url, page_title, page_text, accessible_by in page_rows:
                         if run_id in _stop_requested:
@@ -580,6 +867,8 @@ async def _reconcile_direct_access(
                             credential=cred,
                             login_url=login_url,
                             username=cred.username,
+                            auth_check_snapshot=auth_check_snapshot,
+                            recover_api_auth=False,
                         )
                         if not accessible:
                             continue
@@ -628,6 +917,8 @@ async def _direct_load_accessible(
     credential=None,
     login_url: str = "",
     username: Optional[str] = None,
+    auth_check_snapshot: dict | None = None,
+    recover_api_auth: bool = True,
 ) -> tuple[bool, str, str, Optional[str]]:
     try:
         resp = await _goto_with_auth_recovery(
@@ -637,6 +928,8 @@ async def _direct_load_accessible(
             credential=credential,
             login_url=login_url,
             username=username,
+            auth_check_snapshot=auth_check_snapshot,
+            recover_api_auth=recover_api_auth,
         )
     except Exception:
         return False, "", "", None
@@ -791,6 +1084,15 @@ def _save_link(run_id: int, source_id: Optional[int], target_id: int, target_url
     if source_id is None:
         return
     with Session(get_engine()) as s:
+        existing = s.exec(
+            select(PageLink)
+            .where(PageLink.test_run_id == run_id)
+            .where(PageLink.source_page_id == source_id)
+            .where(PageLink.target_page_id == target_id)
+            .where(PageLink.target_url == target_url)
+        ).first()
+        if existing:
+            return
         pl = PageLink(
             test_run_id=run_id,
             source_page_id=source_id,
@@ -902,6 +1204,30 @@ def _is_api_page(url: str, text: str) -> bool:
     return len(stripped) > 2 and stripped[0] in ("{", "[")
 
 
+def _is_api_response_candidate(url: str, resource_type: str, content_type: str) -> bool:
+    path = urlparse(url).path.lower()
+    if any(pat in path for pat in ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql", "/swagger", "/openapi")):
+        return True
+    if resource_type in ("fetch", "xhr"):
+        return True
+    ctype = (content_type or "").lower()
+    return any(token in ctype for token in ("json", "xml", "graphql"))
+
+
+def _response_body_is_text(content_type: str) -> bool:
+    ctype = (content_type or "").lower()
+    return any(token in ctype for token in ("text", "json", "xml", "html", "javascript", "graphql"))
+
+
+def _url_has_object_ref(url: str) -> bool:
+    parsed = urlparse(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if any(part.isdigit() for part in path_parts):
+        return True
+    query = parsed.query.lower()
+    return any(marker in query for marker in ("id=", "account=", "user=", "customer=", "order="))
+
+
 def _is_session_ending_url(url: str, link_text: str | None = None) -> bool:
     try:
         parsed = urlparse(url)
@@ -958,6 +1284,8 @@ async def _goto_with_auth_recovery(
     credential,
     login_url: str,
     username: Optional[str],
+    auth_check_snapshot: dict | None = None,
+    recover_api_auth: bool = True,
 ):
     response = None
     for attempt in range(2):
@@ -972,12 +1300,129 @@ async def _goto_with_auth_recovery(
         if not session_dropped:
             return response
         if attempt == 0:
+            if not recover_api_auth and _api_response_should_not_reauth(url, response):
+                log.debug(
+                    "API response looked unauthenticated for user=%s at %s; treating as inaccessible response",
+                    username,
+                    url,
+                )
+                return response
+            if await _auth_check_still_authenticated(page, auth_check_snapshot, login_url, username):
+                log.info(
+                    "Session-drop signal was false for user=%s at %s; known-good page still loads",
+                    username,
+                    url,
+                )
+                return response
+            if _api_response_should_not_reauth(url, response):
+                log.info(
+                    "API response looked unauthenticated for user=%s at %s, but no browser-login proof; treating as inaccessible response",
+                    username,
+                    url,
+                )
+                return response
             log.info("Session appears to have dropped for user=%s at %s; re-authenticating and retrying", username, url)
             await _authenticate(page, login_url, credential)
             continue
         log.warning("Session still appears unauthenticated after retry for user=%s at %s", username, url)
         return response
     return response
+
+
+def _api_response_should_not_reauth(url: str, response) -> bool:
+    if not _is_api_page(url, ""):
+        return False
+    return response is None or response.status in (401, 403, 404, 419, 440)
+
+
+async def _capture_auth_check_snapshot(page, login_url: str) -> dict | None:
+    try:
+        if await _page_requires_login(page, login_url):
+            return None
+    except Exception:
+        return None
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        text = await page.evaluate("() => document.body.innerText")
+    except Exception:
+        text = ""
+    if not text.strip() or _looks_like_login_text(text):
+        return None
+    return {
+        "url": page.url,
+        "title": title or "",
+        "text": text[:5000],
+    }
+
+
+async def _auth_check_still_authenticated(
+    page,
+    snapshot: dict | None,
+    login_url: str,
+    username: Optional[str],
+) -> bool:
+    if not snapshot or not snapshot.get("url"):
+        return False
+    check_page = None
+    try:
+        check_page = await page.context.new_page()
+        response = await check_page.goto(snapshot["url"], wait_until="domcontentloaded", timeout=15_000)
+        try:
+            await check_page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
+        if _response_suggests_session_dropped(response) or await _page_requires_login(check_page, login_url):
+            return False
+        try:
+            title = await check_page.title()
+        except Exception:
+            title = ""
+        try:
+            text = await check_page.evaluate("() => document.body.innerText")
+        except Exception:
+            text = ""
+        if not text.strip() or _looks_like_login_text(text):
+            return False
+        return _auth_check_matches_snapshot(snapshot, title, text)
+    except Exception as exc:
+        log.debug("Auth sanity check failed for user=%s: %s", username, exc)
+        return False
+    finally:
+        if check_page is not None:
+            try:
+                await check_page.close()
+            except Exception:
+                pass
+
+
+def _auth_check_matches_snapshot(snapshot: dict, title: str, text: str) -> bool:
+    original_title = (snapshot.get("title") or "").strip().lower()
+    candidate_title = (title or "").strip().lower()
+    if original_title and candidate_title and original_title != candidate_title:
+        return False
+
+    original_tokens = _meaningful_text_tokens(snapshot.get("text") or "")
+    candidate_tokens = _meaningful_text_tokens(text or "")
+    if not original_tokens or not candidate_tokens:
+        return False
+    overlap = len(original_tokens & candidate_tokens)
+    threshold = min(8, max(3, len(original_tokens) // 4))
+    return overlap >= threshold
+
+
+def _meaningful_text_tokens(text: str) -> set[str]:
+    stop = {
+        "the", "and", "for", "you", "your", "are", "this", "that", "with", "from",
+        "login", "logout", "sign", "menu", "home", "page", "click", "submit", "cancel",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{3,}", (text or "").lower()[:5000])
+        if token not in stop
+    }
 
 
 # ── Authentication ────────────────────────────────────────────────────────────

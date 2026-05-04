@@ -424,19 +424,35 @@ Return ONLY valid JSON — an array of probe objects (no markdown fences):
 ]
 
 General rules:
-- Maximum 30 probes total.
-- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL param injection, SSRF).
+- Maximum 60 probes total. Prefer more targeted input-validation probes over repeating the same
+    authorization/IDOR pattern. If you cannot include everything, preserve coverage in this order:
+    SQL injection, XSS, object-reference tampering, authentication/authorization bypass, then other checks.
+- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL/query param injection, JSON/form body tampering, SSRF).
 - "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
 - "idor" probes: mark a URL that contains an object ID for IDOR testing. Use ONE per URL — the \
 scanner automatically finds peer IDs from the crawl and tests a ±500 range. \
 Do NOT generate individual http probes for each sequential ID.
+- Object references are not limited to REST-style path IDs. When testing authorization or IDOR, inspect and mutate IDs in:
+    - path segments such as /accounts/42 or /api/users/7;
+    - GET query parameters such as ?id=42, ?accountId=42, ?user_id=7;
+    - request bodies for POST/PUT/PATCH/DELETE, including JSON objects, nested JSON objects/arrays, and form-like fields.
+- For query-string IDs, put mutated values in the "params" object or in the URL query string.
+- For JSON body IDs, put a JSON object/array in "body" and include "Content-Type": "application/json" in "headers" when appropriate.
 - "as_user": set to a username from the available test users list to send the probe authenticated \
 as that specific user. Set to null to use the primary session. Use this for authorization bypass \
 testing — e.g. send a request as a low-privilege user to an endpoint that should be admin-only.
 - For auth bypass probes: include a version with empty Cookie and Authorization headers.
-- For injection payloads use safe, non-destructive test strings:
-  - SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1; SELECT 1--
-  - XSS: <script>alert(1)</script>  /  "><img src=x onerror=alert(1)>
+- For injection probes, generate multiple payload variants per discovered input. Do not stop after one
+    generic payload. Cover reflected, stored-like, encoded, quote-breaking, numeric, boolean, and timing cases
+    where relevant. Keep payloads safe and non-destructive.
+    - SQLi boolean/string: ' OR '1'='1'--  /  " OR "1"="1"--  /  admin'--
+    - SQLi numeric: 1 OR 1=1--  /  0 OR 1=1  /  -1 OR 1=1
+    - SQLi error/union/order: ' UNION SELECT NULL--  /  1' ORDER BY 999--  /  ' AND extractvalue(1,concat(0x7e,version()))--
+    - SQLi timing: 1 AND SLEEP(1)--  /  '; WAITFOR DELAY '0:0:1'--  /  1); SELECT pg_sleep(1)--
+    - XSS HTML/script: <script>alert(1)</script>  /  "><script>alert(1)</script>
+    - XSS attribute breakouts: "><img src=x onerror=alert(1)>  /  ' autofocus onfocus=alert(1) x='
+    - XSS SVG/event: <svg onload=alert(1)>  /  <details open ontoggle=alert(1)>
+    - XSS encoded/url contexts: javascript:alert(1)  /  %3Cscript%3Ealert(1)%3C/script%3E
   - SSTI: {{7*7}}  /  ${{7*7}}
   - Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd
   - SSRF: http://169.254.169.254/latest/meta-data/
@@ -473,30 +489,48 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
             )
         sections.append(
             "OBJECT REFERENCE — HIGH PRIORITY (A01):\n"
-            "This page contains numeric object IDs in the URL. Emit ONE 'idor' type probe per "
-            "URL that contains an ID. The scanner will look up peer IDs from other crawled users "
-            "and test a ±500 range automatically — do NOT generate individual http probes for "
-            "each sequential ID.\n"
-            "Additionally, generate 'http' probes for:\n"
-            "  • String IDs where numeric is expected ('admin', 'null', '../../etc/passwd').\n"
-            "  • POST/PUT replay with a different user's ID substituted in the request body."
+            "This page contains or may use object IDs. Examine every object reference location, "
+            "not only REST-style path segments:\n"
+            "  • Path IDs: /accounts/42, /api/users/7, /orders/123.\n"
+            "  • GET/query IDs: ?id=42, ?accountId=42, ?user_id=7, ?order=123.\n"
+            "  • POST/PUT/PATCH/DELETE body IDs: JSON fields, nested JSON objects/arrays, and form-like body fields.\n"
+            "Emit ONE 'idor' type probe per URL that contains a path object ID. The scanner will "
+            "look up peer IDs from other crawled users and test a ±500 range automatically — do "
+            "NOT generate individual http probes for each sequential path ID.\n"
+            "Additionally, generate targeted 'http' probes for query and body object references:\n"
+            "  • Substitute another user's known/likely ID into query parameters using the 'params' object.\n"
+            "  • Replay POST/PUT/PATCH requests with a different user's ID substituted in JSON/body fields.\n"
+            "  • Include nested JSON cases such as {'account': {'id': '...'}} or arrays where the context suggests them.\n"
+            "  • Try string IDs where numeric is expected ('admin', 'null', '../../etc/passwd')."
             + user_note
         )
 
     if categories.get("takes_input"):
         sections.append(
-            "TAKES INPUT — HIGH PRIORITY (A03, A10):\n"
+            "TAKES INPUT — HIGHEST PRIORITY FOR THIS PAGE (A03, A10):\n"
             "This page accepts user input. Identify every query parameter, form field, and "
-            "JSON body field from the URL and context.\n"
-            "For each parameter test ALL of the following:\n"
-            "  • SQLi: ' OR '1'='1  /  1' AND SLEEP(0)--  /  1 UNION SELECT NULL--\n"
-            "  • XSS: <script>alert(1)</script>  /  \"><img src=x onerror=alert(1)>\n"
+            "JSON body field from the URL and context, including request body excerpts captured during crawling.\n"
+            "Prioritize SQL injection and XSS before lower-value auth/header probes. For each discovered "
+            "input, generate several focused SQLi and XSS probes, not just one payload.\n"
+            "SQLi coverage to include when applicable:\n"
+            "  • Boolean/string auth-bypass style: ' OR '1'='1'--, \" OR \"1\"=\"1\"--, admin'--\n"
+            "  • Numeric fields: 1 OR 1=1--, 0 OR 1=1, -1 OR 1=1\n"
+            "  • Error/union/order probes: ' UNION SELECT NULL--, 1' ORDER BY 999--\n"
+            "  • Low-impact timing probes: 1 AND SLEEP(1)--, '; WAITFOR DELAY '0:0:1'--, 1); SELECT pg_sleep(1)--\n"
+            "XSS coverage to include when applicable:\n"
+            "  • HTML/script contexts: <script>alert(1)</script>, \"><script>alert(1)</script>\n"
+            "  • Attribute breakouts: \"><img src=x onerror=alert(1)>, ' autofocus onfocus=alert(1) x='\n"
+            "  • SVG/event handlers: <svg onload=alert(1)>, <details open ontoggle=alert(1)>\n"
+            "  • Encoded/url contexts: javascript:alert(1), %3Cscript%3Ealert(1)%3C/script%3E\n"
+            "Also include, after SQLi/XSS coverage:\n"
             "  • SSTI: {{7*7}}  /  ${{7*7}}  /  <%= 7*7 %>\n"
             "  • Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd\n"
             "  • SSRF: http://169.254.169.254/latest/meta-data/\n"
             "  • CMDi: ; echo aespa_probe  /  $(echo aespa_probe)\n"
-            "Use 'form' type probes for fields inside HTML forms; 'http' type for URL params.\n"
-            "Generate at least one probe per payload category per input field."
+            "Use 'form' type probes for fields inside HTML forms; 'http' type for URL params and API bodies. "
+            "For JSON APIs, replay the observed body shape and replace one field at a time with SQLi/XSS payloads. "
+            "If there are many fields, test up to the five most security-relevant fields first: id/account/user/order, "
+            "search/query/filter/sort, name/title/description/comment/message, email/username, amount/quantity."
         )
 
     if categories.get("req_auth"):
