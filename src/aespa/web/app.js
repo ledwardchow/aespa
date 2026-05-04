@@ -275,7 +275,7 @@ function SitesList() {
         <button className="btn" onClick=${()=>nav("#/sites/new")}><${IconPlus}/> New site</button>
       </div>
     </div>
-    <div className="content">
+    <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
       ${sites&&sites.length>0 && html`
         <div className="stat-strip">
@@ -356,7 +356,7 @@ function SiteDetail({ siteId }) {
         <button className="btn" onClick=${()=>nav(`#/sites/${siteId}/runs/new`)}><${IconPlus}/> New run</button>
       </div>
     </div>
-    <div className="content stack">
+    <div className="content scroll-content stack">
       ${error && html`<div className="alert error">${error}</div>`}
 
       ${site && html`
@@ -533,7 +533,7 @@ function TestRunForm({ siteId }) {
         <span className="breadcrumb-sep"> / </span>New test run
       </div>
     </div>
-    <div className="content">
+    <div className="content scroll-content">
       <form className="card" onSubmit=${onSubmit}>
         ${error && html`<div className="alert error">${error}</div>`}
         <div className="form-section-title">Run Configuration</div>
@@ -807,7 +807,7 @@ function TestRunDetail({ runId }) {
         const sn = simNodes.find(n => n.id === updated.id);
         if (sn) Object.assign(sn, updated);
       });
-      d3.select(svgRef.current).selectAll("circle")
+      d3.select(svgRef.current).selectAll("circle.node-dot")
         .filter(d => d && d.id != null)
         .attr("fill", nodeColorFn);
       return;
@@ -861,6 +861,7 @@ function TestRunDetail({ runId }) {
       .on("click", (e, d) => { e.stopPropagation(); setSelNode(d); });
 
     node.append("circle")
+      .attr("class", "node-dot")
       .attr("r", 10)
       .attr("fill", nodeColorFn)
       .attr("stroke", d => d.status === "failed" ? "#fbbf24" : "var(--bg)")
@@ -920,6 +921,20 @@ function TestRunDetail({ runId }) {
         .attr("class", "node-crawl-pulse")
         .attr("r", 10);
   }, [run?.current_url, graph]);
+
+  // Pulse graph nodes that are actively being scanned.
+  useEffect(() => {
+    if (!svgRef.current || !graph) return;
+    const svg = d3.select(svgRef.current);
+    svg.selectAll(".node-scan-pulse").remove();
+    const runningIds = new Set(graph.nodes.filter(n => n.scan_status === "running").map(n => n.id));
+    if (runningIds.size === 0) return;
+    svg.select("g").selectAll("g")
+      .filter(d => d && runningIds.has(d.id))
+      .insert("circle", ":first-child")
+        .attr("class", "node-scan-pulse")
+        .attr("r", 11);
+  }, [graph, activeTab, graphView]);
 
   // Compute the fill colour for a graph node based on current view mode.
   const nodeColorFn = (d) => {
@@ -1441,15 +1456,89 @@ function TestRunDetail({ runId }) {
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-                const map = {};
+                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, false_positive:3};
+                const FP_GROUP_KEY = "__false_positives__";
+                const activeMap = {};
+                const fpMap = {};
                 for (const f of findings) {
-                  (map[f.title] = map[f.title]||[]).push(f);
+                  const target = f.validation_status === "false_positive" ? fpMap : activeMap;
+                  (target[f.title] = target[f.title]||[]).push(f);
                 }
-                const groups = Object.entries(map).map(([title, items]) => {
+                const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
+                  const sortedItems = [...items].sort((a,b)=>{
+                    const va = VAL_ORDER[a.validation_status] ?? 2;
+                    const vb = VAL_ORDER[b.validation_status] ?? 2;
+                    if (va !== vb) return va - vb;
+                    return (SEV_ORDER[a.severity]??99)-(SEV_ORDER[b.severity]??99);
+                  });
                   const topSev = items.reduce((b,f)=>
                     (SEV_ORDER[f.severity]??99)<(SEV_ORDER[b]??99)?f.severity:b, items[0].severity);
-                  return { title, items, topSev, count:items.length, owasp:items[0].owasp_category };
-                }).sort((a,b)=>(SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99));
+                  return { title, items:sortedItems, topSev, count:items.length, owasp:items[0].owasp_category };
+                }).sort((a,b)=>{
+                  return (SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99);
+                });
+                const groups = makeGroups(activeMap);
+                const fpGroups = makeGroups(fpMap);
+                const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const renderFinding = (f, keyPrefix="") => html`
+                  <tr key=${keyPrefix+f.id} className="finding-instance-row"
+                    onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
+                    <td>
+                      ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
+                      ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">false +</span>`}
+                      ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
+                    </td>
+                    <td></td>
+                    <td colSpan="2">
+                      <span className="instance-chevron">${expandedFinding===f.id?"▾":"▸"}</span>
+                      <span className="finding-affected-label" style=${{marginRight:6}}>Affected URL</span>
+                      <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${f.affected_url||"—"}</span>
+                    </td>
+                    <td>
+                      <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
+                        ${(f.validation_status==="unvalidated"||f.validation_status==="false_positive") && html`
+                          <button className="btn ghost sm finding-del-btn" title="Validate"
+                            onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
+                        <button className="btn ghost sm finding-del-btn" title="Delete"
+                          onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button>
+                      </div>
+                    </td>
+                  </tr>
+                  ${expandedFinding===f.id && html`
+                    <tr key=${"ev-"+keyPrefix+f.id} className="finding-evidence-row">
+                      <td colSpan="5">
+                        <div className="finding-description">${f.description}</div>
+                        ${f.validation_note && html`
+                          <div className=${"finding-validation-note val-note-"+f.validation_status}>
+                            <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                        ${f.screenshot_b64 && html`
+                          <div className="finding-screenshot-wrap">
+                            <div className="finding-affected-label">Screenshot</div>
+                            <img src=${"data:image/png;base64,"+f.screenshot_b64}
+                              className="finding-screenshot" alt="proof screenshot"/>
+                          </div>`}
+                      </td>
+                    </tr>`}
+                `;
+                const fpRows = fpGroups.map(g => {
+                  const fpKey = "fp:" + g.title;
+                  return html`
+                    <tr key=${fpKey} className="finding-group-row"
+                      onClick=${()=>toggleGroup(fpKey)}>
+                      <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
+                      <td><span className="owasp-badge">${g.owasp}</span></td>
+                      <td className="finding-title">
+                        <span className="group-chevron">${expandedGroups.has(fpKey)?"▾":"▸"}</span>
+                        ${g.title}
+                      </td>
+                      <td><span className="finding-count-badge">${g.count}</span></td>
+                      <td></td>
+                    </tr>
+                    ${expandedGroups.has(fpKey) && g.items.map(f => renderFinding(f,"fp-"))}
+                  `;
+                });
                 return html`
                 <table className="findings-table">
                   <thead>
@@ -1477,49 +1566,22 @@ function TestRunDetail({ runId }) {
                             onClick=${e=>onDeleteFindingGroup(e,g.title)}>🗑</button>
                         </td>
                       </tr>
-                      ${expandedGroups.has(g.title) && g.items.map(f => html`
-                        <tr key=${f.id} className="finding-instance-row"
-                          onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
-                          <td>
-                            ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
-                            ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">false +</span>`}
-                            ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
-                          </td>
-                          <td></td>
-                          <td colSpan="2">
-                            <span className="instance-chevron">${expandedFinding===f.id?"▾":"▸"}</span>
-                            <span className="finding-affected-label" style=${{marginRight:6}}>Affected URL</span>
-                            <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${f.affected_url||"—"}</span>
-                          </td>
-                          <td>
-                            <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
-                              ${(f.validation_status==="unvalidated"||f.validation_status==="false_positive") && html`
-                                <button className="btn ghost sm finding-del-btn" title="Validate"
-                                  onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
-                              <button className="btn ghost sm finding-del-btn" title="Delete"
-                                onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button>
-                            </div>
-                          </td>
-                        </tr>
-                        ${expandedFinding===f.id && html`
-                          <tr key=${"ev-"+f.id} className="finding-evidence-row">
-                            <td colSpan="5">
-                              <div className="finding-description">${f.description}</div>
-                              ${f.validation_note && html`
-                                <div className=${"finding-validation-note val-note-"+f.validation_status}>
-                                  <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
-                                </div>`}
-                              ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
-                              ${f.screenshot_b64 && html`
-                                <div className="finding-screenshot-wrap">
-                                  <div className="finding-affected-label">Screenshot</div>
-                                  <img src=${"data:image/png;base64,"+f.screenshot_b64}
-                                    className="finding-screenshot" alt="proof screenshot"/>
-                                </div>`}
-                            </td>
-                          </tr>`}
-                      `)}
+                      ${expandedGroups.has(g.title) && g.items.map(f => renderFinding(f))}
                     `)}
+                    ${fpCount > 0 && html`
+                      <tr key=${FP_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(FP_GROUP_KEY)}>
+                        <td><span className="val-badge val-fp">false +</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(FP_GROUP_KEY)?"▾":"▸"}</span>
+                          False Positives
+                        </td>
+                        <td><span className="finding-count-badge">${fpCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(FP_GROUP_KEY) && fpRows}
+                    `}
                   </tbody>
                 </table>`;
               })()}

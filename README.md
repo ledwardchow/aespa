@@ -73,8 +73,9 @@ Scan in progress:
 Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
 
-Findings:
-![Screenshot](docs/images/finding.png)
+Findings (run against OWASP Juice Shop)
+![Screenshot](docs/images/juiceshop.png)
+
 
 ## Dev comments:
 
