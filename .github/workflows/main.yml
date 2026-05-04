@@ -3,8 +3,7 @@ name: Deploy to SSH Server
 on:
   push:
     branches:
-      - main
-      - develop
+      - deployed-to-staging
   workflow_dispatch:
     inputs:
       branch:
@@ -40,9 +39,8 @@ jobs:
           # Deploy via SSH
           ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
           cd "${{ env.DEPLOY_PATH }}" && \
-          git fetch origin && \
-          git checkout ${{ github.ref_name }} && \
-          git pull origin ${{ github.ref_name }}
+          git pull
+          sudo systemctl restart aespa.service
           EOF
           
           # Clean up
