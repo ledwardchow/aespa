@@ -153,6 +153,30 @@ def test_stop_pending_run_rejected(client: TestClient):
     assert r.status_code == 409
 
 
+def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    stopped_runs = []
+
+    monkeypatch.setattr(scan_api.validator_svc, "request_stop", lambda run_id: stopped_runs.append(run_id) or True)
+    monkeypatch.setattr(scan_api.validator_svc, "get_validation_status", lambda run_id: {
+        "total": 0,
+        "confirmed": 0,
+        "false_positives": 0,
+        "validating": 0,
+        "unvalidated": 0,
+        "status": "stopped",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/validate/stop")
+
+    assert r.status_code == 200
+    assert stopped_runs == [run["id"]]
+    assert r.json()["status"] == "stopped"
+
+
 # ── Graph / pages on empty run ────────────────────────────────────────────────
 
 def test_get_graph_empty(client: TestClient):
