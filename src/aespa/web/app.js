@@ -355,14 +355,6 @@ function SiteDetail({ siteId }) {
     catch(e) { setError(e.message); }
   };
 
-  const STATUS_BADGE = {
-    pending:  html`<span className="badge">pending</span>`,
-    running:  html`<span className="badge running">running</span>`,
-    complete: html`<span className="badge ok">complete</span>`,
-    failed:   html`<span className="badge danger">failed</span>`,
-    stopped:  html`<span className="badge">stopped</span>`,
-  };
-
   return html`
     <div className="topbar">
       <div className="topbar-title">
@@ -413,7 +405,7 @@ function SiteDetail({ siteId }) {
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
                   <td><strong>${r.name}</strong></td>
-                  <td>${STATUS_BADGE[r.status]||r.status}</td>
+                  <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
                   <td className="subtle">${fmtDate(r.created_at)}</td>
                   <td>
@@ -609,6 +601,27 @@ const userColor = (d, credentials) => {
   return idx >= 0 ? USER_PALETTE[idx % USER_PALETTE.length] : USER_NONE_COLOR;
 };
 
+function runWorkflowStatus(run, opts = {}) {
+  if (!run) return { key:"pending", label:"pending" };
+  const scanStatus = opts.scanStatus || run.scan_status || "idle";
+  if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
+  if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
+  if (run.status === "running") return { key:"running", label:"crawling" };
+  if (run.status === "failed") return { key:"danger", label:"crawl failed" };
+  if (scanStatus === "running") return { key:"running", label:"scanning" };
+  if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
+  if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
+  if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
+  if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
+  if (run.status === "complete") return { key:"partial", label:"crawl complete" };
+  return { key:"neutral", label:run.status || "pending" };
+}
+
+const workflowBadge = (run, opts = {}) => {
+  const st = runWorkflowStatus(run, opts);
+  return html`<span className=${"badge " + st.key}>${st.label}</span>`;
+};
+
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
   const [graph, setGraph]       = useState(null);
@@ -626,6 +639,8 @@ function TestRunDetail({ runId }) {
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
+  const [crawlStopRequested, setCrawlStopRequested] = useState(false);
+  const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
@@ -679,6 +694,7 @@ function TestRunDetail({ runId }) {
         api.getGraph(runId).then(setGraph).catch(()=>{});
       } else if (evt.type === "run_update") {
         setRun(prev => prev ? { ...prev, status: evt.status ?? prev.status, pages_discovered: evt.pages_discovered ?? prev.pages_discovered } : prev);
+        if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
         // crawl_progress is still used for the done flag
@@ -702,6 +718,7 @@ function TestRunDetail({ runId }) {
         });
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
+        if (evt.status && evt.status !== "running") setScanStopRequested(false);
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -717,26 +734,36 @@ function TestRunDetail({ runId }) {
   }, [runId]);
 
   // Poll run metadata (including per_user_progress current URLs) while crawling
+  // or while the backend is unwinding after a stop request.
   useEffect(() => {
-    if (run?.status !== "running") return;
+    if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
-      api.getRun(runId).then(r => setRun(r)).catch(() => {});
+      api.getRun(runId).then(r => {
+        setRun(r);
+        if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
+      }).catch(() => {});
     }, 2000);
     return () => clearInterval(iv);
-  }, [run?.status, runId]);
+  }, [run?.status, runId, crawlStopRequested]);
 
-  // Poll findings while scan is running or on findings tab
+  // Poll findings/status while scan is running, stopping, or on findings tab.
   useEffect(() => {
-    const needsFindings = scanStatus?.status === "running" || activeTab === "findings";
+    const scanActive = scanStatus?.status === "running" || scanStopRequested;
+    const needsFindings = scanActive || activeTab === "findings";
     if (!needsFindings) return;
     const poll = () => {
       api.getFindings(runId).then(setFindings).catch(() => {});
-      if (!scanStatus) api.getScanStatus(runId).then(setScanStatus).catch(() => {});
+      if (scanActive || !scanStatus) {
+        api.getScanStatus(runId).then(s => {
+          setScanStatus(s);
+          if (scanStopRequested && s.status !== "running") setScanStopRequested(false);
+        }).catch(() => {});
+      }
     };
     poll();
     const iv = setInterval(poll, 4000);
     return () => clearInterval(iv);
-  }, [runId, scanStatus?.status, activeTab]);
+  }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
 
   // Poll validation status while validating is running
   useEffect(() => {
@@ -758,6 +785,11 @@ function TestRunDetail({ runId }) {
     api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
   }, [activeTab, runId]);
 
+  useEffect(() => {
+    if (activeTab !== "scan") return;
+    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+  }, [activeTab, runId]);
+
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
     const poll = async () => {
@@ -777,13 +809,15 @@ function TestRunDetail({ runId }) {
     const isActive = (
       activeTab === "traffic" ||
       run?.status === "running" ||
-      scanStatus?.status === "running"
+      scanStatus?.status === "running" ||
+      crawlStopRequested ||
+      scanStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, runId]);
+  }, [activeTab, run?.status, scanStatus?.status, runId, crawlStopRequested, scanStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
@@ -1009,6 +1043,7 @@ function TestRunDetail({ runId }) {
 
   const onStartScan = async () => {
     try {
+      setScanStopRequested(false);
       const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
@@ -1021,15 +1056,17 @@ function TestRunDetail({ runId }) {
         );
         if (!ok) return;
       }
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.startScan(runId);
       setScanStatus(s);
-    } catch(e) { setError(e.message); }
+    } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
   const onScanPage = async () => {
     if (!selectedNode || scopeBusy) return;
     setScopeBusy(true);
     try {
+      setScanStopRequested(false);
       const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
@@ -1042,6 +1079,7 @@ function TestRunDetail({ runId }) {
         );
         if (!ok) return;
       }
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.scanPage(runId, selectedNode.id);
       setScanStatus(s);
     } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
@@ -1095,9 +1133,12 @@ function TestRunDetail({ runId }) {
 
   const onStopScan = async () => {
     try {
+      setScanStopRequested(true);
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.stopScan(runId);
-      setScanStatus(s);
-    } catch(e) { setError(e.message); }
+      setScanStatus(prev => s.status === "running" ? { ...prev, ...s, status: "running" } : s);
+      if (s.status !== "running") setScanStopRequested(false);
+    } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
   const onEditSettings = () => {
@@ -1142,6 +1183,7 @@ function TestRunDetail({ runId }) {
 
   const onStart = async () => {
     try {
+      setCrawlStopRequested(false);
       const r = await api.startRun(runId);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
@@ -1150,21 +1192,44 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
   const onStop = async () => {
-    try { const r = await api.stopRun(runId); setRun(r); } catch(e) { setError(e.message); }
+    try {
+      setCrawlStopRequested(true);
+      const r = await api.stopRun(runId);
+      setRun(r);
+    } catch(e) {
+      setCrawlStopRequested(false);
+      setError(e.message);
+    }
   };
   const onRestart = async () => {
     if (!confirm("Delete all crawled pages for this run and start fresh?")) return;
     try {
+      setCrawlStopRequested(false);
+      setScanStopRequested(false);
       setGraph({nodes:[], links:[]});
       const r = await api.restartRun(runId);
       setRun({...r, status: "running", per_user_progress: {}});
     } catch(e) { setError(e.message); }
   };
 
-  const STATUS_COLOR = { pending:"var(--muted)", running:"var(--warn)", complete:"var(--ok)", failed:"var(--danger)", stopped:"var(--muted)" };
-  const canStart   = run && ["pending","stopped","failed","complete"].includes(run.status);
-  const canRestart = run && ["stopped","failed","complete"].includes(run.status);
-  const canStop    = run?.status === "running";
+  const effectiveScanStatus = scanStatus?.status || run?.scan_status || "idle";
+  const headerStatus = runWorkflowStatus(run, {
+    scanStatus: effectiveScanStatus,
+    crawlStopping: crawlStopRequested,
+    scanStopping: scanStopRequested,
+  });
+  const STATUS_COLOR = {
+    neutral:"var(--muted)",
+    pending:"var(--muted)",
+    running:"var(--warn)",
+    stopping:"var(--warn)",
+    partial:"var(--text-2)",
+    ok:"var(--ok)",
+    danger:"var(--danger)",
+  };
+  const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
+  const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
+  const canStop    = run?.status === "running" && !crawlStopRequested;
 
   return html`
     <div className="topbar">
@@ -1172,10 +1237,11 @@ function TestRunDetail({ runId }) {
         <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
         <span className="breadcrumb-sep"> / </span>
         ${run ? run.name : "…"}
-        ${run && html`<span className=${"run-status-badge"+(run.status==="running"?" running":"")} style=${{color:STATUS_COLOR[run.status]||"var(--muted)"}}>● ${run.status}</span>`}
+        ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
       </div>
       <div className="topbar-actions">
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
       </div>
     </div>
 
@@ -1207,9 +1273,11 @@ function TestRunDetail({ runId }) {
           </div>`}
         ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
-        ${activeTab==="scan" && scanStatus?.status==="running" && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan}>◼ Stop scan</button>`}
-        ${activeTab==="scan" && (scanStatus?.status==="idle"||scanStatus?.status==="complete"||scanStatus?.status==="stopped"||scanStatus?.status==null) && run?.status!=="running" && html`
+        ${activeTab==="scan" && effectiveScanStatus==="running" && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
+            ${scanStopRequested ? "◼ Stopping scan…" : "◼ Stop scan"}
+          </button>`}
+        ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
       </div>
 
@@ -1270,7 +1338,9 @@ function TestRunDetail({ runId }) {
                   <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
                 </div>
                 <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">${done} / ${total} pages scanned</span>
+                  <span className="scan-progress-counts">
+                    ${scanStopRequested ? "Stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
+                  </span>
                   ${scanStatus.findings_count > 0 && html`
                     <span className="scan-progress-findings">
                       ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
@@ -1442,8 +1512,9 @@ function TestRunDetail({ runId }) {
         <div className="findings-panel">
           <div className="findings-status-bar">
             ${scanStatus && html`
-              <span className=${"scan-status-badge scan-status-"+scanStatus.status}>
-                ${scanStatus.status==="running" ? "Scanning…" :
+              <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
+                ${scanStopRequested ? "Stopping scan…" :
+                  scanStatus.status==="running" ? "Scanning…" :
                   scanStatus.status==="complete" ? "Scan complete" :
                   scanStatus.status==="stopped"  ? "Scan stopped" :
                   scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
