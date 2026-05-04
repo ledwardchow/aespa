@@ -132,3 +132,49 @@ def test_upsert_invalid_max_tokens(client: TestClient):
         "temperature": 0.0,
     })
     assert r.status_code == 422
+
+
+# ── Scanner policy ───────────────────────────────────────────────────────────
+
+def test_get_scanner_policy_defaults(client: TestClient):
+    r = client.get("/api/settings/scanner-policy")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["scan_mode"] == "safe_active"
+    assert data["max_probes_per_page"] == 50
+    assert data["allowed_schemes"] == ["http", "https"]
+    assert "POST" in data["methods_by_mode"]["safe_active"]
+
+
+def test_upsert_scanner_policy(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload.update({
+        "scan_mode": "aggressive",
+        "max_probes_per_page": 25,
+        "request_timeout_s": 12.5,
+        "min_delay_s": 0.1,
+        "blocked_headers": ["host", "cookie", "x-admin"],
+    })
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["scan_mode"] == "aggressive"
+    assert data["max_probes_per_page"] == 25
+    assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
+
+    r2 = client.get("/api/settings/scanner-policy")
+    assert r2.json()["request_timeout_s"] == 12.5
+
+
+def test_upsert_scanner_policy_invalid_limit(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["max_probes_per_page"] = 9999
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+def test_upsert_scanner_policy_invalid_method(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["methods_by_mode"]["safe_active"] = ["GET", "BAD METHOD"]
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422

@@ -86,9 +86,11 @@ Return ONLY valid JSON in this exact format (no markdown fences):
   }}
 }}
 
-For suggested_links: include up to 10 absolute URLs from this page (same domain) that reveal the most \
-important or interesting application functionality. Prefer links to forms, features, user actions, \
-admin areas, API endpoints, etc. over navigation links already visible on every page.
+For suggested_links: include up to 10 absolute URLs that appear as actual links on this page \
+(same domain) and reveal the most important or interesting application functionality. Do not \
+construct, guess, rewrite, or substitute URLs from IDs/account numbers visible in page text. \
+Prefer links to forms, features, user actions, admin areas, API endpoints, etc. over navigation \
+links already visible on every page.
 
 For categories — answer true/false to each:
 - req_auth: Does accessing or using this page require the user to be authenticated/logged in?
@@ -124,6 +126,64 @@ async def analyse_page(
     )
     raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
     return _parse(raw, url)
+
+
+async def judge_page_access(
+    config: LLMConfig,
+    *,
+    url: str,
+    original_title: str,
+    original_text: str,
+    candidate_title: str,
+    candidate_text: str,
+    candidate_username: str,
+    screenshot_b64: Optional[str] = None,
+) -> dict:
+    """Return {"accessible": bool, "reasoning": str} for direct-access reconciliation."""
+    prompt = f"""\
+You are helping a penetration testing crawler decide whether a user truly has access to a page.
+
+The crawler already confirmed the candidate user is authenticated and the browser did not show a login form.
+Your job is to decide whether the candidate response is a successful, legitimate view of the same page/functionality,
+or merely an authenticated error/denial/loading state.
+
+Target URL: {url}
+Candidate user: {candidate_username}
+
+Original page title:
+{original_title or "(no title)"}
+
+Original page text excerpt:
+{(original_text or "")[:4000]}
+
+Candidate page title:
+{candidate_title or "(no title)"}
+
+Candidate page text excerpt:
+{(candidate_text or "")[:4000]}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "accessible": true,
+  "reasoning": "short explanation"
+}}
+
+Rules:
+- Return accessible=true if the candidate page shows the same kind of real page/functionality for that user,
+  even if account names, balances, IDs, or user-specific values differ.
+- Return accessible=false if the candidate page shows a toast/error/denial/loading failure such as
+  "could not load details", "not authorized", "access denied", "not found", blank content,
+  a generic app shell, or anything indicating the requested object did not load.
+- Do not require exact text equality. This is fuzzy semantic judgement about access to equivalent functionality.
+"""
+    raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+    data = _extract_json(raw, expect=dict)
+    if not isinstance(data, dict):
+        return {"accessible": False, "reasoning": "LLM did not return an object."}
+    return {
+        "accessible": bool(data.get("accessible")),
+        "reasoning": str(data.get("reasoning") or ""),
+    }
 
 
 def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCategories]:
@@ -664,7 +724,7 @@ async def validate_finding_result(
 ) -> dict:
     """Return {"verdict": "confirmed"|"false_positive", "reasoning": str}."""
     if not probe_results:
-        return {"verdict": "confirmed", "reasoning": "No validation probes were generated; treating original finding as confirmed."}
+        return {"verdict": "false_positive", "reasoning": "No validation probes reproduced the issue."}
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
         f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
