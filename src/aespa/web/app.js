@@ -89,6 +89,7 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/settings")                             return { name: "settings" };
+  if (hash === "#/scan-policy")                          return { name: "scan-policy" };
 
   return { name: "list" };
 }
@@ -212,12 +213,18 @@ const IconStop = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill
   <rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/>
 </svg>`;
 
+const IconShield = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M8 1.5L2 4v4c0 3 2.5 5.5 6 6 3.5-.5 6-3 6-6V4L8 1.5z"
+    stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+</svg>`;
+
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
   const route = useRoute();
-  const onSites    = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
-  const onSettings = route.name === "settings";
+  const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
+  const onSettings   = route.name === "settings";
+  const onScanPolicy = route.name === "scan-policy";
 
   return html`
     <div className="shell">
@@ -235,6 +242,9 @@ function App() {
           <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")}>
             <span className="nav-icon"><${IconSettings}/></span> LLM Settings
           </a>
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")}>
+            <span className="nav-icon"><${IconShield}/></span> Scan Policy
+          </a>
         </nav>
         <div className="sidebar-footer">v0.1.0</div>
       </aside>
@@ -247,6 +257,7 @@ function App() {
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id}/>`}
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
+        ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
       </div>
     </div>
   `;
@@ -1827,7 +1838,6 @@ const BASE_URL_HINTS = {
 };
 
 function SettingsPage() {
-  const [settingsTab, setSettingsTab] = useState("llm");
   const [form, setForm]           = useState(null);
   const [dms, setDMs]             = useState({});
   const [customModel, setCustomModel] = useState(false);
@@ -1873,14 +1883,9 @@ function SettingsPage() {
   return html`
     <div className="topbar"><div className="topbar-title">Settings</div></div>
     <div className="content scroll-content">
-      <div className="tab-bar settings-tab-bar">
-        <button className=${"tab-btn"+(settingsTab==="llm"?" active":"")} onClick=${()=>setSettingsTab("llm")}>LLM</button>
-        <button className=${"tab-btn"+(settingsTab==="scanner"?" active":"")} onClick=${()=>setSettingsTab("scanner")}>Scanner Policy</button>
-      </div>
-      ${settingsTab==="llm" && html`
-        ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
-        ${error&&html`<div className="alert error">${error}</div>`}
-        ${form&&html`
+      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+      ${error&&html`<div className="alert error">${error}</div>`}
+      ${form&&html`
         <form className="card" onSubmit=${onSubmit}>
           <div className="form-section-title">Provider</div>
           <div className="provider-grid">
@@ -1944,8 +1949,15 @@ function SettingsPage() {
             <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
             <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save settings"}</button>
           </div>
-        </form>`}`}
-      ${settingsTab==="scanner" && html`<${ScannerPolicySettings}/>`}
+        </form>`}
+    </div>`;
+}
+
+function ScanPolicyPage() {
+  return html`
+    <div className="topbar"><div className="topbar-title">Scan Policy</div></div>
+    <div className="content scroll-content">
+      <${ScannerPolicySettings}/>
     </div>`;
 }
 
