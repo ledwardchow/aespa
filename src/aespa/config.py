@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from importlib.metadata import version, PackageNotFoundError
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+try:
+    _pkg_version = version("aespa")
+except PackageNotFoundError:
+    _pkg_version = "unknown"
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +28,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     web_dir: Path = DEFAULT_WEB_DIR
+    app_version: str = _pkg_version
 
 
 def get_settings() -> Settings:
