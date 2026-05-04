@@ -121,6 +121,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
     for l in links:
         session.delete(l)
+    views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all()
+    for v in views:
+        session.delete(v)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
@@ -198,6 +201,8 @@ async def restart_test_run(
     # Wipe existing results
     for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
         session.delete(lnk)
+    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
+        session.delete(view)
     for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
         session.delete(pg)
     # Reset run state
@@ -385,6 +390,12 @@ def delete_page(
         )
     ).all():
         session.delete(link)
+    for view in session.exec(
+        select(PageCredentialView)
+        .where(PageCredentialView.test_run_id == run_id)
+        .where(PageCredentialView.page_id.in_(ids))
+    ).all():
+        session.delete(view)
     for p in session.exec(select(CrawledPage).where(CrawledPage.id.in_(ids))).all():
         session.delete(p)
     session.commit()

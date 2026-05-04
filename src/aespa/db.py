@@ -80,6 +80,15 @@ def _migrate(engine: Engine) -> None:
                 has_business_logic INTEGER
             )
         """))
+        conn.execute(__import__("sqlalchemy").text("""
+            DELETE FROM page_credential_view
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM crawled_page
+                WHERE crawled_page.id = page_credential_view.page_id
+                  AND crawled_page.test_run_id = page_credential_view.test_run_id
+            )
+        """))
         conn.commit()
 
 
