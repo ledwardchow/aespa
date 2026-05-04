@@ -113,3 +113,70 @@ def test_request_stop_noops_when_validation_not_running(monkeypatch):
     assert validator.request_stop(456) is False
     assert 456 not in validator._stop_requested
     assert reset_calls == []
+
+
+def test_probe_body_helper_serializes_json_objects():
+    content, headers, preview = scanner._prepare_probe_body(
+        {"account": {"id": 10000001}},
+        {},
+    )
+
+    assert content == b'{"account":{"id":10000001}}'
+    assert headers["Content-Type"] == "application/json"
+    assert preview == '{"account":{"id":10000001}}'
+
+
+def test_probe_body_helper_preserves_explicit_content_type():
+    content, headers, preview = scanner._prepare_probe_body(
+        {"accountId": "10000001"},
+        {"Content-Type": "application/vnd.api+json"},
+    )
+
+    assert content == b'{"accountId":"10000001"}'
+    assert headers["Content-Type"] == "application/vnd.api+json"
+    assert preview == '{"accountId":"10000001"}'
+
+
+def test_probe_cap_prioritizes_injection_for_input_pages():
+    probes = []
+    for i in range(40):
+        probes.append({
+            "type": "http",
+            "method": "GET",
+            "url": f"https://target.local/accounts/{i}",
+            "params": {},
+            "headers": {},
+            "body": None,
+            "desc": f"IDOR [range]: /1→/{i}",
+        })
+    for i in range(10):
+        probes.append({
+            "type": "http",
+            "method": "GET",
+            "url": "https://target.local/search",
+            "params": {"q": "<script>alert(1)</script>" if i % 2 else "' OR '1'='1'--"},
+            "headers": {},
+            "body": None,
+            "desc": "XSS probe" if i % 2 else "SQLi probe",
+        })
+
+    selected = scanner._prioritize_probes_for_cap(
+        probes,
+        20,
+        {"takes_input": True, "has_object_ref": True},
+    )
+
+    injection_count = sum(1 for p in selected if "probe" in p["desc"])
+
+    assert len(selected) == 20
+    assert injection_count == 10
+
+
+def test_input_validation_probes_include_expanded_sqli_and_xss_payloads():
+    probes = scanner._input_validation_probes("https://target.local/search?q=test")
+    text = "\n".join(p["url"] + " " + p["desc"] for p in probes)
+
+    assert "WAITFOR" in text or "WAITFOR" in text.upper()
+    assert "pg_sleep" in text
+    assert "onfocus" in text
+    assert "%253Cscript%253Ealert%281%29%253C%2Fscript%253E" in text

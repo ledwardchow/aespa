@@ -496,6 +496,8 @@ async def _run_validation_probe(
         log.info("  Validation probe rejected by policy: %s (%s)", rejection, desc)
         return None
 
+    content, request_headers, body_preview = scanner_svc._prepare_probe_body(body, extra_hdrs)
+
     # Use the override session (specific user) if provided, else the primary.
     session = override_session or primary_session
     cookies = session["cookies"] if session else {}
@@ -512,8 +514,8 @@ async def _run_validation_probe(
             req = client.build_request(
                 method, url,
                 params=params,
-                content=body.encode() if isinstance(body, str) else body,
-                headers=extra_hdrs,
+                content=content,
+                headers=request_headers,
             )
             resp = await client.send(req, follow_redirects=scanner_policy.follow_redirects)
             resp_body = resp.text[:min(800, scanner_policy.response_body_read_limit_bytes)]
@@ -524,7 +526,7 @@ async def _run_validation_probe(
             user_note = f"Sent as user: {as_user}\n" if as_user else ""
             evidence = (
                 f"{user_note}REQUEST:\n{method} {req.url} HTTP/1.1\n{req_hdrs_text}\n"
-                + (f"\n{body[:200]}" if body else "")
+                + (f"\n{body_preview[:200]}" if body_preview else "")
                 + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_hdrs_text}\n\n{resp_body}"
             )
             return {
