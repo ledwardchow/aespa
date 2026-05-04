@@ -47,6 +47,7 @@ const api = {
   updateRunScanPolicy:   (id,b)     => req(`/api/test-runs/${id}/scan/policy`, { method:"PATCH", body:b }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
+  getVersion:       ()            => req("/api/version"),
 };
 
 async function req(url, opts = {}) {
@@ -225,6 +226,8 @@ function App() {
   const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
 
   return html`
     <div className="shell">
@@ -246,7 +249,7 @@ function App() {
             <span className="nav-icon"><${IconShield}/></span> Scan Policy
           </a>
         </nav>
-        <div className="sidebar-footer">v0.1.0</div>
+        <div className="sidebar-footer">${appVersion ? `v${appVersion}` : ""}</div>
       </aside>
 
       <div className="main">
