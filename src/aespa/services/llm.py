@@ -312,7 +312,7 @@ def _chat_completion_kwargs(
         "model": config.model,
         "messages": messages,
     }
-    token_limit = min(config.max_tokens, 1024)
+    token_limit = config.max_tokens
     if provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model):
         kwargs["max_completion_tokens"] = token_limit
     else:
@@ -363,7 +363,7 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
     content.append({"type": "text", "text": prompt})
     resp = await client.messages.create(
         model=config.model,
-        max_tokens=min(config.max_tokens, 1024),
+        max_tokens=config.max_tokens,
         temperature=config.temperature,
         messages=[{"role": "user", "content": content}],
     )
@@ -387,7 +387,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         model=config.model,
         contents=parts,
         config=types.GenerateContentConfig(
-            max_output_tokens=min(config.max_tokens, 8192),
+            max_output_tokens=config.max_tokens,
             temperature=config.temperature,
         ),
     )
