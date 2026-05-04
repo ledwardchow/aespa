@@ -47,6 +47,7 @@ class LLMProvider(str, Enum):
     anthropic = "anthropic"
     openai = "openai"
     openai_compatible = "openai_compatible"
+    openrouter = "openrouter"
     google = "google"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
