@@ -1813,6 +1813,7 @@ function RunScannerPolicyPanel({ runId, run, scanStatus, validateStatus, onSaved
 const PROVIDER_LABELS = {
   anthropic:"Anthropic", openai:"OpenAI",
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
+  openrouter:"OpenRouter",
   google:"Google Gemini",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry",
@@ -1820,6 +1821,7 @@ const PROVIDER_LABELS = {
 const PROVIDER_PLACEHOLDERS = {
   anthropic:"claude-opus-4-5", openai:"gpt-4.1",
   openai_compatible:"e.g. llama-3.1-8b-instruct",
+  openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
@@ -1835,7 +1837,7 @@ const BASE_URL_PLACEHOLDERS = {
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
-  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1",
+  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
@@ -1881,7 +1883,7 @@ function SettingsPage() {
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
   const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","google","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     <div className="topbar"><div className="topbar-title">Settings</div></div>
@@ -1911,7 +1913,7 @@ function SettingsPage() {
           ${needsKey&&html`
             <div className="field"><label>API Key</label>
               <input type="password" required value=${form.api_key}
-                placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":""}
+                placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":""}
                 onChange=${e=>upd({api_key:e.target.value})}/></div>`}
           ${form.provider==="openai_compatible"&&html`
             <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
