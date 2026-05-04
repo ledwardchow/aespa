@@ -1,4 +1,4 @@
-"""Abstract LLM client — wraps Anthropic, OpenAI, OpenAI-compatible, and Google Gemini APIs."""
+"""Abstract LLM client wrappers for configured provider APIs."""
 from __future__ import annotations
 
 import base64
@@ -7,6 +7,22 @@ import re
 from typing import Any, Optional
 
 from aespa.models import LLMConfig
+
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _strip_thinking_blocks(raw: str) -> str:
+    """Remove visible model reasoning wrappers while keeping the final answer."""
+    text = raw
+    block_tags = ("think", "thinking", "reasoning", "thought")
+    for tag in block_tags:
+        text = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
+    # closing tag when they are interrupted near the final JSON.
+    text = re.sub(r"(?is)^\s*(?:reasoning|thinking|thought)\s*:\s*.*?(?=[\[{])", "", text)
+    return text
 
 
 def _extract_json(raw: str, expect: type = list) -> Any:
@@ -21,8 +37,7 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     if not raw:
         raise ValueError("empty response")
 
-    # Strip thinking/reasoning blocks
-    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    text = _strip_thinking_blocks(raw)
     # Strip markdown fences
     text = re.sub(r"```(?:json|python)?\s*", "", text).strip().rstrip("`").strip()
 
@@ -32,34 +47,38 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Find the outermost JSON container matching `expect`
+    # Find the first balanced JSON container matching `expect` that parses.
     open_ch  = "[" if expect is list else "{"
     close_ch = "]" if expect is list else "}"
-    start = text.find(open_ch)
-    if start == -1:
+    starts = [i for i, ch in enumerate(text) if ch == open_ch]
+    if not starts:
         raise ValueError(f"no '{open_ch}' found in LLM response")
 
-    depth = 0
-    in_str = False
-    escape = False
-    for i, ch in enumerate(text[start:], start):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_str:
-            escape = True
-            continue
-        if ch == '"' and not escape:
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == open_ch:
-            depth += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start : i + 1])
+    for start in starts:
+        depth = 0
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text[start:], start):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_str:
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
 
     raise ValueError("could not extract balanced JSON from LLM response")
 
@@ -218,7 +237,117 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _azure_openai(config, prompt, screenshot_b64)
     if config.provider == "azure_foundry":
         return await _azure_foundry(config, prompt, screenshot_b64)
+    if config.provider == "openrouter":
+        return await _openrouter(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
+
+
+def _content_part_text(part: Any) -> str:
+    if part is None:
+        return ""
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict):
+        part_type = str(part.get("type") or "")
+        if part_type in ("reasoning", "reasoning_content", "thinking", "thought"):
+            return ""
+        if part_type in ("text", "output_text", "message"):
+            value = part.get("text") or part.get("content")
+            return value if isinstance(value, str) else ""
+        value = part.get("text")
+        return value if isinstance(value, str) else ""
+
+    part_type = str(getattr(part, "type", "") or "")
+    if part_type in ("reasoning", "reasoning_content", "thinking", "thought"):
+        return ""
+    text = getattr(part, "text", None)
+    if isinstance(text, str):
+        return text
+    content = getattr(part, "content", None)
+    if isinstance(content, str):
+        return content
+    return ""
+
+
+def _extract_message_text(message: Any) -> str:
+    if message is None:
+        return ""
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(_content_part_text(part) for part in content)
+    else:
+        text = ""
+
+    if text:
+        return _strip_thinking_blocks(text).strip()
+
+    # OpenAI-compatible gateways and local servers vary on where they expose
+    # visible chain-of-thought / final text for reasoning models.
+    for attr in ("reasoning_content", "reasoning", "output_text", "text"):
+        value = getattr(message, attr, None)
+        if isinstance(value, str) and value.strip():
+            return _strip_thinking_blocks(value).strip()
+    return ""
+
+
+def _model_needs_reasoning_params(model: str) -> bool:
+    lowered = (model or "").lower().split("/")[-1]
+    return (
+        lowered.startswith(("o1", "o3", "o4"))
+        or lowered.startswith("gpt-5")
+        or "reasoning" in lowered
+    )
+
+
+def _chat_completion_kwargs(
+    *,
+    config: LLMConfig,
+    messages: list[dict],
+    provider: str,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "messages": messages,
+    }
+    token_limit = min(config.max_tokens, 1024)
+    if provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model):
+        kwargs["max_completion_tokens"] = token_limit
+    else:
+        kwargs["max_tokens"] = token_limit
+
+    if not (provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model)):
+        kwargs["temperature"] = config.temperature
+    return kwargs
+
+
+async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        retry_kwargs = dict(kwargs)
+        changed = False
+
+        if "max_tokens" in retry_kwargs and ("max_tokens" in message or "max completion" in message):
+            retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
+            changed = True
+        if "temperature" in retry_kwargs and "temperature" in message:
+            retry_kwargs.pop("temperature", None)
+            changed = True
+
+        if not changed:
+            raise
+        return await client.chat.completions.create(**retry_kwargs)
+
+
+def _extract_first_choice_text(resp: Any) -> str:
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    return _extract_message_text(getattr(choices[0], "message", None))
 
 
 async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
@@ -238,13 +367,7 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
         temperature=config.temperature,
         messages=[{"role": "user", "content": content}],
     )
-    # resp.content is a list of blocks; find the first one that has text.
-    # (Extended thinking models may prepend a ThinkingBlock before the TextBlock.)
-    for block in (resp.content or []):
-        text = getattr(block, "text", None)
-        if text is not None:
-            return str(text)
-    return ""
+    return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
 async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
@@ -292,20 +415,39 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
     else:
         msg_content = prompt
 
-    resp = await client.chat.completions.create(
-        model=config.model,
-        max_tokens=min(config.max_tokens, 1024),
-        temperature=config.temperature,
-        messages=[{"role": "user", "content": msg_content}],
+    resp = await _create_chat_completion(
+        client,
+        _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=[{"role": "user", "content": msg_content}],
+        ),
     )
-    # Safely access choices — guard against None or empty list
-    choices = getattr(resp, "choices", None) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    if message is None:
-        return ""
-    return getattr(message, "content", None) or ""
+    return _extract_first_choice_text(resp)
+
+
+async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=config.api_key, base_url=OPENROUTER_BASE_URL)
+
+    if screenshot_b64:
+        msg_content: object = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        msg_content = prompt
+
+    resp = await _create_chat_completion(
+        client,
+        _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=[{"role": "user", "content": msg_content}],
+        ),
+    )
+    return _extract_first_choice_text(resp)
 
 
 async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
@@ -325,19 +467,15 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
     else:
         msg_content = prompt
 
-    resp = await client.chat.completions.create(
-        model=config.model,
-        max_tokens=min(config.max_tokens, 1024),
-        temperature=config.temperature,
-        messages=[{"role": "user", "content": msg_content}],
+    resp = await _create_chat_completion(
+        client,
+        _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=[{"role": "user", "content": msg_content}],
+        ),
     )
-    choices = getattr(resp, "choices", None) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    if message is None:
-        return ""
-    return getattr(message, "content", None) or ""
+    return _extract_first_choice_text(resp)
 
 
 async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
@@ -358,19 +496,15 @@ async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optiona
     else:
         msg_content = prompt
 
-    resp = await client.chat.completions.create(
-        model=config.model,
-        max_tokens=min(config.max_tokens, 1024),
-        temperature=config.temperature,
-        messages=[{"role": "user", "content": msg_content}],
+    resp = await _create_chat_completion(
+        client,
+        _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=[{"role": "user", "content": msg_content}],
+        ),
     )
-    choices = getattr(resp, "choices", None) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    if message is None:
-        return ""
-    return getattr(message, "content", None) or ""
+    return _extract_first_choice_text(resp)
 
 
 # ── Scanner LLM functions ─────────────────────────────────────────────────────

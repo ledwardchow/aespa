@@ -56,6 +56,9 @@ Open the app, go to **LLM Settings**, and configure one of:
 - **OpenAI** — requires an OpenAI API key
 - **Google** - requires a Google API key
 - **OpenAI-compatible** — for local models via LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`); no API key required
+- **OpenRouter** — requires an OpenRouter API key (`sk-or-v1-...`) and an OpenRouter model id, such as a model marked free in their catalog
+
+OpenRouter can also be configured through **OpenAI-compatible** by setting the base URL to `https://openrouter.ai/api/v1`, entering your OpenRouter API key, and using an exact OpenRouter model id.
 
 ## Use
 Landing page:
