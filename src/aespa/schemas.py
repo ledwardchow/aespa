@@ -422,7 +422,7 @@ class ValidationStatusOut(BaseModel):
     false_positives: int
     validating: int
     unvalidated: int
-    status: str   # idle | running | complete
+    status: str   # idle | running | stopped | complete
 
 
 class PageCredentialViewOut(BaseModel):
