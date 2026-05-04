@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from sqlmodel import Session
+from fastapi import HTTPException
+from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, ScannerPolicy, TestRun
 from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyBase, ScannerPolicyIn, ScannerPolicyOut
@@ -17,13 +18,64 @@ def _utcnow() -> datetime:
 
 
 def get_llm_config(session: Session) -> LLMConfig | None:
-    return session.get(LLMConfig, _SINGLETON_ID)
+    return session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
 
 
 def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
-    cfg = session.get(LLMConfig, _SINGLETON_ID)
+    cfg = get_llm_config(session)
     if cfg is None:
-        cfg = LLMConfig(id=_SINGLETON_ID)
+        cfg = LLMConfig(is_active=True)
+
+    return _apply_llm_config(session, cfg, payload, activate=True)
+
+
+def list_llm_profiles(session: Session) -> list[LLMConfig]:
+    return list(session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).all())
+
+
+def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
+    cfg = session.get(LLMConfig, profile_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="LLM settings profile not found")
+    return cfg
+
+
+def create_llm_profile(session: Session, payload: LLMConfigIn) -> LLMConfig:
+    cfg = LLMConfig()
+    return _apply_llm_config(session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0))
+
+
+def update_llm_profile(session: Session, profile_id: int, payload: LLMConfigIn) -> LLMConfig:
+    cfg = get_llm_profile(session, profile_id)
+    return _apply_llm_config(session, cfg, payload, activate=cfg.is_active)
+
+
+def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
+    cfg = get_llm_profile(session, profile_id)
+    for profile in session.exec(select(LLMConfig)).all():
+        profile.is_active = profile.id == profile_id
+        session.add(profile)
+    session.commit()
+    session.refresh(cfg)
+    return cfg
+
+
+def delete_llm_profile(session: Session, profile_id: int) -> None:
+    cfg = get_llm_profile(session, profile_id)
+    was_active = cfg.is_active
+    session.delete(cfg)
+    session.commit()
+    if was_active:
+        replacement = session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).first()
+        if replacement is not None:
+            activate_llm_profile(session, replacement.id)
+
+
+def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool) -> LLMConfig:
+    _ensure_unique_llm_profile_name(session, payload.name, cfg.id)
+
+    cfg.name        = payload.name
+    cfg.is_active   = bool(activate)
 
     cfg.provider    = payload.provider
     cfg.api_key     = payload.api_key
@@ -34,10 +86,23 @@ def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
     cfg.use_vision  = payload.use_vision
     cfg.updated_at  = _utcnow()
 
+    if cfg.is_active:
+        for profile in session.exec(select(LLMConfig)).all():
+            if profile.id != cfg.id:
+                profile.is_active = False
+                session.add(profile)
+
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
     return cfg
+
+
+def _ensure_unique_llm_profile_name(session: Session, name: str, current_id: int | None) -> None:
+    normalized = name.strip().casefold()
+    for profile in session.exec(select(LLMConfig)).all():
+        if profile.id != current_id and profile.name.strip().casefold() == normalized:
+            raise HTTPException(status_code=409, detail="An LLM settings profile with that name already exists")
 
 
 def _json_loads(value: str | None, fallback):
