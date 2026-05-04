@@ -25,7 +25,7 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    app = FastAPI(title="AESPA", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
 
     app.include_router(sites_router)
     app.include_router(settings_router)
@@ -37,6 +37,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/version")
+    def version() -> dict[str, str]:
+        return {"version": settings.app_version}
 
     web_dir: Path = settings.web_dir
     if web_dir.exists() and (web_dir / "index.html").exists():
