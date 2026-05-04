@@ -48,6 +48,8 @@ class LLMProvider(str, Enum):
     openai = "openai"
     openai_compatible = "openai_compatible"
     google = "google"
+    azure_openai = "azure_openai"
+    azure_foundry = "azure_foundry"
 
 
 class LLMConfig(SQLModel, table=True):
@@ -64,6 +66,27 @@ class LLMConfig(SQLModel, table=True):
     temperature: float = Field(default=0.0)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScannerPolicy(SQLModel, table=True):
+    """Singleton row (id always = 1) for scanner policy defaults."""
+
+    __tablename__ = "scanner_policy"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scan_mode: str = Field(default="safe_active")
+    max_probes_per_page: int = Field(default=50)
+    request_timeout_s: float = Field(default=10.0)
+    min_delay_s: float = Field(default=0.2)
+    max_request_body_bytes: int = Field(default=65536)
+    response_body_read_limit_bytes: int = Field(default=512 * 1024)
+    allowed_schemes: str = Field(default='["http", "https"]')
+    methods_by_mode: str = Field(default='{"passive": ["GET", "HEAD"], "safe_active": ["GET", "POST", "HEAD"], "aggressive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]}')
+    blocked_headers: str = Field(default='["host", "cookie"]')
+    follow_redirects: bool = Field(default=True)
+    allow_subdomains: bool = Field(default=True)
+    require_approval_for_destructive: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -88,6 +111,8 @@ class TestRun(SQLModel, table=True):
     use_screenshots: bool = Field(default=False)
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=50)
+    scan_mode: str = Field(default="safe_active")
+    scanner_policy_json: str = Field(default="{}")
     # Progress
     pages_discovered: int = Field(default=0)
     current_url: Optional[str] = Field(default=None)

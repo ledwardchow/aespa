@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlmodel import Session
 
 from aespa.db import get_session
-from aespa.schemas import LLMConfigIn, LLMConfigOut, PROVIDER_DEFAULT_MODELS
+from aespa.schemas import LLMConfigIn, LLMConfigOut, PROVIDER_DEFAULT_MODELS, ScannerPolicyIn, ScannerPolicyOut
 from aespa.services import settings as settings_service
 
 
@@ -32,3 +32,16 @@ def upsert_llm_config(
 def default_models() -> dict[str, list[str]]:
     """Return well-known model names for each provider (for UI dropdowns)."""
     return PROVIDER_DEFAULT_MODELS
+
+
+@router.get("/scanner-policy", response_model=ScannerPolicyOut)
+def get_scanner_policy(session: Session = Depends(get_session)) -> ScannerPolicyOut:
+    return settings_service.get_scanner_policy(session)
+
+
+@router.put("/scanner-policy", response_model=ScannerPolicyOut)
+def upsert_scanner_policy(
+    payload: ScannerPolicyIn,
+    session: Session = Depends(get_session),
+) -> ScannerPolicyOut:
+    return settings_service.upsert_scanner_policy(session, payload)
