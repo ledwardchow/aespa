@@ -40,6 +40,7 @@ const api = {
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
+  stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getRunScanPolicy:      (id)       => req(`/api/test-runs/${id}/scan/policy`),
@@ -774,8 +775,21 @@ function TestRunDetail({ runId }) {
   // Fetch page detail when node selected
   useEffect(() => {
     if (!selectedNode) { setPageDetail(null); setPageViews([]); return; }
-    api.getPage(runId, selectedNode.id).then(setPageDetail).catch(()=>{});
-    api.getPageViews(runId, selectedNode.id).then(setPageViews).catch(()=>setPageViews([]));
+    let cancelled = false;
+    const pageId = selectedNode.id;
+    setPageDetail(null);
+    setPageViews([]);
+    api.getPage(runId, pageId)
+      .then(detail => {
+        if (!cancelled && selectedNode.id === pageId) setPageDetail(detail);
+      })
+      .catch(()=>{});
+    api.getPageViews(runId, pageId)
+      .then(views => {
+        if (!cancelled && selectedNode.id === pageId) setPageViews(views);
+      })
+      .catch(()=>{ if (!cancelled) setPageViews([]); });
+    return () => { cancelled = true; };
   }, [selectedNode, runId]);
 
   // D3 force graph
@@ -1033,6 +1047,15 @@ function TestRunDetail({ runId }) {
       setFindings(prev => prev.map(f => f.id === findingId ? { ...f, ...updated } : f));
       setValidateStatus(vs => vs ? { ...vs, status: "running" } : vs);
       setValidateBusy(true);
+    } catch(err) { setError(err.message); }
+  };
+
+  const onStopValidation = async () => {
+    try {
+      const vs = await api.stopValidation(runId);
+      setValidateStatus(vs);
+      setValidateBusy(false);
+      setFindings(await api.getFindings(runId));
     } catch(err) { setError(err.message); }
   };
 
@@ -1398,9 +1421,14 @@ function TestRunDetail({ runId }) {
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
               ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives}/${validateStatus.total}</span>`
+              : validateStatus?.status==="stopped"
+                ? html`<span className="val-status-badge val-fp">Validation stopped</span>`
               : validateStatus?.status==="complete"
                 ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.false_positives} false positive${validateStatus.false_positives!==1?"s":""}</span>`
                 : null}
+            ${validateStatus?.status==="running" && html`
+              <button className="btn danger-outline sm" style=${{marginLeft:8}}
+                onClick=${onStopValidation}>Stop validation</button>`}
             ${findings.length>0 && html`
               <button className="btn sm" style=${{marginLeft:8}}
                 disabled=${validateBusy||validateStatus?.status==="running"}

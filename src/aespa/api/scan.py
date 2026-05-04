@@ -149,6 +149,17 @@ async def start_validation(
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
 
 
+@router.post("/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut)
+def stop_validation(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ValidationStatusOut:
+    """Stop background validation for this run."""
+    _get_run_or_404(session, run_id)
+    validator_svc.request_stop(run_id)
+    return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
 @router.post(
     "/api/test-runs/{run_id}/findings/{finding_id}/validate",
     response_model=ScanFindingOut,
