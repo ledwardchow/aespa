@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
@@ -180,6 +181,95 @@ class LLMConfigOut(BaseModel):
     updated_at: datetime
 
 
+# ── Scanner policy schemas ───────────────────────────────────────────────────
+
+ScanModeLiteral = Literal["passive", "safe_active", "aggressive", "destructive"]
+SchemeLiteral = Literal["http", "https"]
+
+SCAN_MODES: tuple[str, ...] = ("passive", "safe_active", "aggressive", "destructive")
+DEFAULT_METHODS_BY_MODE: dict[str, list[str]] = {
+    "passive": ["GET", "HEAD"],
+    "safe_active": ["GET", "POST", "HEAD"],
+    "aggressive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+}
+
+
+class ScannerPolicyBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    scan_mode: ScanModeLiteral = "safe_active"
+    max_probes_per_page: int = Field(default=50, ge=0, le=500)
+    request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
+    min_delay_s: float = Field(default=0.2, ge=0.0, le=60.0)
+    max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
+    response_body_read_limit_bytes: int = Field(default=512 * 1024, ge=1024, le=10 * 1024 * 1024)
+    allowed_schemes: list[SchemeLiteral] = Field(default_factory=lambda: ["http", "https"], min_length=1)
+    methods_by_mode: dict[str, list[str]] = Field(default_factory=lambda: {
+        k: list(v) for k, v in DEFAULT_METHODS_BY_MODE.items()
+    })
+    blocked_headers: list[str] = Field(default_factory=lambda: ["host", "cookie"])
+    follow_redirects: bool = True
+    allow_subdomains: bool = True
+    require_approval_for_destructive: bool = True
+
+    @field_validator("methods_by_mode", mode="before")
+    @classmethod
+    def _normalize_methods_by_mode(cls, v):
+        if v is None:
+            return {k: list(methods) for k, methods in DEFAULT_METHODS_BY_MODE.items()}
+        out: dict[str, list[str]] = {}
+        for mode, methods in dict(v).items():
+            if mode not in SCAN_MODES:
+                raise ValueError(f"Unknown scan mode '{mode}'")
+            if not isinstance(methods, list) or not methods:
+                raise ValueError(f"methods_by_mode.{mode} must be a non-empty list")
+            normalized = []
+            for method in methods:
+                method_s = str(method).strip().upper()
+                if not re.fullmatch(r"[A-Z]{2,16}", method_s):
+                    raise ValueError(f"Invalid HTTP method '{method}'")
+                if method_s not in normalized:
+                    normalized.append(method_s)
+            out[mode] = normalized
+        for mode, methods in DEFAULT_METHODS_BY_MODE.items():
+            out.setdefault(mode, list(methods))
+        return out
+
+    @field_validator("blocked_headers", mode="before")
+    @classmethod
+    def _normalize_blocked_headers(cls, v):
+        if v is None:
+            return ["host", "cookie"]
+        out = []
+        for header in list(v):
+            header_s = str(header).strip().lower()
+            if not re.fullmatch(r"[a-z0-9!#$%&'*+.^_`|~-]+", header_s):
+                raise ValueError(f"Invalid header name '{header}'")
+            if header_s not in out:
+                out.append(header_s)
+        return out
+
+    @model_validator(mode="after")
+    def _check_current_mode_methods(self) -> "ScannerPolicyBase":
+        if self.scan_mode not in self.methods_by_mode or not self.methods_by_mode[self.scan_mode]:
+            raise ValueError("methods_by_mode must include methods for the selected scan_mode")
+        return self
+
+
+class ScannerPolicyIn(ScannerPolicyBase):
+    pass
+
+
+class ScannerPolicyOut(ScannerPolicyBase):
+    updated_at: datetime
+
+
+class RunScannerPolicyOut(ScannerPolicyBase):
+    source: Literal["run_snapshot", "global_default"]
+    updated_at: datetime | None = None
+
+
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 class TestRunCreate(BaseModel):
@@ -189,6 +279,7 @@ class TestRunCreate(BaseModel):
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=50, ge=5, le=500)
+    scan_mode: ScanModeLiteral = "safe_active"
 
 
 class TestRunUpdate(BaseModel):
@@ -214,6 +305,7 @@ class TestRunSummary(BaseModel):
     use_screenshots: bool
     max_depth: int
     max_pages: int
+    scan_mode: str = "safe_active"
     pages_discovered: int
     current_url: str | None
     created_at: datetime
@@ -221,6 +313,7 @@ class TestRunSummary(BaseModel):
     completed_at: datetime | None
     error_message: str | None
     credentials: list[CredentialSummary] = []
+    scanner_policy: dict = Field(default_factory=dict)
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
 
@@ -329,7 +422,7 @@ class ValidationStatusOut(BaseModel):
     false_positives: int
     validating: int
     unvalidated: int
-    status: str   # idle | running | complete
+    status: str   # idle | running | stopped | complete
 
 
 class PageCredentialViewOut(BaseModel):

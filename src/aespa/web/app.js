@@ -16,6 +16,8 @@ const api = {
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
+  getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
+  upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
   getRun:           (id)          => req(`/api/test-runs/${id}`),
@@ -38,8 +40,11 @@ const api = {
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
+  stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
+  getRunScanPolicy:      (id)       => req(`/api/test-runs/${id}/scan/policy`),
+  updateRunScanPolicy:   (id,b)     => req(`/api/test-runs/${id}/scan/policy`, { method:"PATCH", body:b }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
 };
@@ -89,6 +94,92 @@ function useRoute() {
 }
 
 const nav = (to) => { window.location.hash = to; };
+
+// ── Scanner policy helpers ──────────────────────────────────────────────────
+
+const SCAN_MODE_OPTIONS = [
+  ["passive", "Passive"],
+  ["safe_active", "Safe Active"],
+  ["aggressive", "Aggressive"],
+  ["destructive", "Destructive"],
+];
+const SCAN_MODE_DEFINITIONS = {
+  passive:"Passive checks only. Requests pages to inspect headers, cookies, and obvious access-control signals without running LLM-planned attack probes.",
+  safe_active:"Bounded active testing. Allows non-destructive HTTP probes and common payloads for issues such as XSS, injection markers, IDOR, and auth checks.",
+  aggressive:"Noisier active testing. Allows broader fuzzing, more HTTP methods, and higher-risk payloads that may trigger alerts or affect application state.",
+  destructive:"Highest-risk testing. Allows potentially state-changing probes; use only with explicit authorization and approval controls.",
+};
+const scanModeLabel = (mode) => (SCAN_MODE_OPTIONS.find(([v])=>v===mode)||[])[1] || mode;
+function ScanModeDefinitions({ selected }) {
+  return html`<div className="scan-mode-definitions">
+    ${SCAN_MODE_OPTIONS.map(([value,label])=>html`
+      <div key=${value} className=${"scan-mode-definition"+(selected===value?" selected":"")}>
+        <span className=${"scan-mode-badge mode-"+value}>${label}</span>
+        <span>${SCAN_MODE_DEFINITIONS[value]}</span>
+      </div>`)}
+  </div>`;
+}
+const csv = (value, transform=(x)=>x) => String(value||"")
+  .split(",").map(x=>transform(x.trim())).filter(Boolean);
+const defaultPolicyForm = () => ({
+  scan_mode:"safe_active",
+  max_probes_per_page:50,
+  request_timeout_s:10,
+  min_delay_s:0.2,
+  max_request_body_bytes:65536,
+  response_body_read_limit_bytes:524288,
+  allowed_schemes:"http, https",
+  methods_passive:"GET, HEAD",
+  methods_safe_active:"GET, POST, HEAD",
+  methods_aggressive:"GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+  methods_destructive:"GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+  blocked_headers:"host, cookie",
+  follow_redirects:true,
+  allow_subdomains:true,
+  require_approval_for_destructive:true,
+});
+const policyToForm = (p) => {
+  const f = defaultPolicyForm();
+  if (!p) return f;
+  const mbm = p.methods_by_mode || {};
+  return {
+    ...f,
+    scan_mode:p.scan_mode || f.scan_mode,
+    max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
+    request_timeout_s:p.request_timeout_s ?? f.request_timeout_s,
+    min_delay_s:p.min_delay_s ?? f.min_delay_s,
+    max_request_body_bytes:p.max_request_body_bytes ?? f.max_request_body_bytes,
+    response_body_read_limit_bytes:p.response_body_read_limit_bytes ?? f.response_body_read_limit_bytes,
+    allowed_schemes:(p.allowed_schemes || ["http","https"]).join(", "),
+    methods_passive:(mbm.passive || ["GET","HEAD"]).join(", "),
+    methods_safe_active:(mbm.safe_active || ["GET","POST","HEAD"]).join(", "),
+    methods_aggressive:(mbm.aggressive || ["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"]).join(", "),
+    methods_destructive:(mbm.destructive || ["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"]).join(", "),
+    blocked_headers:(p.blocked_headers || ["host","cookie"]).join(", "),
+    follow_redirects:p.follow_redirects ?? true,
+    allow_subdomains:p.allow_subdomains ?? true,
+    require_approval_for_destructive:p.require_approval_for_destructive ?? true,
+  };
+};
+const policyPayload = (form) => ({
+  scan_mode:form.scan_mode,
+  max_probes_per_page:Number(form.max_probes_per_page),
+  request_timeout_s:Number(form.request_timeout_s),
+  min_delay_s:Number(form.min_delay_s),
+  max_request_body_bytes:Number(form.max_request_body_bytes),
+  response_body_read_limit_bytes:Number(form.response_body_read_limit_bytes),
+  allowed_schemes:csv(form.allowed_schemes, x=>x.toLowerCase()),
+  methods_by_mode:{
+    passive:csv(form.methods_passive, x=>x.toUpperCase()),
+    safe_active:csv(form.methods_safe_active, x=>x.toUpperCase()),
+    aggressive:csv(form.methods_aggressive, x=>x.toUpperCase()),
+    destructive:csv(form.methods_destructive, x=>x.toUpperCase()),
+  },
+  blocked_headers:csv(form.blocked_headers, x=>x.toLowerCase()),
+  follow_redirects:!!form.follow_redirects,
+  allow_subdomains:!!form.allow_subdomains,
+  require_approval_for_destructive:!!form.require_approval_for_destructive,
+});
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -364,7 +455,7 @@ function SiteForm({ siteId }) {
 
   return html`
     <div className="topbar"><div className="topbar-title">${bc}</div></div>
-    <div className="content">
+    <div className="content scroll-content">
       ${loading && html`<div className="subtle">Loading…</div>`}
       ${!loading && html`
         <form className="card" onSubmit=${onSubmit}>
@@ -408,10 +499,19 @@ function SiteForm({ siteId }) {
 // ── Test run form ─────────────────────────────────────────────────────────────
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50 });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => setForm(f=>({...f,...p}));
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const policy = await api.getScannerPolicy();
+        if (policy?.scan_mode) upd({scan_mode:policy.scan_mode});
+      } catch(e) { setError(e.message); }
+    })();
+  }, []);
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true);
@@ -420,6 +520,7 @@ function TestRunForm({ siteId }) {
         name: form.name.trim()||null,
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
+        scan_mode: form.scan_mode,
       });
       nav(`#/runs/${run.id}`);
     } catch(e) { setError(e.message); setSaving(false); }
@@ -450,6 +551,15 @@ function TestRunForm({ siteId }) {
             <input type="number" required min="5" max="500" value=${form.max_pages} onChange=${e=>upd({max_pages:e.target.value})}/>
           </div>
         </div>
+        <div className="divider"/>
+        <div className="form-section-title">Scan Policy</div>
+        <div className="field">
+          <label>Scan mode</label>
+          <select className="select" value=${form.scan_mode} onChange=${e=>upd({scan_mode:e.target.value})}>
+            ${SCAN_MODE_OPTIONS.map(([value,label])=>html`<option key=${value} value=${value}>${label}</option>`)}
+          </select>
+        </div>
+        <${ScanModeDefinitions} selected=${form.scan_mode}/>
         <div className="divider"/>
         <div className="row spread">
           <button type="button" className="btn ghost" onClick=${()=>nav(`#/sites/${siteId}`)}>Cancel</button>
@@ -665,8 +775,21 @@ function TestRunDetail({ runId }) {
   // Fetch page detail when node selected
   useEffect(() => {
     if (!selectedNode) { setPageDetail(null); setPageViews([]); return; }
-    api.getPage(runId, selectedNode.id).then(setPageDetail).catch(()=>{});
-    api.getPageViews(runId, selectedNode.id).then(setPageViews).catch(()=>setPageViews([]));
+    let cancelled = false;
+    const pageId = selectedNode.id;
+    setPageDetail(null);
+    setPageViews([]);
+    api.getPage(runId, pageId)
+      .then(detail => {
+        if (!cancelled && selectedNode.id === pageId) setPageDetail(detail);
+      })
+      .catch(()=>{});
+    api.getPageViews(runId, pageId)
+      .then(views => {
+        if (!cancelled && selectedNode.id === pageId) setPageViews(views);
+      })
+      .catch(()=>{ if (!cancelled) setPageViews([]); });
+    return () => { cancelled = true; };
   }, [selectedNode, runId]);
 
   // D3 force graph
@@ -852,6 +975,18 @@ function TestRunDetail({ runId }) {
 
   const onStartScan = async () => {
     try {
+      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
+        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
+        const ok = confirm(
+          `Start ${scanModeLabel(policy.scan_mode)} scan?\n\n` +
+          `Methods: ${methods}\n` +
+          `Max probes/page: ${policy.max_probes_per_page}\n` +
+          `Delay: ${policy.min_delay_s}s\n` +
+          `Timeout: ${policy.request_timeout_s}s`
+        );
+        if (!ok) return;
+      }
       const s = await api.startScan(runId);
       setScanStatus(s);
     } catch(e) { setError(e.message); }
@@ -861,6 +996,18 @@ function TestRunDetail({ runId }) {
     if (!selectedNode || scopeBusy) return;
     setScopeBusy(true);
     try {
+      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
+        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
+        const ok = confirm(
+          `Scan this page with ${scanModeLabel(policy.scan_mode)} mode?\n\n` +
+          `Methods: ${methods}\n` +
+          `Max probes/page: ${policy.max_probes_per_page}\n` +
+          `Delay: ${policy.min_delay_s}s\n` +
+          `Timeout: ${policy.request_timeout_s}s`
+        );
+        if (!ok) return;
+      }
       const s = await api.scanPage(runId, selectedNode.id);
       setScanStatus(s);
     } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
@@ -900,6 +1047,15 @@ function TestRunDetail({ runId }) {
       setFindings(prev => prev.map(f => f.id === findingId ? { ...f, ...updated } : f));
       setValidateStatus(vs => vs ? { ...vs, status: "running" } : vs);
       setValidateBusy(true);
+    } catch(err) { setError(err.message); }
+  };
+
+  const onStopValidation = async () => {
+    try {
+      const vs = await api.stopValidation(runId);
+      setValidateStatus(vs);
+      setValidateBusy(false);
+      setFindings(await api.getFindings(runId));
     } catch(err) { setError(err.message); }
   };
 
@@ -997,6 +1153,8 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+        <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
+          onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1122,7 +1280,16 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic") ? "none" : "flex"}}>
+      ${activeTab==="policy" && html`
+        <${RunScannerPolicyPanel}
+          runId=${runId}
+          run=${run}
+          scanStatus=${scanStatus}
+          validateStatus=${validateStatus}
+          onSaved=${policy=>setRun(r=>r?{...r, scan_mode:policy.scan_mode, scanner_policy:policy}:r)}
+        />`}
+
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1254,9 +1421,14 @@ function TestRunDetail({ runId }) {
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
               ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives}/${validateStatus.total}</span>`
+              : validateStatus?.status==="stopped"
+                ? html`<span className="val-status-badge val-fp">Validation stopped</span>`
               : validateStatus?.status==="complete"
                 ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.false_positives} false positive${validateStatus.false_positives!==1?"s":""}</span>`
                 : null}
+            ${validateStatus?.status==="running" && html`
+              <button className="btn danger-outline sm" style=${{marginLeft:8}}
+                onClick=${onStopValidation}>Stop validation</button>`}
             ${findings.length>0 && html`
               <button className="btn sm" style=${{marginLeft:8}}
                 disabled=${validateBusy||validateStatus?.status==="running"}
@@ -1420,6 +1592,148 @@ function TestRunDetail({ runId }) {
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
+function ScannerPolicyFields({ form, upd, disabled=false }) {
+  return html`
+    <div className="form-section-title">Mode</div>
+    <div className="field">
+      <label>Scan mode</label>
+      <select className="select" disabled=${disabled} value=${form.scan_mode} onChange=${e=>upd({scan_mode:e.target.value})}>
+        ${SCAN_MODE_OPTIONS.map(([value,label])=>html`<option key=${value} value=${value}>${label}</option>`)}
+      </select>
+    </div>
+    <${ScanModeDefinitions} selected=${form.scan_mode}/>
+    <div className="divider"/>
+    <div className="form-section-title">Limits</div>
+    <div className="two-col">
+      <div className="field"><label>Max probes per page</label>
+        <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
+      <div className="field"><label>Request timeout (seconds)</label>
+        <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
+      <div className="field"><label>Minimum delay (seconds)</label>
+        <input type="number" disabled=${disabled} min="0" max="60" step="0.05" value=${form.min_delay_s} onChange=${e=>upd({min_delay_s:e.target.value})}/></div>
+      <div className="field"><label>Max request body bytes</label>
+        <input type="number" disabled=${disabled} min="0" max=${10*1024*1024} value=${form.max_request_body_bytes} onChange=${e=>upd({max_request_body_bytes:e.target.value})}/></div>
+    </div>
+    <div className="field"><label>Response body read limit bytes</label>
+      <input type="number" disabled=${disabled} min="1024" max=${10*1024*1024} value=${form.response_body_read_limit_bytes} onChange=${e=>upd({response_body_read_limit_bytes:e.target.value})}/></div>
+    <div className="divider"/>
+    <div className="form-section-title">Scope</div>
+    <div className="two-col">
+      <div className="field"><label>Allowed schemes</label>
+        <input type="text" disabled=${disabled} value=${form.allowed_schemes} onChange=${e=>upd({allowed_schemes:e.target.value})}/></div>
+      <div className="field"><label>Blocked headers</label>
+        <input type="text" disabled=${disabled} value=${form.blocked_headers} onChange=${e=>upd({blocked_headers:e.target.value})}/></div>
+    </div>
+    <label className="toggle-row">
+      <input type="checkbox" disabled=${disabled} checked=${form.follow_redirects} onChange=${e=>upd({follow_redirects:e.target.checked})}/>
+      <span>Follow redirects</span>
+    </label>
+    <label className="toggle-row">
+      <input type="checkbox" disabled=${disabled} checked=${form.allow_subdomains} onChange=${e=>upd({allow_subdomains:e.target.checked})}/>
+      <span>Allow subdomains of the crawled host</span>
+    </label>
+    <label className="toggle-row">
+      <input type="checkbox" disabled=${disabled} checked=${form.require_approval_for_destructive} onChange=${e=>upd({require_approval_for_destructive:e.target.checked})}/>
+      <span>Require approval for destructive mode</span>
+    </label>
+    <div className="divider"/>
+    <div className="form-section-title">Methods</div>
+    <div className="two-col">
+      <div className="field"><label>Passive</label>
+        <input type="text" disabled=${disabled} value=${form.methods_passive} onChange=${e=>upd({methods_passive:e.target.value})}/></div>
+      <div className="field"><label>Safe active</label>
+        <input type="text" disabled=${disabled} value=${form.methods_safe_active} onChange=${e=>upd({methods_safe_active:e.target.value})}/></div>
+      <div className="field"><label>Aggressive</label>
+        <input type="text" disabled=${disabled} value=${form.methods_aggressive} onChange=${e=>upd({methods_aggressive:e.target.value})}/></div>
+      <div className="field"><label>Destructive</label>
+        <input type="text" disabled=${disabled} value=${form.methods_destructive} onChange=${e=>upd({methods_destructive:e.target.value})}/></div>
+    </div>`;
+}
+
+function ScannerPolicySettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(policyToForm(await api.getScannerPolicy())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedPolicy = await api.upsertScannerPolicy(policyPayload(form));
+      setForm(policyToForm(savedPolicy));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <${ScannerPolicyFields} form=${form} upd=${upd}/>
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save policy"}</button>
+        </div>
+      </form>`}`;
+}
+
+function RunScannerPolicyPanel({ runId, run, scanStatus, validateStatus, onSaved }) {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const disabled = run?.status === "running" || scanStatus?.status === "running" || validateStatus?.status === "running";
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(policyToForm(await api.getRunScanPolicy(runId))); }
+      catch(e) { setError(e.message); }
+    })();
+  }, [runId]);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const policy = await api.updateRunScanPolicy(runId, policyPayload(form));
+      setForm(policyToForm(policy));
+      setSaved(true);
+      onSaved?.(policy);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return html`
+    <div className="policy-panel">
+      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+      ${error&&html`<div className="alert error">${error}</div>`}
+      ${disabled&&html`<div className="alert" style=${{marginBottom:12}}>Scan policy is locked while crawl, scan, or validation is running.</div>`}
+      ${form&&html`
+        <form className="card" onSubmit=${onSubmit}>
+          <div className="policy-summary-row">
+            <span className=${"scan-mode-badge mode-"+form.scan_mode}>${scanModeLabel(form.scan_mode)}</span>
+            <span className="subtle">${form.max_probes_per_page} probes/page · ${form.request_timeout_s}s timeout · ${form.min_delay_s}s delay</span>
+          </div>
+          <div className="divider"/>
+          <${ScannerPolicyFields} form=${form} upd=${upd} disabled=${disabled}/>
+          <div className="divider"/>
+          <div className="row spread">
+            <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+            <button type="submit" className="btn" disabled=${saving||disabled}>${saving?"Saving…":"Save run policy"}</button>
+          </div>
+        </form>`}
+    </div>`;
+}
+
 const PROVIDER_LABELS = {
   anthropic:"Anthropic", openai:"OpenAI",
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
@@ -1451,6 +1765,7 @@ const BASE_URL_HINTS = {
 };
 
 function SettingsPage() {
+  const [settingsTab, setSettingsTab] = useState("llm");
   const [form, setForm]           = useState(null);
   const [dms, setDMs]             = useState({});
   const [customModel, setCustomModel] = useState(false);
@@ -1494,11 +1809,16 @@ function SettingsPage() {
   const needsKey     = form&&["anthropic","openai","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
-    <div className="topbar"><div className="topbar-title">LLM Settings</div></div>
-    <div className="content">
-      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
-      ${error&&html`<div className="alert error">${error}</div>`}
-      ${form&&html`
+    <div className="topbar"><div className="topbar-title">Settings</div></div>
+    <div className="content scroll-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn"+(settingsTab==="llm"?" active":"")} onClick=${()=>setSettingsTab("llm")}>LLM</button>
+        <button className=${"tab-btn"+(settingsTab==="scanner"?" active":"")} onClick=${()=>setSettingsTab("scanner")}>Scanner Policy</button>
+      </div>
+      ${settingsTab==="llm" && html`
+        ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+        ${error&&html`<div className="alert error">${error}</div>`}
+        ${form&&html`
         <form className="card" onSubmit=${onSubmit}>
           <div className="form-section-title">Provider</div>
           <div className="provider-grid">
@@ -1562,7 +1882,8 @@ function SettingsPage() {
             <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
             <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save settings"}</button>
           </div>
-        </form>`}
+        </form>`}`}
+      ${settingsTab==="scanner" && html`<${ScannerPolicySettings}/>`}
     </div>`;
 }
 
