@@ -31,6 +31,15 @@ def test_create_run_custom_name(client: TestClient):
     assert r.json()["name"] == "Initial recon"
 
 
+def test_create_run_with_scan_mode(client: TestClient):
+    site = _make_site(client)
+    r = _make_run(client, site["id"], scan_mode="aggressive")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["scan_mode"] == "aggressive"
+    assert data["scanner_policy"]["scan_mode"] == "aggressive"
+
+
 def test_create_run_auto_increments(client: TestClient):
     site = _make_site(client)
     _make_run(client, site["id"])
@@ -85,6 +94,46 @@ def test_create_run_invalid_max_pages(client: TestClient):
     assert r.status_code == 422
 
 
+def test_create_run_invalid_scan_mode(client: TestClient):
+    site = _make_site(client)
+    r = _make_run(client, site["id"], scan_mode="reckless")
+    assert r.status_code == 422
+
+
+def test_run_scan_policy_snapshots_global_defaults(client: TestClient):
+    policy = client.get("/api/settings/scanner-policy").json()
+    policy["max_probes_per_page"] = 7
+    client.put("/api/settings/scanner-policy", json=policy)
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    r = client.get(f"/api/test-runs/{run['id']}/scan/policy")
+    assert r.status_code == 200
+    assert r.json()["source"] == "run_snapshot"
+    assert r.json()["max_probes_per_page"] == 7
+
+    policy["max_probes_per_page"] = 30
+    client.put("/api/settings/scanner-policy", json=policy)
+    r2 = client.get(f"/api/test-runs/{run['id']}/scan/policy")
+    assert r2.json()["max_probes_per_page"] == 7
+
+
+def test_update_run_scan_policy(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    policy = client.get(f"/api/test-runs/{run['id']}/scan/policy").json()
+    policy["scan_mode"] = "passive"
+    policy["max_probes_per_page"] = 0
+    r = client.patch(f"/api/test-runs/{run['id']}/scan/policy", json=policy)
+    assert r.status_code == 200
+    assert r.json()["scan_mode"] == "passive"
+    assert r.json()["max_probes_per_page"] == 0
+
+    run2 = client.get(f"/api/test-runs/{run['id']}").json()
+    assert run2["scan_mode"] == "passive"
+    assert run2["scanner_policy"]["max_probes_per_page"] == 0
+
+
 # ── Start without LLM config ──────────────────────────────────────────────────
 
 def test_start_run_requires_llm_config(client: TestClient):
@@ -102,6 +151,30 @@ def test_stop_pending_run_rejected(client: TestClient):
     run = _make_run(client, site["id"]).json()
     r = client.post(f"/api/test-runs/{run['id']}/stop")
     assert r.status_code == 409
+
+
+def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    stopped_runs = []
+
+    monkeypatch.setattr(scan_api.validator_svc, "request_stop", lambda run_id: stopped_runs.append(run_id) or True)
+    monkeypatch.setattr(scan_api.validator_svc, "get_validation_status", lambda run_id: {
+        "total": 0,
+        "confirmed": 0,
+        "false_positives": 0,
+        "validating": 0,
+        "unvalidated": 0,
+        "status": "stopped",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/validate/stop")
+
+    assert r.status_code == 200
+    assert stopped_runs == [run["id"]]
+    assert r.json()["status"] == "stopped"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────

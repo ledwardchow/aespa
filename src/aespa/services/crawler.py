@@ -30,6 +30,12 @@ from aespa.services.settings import get_llm_config
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
 
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
@@ -146,6 +152,15 @@ async def _do_crawl(run_id: int) -> None:
         if isinstance(r, Exception):
             log.error("Crawl task raised: %s", r)
 
+    await _reconcile_direct_access(
+        run_id=run_id,
+        creds=creds,
+        base_url=base_url,
+        login_url=login_url,
+        requires_auth=requires_auth,
+        llm_cfg=llm_cfg,
+    )
+
     # OR-merge page categories from all credential views into each CrawledPage.
     _merge_all_categories(run_id)
 
@@ -196,11 +211,7 @@ async def _crawl_as_credential(
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
+            user_agent=_UA,
             ignore_https_errors=True,
         )
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
@@ -224,6 +235,10 @@ async def _crawl_as_credential(
 
             url, depth, parent_id = queue.popleft()
             norm = _norm(url)
+
+            if requires_auth and _is_session_ending_url(url):
+                log.info("Skipping session-ending URL during crawl: %s", url)
+                continue
 
             # ── Reserve or look up page in shared state ───────────────────────
             page_id: int
@@ -254,11 +269,13 @@ async def _crawl_as_credential(
 
             # ── Navigate ──────────────────────────────────────────────────────
             try:
-                resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=8_000)
-                except Exception:
-                    pass
+                resp = await _goto_with_auth_recovery(
+                    page, url,
+                    requires_auth=requires_auth,
+                    credential=cred,
+                    login_url=login_url,
+                    username=username,
+                )
             except Exception as nav_err:
                 if is_first:
                     _update_page(page_id, status="failed", error_message=str(nav_err)[:500])
@@ -293,11 +310,7 @@ async def _crawl_as_credential(
                         shared.crawled_norms[norm_final] = page_id
 
             # ── DOM-based accessibility check (login form = not accessible) ───
-            try:
-                pw_loc = page.locator("input[type='password']").first
-                on_login = (await pw_loc.count() > 0) and (await pw_loc.is_visible())
-            except Exception:
-                on_login = False
+            on_login = await _page_requires_login(page, login_url)
 
             if on_login:
                 if is_first:
@@ -412,14 +425,20 @@ async def _crawl_as_credential(
 
             # ── Enqueue links ─────────────────────────────────────────────────
             if depth < max_depth:
-                for sugg_url in reversed(suggested):
+                filtered_suggested = _filter_suggested_links(suggested, same_domain_links, base_netloc)
+                if len(filtered_suggested) < len(suggested):
+                    log.info(
+                        "Dropped %d LLM-suggested crawl URL(s) that were not observed as page links for %s",
+                        len(suggested) - len(filtered_suggested), final_url,
+                    )
+                for sugg_url in reversed(filtered_suggested):
                     n = _norm(sugg_url)
-                    if n not in queued and _same_domain(sugg_url, base_netloc):
+                    if n not in queued and _same_domain(sugg_url, base_netloc) and not _is_session_ending_url(sugg_url):
                         queued.add(n)
                         queue.appendleft((sugg_url, depth + 1, page_id))
-                for link_url, _ in same_domain_links:
+                for link_url, link_text in same_domain_links:
                     n = _norm(link_url)
-                    if n not in queued and _same_domain(link_url, base_netloc):
+                    if n not in queued and _same_domain(link_url, base_netloc) and not _is_session_ending_url(link_url, link_text):
                         queued.add(n)
                         queue.append((link_url, depth + 1, page_id))
 
@@ -472,6 +491,13 @@ def _save_credential_view(
     cats: dict,
 ) -> None:
     with Session(get_engine()) as s:
+        existing = s.exec(
+            select(PageCredentialView)
+            .where(PageCredentialView.page_id == page_id)
+            .where(PageCredentialView.credential_id == credential_id)
+        ).first()
+        if existing:
+            return
         view = PageCredentialView(
             page_id=page_id,
             test_run_id=run_id,
@@ -487,6 +513,243 @@ def _save_credential_view(
         )
         s.add(view)
         s.commit()
+
+
+async def _reconcile_direct_access(
+    *,
+    run_id: int,
+    creds: list,
+    base_url: str,
+    login_url: str,
+    requires_auth: bool,
+    llm_cfg,
+) -> None:
+    """Mark pages as accessible when a credential can load a known URL directly.
+
+    Crawl discovery answers "did this user find a link here?". Authorization needs a
+    separate direct-load check because shared URLs can render user-specific content.
+    """
+    if not requires_auth or len(creds) < 2:
+        return
+
+    from playwright.async_api import async_playwright
+
+    with Session(get_engine()) as s:
+        pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.status == "crawled")
+        ).all()
+        page_rows = [
+            (p.id, p.url, p.title or "", p.page_text or "", json.loads(p.accessible_by or "[]"))
+            for p in pages
+            if p.id is not None and p.url
+        ]
+
+    if not page_rows:
+        return
+
+    log.info("Reconciling direct page access across %d credential(s)", len(creds))
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            for cred in creds:
+                if run_id in _stop_requested:
+                    break
+                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+                traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
+                page = await ctx.new_page()
+                try:
+                    try:
+                        await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+                    except Exception:
+                        pass
+                    await _authenticate(page, login_url, cred)
+
+                    for page_id, page_url, page_title, page_text, accessible_by in page_rows:
+                        if run_id in _stop_requested:
+                            break
+                        if cred.id in accessible_by:
+                            continue
+                        if _is_session_ending_url(page_url):
+                            continue
+                        accessible, title, text, screenshot_b64 = await _direct_load_accessible(
+                            page,
+                            page_url,
+                            requires_auth=requires_auth,
+                            credential=cred,
+                            login_url=login_url,
+                            username=cred.username,
+                        )
+                        if not accessible:
+                            continue
+                        access_ok, access_reason = await _confirm_direct_page_access(
+                            llm_cfg=llm_cfg,
+                            url=page_url,
+                            original_title=page_title,
+                            original_text=page_text,
+                            candidate_title=title,
+                            candidate_text=text,
+                            candidate_username=cred.username,
+                            screenshot_b64=screenshot_b64,
+                        )
+                        if not access_ok:
+                            log.info(
+                                "  Direct access rejected: user=%s page=%s reason=%s",
+                                cred.username, page_url, access_reason,
+                            )
+                            continue
+                        log.info("  Direct access confirmed: user=%s page=%s", cred.username, page_url)
+                        _save_credential_view(
+                            page_id, run_id, cred.id, cred.username,
+                            screenshot_b64,
+                            f"[Direct access reconciliation] {access_reason}",
+                            text[:10_000],
+                            {},
+                        )
+                        _update_accessible_by(page_id, cred.id)
+                        accessible_by.append(cred.id)
+                        events_svc.emit(run_id, {
+                            "type": "node_accessible_by",
+                            "page_id": page_id,
+                            "username": cred.username,
+                        })
+                finally:
+                    await ctx.close()
+        finally:
+            await browser.close()
+
+
+async def _direct_load_accessible(
+    page,
+    url: str,
+    *,
+    requires_auth: bool = False,
+    credential=None,
+    login_url: str = "",
+    username: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
+    try:
+        resp = await _goto_with_auth_recovery(
+            page,
+            url,
+            requires_auth=requires_auth,
+            credential=credential,
+            login_url=login_url,
+            username=username,
+        )
+    except Exception:
+        return False, "", "", None
+
+    if resp is not None and resp.status >= 400:
+        return False, "", "", None
+
+    try:
+        pw_loc = page.locator("input[type='password']").first
+        on_login = (await pw_loc.count() > 0) and (await pw_loc.is_visible())
+    except Exception:
+        on_login = False
+    if on_login:
+        return False, "", "", None
+
+    await page.wait_for_timeout(800)
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        text = await page.evaluate("() => document.body.innerText")
+    except Exception:
+        text = ""
+    if _looks_like_login_text(text) or not text.strip():
+        return False, title, text, None
+    screenshot_b64: Optional[str] = None
+    try:
+        raw = await page.screenshot(type="png", full_page=False)
+        screenshot_b64 = base64.b64encode(raw).decode()
+    except Exception:
+        pass
+    return True, title, text, screenshot_b64
+
+
+async def _confirm_direct_page_access(
+    *,
+    llm_cfg,
+    url: str,
+    original_title: str,
+    original_text: str,
+    candidate_title: str,
+    candidate_text: str,
+    candidate_username: str,
+    screenshot_b64: Optional[str],
+) -> tuple[bool, str]:
+    if _looks_like_access_failure_text(candidate_text):
+        return False, "The direct-load response contains an access failure or loading error message."
+    if not candidate_text.strip():
+        return False, "The direct-load response did not contain meaningful page text."
+    try:
+        verdict = await llm_svc.judge_page_access(
+            llm_cfg,
+            url=url,
+            original_title=original_title,
+            original_text=original_text,
+            candidate_title=candidate_title,
+            candidate_text=candidate_text,
+            candidate_username=candidate_username,
+            screenshot_b64=screenshot_b64,
+        )
+    except Exception as exc:
+        log.warning("  LLM access reconciliation failed for %s as %s: %s", url, candidate_username, exc)
+        return False, "Access reconciliation could not get a reliable LLM judgement."
+
+    accessible = bool(verdict.get("accessible"))
+    reasoning = str(verdict.get("reasoning") or "No reasoning returned.")[:1000]
+    return accessible, reasoning
+
+
+def _looks_like_login_text(text: str) -> bool:
+    body = (text or "").lower()[:3000]
+    login_hits = sum(
+        1 for marker in ("login", "log in", "sign in", "password", "forgot password")
+        if marker in body
+    )
+    denied_hits = sum(
+        1 for marker in ("access denied", "forbidden", "unauthorized", "unauthorised")
+        if marker in body
+    )
+    return login_hits >= 2 or denied_hits >= 1
+
+
+def _looks_like_access_failure_text(text: str) -> bool:
+    body = (text or "").lower()[:5000]
+    return any(marker in body for marker in (
+        "could not load", "couldn't load", "failed to load", "unable to load",
+        "cannot load", "can't load", "not authorized", "not authorised",
+        "unauthorized", "unauthorised", "access denied", "forbidden",
+        "permission denied", "does not have access", "no access", "not found",
+        "account not found", "details unavailable", "details could not be loaded",
+    ))
+
+
+def _looks_like_denied_or_login_wall_text(text: str) -> bool:
+    body = (text or "").lower()[:3000]
+    denied_hits = sum(
+        1 for marker in (
+            "access denied", "forbidden", "unauthorized", "unauthorised",
+            "session expired", "session has expired",
+        )
+        if marker in body
+    )
+    if denied_hits:
+        return True
+    login_wall_hits = sum(
+        1 for marker in (
+            "login required", "please log in", "please sign in",
+            "you must log in", "you must sign in", "authentication required",
+        )
+        if marker in body
+    )
+    return login_wall_hits >= 1
 
 
 def _merge_all_categories(run_id: int) -> None:
@@ -602,6 +865,26 @@ def _same_domain(url: str, base_netloc: str) -> bool:
         return False
 
 
+def _filter_suggested_links(
+    suggested: list[str],
+    observed_links: list[tuple[str, str]],
+    base_netloc: str,
+) -> list[str]:
+    observed_by_norm = {
+        _norm(url): url
+        for url, link_text in observed_links
+        if _same_domain(url, base_netloc) and not _is_session_ending_url(url, link_text)
+    }
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for url in suggested:
+        norm = _norm(url)
+        if norm in observed_by_norm and norm not in seen:
+            filtered.append(observed_by_norm[norm])
+            seen.add(norm)
+    return filtered
+
+
 def _in_base_scope(url: str, base_netloc: str, base_path: str) -> bool:
     if not _same_domain(url, base_netloc):
         return False
@@ -617,6 +900,84 @@ def _is_api_page(url: str, text: str) -> bool:
         return True
     stripped = (text or "").lstrip()
     return len(stripped) > 2 and stripped[0] in ("{", "[")
+
+
+def _is_session_ending_url(url: str, link_text: str | None = None) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        parsed = None
+    haystack = " ".join([
+        (parsed.path if parsed else url) or "",
+        (parsed.query if parsed else "") or "",
+        link_text or "",
+    ]).lower()
+    compact = "".join(ch for ch in haystack if ch.isalnum())
+    return any(marker in compact for marker in (
+        "logout", "signout", "signoff", "logoff",
+        "endsession", "destroysession", "invalidatesession",
+    ))
+
+
+def _same_url_without_fragment(left: str, right: str) -> bool:
+    try:
+        l = urlparse(left)
+        r = urlparse(right)
+        return (
+            l.scheme.lower(), l.netloc.lower(), l.path.rstrip("/") or "/", l.query,
+        ) == (
+            r.scheme.lower(), r.netloc.lower(), r.path.rstrip("/") or "/", r.query,
+        )
+    except Exception:
+        return False
+
+
+def _response_suggests_session_dropped(resp) -> bool:
+    return resp is not None and resp.status in (401, 419, 440)
+
+
+async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
+    try:
+        pw_loc = page.locator("input[type='password']").first
+        if (await pw_loc.count() > 0) and (await pw_loc.is_visible()):
+            return True
+    except Exception:
+        pass
+    try:
+        text = await page.evaluate("() => document.body.innerText")
+    except Exception:
+        text = ""
+    return _looks_like_denied_or_login_wall_text(text)
+
+
+async def _goto_with_auth_recovery(
+    page,
+    url: str,
+    *,
+    requires_auth: bool,
+    credential,
+    login_url: str,
+    username: Optional[str],
+):
+    response = None
+    for attempt in range(2):
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8_000)
+        except Exception:
+            pass
+        if not requires_auth or credential is None or not login_url:
+            return response
+        session_dropped = _response_suggests_session_dropped(response) or await _page_requires_login(page, login_url)
+        if not session_dropped:
+            return response
+        if attempt == 0:
+            log.info("Session appears to have dropped for user=%s at %s; re-authenticating and retrying", username, url)
+            await _authenticate(page, login_url, credential)
+            continue
+        log.warning("Session still appears unauthenticated after retry for user=%s at %s", username, url)
+        return response
+    return response
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
