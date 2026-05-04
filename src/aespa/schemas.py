@@ -329,6 +329,9 @@ class TestRunSummary(BaseModel):
     max_depth: int
     max_pages: int
     scan_mode: str = "safe_active"
+    scan_status: str = "idle"
+    scan_total_pages: int = 0
+    scan_pages_done: int = 0
     pages_discovered: int
     current_url: str | None
     created_at: datetime
