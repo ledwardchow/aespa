@@ -151,6 +151,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
 class LLMConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    name: str = Field(default="Default", min_length=1, max_length=120)
     provider: LLMProviderLiteral = "anthropic"
     api_key: str | None = None
     base_url: str | None = None
@@ -190,6 +191,9 @@ class LLMConfigIn(BaseModel):
 class LLMConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    id: int
+    name: str
+    is_active: bool
     provider: str
     api_key: str | None
     base_url: str | None

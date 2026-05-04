@@ -54,11 +54,13 @@ class LLMProvider(str, Enum):
 
 
 class LLMConfig(SQLModel, table=True):
-    """Singleton row (id always = 1)."""
+    """Saved LLM settings profile."""
 
     __tablename__ = "llm_config"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(default="Default", index=True)
+    is_active: bool = Field(default=False, index=True)
     provider: str = Field(default=LLMProvider.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
