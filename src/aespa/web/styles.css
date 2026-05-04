@@ -974,6 +974,16 @@ legend {
   animation: pulse-ring 1.4s ease-out infinite;
 }
 
+.node-scan-pulse {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  pointer-events: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulse-ring 1.15s ease-out infinite;
+}
+
 /* ── Tab bar ────────────────────────────────────────────────── */
 
 .tab-bar {
