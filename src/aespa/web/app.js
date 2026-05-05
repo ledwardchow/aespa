@@ -15,6 +15,11 @@ const api = {
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
+  listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
+  createLLMProfile: (b)           => req("/api/settings/llm/profiles", { method:"POST", body:b }),
+  updateLLMProfile: (id,b)        => req(`/api/settings/llm/profiles/${id}`, { method:"PUT", body:b }),
+  activateLLMProfile: (id)        => req(`/api/settings/llm/profiles/${id}/activate`, { method:"POST" }),
+  deleteLLMProfile: (id)          => req(`/api/settings/llm/profiles/${id}`, { method:"DELETE" }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
@@ -350,14 +355,6 @@ function SiteDetail({ siteId }) {
     catch(e) { setError(e.message); }
   };
 
-  const STATUS_BADGE = {
-    pending:  html`<span className="badge">pending</span>`,
-    running:  html`<span className="badge running">running</span>`,
-    complete: html`<span className="badge ok">complete</span>`,
-    failed:   html`<span className="badge danger">failed</span>`,
-    stopped:  html`<span className="badge">stopped</span>`,
-  };
-
   return html`
     <div className="topbar">
       <div className="topbar-title">
@@ -408,7 +405,7 @@ function SiteDetail({ siteId }) {
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
                   <td><strong>${r.name}</strong></td>
-                  <td>${STATUS_BADGE[r.status]||r.status}</td>
+                  <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
                   <td className="subtle">${fmtDate(r.created_at)}</td>
                   <td>
@@ -604,6 +601,27 @@ const userColor = (d, credentials) => {
   return idx >= 0 ? USER_PALETTE[idx % USER_PALETTE.length] : USER_NONE_COLOR;
 };
 
+function runWorkflowStatus(run, opts = {}) {
+  if (!run) return { key:"pending", label:"pending" };
+  const scanStatus = opts.scanStatus || run.scan_status || "idle";
+  if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
+  if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
+  if (run.status === "running") return { key:"running", label:"crawling" };
+  if (run.status === "failed") return { key:"danger", label:"crawl failed" };
+  if (scanStatus === "running") return { key:"running", label:"scanning" };
+  if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
+  if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
+  if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
+  if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
+  if (run.status === "complete") return { key:"partial", label:"crawl complete" };
+  return { key:"neutral", label:run.status || "pending" };
+}
+
+const workflowBadge = (run, opts = {}) => {
+  const st = runWorkflowStatus(run, opts);
+  return html`<span className=${"badge " + st.key}>${st.label}</span>`;
+};
+
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
   const [graph, setGraph]       = useState(null);
@@ -621,6 +639,8 @@ function TestRunDetail({ runId }) {
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
+  const [crawlStopRequested, setCrawlStopRequested] = useState(false);
+  const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
@@ -674,6 +694,7 @@ function TestRunDetail({ runId }) {
         api.getGraph(runId).then(setGraph).catch(()=>{});
       } else if (evt.type === "run_update") {
         setRun(prev => prev ? { ...prev, status: evt.status ?? prev.status, pages_discovered: evt.pages_discovered ?? prev.pages_discovered } : prev);
+        if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
         // crawl_progress is still used for the done flag
@@ -697,6 +718,7 @@ function TestRunDetail({ runId }) {
         });
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
+        if (evt.status && evt.status !== "running") setScanStopRequested(false);
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -712,26 +734,36 @@ function TestRunDetail({ runId }) {
   }, [runId]);
 
   // Poll run metadata (including per_user_progress current URLs) while crawling
+  // or while the backend is unwinding after a stop request.
   useEffect(() => {
-    if (run?.status !== "running") return;
+    if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
-      api.getRun(runId).then(r => setRun(r)).catch(() => {});
+      api.getRun(runId).then(r => {
+        setRun(r);
+        if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
+      }).catch(() => {});
     }, 2000);
     return () => clearInterval(iv);
-  }, [run?.status, runId]);
+  }, [run?.status, runId, crawlStopRequested]);
 
-  // Poll findings while scan is running or on findings tab
+  // Poll findings/status while scan is running, stopping, or on findings tab.
   useEffect(() => {
-    const needsFindings = scanStatus?.status === "running" || activeTab === "findings";
+    const scanActive = scanStatus?.status === "running" || scanStopRequested;
+    const needsFindings = scanActive || activeTab === "findings";
     if (!needsFindings) return;
     const poll = () => {
       api.getFindings(runId).then(setFindings).catch(() => {});
-      if (!scanStatus) api.getScanStatus(runId).then(setScanStatus).catch(() => {});
+      if (scanActive || !scanStatus) {
+        api.getScanStatus(runId).then(s => {
+          setScanStatus(s);
+          if (scanStopRequested && s.status !== "running") setScanStopRequested(false);
+        }).catch(() => {});
+      }
     };
     poll();
     const iv = setInterval(poll, 4000);
     return () => clearInterval(iv);
-  }, [runId, scanStatus?.status, activeTab]);
+  }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
 
   // Poll validation status while validating is running
   useEffect(() => {
@@ -753,6 +785,11 @@ function TestRunDetail({ runId }) {
     api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
   }, [activeTab, runId]);
 
+  useEffect(() => {
+    if (activeTab !== "scan") return;
+    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+  }, [activeTab, runId]);
+
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
     const poll = async () => {
@@ -772,13 +809,15 @@ function TestRunDetail({ runId }) {
     const isActive = (
       activeTab === "traffic" ||
       run?.status === "running" ||
-      scanStatus?.status === "running"
+      scanStatus?.status === "running" ||
+      crawlStopRequested ||
+      scanStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, runId]);
+  }, [activeTab, run?.status, scanStatus?.status, runId, crawlStopRequested, scanStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
@@ -1004,6 +1043,7 @@ function TestRunDetail({ runId }) {
 
   const onStartScan = async () => {
     try {
+      setScanStopRequested(false);
       const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
@@ -1016,15 +1056,17 @@ function TestRunDetail({ runId }) {
         );
         if (!ok) return;
       }
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.startScan(runId);
       setScanStatus(s);
-    } catch(e) { setError(e.message); }
+    } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
   const onScanPage = async () => {
     if (!selectedNode || scopeBusy) return;
     setScopeBusy(true);
     try {
+      setScanStopRequested(false);
       const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
@@ -1037,6 +1079,7 @@ function TestRunDetail({ runId }) {
         );
         if (!ok) return;
       }
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.scanPage(runId, selectedNode.id);
       setScanStatus(s);
     } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
@@ -1090,9 +1133,12 @@ function TestRunDetail({ runId }) {
 
   const onStopScan = async () => {
     try {
+      setScanStopRequested(true);
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.stopScan(runId);
-      setScanStatus(s);
-    } catch(e) { setError(e.message); }
+      setScanStatus(prev => s.status === "running" ? { ...prev, ...s, status: "running" } : s);
+      if (s.status !== "running") setScanStopRequested(false);
+    } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
   const onEditSettings = () => {
@@ -1137,6 +1183,7 @@ function TestRunDetail({ runId }) {
 
   const onStart = async () => {
     try {
+      setCrawlStopRequested(false);
       const r = await api.startRun(runId);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
@@ -1145,21 +1192,44 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
   const onStop = async () => {
-    try { const r = await api.stopRun(runId); setRun(r); } catch(e) { setError(e.message); }
+    try {
+      setCrawlStopRequested(true);
+      const r = await api.stopRun(runId);
+      setRun(r);
+    } catch(e) {
+      setCrawlStopRequested(false);
+      setError(e.message);
+    }
   };
   const onRestart = async () => {
     if (!confirm("Delete all crawled pages for this run and start fresh?")) return;
     try {
+      setCrawlStopRequested(false);
+      setScanStopRequested(false);
       setGraph({nodes:[], links:[]});
       const r = await api.restartRun(runId);
       setRun({...r, status: "running", per_user_progress: {}});
     } catch(e) { setError(e.message); }
   };
 
-  const STATUS_COLOR = { pending:"var(--muted)", running:"var(--warn)", complete:"var(--ok)", failed:"var(--danger)", stopped:"var(--muted)" };
-  const canStart   = run && ["pending","stopped","failed","complete"].includes(run.status);
-  const canRestart = run && ["stopped","failed","complete"].includes(run.status);
-  const canStop    = run?.status === "running";
+  const effectiveScanStatus = scanStatus?.status || run?.scan_status || "idle";
+  const headerStatus = runWorkflowStatus(run, {
+    scanStatus: effectiveScanStatus,
+    crawlStopping: crawlStopRequested,
+    scanStopping: scanStopRequested,
+  });
+  const STATUS_COLOR = {
+    neutral:"var(--muted)",
+    pending:"var(--muted)",
+    running:"var(--warn)",
+    stopping:"var(--warn)",
+    partial:"var(--text-2)",
+    ok:"var(--ok)",
+    danger:"var(--danger)",
+  };
+  const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
+  const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
+  const canStop    = run?.status === "running" && !crawlStopRequested;
 
   return html`
     <div className="topbar">
@@ -1167,10 +1237,11 @@ function TestRunDetail({ runId }) {
         <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
         <span className="breadcrumb-sep"> / </span>
         ${run ? run.name : "…"}
-        ${run && html`<span className=${"run-status-badge"+(run.status==="running"?" running":"")} style=${{color:STATUS_COLOR[run.status]||"var(--muted)"}}>● ${run.status}</span>`}
+        ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
       </div>
       <div className="topbar-actions">
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
       </div>
     </div>
 
@@ -1202,9 +1273,11 @@ function TestRunDetail({ runId }) {
           </div>`}
         ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
-        ${activeTab==="scan" && scanStatus?.status==="running" && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan}>◼ Stop scan</button>`}
-        ${activeTab==="scan" && (scanStatus?.status==="idle"||scanStatus?.status==="complete"||scanStatus?.status==="stopped"||scanStatus?.status==null) && run?.status!=="running" && html`
+        ${activeTab==="scan" && effectiveScanStatus==="running" && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
+            ${scanStopRequested ? "◼ Stopping scan…" : "◼ Stop scan"}
+          </button>`}
+        ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
       </div>
 
@@ -1265,7 +1338,9 @@ function TestRunDetail({ runId }) {
                   <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
                 </div>
                 <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">${done} / ${total} pages scanned</span>
+                  <span className="scan-progress-counts">
+                    ${scanStopRequested ? "Stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
+                  </span>
                   ${scanStatus.findings_count > 0 && html`
                     <span className="scan-progress-findings">
                       ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
@@ -1279,8 +1354,10 @@ function TestRunDetail({ runId }) {
           }
           const credList = run.credentials || [];
           const multiUser = credList.length > 1;
-          // Overall progress bar — pages_discovered is the true total across all users
-          const overallPct = Math.min(100, (run.pages_discovered / run.max_pages) * 100);
+          // Overall progress reaches the cap while crawling, then fills once discovery is complete.
+          const overallPct = run.status === "complete"
+            ? 100
+            : Math.min(100, (run.pages_discovered / run.max_pages) * 100);
           const progressBar = (run.status === "running" || run.pages_discovered > 0) ? html`
             <div className="crawl-progress-bar">
               <div className="crawl-progress-fill" style=${{width: overallPct + "%"}}></div>
@@ -1437,8 +1514,9 @@ function TestRunDetail({ runId }) {
         <div className="findings-panel">
           <div className="findings-status-bar">
             ${scanStatus && html`
-              <span className=${"scan-status-badge scan-status-"+scanStatus.status}>
-                ${scanStatus.status==="running" ? "Scanning…" :
+              <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
+                ${scanStopRequested ? "Stopping scan…" :
+                  scanStatus.status==="running" ? "Scanning…" :
                   scanStatus.status==="complete" ? "Scan complete" :
                   scanStatus.status==="stopped"  ? "Scan stopped" :
                   scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
@@ -1813,6 +1891,7 @@ function RunScannerPolicyPanel({ runId, run, scanStatus, validateStatus, onSaved
 const PROVIDER_LABELS = {
   anthropic:"Anthropic", openai:"OpenAI",
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
+  openrouter:"OpenRouter",
   google:"Google Gemini",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry",
@@ -1820,6 +1899,7 @@ const PROVIDER_LABELS = {
 const PROVIDER_PLACEHOLDERS = {
   anthropic:"claude-opus-4-5", openai:"gpt-4.1",
   openai_compatible:"e.g. llama-3.1-8b-instruct",
+  openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
@@ -1835,124 +1915,211 @@ const BASE_URL_PLACEHOLDERS = {
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
-  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1",
+  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
 
-function SettingsPage() {
-  const [form, setForm]           = useState(null);
-  const [dms, setDMs]             = useState({});
+const DEFAULT_LLM_FORM = {
+  name:"Default", provider:"anthropic", api_key:"", base_url:"",
+  model:"claude-opus-4-5", max_tokens:4096, temperature:0, use_vision:false,
+};
+
+function llmProfileToForm(cfg) {
+  return cfg ? {
+    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"", base_url:cfg.base_url??"",
+    model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
+    use_vision:cfg.use_vision??false,
+  } : {...DEFAULT_LLM_FORM};
+}
+
+function llmPayload(form) {
+  const needsBaseUrl = ["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  return {
+    name:form.name.trim(),
+    provider:form.provider,
+    api_key:form.api_key.trim()||null,
+    base_url:needsBaseUrl?form.base_url.trim():null,
+    model:form.model.trim(),
+    max_tokens:Number(form.max_tokens),
+    temperature:Number(form.temperature),
+    use_vision:form.use_vision,
+  };
+}
+
+function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => llmProfileToForm(profile));
   const [customModel, setCustomModel] = useState(false);
-  const [saving, setSaving]       = useState(false);
-  const [saved, setSaved]         = useState(false);
-  const [error, setError]         = useState(null);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [cfg,dm] = await Promise.all([api.getLLMConfig(), api.getDefaultModels()]);
-        setDMs(dm);
-        setForm(cfg ? {
-          provider:cfg.provider, api_key:cfg.api_key??"", base_url:cfg.base_url??"",
-          model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
-          use_vision:cfg.use_vision??false,
-        } : { provider:"anthropic", api_key:"", base_url:"", model:"claude-opus-4-5", max_tokens:4096, temperature:0, use_vision:false });
-      } catch(e) { setError(e.message); }
-    })();
-  }, []);
-
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
   const changeProv = p => { const ms=dms[p]||[]; setCustomModel(false); upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
-    const needsBaseUrl = ["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
-    const payload = {
-      provider:form.provider, api_key:form.api_key.trim()||null,
-      base_url:needsBaseUrl?form.base_url.trim():null,
-      model:form.model.trim(), max_tokens:Number(form.max_tokens),
-      temperature:Number(form.temperature), use_vision:form.use_vision,
-    };
-    try { await api.upsertLLMConfig(payload); setSaved(true); }
-    catch(e) { setError(e.message); } finally { setSaving(false); }
+    try {
+      const payload = llmPayload(form);
+      const savedProfile = mode === "edit"
+        ? await api.updateLLMProfile(profile.id, payload)
+        : await api.createLLMProfile(payload);
+      setSaved(true);
+      onSaved?.(savedProfile);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
   const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","google","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
-    <div className="topbar"><div className="topbar-title">Settings</div></div>
+    ${error&&html`<div className="alert error">${error}</div>`}
+    <form className="card" onSubmit=${onSubmit}>
+      <div className="form-section-title">Profile</div>
+      <div className="field"><label>Name</label>
+        <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
+      <div className="divider"/>
+      <div className="form-section-title">Provider</div>
+      <div className="provider-grid">
+        ${Object.entries(PROVIDER_LABELS).map(([k,lbl])=>html`
+          <label key=${k} className=${"provider-card"+(form.provider===k?" selected":"")}>
+            <input type="radio" name="provider" value=${k} checked=${form.provider===k} onChange=${()=>changeProv(k)}/>
+            <span className="provider-name">${lbl}</span>
+          </label>`)}
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
+      ${needsBaseUrl&&html`
+        <div className="field">
+          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
+          <input type="url" required value=${form.base_url}
+            placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
+            onChange=${e=>upd({base_url:e.target.value})}/>
+          ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
+        </div>`}
+      ${needsKey&&html`
+        <div className="field"><label>API Key</label>
+          <input type="password" required value=${form.api_key}
+            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":""}
+            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
+      ${form.provider==="openai_compatible"&&html`
+        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+          <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
+            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
+      <div className="field"><label>Model</label>
+        ${models.length>0?html`
+          <div className="model-select-group">
+            <select className="select" value=${isCustom?"__custom__":form.model}
+              onChange=${e=>{
+                if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
+                else{setCustomModel(true);upd({model:""});}
+              }}>
+              ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
+              <option value="__custom__">Custom…</option>
+            </select>
+            ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
+          </div>`:html`
+          <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
+            onChange=${e=>upd({model:e.target.value})}/>`}
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Sampling</div>
+      <div className="two-col">
+        <div className="field"><label>Max tokens</label>
+          <input type="number" required min="1" max="32768" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+        <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
+          <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Vision</div>
+      <label className="toggle-row">
+        <input type="checkbox" checked=${form.use_vision} onChange=${e=>upd({use_vision:e.target.checked})}/>
+        <span>Include page screenshots in LLM prompts (requires vision-capable model)</span>
+      </label>
+      <div className="divider"/>
+      <div className="row spread">
+        <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+        <div className="row">
+          ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save profile":"Create profile"}</button>
+        </div>
+      </div>
+    </form>`;
+}
+
+function SettingsPage() {
+  const [profiles, setProfiles] = useState(null);
+  const [dms, setDMs] = useState({});
+  const [screen, setScreen] = useState("list");
+  const [editing, setEditing] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const [items,dm] = await Promise.all([api.listLLMProfiles(), api.getDefaultModels()]);
+      setProfiles(items);
+      setDMs(dm);
+      if (items.length === 0) { setScreen("new"); setEditing(null); }
+      else if (screen === "new" && profiles?.length === 0) { setScreen("list"); }
+    } catch(e) { setError(e.message); }
+  }, [screen, profiles?.length]);
+
+  useEffect(() => { load(); }, []);
+
+  const onSaved = async () => { await load(); setScreen("list"); setEditing(null); };
+  const onEdit = profile => { setEditing(profile); setScreen("edit"); setError(null); };
+  const onNew = () => { setEditing(null); setScreen("new"); setError(null); };
+  const onCancel = () => { setScreen(profiles?.length ? "list" : "new"); setEditing(null); setError(null); };
+  const onActivate = async (profile) => {
+    setBusyId(profile.id); setError(null);
+    try { await api.activateLLMProfile(profile.id); await load(); }
+    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  };
+  const onDelete = async (profile) => {
+    if (!confirm(`Delete LLM settings profile "${profile.name}"?`)) return;
+    setBusyId(profile.id); setError(null);
+    try { await api.deleteLLMProfile(profile.id); await load(); }
+    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  };
+
+  const title = screen === "new" ? "New LLM Settings Profile" : screen === "edit" ? "Edit LLM Settings Profile" : "LLM Settings";
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">${title}</div>
+      ${screen==="list"&&html`<div className="topbar-actions"><button className="btn" onClick=${onNew}>New profile</button></div>`}
+    </div>
     <div className="content scroll-content">
-      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+      ${!profiles&&!error&&html`<div className="subtle">Loading…</div>`}
       ${error&&html`<div className="alert error">${error}</div>`}
-      ${form&&html`
-        <form className="card" onSubmit=${onSubmit}>
-          <div className="form-section-title">Provider</div>
-          <div className="provider-grid">
-            ${Object.entries(PROVIDER_LABELS).map(([k,lbl])=>html`
-              <label key=${k} className=${"provider-card"+(form.provider===k?" selected":"")}>
-                <input type="radio" name="provider" value=${k} checked=${form.provider===k} onChange=${()=>changeProv(k)}/>
-                <span className="provider-name">${lbl}</span>
-              </label>`)}
-          </div>
-          <div className="divider"/>
-          <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
-          ${needsBaseUrl&&html`
-            <div className="field">
-              <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
-              <input type="url" required value=${form.base_url}
-                placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
-                onChange=${e=>upd({base_url:e.target.value})}/>
-              ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
-            </div>`}
-          ${needsKey&&html`
-            <div className="field"><label>API Key</label>
-              <input type="password" required value=${form.api_key}
-                placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":""}
-                onChange=${e=>upd({api_key:e.target.value})}/></div>`}
-          ${form.provider==="openai_compatible"&&html`
-            <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-              <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
-                onChange=${e=>upd({api_key:e.target.value})}/></div>`}
-          <div className="field"><label>Model</label>
-            ${models.length>0?html`
-              <div className="model-select-group">
-                <select className="select" value=${isCustom?"__custom__":form.model}
-                  onChange=${e=>{
-                    if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
-                    else{setCustomModel(true);upd({model:""});}
-                  }}>
-                  ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
-                  <option value="__custom__">Custom…</option>
-                </select>
-                ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
-              </div>`:html`
-              <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
-                onChange=${e=>upd({model:e.target.value})}/>`}
-          </div>
-          <div className="divider"/>
-          <div className="form-section-title">Sampling</div>
-          <div className="two-col">
-            <div className="field"><label>Max tokens</label>
-              <input type="number" required min="1" max="32768" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
-            <div className="field"><label>Temperature <span className="field-hint-inline">(0–2)</span></label>
-              <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
-          </div>
-          <div className="divider"/>
-          <div className="form-section-title">Vision</div>
-          <label className="toggle-row">
-            <input type="checkbox" checked=${form.use_vision} onChange=${e=>upd({use_vision:e.target.checked})}/>
-            <span>Include page screenshots in LLM prompts (requires vision-capable model)</span>
-          </label>
-          <div className="divider"/>
-          <div className="row spread">
-            <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
-            <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save settings"}</button>
-          </div>
-        </form>`}
+      ${profiles&&screen==="list"&&html`
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              ${profiles.map(p=>html`
+                <tr key=${p.id}>
+                  <td><strong>${p.name}</strong></td>
+                  <td>${PROVIDER_LABELS[p.provider]||p.provider}</td>
+                  <td className="mono">${p.model}</td>
+                  <td>${p.use_vision?"On":"Off"}</td>
+                  <td>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</td>
+                  <td>
+                    <div className="row" style=${{justifyContent:"flex-end"}}>
+                      ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
+                      <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                      <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+      ${profiles&&screen==="new"&&html`<${LLMProfileForm} mode="new" dms=${dms} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
+      ${profiles&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} dms=${dms} onSaved=${onSaved} onCancel=${onCancel}/>`}
     </div>`;
 }
 
