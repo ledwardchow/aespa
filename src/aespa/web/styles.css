@@ -665,6 +665,7 @@ legend {
 /* Validation badges */
 .val-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
 .val-confirmed  { background: rgba(63,207,112,0.15); color: var(--ok); }
+.val-unconfirmed { background: rgba(245,166,35,0.15); color: var(--warn); }
 .val-fp         { background: rgba(107,118,145,0.2); color: var(--muted); }
 .val-validating { background: rgba(245,166,35,0.15); color: var(--warn); animation: val-pulse 1.2s ease-in-out infinite; }
 @keyframes val-pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
@@ -677,6 +678,7 @@ legend {
 /* Validation note in evidence panel */
 .finding-validation-note { padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
 .val-note-confirmed    { background: rgba(63,207,112,0.07); color: var(--ok); }
+.val-note-unconfirmed  { background: rgba(245,166,35,0.08); color: var(--warn); }
 .val-note-false_positive { background: rgba(107,118,145,0.12); color: var(--muted); }
 .scan-node-status { display: inline-block; margin-left: 10px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: capitalize; }
 .view-toggle { display:flex; gap:2px; background:var(--panel-2); border-radius:6px; padding:2px; }
