@@ -1354,8 +1354,10 @@ function TestRunDetail({ runId }) {
           }
           const credList = run.credentials || [];
           const multiUser = credList.length > 1;
-          // Overall progress bar — pages_discovered is the true total across all users
-          const overallPct = Math.min(100, (run.pages_discovered / run.max_pages) * 100);
+          // Overall progress reaches the cap while crawling, then fills once discovery is complete.
+          const overallPct = run.status === "complete"
+            ? 100
+            : Math.min(100, (run.pages_discovered / run.max_pages) * 100);
           const progressBar = (run.status === "running" || run.pages_discovered > 0) ? html`
             <div className="crawl-progress-bar">
               <div className="crawl-progress-fill" style=${{width: overallPct + "%"}}></div>
