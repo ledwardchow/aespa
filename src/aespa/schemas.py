@@ -446,6 +446,7 @@ class ValidationStatusOut(BaseModel):
     total: int
     confirmed: int
     false_positives: int
+    unconfirmed: int = 0
     validating: int
     unvalidated: int
     status: str   # idle | running | stopped | complete

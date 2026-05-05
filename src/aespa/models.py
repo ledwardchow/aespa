@@ -220,6 +220,6 @@ class ScanFinding(SQLModel, table=True):
     evidence: str = Field(default="")          # formatted request + response excerpt
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     # Validation fields
-    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | false_positive
+    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)
