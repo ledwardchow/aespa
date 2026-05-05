@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
-from aespa.models import Credential, Site
+from aespa.models import Credential, PageCredentialView, Site
 from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
 
 
@@ -117,6 +117,9 @@ def delete_site(session: Session, site_id: int) -> None:
         links = session.exec(select(PageLink).where(PageLink.test_run_id == run.id)).all()
         for lnk in links:
             session.delete(lnk)
+        views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run.id)).all()
+        for view in views:
+            session.delete(view)
         pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run.id)).all()
         for pg in pages:
             session.delete(pg)

@@ -14,7 +14,9 @@ def test_get_default_models(client: TestClient):
     assert "anthropic" in data
     assert "openai" in data
     assert "openai_compatible" in data
+    assert "openrouter" in data
     assert isinstance(data["anthropic"], list)
+    assert isinstance(data["openrouter"], list)
 
 
 def test_upsert_anthropic(client: TestClient):
@@ -74,6 +76,22 @@ def test_upsert_openai_compatible_strips_trailing_slash(client: TestClient):
     assert r.json()["base_url"] == "http://localhost:1234/v1"
 
 
+def test_upsert_openrouter(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openrouter",
+        "api_key": "sk-or-v1-test",
+        "model": "openrouter/owl-alpha",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "openrouter"
+    assert data["api_key"] == "sk-or-v1-test"
+    assert data["model"] == "openrouter/owl-alpha"
+    assert data["base_url"] is None
+
+
 def test_upsert_is_idempotent(client: TestClient):
     payload = {
         "provider": "anthropic",
@@ -96,6 +114,16 @@ def test_upsert_anthropic_missing_api_key(client: TestClient):
     r = client.put("/api/settings/llm", json={
         "provider": "anthropic",
         "model": "claude-opus-4-5",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_openrouter_missing_api_key(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "openrouter",
+        "model": "openrouter/owl-alpha",
         "max_tokens": 4096,
         "temperature": 0.0,
     })

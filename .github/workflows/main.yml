@@ -39,7 +39,9 @@ jobs:
           # Deploy via SSH
           ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
           cd "${{ env.DEPLOY_PATH }}" && \
-          git pull
+          git fetch origin
+          git reset --hard origin/deployed-to-staging
+          git clean -fd
           sudo systemctl restart aespa.service
           EOF
           

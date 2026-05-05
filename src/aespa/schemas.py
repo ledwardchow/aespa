@@ -87,7 +87,13 @@ class SiteDetail(BaseModel):
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderLiteral = Literal[
-    "anthropic", "openai", "openai_compatible", "google", "azure_openai", "azure_foundry"
+    "anthropic",
+    "openai",
+    "openai_compatible",
+    "openrouter",
+    "google",
+    "azure_openai",
+    "azure_foundry",
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
@@ -109,6 +115,12 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "o3-mini",
     ],
     "openai_compatible": [],
+    "openrouter": [
+        "openrouter/owl-alpha",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "poolside/laguna-xs.2:free",
+        "poolside/laguna-m.1:free",
+    ],
     "google": [
         "gemini-2.5-pro-preview-05-06",
         "gemini-2.5-flash-preview-04-17",
@@ -139,6 +151,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
 class LLMConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    name: str = Field(default="Default", min_length=1, max_length=120)
     provider: LLMProviderLiteral = "anthropic"
     api_key: str | None = None
     base_url: str | None = None
@@ -149,7 +162,14 @@ class LLMConfigIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_provider_fields(self) -> "LLMConfigIn":
-        _needs_key = ("anthropic", "openai", "google", "azure_openai", "azure_foundry")
+        _needs_key = (
+            "anthropic",
+            "openai",
+            "openrouter",
+            "google",
+            "azure_openai",
+            "azure_foundry",
+        )
         _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
@@ -171,6 +191,9 @@ class LLMConfigIn(BaseModel):
 class LLMConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    id: int
+    name: str
+    is_active: bool
     provider: str
     api_key: str | None
     base_url: str | None
@@ -306,6 +329,9 @@ class TestRunSummary(BaseModel):
     max_depth: int
     max_pages: int
     scan_mode: str = "safe_active"
+    scan_status: str = "idle"
+    scan_total_pages: int = 0
+    scan_pages_done: int = 0
     pages_discovered: int
     current_url: str | None
     created_at: datetime

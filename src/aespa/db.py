@@ -42,6 +42,8 @@ def init_db() -> None:
 
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
+    _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
+    _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
@@ -76,6 +78,15 @@ def _migrate(engine: Engine) -> None:
                 takes_input INTEGER,
                 has_object_ref INTEGER,
                 has_business_logic INTEGER
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text("""
+            DELETE FROM page_credential_view
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM crawled_page
+                WHERE crawled_page.id = page_credential_view.page_id
+                  AND crawled_page.test_run_id = page_credential_view.test_run_id
             )
         """))
         conn.commit()
