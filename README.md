@@ -80,13 +80,17 @@ Findings (run against OWASP Juice Shop)
 ![Screenshot](docs/images/juiceshop.png)
 
 
-## Dev comments:
+## Implementation details
 
-**Crawler/Site Map** - "mostly works"
+**Crawler/Site Map**
 * The crawler works by submitting the contents of the page to an LLM and asking it where to visit next. 
 * Multi-user crawling works by having multiple headless Chromium browsers via Playwright crawl at once, and matching page URLs. (this is going to be an issue for SPA apps which don't update the URL)
 
 **Scan** 
 * This works by grabbing auth tokens from each user via Playwright then the structure of pages from the site map, plus the information collected (i.e. uses authentication, has object references, takes user input etc) are sent to the LLM to determine what should be tested. The LLM generates HTTP probes in JSON format, which are then interpreted back to HTTP requests and sent by HTTPX. The responses are sent back to the LLM to determine whether there's a finding here.
-* I've been testing this with qwen3-coder-30b which is the only model that runs acceptably fast locally and the results aren't very good, it's mostly false positives. Need to adjust prompts + test with a better model
-* Testing raw prompts directly against qwen3-coder, I've observed that it doesn't give very good security testing advice in general, hah.
+
+## Recommended models
+* Qwen3.6-35b-A3b (Q3)
+* Qwen3.6-27b (q3_xxs)
+* Qwen3-coder-30b
+
