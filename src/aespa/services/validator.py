@@ -54,6 +54,7 @@ def get_validation_status(run_id: int) -> dict:
     total = len(findings)
     confirmed   = sum(1 for f in findings if f.validation_status == "confirmed")
     false_pos   = sum(1 for f in findings if f.validation_status == "false_positive")
+    unconfirmed = sum(1 for f in findings if f.validation_status == "unconfirmed")
     validating  = sum(1 for f in findings if f.validation_status == "validating")
     unvalidated = sum(1 for f in findings if f.validation_status == "unvalidated")
     if run_id in _stop_requested:
@@ -68,6 +69,7 @@ def get_validation_status(run_id: int) -> dict:
         "total": total,
         "confirmed": confirmed,
         "false_positives": false_pos,
+        "unconfirmed": unconfirmed,
         "validating": validating,
         "unvalidated": unvalidated,
         "status": status,
@@ -367,7 +369,7 @@ async def _deterministic_validate_finding(
     if not _is_access_control_finding(finding):
         return None
     if not cred_sessions:
-        return ("false_positive", "Access-control validation could not run because no alternate user sessions were available.")
+        return ("unconfirmed", "Access-control validation could not run because no alternate user sessions were available.")
 
     with Session(get_engine()) as s:
         page = s.get(CrawledPage, finding.page_id)
@@ -376,18 +378,18 @@ async def _deterministic_validate_finding(
         page_title = page.title or "" if page else ""
 
     if not accessible_by:
-        return ("false_positive", "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.")
+        return ("unconfirmed", "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.")
 
     unauthorized = {
         cred_id: session for cred_id, session in cred_sessions.items()
         if cred_id not in accessible_by
     }
     if not unauthorized:
-        return ("false_positive", "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.")
+        return ("unconfirmed", "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.")
 
     url = finding.affected_url or ""
     if not url:
-        return ("false_positive", "The finding did not include an affected URL to re-test.")
+        return ("unconfirmed", "The finding did not include an affected URL to re-test.")
 
     for cred_id, session in unauthorized.items():
         username = session.get("username") or f"credential {cred_id}"
@@ -401,7 +403,7 @@ async def _deterministic_validate_finding(
             ) as client:
                 resp = await client.get(url)
         except Exception as exc:
-            return ("false_positive", f"Validation request as {username} failed: {exc}")
+            return ("unconfirmed", f"Validation request as {username} failed: {exc}")
 
         if _response_denies_access(resp):
             continue
