@@ -4,6 +4,7 @@ from aespa.services import llm
 from aespa.services import scanner
 from aespa.services import validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
+from aespa.models import ScanFinding
 
 
 def test_validate_finding_result_without_probe_results_is_false_positive():
@@ -17,6 +18,30 @@ def test_validate_finding_result_without_probe_results_is_false_positive():
 
     assert result["verdict"] == "false_positive"
     assert "No validation probes" in result["reasoning"]
+
+
+def test_access_control_validation_without_credentials_is_unconfirmed():
+    finding = ScanFinding(
+        test_run_id=1,
+        page_id=1,
+        owasp_category="A01",
+        severity="high",
+        title="Authorization bypass",
+        description="A protected page may be reachable without the right user.",
+        affected_url="https://target.local/admin",
+        evidence="",
+    )
+
+    result = asyncio.run(validator._deterministic_validate_finding(
+        finding,
+        cred_sessions={},
+        scanner_policy=None,
+    ))
+
+    assert result is not None
+    verdict, reason = result
+    assert verdict == "unconfirmed"
+    assert "no alternate user sessions" in reason
 
 
 def test_spa_shell_is_not_treated_as_protected_content():

@@ -1527,11 +1527,11 @@ function TestRunDetail({ runId }) {
               </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
-              ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives}/${validateStatus.total}</span>`
+              ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives+(validateStatus.unconfirmed||0)}/${validateStatus.total}</span>`
               : validateStatus?.status==="stopped"
                 ? html`<span className="val-status-badge val-fp">Validation stopped</span>`
               : validateStatus?.status==="complete"
-                ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.false_positives} false positive${validateStatus.false_positives!==1?"s":""}</span>`
+                ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.unconfirmed||0} unconfirmed · ${validateStatus.false_positives} low confidence</span>`
                 : null}
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
@@ -1548,12 +1548,18 @@ function TestRunDetail({ runId }) {
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, false_positive:3};
-                const FP_GROUP_KEY = "__false_positives__";
+                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4};
+                const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
+                const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
+                const unconfirmedMap = {};
                 const fpMap = {};
                 for (const f of findings) {
-                  const target = f.validation_status === "false_positive" ? fpMap : activeMap;
+                  const target = f.validation_status === "false_positive"
+                    ? fpMap
+                    : f.validation_status === "unconfirmed"
+                      ? unconfirmedMap
+                      : activeMap;
                   (target[f.title] = target[f.title]||[]).push(f);
                 }
                 const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
@@ -1570,14 +1576,17 @@ function TestRunDetail({ runId }) {
                   return (SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99);
                 });
                 const groups = makeGroups(activeMap);
+                const unconfirmedGroups = makeGroups(unconfirmedMap);
                 const fpGroups = makeGroups(fpMap);
+                const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
                     <td>
                       ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
-                      ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">false +</span>`}
+                      ${f.validation_status==="unconfirmed"   && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
+                      ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">low conf</span>`}
                       ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
                     </td>
                     <td></td>
@@ -1588,7 +1597,7 @@ function TestRunDetail({ runId }) {
                     </td>
                     <td>
                       <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
-                        ${(f.validation_status==="unvalidated"||f.validation_status==="false_positive") && html`
+                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive") && html`
                           <button className="btn ghost sm finding-del-btn" title="Validate"
                             onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
                         <button className="btn ghost sm finding-del-btn" title="Delete"
@@ -1614,23 +1623,25 @@ function TestRunDetail({ runId }) {
                       </td>
                     </tr>`}
                 `;
-                const fpRows = fpGroups.map(g => {
-                  const fpKey = "fp:" + g.title;
+                const renderStatusRows = (statusGroups, keyPrefix) => statusGroups.map(g => {
+                  const groupKey = keyPrefix + ":" + g.title;
                   return html`
-                    <tr key=${fpKey} className="finding-group-row"
-                      onClick=${()=>toggleGroup(fpKey)}>
+                    <tr key=${groupKey} className="finding-group-row"
+                      onClick=${()=>toggleGroup(groupKey)}>
                       <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
                       <td><span className="owasp-badge">${g.owasp}</span></td>
                       <td className="finding-title">
-                        <span className="group-chevron">${expandedGroups.has(fpKey)?"▾":"▸"}</span>
+                        <span className="group-chevron">${expandedGroups.has(groupKey)?"▾":"▸"}</span>
                         ${g.title}
                       </td>
                       <td><span className="finding-count-badge">${g.count}</span></td>
                       <td></td>
                     </tr>
-                    ${expandedGroups.has(fpKey) && g.items.map(f => renderFinding(f,"fp-"))}
+                    ${expandedGroups.has(groupKey) && g.items.map(f => renderFinding(f,keyPrefix+"-"))}
                   `;
                 });
+                const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
+                const fpRows = renderStatusRows(fpGroups, "fp");
                 return html`
                 <table className="findings-table">
                   <thead>
@@ -1660,14 +1671,28 @@ function TestRunDetail({ runId }) {
                       </tr>
                       ${expandedGroups.has(g.title) && g.items.map(f => renderFinding(f))}
                     `)}
+                    ${unconfirmedCount > 0 && html`
+                      <tr key=${UNCONFIRMED_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(UNCONFIRMED_GROUP_KEY)}>
+                        <td><span className="val-badge val-unconfirmed">unconfirmed</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(UNCONFIRMED_GROUP_KEY)?"▾":"▸"}</span>
+                          Unconfirmed Findings
+                        </td>
+                        <td><span className="finding-count-badge">${unconfirmedCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(UNCONFIRMED_GROUP_KEY) && unconfirmedRows}
+                    `}
                     ${fpCount > 0 && html`
                       <tr key=${FP_GROUP_KEY} className="finding-group-row"
                         onClick=${()=>toggleGroup(FP_GROUP_KEY)}>
-                        <td><span className="val-badge val-fp">false +</span></td>
+                        <td><span className="val-badge val-fp">low conf</span></td>
                         <td></td>
                         <td className="finding-title">
                           <span className="group-chevron">${expandedGroups.has(FP_GROUP_KEY)?"▾":"▸"}</span>
-                          False Positives
+                          Low Confidence
                         </td>
                         <td><span className="finding-count-badge">${fpCount}</span></td>
                         <td></td>
