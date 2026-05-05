@@ -546,9 +546,20 @@ def _save_credential_view(
         existing = s.exec(
             select(PageCredentialView)
             .where(PageCredentialView.page_id == page_id)
+            .where(PageCredentialView.test_run_id == run_id)
             .where(PageCredentialView.credential_id == credential_id)
         ).first()
         if existing:
+            existing.username = username
+            existing.screenshot_b64 = screenshot_b64
+            existing.llm_context = llm_context
+            existing.page_text = page_text
+            existing.req_auth = cats.get("req_auth")
+            existing.takes_input = cats.get("takes_input")
+            existing.has_object_ref = cats.get("has_object_ref")
+            existing.has_business_logic = cats.get("has_business_logic")
+            s.add(existing)
+            s.commit()
             return
         view = PageCredentialView(
             page_id=page_id,
@@ -1053,7 +1064,9 @@ def _merge_all_categories(run_id: int) -> None:
         ).all()
         for cp in pages:
             views = s.exec(
-                select(PageCredentialView).where(PageCredentialView.page_id == cp.id)
+                select(PageCredentialView)
+                .where(PageCredentialView.test_run_id == run_id)
+                .where(PageCredentialView.page_id == cp.id)
             ).all()
             if not views:
                 continue

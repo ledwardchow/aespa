@@ -38,11 +38,28 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     from aespa.models import Site
+    from aespa.services import scanner as scanner_svc
     site = session.get(Site, run.site_id)
     creds = [CredentialSummary.model_validate(c) for c in (site.credentials if site else [])]
     s = TestRunSummary.model_validate(run)
     s.credentials = creds
     s.scanner_policy = settings_service.get_run_scanner_policy(session, run).model_dump(mode="json")
+    scan_pages = session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run.id)
+        .where(CrawledPage.in_scope != False)  # noqa: E712
+    ).all()
+    s.scan_total_pages = len(scan_pages)
+    s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
+    em = run.error_message or ""
+    if em.startswith("scan:"):
+        parts = em.split(":", 2)
+        s.scan_status = parts[1] if len(parts) > 1 else "idle"
+        s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
+    elif scanner_svc.is_running(run.id):
+        s.scan_status = "running"
+    elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
+        s.scan_status = "complete"
     return s
 
 
@@ -121,6 +138,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
     for l in links:
         session.delete(l)
+    views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all()
+    for v in views:
+        session.delete(v)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
@@ -198,6 +218,8 @@ async def restart_test_run(
     # Wipe existing results
     for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
         session.delete(lnk)
+    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
+        session.delete(view)
     for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
         session.delete(pg)
     # Reset run state
@@ -385,6 +407,12 @@ def delete_page(
         )
     ).all():
         session.delete(link)
+    for view in session.exec(
+        select(PageCredentialView)
+        .where(PageCredentialView.test_run_id == run_id)
+        .where(PageCredentialView.page_id.in_(ids))
+    ).all():
+        session.delete(view)
     for p in session.exec(select(CrawledPage).where(CrawledPage.id.in_(ids))).all():
         session.delete(p)
     session.commit()
