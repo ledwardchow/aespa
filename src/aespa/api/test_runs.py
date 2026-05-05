@@ -52,12 +52,12 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     s.scan_total_pages = len(scan_pages)
     s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
     em = run.error_message or ""
-    if em.startswith("scan:"):
+    if scanner_svc.is_running(run.id):
+        s.scan_status = "running"
+    elif em.startswith("scan:"):
         parts = em.split(":", 2)
         s.scan_status = parts[1] if len(parts) > 1 else "idle"
         s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
-    elif scanner_svc.is_running(run.id):
-        s.scan_status = "running"
     elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
         s.scan_status = "complete"
     return s

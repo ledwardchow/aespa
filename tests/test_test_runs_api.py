@@ -1,5 +1,7 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
 from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
 
 def _make_site(client: TestClient, **kw):
@@ -67,6 +69,47 @@ def test_get_run(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}")
     assert r.status_code == 200
     assert r.json()["id"] == run["id"]
+
+
+def test_run_summary_prefers_live_scan_status(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun, TestRunStatus
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            from aespa.services import scanner as scanner_svc
+
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+                error_message="scan:complete",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: run_id == run.id)
+
+            summary = test_runs_api._run_summary(run, session)
+
+        assert summary.scan_status == "running"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_get_run_not_found(client: TestClient):
@@ -165,6 +208,7 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
         "total": 0,
         "confirmed": 0,
         "false_positives": 0,
+        "unconfirmed": 0,
         "validating": 0,
         "unvalidated": 0,
         "status": "stopped",
