@@ -49,6 +49,7 @@ class LLMProvider(str, Enum):
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
     google = "google"
+    bedrock = "bedrock"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
 
@@ -216,8 +217,15 @@ class ScanFinding(SQLModel, table=True):
     severity: str                              # critical | high | medium | low | info
     title: str
     description: str
+    impact: str = Field(default="")
+    likelihood: str = Field(default="")
+    recommendation: str = Field(default="")
+    cvss_score: float = Field(default=0.0)
+    cvss_vector: str = Field(default="")
     affected_url: str = Field(default="")      # specific URL where the issue was observed
     evidence: str = Field(default="")          # formatted request + response excerpt
+    request_evidence: str = Field(default="")
+    response_evidence: str = Field(default="")
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     # Validation fields
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
