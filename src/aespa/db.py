@@ -7,7 +7,6 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.config import Settings, get_settings
 
-
 _engine: Engine | None = None
 
 
@@ -57,6 +56,13 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "has_object_ref", "INTEGER")
     _ensure_column(engine, "crawled_page", "has_business_logic", "INTEGER")
     _ensure_column(engine, "scan_finding", "affected_url", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "impact", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "likelihood", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "recommendation", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "cvss_score", "REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(engine, "scan_finding", "cvss_vector", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "request_evidence", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
