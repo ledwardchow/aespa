@@ -92,6 +92,36 @@ def test_extract_message_text_falls_back_to_reasoning_content():
     assert llm._extract_message_text(message) == '{"context":"from fallback"}'
 
 
+def test_extract_message_text_falls_back_when_content_json_is_truncated():
+    message = SimpleNamespace(
+        content='[\n  {"owasp_category": "A03", "title": "partial", "cvss_vector": "CVSS:3.1/AV:N',
+        reasoning_content="""
+The final answer was:
+```json
+[
+  {
+    "owasp_category": "A03",
+    "severity": "medium",
+    "title": "Reflected XSS in Query Parameter",
+    "description": "The q parameter is reflected without encoding.",
+    "impact": "An attacker can execute script in another user's browser.",
+    "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+    "recommendation": "Encode reflected output and validate the parameter.",
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "affected_url": "http://localhost:3000/assets/i18n/en.json?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E",
+    "evidence": "Payload is reflected in the response."
+  }
+]
+```
+""",
+    )
+
+    extracted = llm._extract_message_text(message)
+
+    assert llm._extract_json(extracted, expect=list)[0]["title"] == "Reflected XSS in Query Parameter"
+
+
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
     captured: dict[str, object] = {}
 
