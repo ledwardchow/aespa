@@ -283,15 +283,28 @@ def _extract_message_text(message: Any) -> str:
     else:
         text = ""
 
-    if text:
-        return _strip_thinking_blocks(text).strip()
-
+    fallback_texts: list[str] = []
     # OpenAI-compatible gateways and local servers vary on where they expose
     # visible chain-of-thought / final text for reasoning models.
     for attr in ("reasoning_content", "reasoning", "output_text", "text"):
         value = getattr(message, attr, None)
         if isinstance(value, str) and value.strip():
-            return _strip_thinking_blocks(value).strip()
+            fallback_texts.append(_strip_thinking_blocks(value).strip())
+
+    if text:
+        cleaned = _strip_thinking_blocks(text).strip()
+        if fallback_texts and any(ch in cleaned for ch in ("[", "{")):
+            try:
+                _extract_json(cleaned, expect=list)
+            except Exception:
+                try:
+                    _extract_json(cleaned, expect=dict)
+                except Exception:
+                    return fallback_texts[0]
+        return cleaned
+
+    if fallback_texts:
+        return fallback_texts[0]
     return ""
 
 
