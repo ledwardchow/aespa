@@ -145,6 +145,9 @@ def _finding_from_llm(
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
+    task = _active_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def is_running(run_id: int) -> bool:
@@ -173,6 +176,11 @@ async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
     try:
         await _do_scan(run_id, page_ids=page_ids)
+    except asyncio.CancelledError:
+        log.info("Scan task cancelled (stop requested) for run_id=%s", run_id)
+        _mark_run(run_id, scan_status="stopped")
+        _emit_scan_update(run_id)
+        raise
     except Exception as exc:
         log.exception("Scan task failed for run_id=%s", run_id)
         _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
@@ -304,6 +312,12 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             ]
         try:
             log.info("Generating site-level test plan (%d pages)...", len(pages_meta))
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "site_plan",
+                "status": "start",
+                "message": f"Building site-level attack plan from {len(pages_meta)} discovered pages\u2026",
+            })
             site_plan = await llm_svc.generate_site_test_plan(llm_cfg, base_url, pages_meta)
             if site_plan:
                 parts: list[str] = []
@@ -322,6 +336,18 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     parts.append("Test notes: " + site_plan["test_notes"])
                 site_context = "\n\n".join(p for p in parts if p)
                 log.info("Site plan ready: %s", site_plan.get("app_summary", "(no summary)"))
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "site_plan",
+                    "status": "complete",
+                    "message": site_plan.get("app_summary", ""),
+                    "data": {
+                        "app_summary": site_plan.get("app_summary"),
+                        "hypotheses": site_plan.get("attack_hypotheses") or [],
+                        "critical_areas": site_plan.get("critical_areas") or [],
+                        "test_notes": site_plan.get("test_notes"),
+                    },
+                })
         except Exception as e:
             log.warning("Site test plan generation failed: %s", e)
 
@@ -535,6 +561,14 @@ async def _scan_page(
     max_probes = scanner_policy.max_probes_per_page if scanner_policy else MAX_PROBES_PER_PAGE
     all_probes = _prioritize_probes_for_cap(all_probes, max_probes, categories)
     log.info("  %d total probes for %s", len(all_probes), page_url)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "page_plan",
+        "status": "complete",
+        "page_url": page_url,
+        "message": f"Planned {len(all_probes)} probe{'s' if len(all_probes) != 1 else ''}",
+        "data": {"probe_count": len(all_probes)},
+    })
 
     # Phase 2: Execute probes.
     results: list[dict] = []
@@ -603,6 +637,16 @@ async def _scan_page(
                 log.debug("Follow-up probe error (%s): %s", probe.get("desc", "?"), e)
             await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
 
+        if followup_probes:
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "page_followup",
+                "status": "complete",
+                "page_url": page_url,
+                "message": f"{len(followup_probes)} follow-up probe{'s' if len(followup_probes) != 1 else ''} executed — initial results looked interesting",
+                "data": {"followup_count": len(followup_probes)},
+            })
+
     # Phase 3: LLM analyses results and produces findings.
     try:
         raw_findings = await llm_svc.analyse_probes(llm_cfg, page_url, results)
@@ -611,6 +655,15 @@ async def _scan_page(
         raw_findings = []
 
     log.info("  %d findings for %s", len(raw_findings), page_url)
+    if raw_findings:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "page_analysis",
+            "status": "complete",
+            "page_url": page_url,
+            "message": f"{len(raw_findings)} potential issue{'s' if len(raw_findings) != 1 else ''} identified",
+            "data": {"finding_count": len(raw_findings)},
+        })
 
     # Build a URL→result lookup so we can attach evidence + screenshot to each finding.
     result_by_url: dict[str, dict] = {}
@@ -1529,6 +1582,12 @@ async def _stored_xss_sweep(
         page_list = [(p.id, p.url) for p in pages]
 
     log.info("Stored XSS sweep: checking %d pages for canary '%s'", len(page_list), canary)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "sweep",
+        "status": "start",
+        "message": f"Stored XSS sweep: re-fetching {len(page_list)} pages for canary\u2026",
+    })
 
     # Detection patterns: these can only appear unescaped if the app rendered
     # attacker-controlled input without HTML-encoding it.
@@ -1633,6 +1692,17 @@ async def _stored_xss_sweep(
             s.commit()
         log.info("Stored XSS sweep: %d finding(s) saved", len(findings_to_save))
         _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "sweep",
+        "status": "complete",
+        "message": (
+            f"Stored XSS sweep complete \u2014 {len(findings_to_save)} finding(s)"
+            if findings_to_save else
+            "Stored XSS sweep complete \u2014 canary not found in any page"
+        ),
+        "data": {"findings_count": len(findings_to_save)},
+    })
 
 
 def _applicable_checks(categories: dict) -> list[str]:

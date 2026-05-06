@@ -639,6 +639,9 @@ function TestRunDetail({ runId }) {
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
+  const [activityLog, setActivityLog]       = useState([]);
+  const [sitePlanData, setSitePlanData]     = useState(null);
+  const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
@@ -719,6 +722,16 @@ function TestRunDetail({ runId }) {
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
         if (evt.status && evt.status !== "running") setScanStopRequested(false);
+      } else if (evt.type === "scanner_phase") {
+        setActivityLog(prev => {
+          const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          const entry = { ...evt, _ts: ts, _id: Date.now() + Math.random() };
+          const next = [...prev, entry];
+          return next.length > 500 ? next.slice(-500) : next;
+        });
+        if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
+          setSitePlanData(evt.data);
+        }
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -824,6 +837,12 @@ function TestRunDetail({ runId }) {
     if (!autoScroll || activeTab !== "traffic" || !trafficTableRef.current) return;
     trafficTableRef.current.scrollTop = trafficTableRef.current.scrollHeight;
   }, [traffic.length, activeTab, autoScroll]);
+
+  // Auto-scroll activity feed when new entries arrive
+  useEffect(() => {
+    if (activeTab !== "activity" || !activityFeedRef.current) return;
+    activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
+  }, [activityLog.length, activeTab]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -1230,6 +1249,7 @@ function TestRunDetail({ runId }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
+  const canStopScan = effectiveScanStatus === "running";
 
   return html`
     <div className="topbar">
@@ -1240,8 +1260,9 @@ function TestRunDetail({ runId }) {
         ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
       </div>
       <div className="topbar-actions">
-        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
+        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop scan"}</button>`}
       </div>
     </div>
 
@@ -1251,8 +1272,12 @@ function TestRunDetail({ runId }) {
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
+        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+        <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
+          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
+          Thinking${scanStatus?.status==="running" && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
           onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
@@ -1395,7 +1420,7 @@ function TestRunDetail({ runId }) {
           onSaved=${policy=>setRun(r=>r?{...r, scan_mode:policy.scan_mode, scanner_policy:policy}:r)}
         />`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy"||activeTab==="activity") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1723,6 +1748,69 @@ function TestRunDetail({ runId }) {
               })()}
               </div>`}
         </div>`}
+
+      ${activeTab==="activity" && html`
+        <div className="activity-panel">
+          ${sitePlanData && html`
+            <div className="site-plan-card">
+              <div className="site-plan-header">
+                <span className="site-plan-label">Site Test Plan</span>
+                <span className="site-plan-badge">LLM Analysis</span>
+              </div>
+              <div className="site-plan-summary">${sitePlanData.app_summary}</div>
+              ${(sitePlanData.hypotheses||[]).length > 0 && html`
+                <div className="site-plan-section">
+                  <div className="site-plan-section-title">Attack Hypotheses</div>
+                  <div className="hypotheses-list">
+                    ${(sitePlanData.hypotheses||[]).map((h, i) => html`
+                      <div key=${i} className="hypothesis-row">
+                        <span className="owasp-badge">${h.owasp || "?"}</span>
+                        <div className="hypothesis-body">
+                          <div className="hypothesis-label">${h.hypothesis}</div>
+                          <div className="hypothesis-desc">${h.description}</div>
+                        </div>
+                      </div>`)}
+                  </div>
+                </div>`}
+              ${(sitePlanData.critical_areas||[]).length > 0 && html`
+                <div className="site-plan-section">
+                  <div className="site-plan-section-title">Critical Areas</div>
+                  <div className="critical-areas-list">
+                    ${(sitePlanData.critical_areas||[]).map((a, i) => html`<span key=${i} className="critical-area-tag">${a}</span>`)}
+                  </div>
+                </div>`}
+              ${sitePlanData.test_notes && html`
+                <div className="site-plan-section">
+                  <div className="site-plan-section-title">Test Notes</div>
+                  <div className="site-plan-notes">${sitePlanData.test_notes}</div>
+                </div>`}
+            </div>`}
+          <div className="activity-feed" ref=${activityFeedRef}>
+            ${activityLog.length === 0 && html`
+              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
+              </div>`}
+            ${activityLog.map(entry => {
+              const PHASE_META = {
+                site_plan:     { label: "Plan",      cls: "phase-plan" },
+                page_plan:     { label: "Probes",    cls: "phase-probes" },
+                page_followup: { label: "Follow-up", cls: "phase-followup" },
+                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:         { label: "Sweep",     cls: "phase-sweep" },
+              };
+              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
+              return html`
+                <div key=${entry._id} className="activity-entry">
+                  <span className="activity-ts">${entry._ts}</span>
+                  <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
+                  ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
+                  <span className="activity-msg">${entry.message}</span>
+                </div>`;
+            })}
+          </div>
+        </div>`}
+
       ${activeTab==="traffic" && html`
         <div className="traffic-panel">
           <div className="traffic-toolbar">
