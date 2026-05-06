@@ -40,6 +40,9 @@ _UA = (
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
+    task = _active_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def is_running(run_id: int) -> bool:
@@ -65,6 +68,17 @@ async def start_crawl(run_id: int) -> None:
 async def _crawl_task(run_id: int) -> None:
     try:
         await _do_crawl(run_id)
+    except asyncio.CancelledError:
+        log.info("Crawl task cancelled (stop requested) for run_id=%s", run_id)
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run and run.status == TestRunStatus.running:
+                run.status = TestRunStatus.stopped
+                run.completed_at = _utcnow()
+                s.add(run)
+                s.commit()
+        events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+        raise
     except Exception as exc:
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)

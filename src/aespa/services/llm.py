@@ -834,10 +834,21 @@ async def plan_probes(
     """
     site_ctx_section = ""
     if site_context:
+        site_ctx_section = f"\nSite-level test plan context (use to inform probe selection):\n{site_context}\n"
+    xss_canary_section = ""
+    if xss_canary:
+        xss_canary_section = (
+            f"\nStored XSS canary: use '{xss_canary}' as the alert argument in every XSS probe "
+            f"instead of alert(1) — e.g. alert('{xss_canary}'), "
+            f"onerror=alert('{xss_canary}'), onload=alert('{xss_canary}'). "
+            f"Also include a probe that submits the bare token <{xss_canary}> as an input value. "
+            f"This allows cross-page stored XSS to be detected in a post-scan sweep.\n"
+        )
     prompt = _PLAN_PROMPT.format(
         url=url,
         title=title or "(no title)",
         context=context or "(no context)",
+        site_context_section=site_ctx_section,
         req_auth=categories.get("req_auth"),
         takes_input=categories.get("takes_input"),
         has_object_ref=categories.get("has_object_ref"),
@@ -845,6 +856,7 @@ async def plan_probes(
         applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
         users_section=_build_users_section(users),
         category_guidance=_build_category_guidance(categories, users=users),
+        xss_canary_section=xss_canary_section,
     )
     raw = await _call(config, prompt, None)
     try:
@@ -899,6 +911,142 @@ async def analyse_probes(
     except Exception:
         return []
 
+
+# ── Site-level test plan ──────────────────────────────────────────────────────
+
+_SITE_PLAN_PROMPT = """\
+You are a senior web application penetration tester preparing a security assessment.
+
+Below is a summary of all pages discovered during crawling of the target web application.
+Analyse the attack surface, reason through the application's architecture, and produce a
+structured test plan with specific, actionable vulnerability hypotheses.
+
+Target base URL: {base_url}
+
+Discovered pages ({page_count} total):
+{pages_summary}
+
+Consider:
+- What kind of application is this? (auth model, user roles, key data objects)
+- What are the highest-value attack targets? (admin panels, financial operations, \
+ID-bearing endpoints, privileged actions)
+- What systemic vulnerabilities are likely based on the observed structure and page categories?
+- What cross-endpoint attack chains deserve testing? For example: auth bypass by calling a \
+final step directly without going through a gated check step; IDOR across resource types; \
+privilege escalation by sending a lower-privilege token to an admin endpoint.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "app_summary": "2-3 sentence description of the application, its key roles, and security-relevant features",
+  "attack_hypotheses": [
+    {{
+      "hypothesis": "Short label for this attack scenario",
+      "description": "What to test, why it may be vulnerable, and which endpoints are involved",
+      "target_pages": ["partial URL or pattern"],
+      "owasp": "A01"
+    }}
+  ],
+  "critical_areas": ["URL pattern or page type that deserves the most thorough testing"],
+  "test_notes": "Specific techniques, IDs, credentials, header patterns, or sequences the scanner should use"
+}}
+
+Limit to the 8 most valuable attack hypotheses. Be specific and actionable."""
+
+
+async def generate_site_test_plan(
+    config: LLMConfig,
+    base_url: str,
+    pages: list[dict],
+) -> dict:
+    """Generate a site-level test plan from crawled page metadata.
+
+    Returns a dict with keys: app_summary, attack_hypotheses, critical_areas, test_notes.
+    Returns {} on failure.
+    """
+    if not pages:
+        return {}
+    pages_summary = "\n".join(
+        f"  - {p['url']} | title={p.get('title') or '(no title)'!r} | "
+        f"auth={p.get('req_auth')}, input={p.get('takes_input')}, "
+        f"obj_ref={p.get('has_object_ref')}, biz_logic={p.get('has_business_logic')} | "
+        f"{(p.get('context') or '')[:180]}"
+        for p in pages[:60]
+    )
+    prompt = _SITE_PLAN_PROMPT.format(
+        base_url=base_url,
+        page_count=len(pages),
+        pages_summary=pages_summary,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        plan = _extract_json(raw or "", expect=dict)
+        if isinstance(plan, dict):
+            return plan
+    except Exception:
+        pass
+    return {}
+
+
+# ── Follow-up probe planning ──────────────────────────────────────────────────
+
+_FOLLOWUP_PROMPT = """\
+You are a senior web application penetration tester reviewing mid-scan probe results.
+
+You have just run an initial set of probes against the page below and received the results.
+Your task is to reason through what you observe, identify any promising leads, and generate
+targeted follow-up probes that would confirm, deepen, or chain from the potential issues.
+
+Page URL: {url}
+Page context: {context}
+
+Site-level test plan context:
+{site_context}
+
+Initial probe results:
+{initial_results}
+
+Think through:
+- Which results look anomalous or potentially vulnerable? (unexpected 200s on restricted pages, \
+error messages that disclose stack traces or internals, reflected or stored payloads, \
+differing responses for different input values, auth bypass indicators)
+- For each interesting result, what follow-up probe would confirm or rule out the issue?
+- Are there attack chains implied by multiple results together? In particular:
+  • If a check/validate/verify endpoint responded saying something is required (e.g. TOTP, pin,
+    2FA code, elevated privilege), probe the corresponding action endpoint DIRECTLY without
+    providing that requirement, to test whether enforcement is server-side or only client-side.
+  • If a response revealed a new endpoint URL, resource ID, token, or parameter — probe it.
+  • If a check returned requires_X: true but the action endpoint is not yet probed — add a probe
+    calling the action endpoint with the required field absent or empty.
+- Did any response reveal new endpoints, IDs, tokens, or parameters worth testing?
+
+Generate targeted follow-up probes. Prefer quality over quantity — a focused probe testing a
+specific hypothesis is more valuable than re-running broad coverage.
+
+Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [] if no leads):
+[
+  {{
+    "type": "http",
+    "method": "GET",
+    "url": "https://...",
+    "params": {{}},
+    "headers": {{}},
+    "body": null,
+    "as_user": null,
+    "desc": "Follow-up: what this tests and why"
+  }}
+]
+
+Return [] if no results look promising enough to warrant follow-up investigation."""
+
+
+async def plan_followup_probes(
+    config: LLMConfig,
+    url: str,
+    context: str,
+    initial_results: list[dict],
+    site_context: str = "",
+) -> list[dict]:
+    """Reason about initial probe results and generate targeted follow-up probes.
 
     This is the iterative-reasoning step: the LLM observes partial results, forms
     hypotheses about what looks interesting, and generates deeper targeted probes.
