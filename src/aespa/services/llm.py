@@ -5,9 +5,9 @@ import base64
 import json
 import re
 from typing import Any, Optional
+from urllib.parse import quote
 
 from aespa.models import LLMConfig
-
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -239,6 +239,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _azure_foundry(config, prompt, screenshot_b64)
     if config.provider == "openrouter":
         return await _openrouter(config, prompt, screenshot_b64)
+    if config.provider == "bedrock":
+        return await _bedrock(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
@@ -507,6 +509,52 @@ async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optiona
     return _extract_first_choice_text(resp)
 
 
+def _extract_bedrock_text(data: dict[str, Any]) -> str:
+    content = (((data.get("output") or {}).get("message") or {}).get("content") or [])
+    if not isinstance(content, list):
+        return ""
+    return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+
+
+async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    import httpx
+
+    if not config.api_key:
+        raise ValueError("Amazon Bedrock API key is required")
+    if not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required")
+
+    content: list[dict[str, Any]] = []
+    if screenshot_b64:
+        content.append({
+            "image": {
+                "format": "png",
+                "source": {"bytes": screenshot_b64},
+            }
+        })
+    content.append({"text": prompt})
+
+    payload: dict[str, Any] = {
+        "messages": [{"role": "user", "content": content}],
+        "inferenceConfig": {
+            "maxTokens": config.max_tokens,
+            "temperature": config.temperature,
+        },
+    }
+    model_id = quote(config.model, safe="")
+    url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        return _extract_bedrock_text(resp.json())
+
+
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
 
 _PLAN_PROMPT = """\
@@ -707,15 +755,29 @@ Return ONLY valid JSON — an array of findings (empty array [] if none found, n
 [
   {{
     "owasp_category": "A03",
-    "severity": "high",
     "title": "Reflected XSS in search parameter",
-    "description": "The search parameter reflects user input without encoding, allowing script injection.",
+    "description": "The search parameter reflects user input without encoding.",
+    "impact": "An attacker could execute JavaScript in a victim's browser and act as that user.",
+    "likelihood": "Likely when attacker-controlled links can be delivered to authenticated users.",
+    "recommendation": "Encode output by context, validate input, and add regression tests for this parameter.",
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "severity": "medium",
     "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
-    "evidence": "The payload was reflected verbatim in the response body at position 234."
+    "evidence": "Short summary of the exact request and response evidence that proves the finding."
   }}
 ]
 
 The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
+Write each finding using the report headings represented by these JSON fields:
+- description: what is vulnerable and where.
+- impact: what an attacker could achieve.
+- likelihood: practical exploitability in this observed context.
+- recommendation: specific remediation steps.
+
+Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
+Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
+medium 4.0-6.9, low 0.1-3.9, info 0.0.
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
@@ -776,9 +838,12 @@ async def analyse_probes(
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
         f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
+        f"URL: {r.get('url')}\n"
         f"Status: {r.get('status')}\n"
+        f"Request evidence:\n{str(r.get('request_evidence') or '')[:2000]}\n\n"
+        f"Response evidence:\n{str(r.get('response_evidence') or '')[:3000]}\n\n"
         f"Response headers: {json.dumps(r.get('headers', {}))}\n"
-        f"Response body (truncated): {str(r.get('body', ''))[:500]}"
+        f"Response body excerpt: {str(r.get('body', ''))[:1000]}"
         for r in results
     )
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
@@ -787,7 +852,18 @@ async def analyse_probes(
         findings = _extract_json(raw or "", expect=list)
         if not isinstance(findings, list):
             return []
-        required = {"owasp_category", "severity", "title", "description", "evidence"}
+        required = {
+            "owasp_category",
+            "severity",
+            "title",
+            "description",
+            "impact",
+            "likelihood",
+            "recommendation",
+            "cvss_score",
+            "affected_url",
+            "evidence",
+        }
         return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
     except Exception:
         return []

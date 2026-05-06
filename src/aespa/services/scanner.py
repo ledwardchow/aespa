@@ -22,7 +22,7 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, ScanFinding, Site, TestRun, TestRunStatus
+from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
@@ -53,6 +53,91 @@ _UA = (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _severity_from_cvss(score: float | int | str | None) -> str:
+    try:
+        value = float(score or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value >= 9.0:
+        return "critical"
+    if value >= 7.0:
+        return "high"
+    if value >= 4.0:
+        return "medium"
+    if value > 0.0:
+        return "low"
+    return "info"
+
+
+def _cvss_score(value: float | int | str | None) -> float:
+    try:
+        return max(0.0, min(10.0, round(float(value or 0.0), 1)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _combined_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
+    parts = []
+    if summary:
+        parts.append(summary.strip())
+    if request_evidence:
+        parts.append(f"REQUEST:\n{request_evidence.strip()}")
+    if response_evidence:
+        parts.append(f"RESPONSE:\n{response_evidence.strip()}")
+    return "\n\n".join(parts)
+
+
+def _finding_from_llm(
+    *,
+    run_id: int,
+    page_id: int,
+    page_url: str,
+    raw: dict,
+    result_by_url: dict[str, dict],
+) -> ScanFinding:
+    probe_urls = list(result_by_url.keys())
+    llm_url = (raw.get("affected_url") or "").strip()
+    if llm_url and llm_url != page_url:
+        affected_url = llm_url
+    elif probe_urls:
+        desc = (raw.get("description", "") + " " + raw.get("title", "")).lower()
+        affected_url = next((u for u in probe_urls if u.lower() in desc), probe_urls[0])
+    else:
+        affected_url = page_url
+
+    matched = result_by_url.get(affected_url, {})
+    request_evidence = str(matched.get("request_evidence") or raw.get("request_evidence") or "")
+    response_evidence = str(matched.get("response_evidence") or raw.get("response_evidence") or "")
+    evidence = _combined_evidence(
+        request_evidence,
+        response_evidence,
+        str(raw.get("evidence") or matched.get("evidence") or ""),
+    )
+    cvss_score = _cvss_score(raw.get("cvss_score"))
+
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=page_id,
+        owasp_category=raw.get("owasp_category", "A00"),
+        severity=_severity_from_cvss(cvss_score),
+        title=raw.get("title", "Untitled finding"),
+        description=raw.get("description", ""),
+        impact=raw.get("impact", ""),
+        likelihood=raw.get("likelihood", ""),
+        recommendation=raw.get("recommendation", ""),
+        cvss_score=cvss_score,
+        cvss_vector=raw.get("cvss_vector", ""),
+        affected_url=affected_url,
+        evidence=evidence[:4000],
+        request_evidence=request_evidence[:4000],
+        response_evidence=response_evidence[:4000],
+        screenshot_b64=matched.get("screenshot_b64"),
+        validation_status="validating",
+        validation_note="Validation queued.",
+        created_at=_utcnow(),
+    )
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
@@ -103,6 +188,7 @@ async def _export_cred_session(
     """Launch a throw-away Playwright browser, authenticate as cred, and return
     (cookie_jar, auth_token) so httpx can impersonate that session."""
     from playwright.async_api import async_playwright
+
     from aespa.services.crawler import _authenticate
 
     async with async_playwright() as p:
@@ -427,43 +513,17 @@ async def _scan_page(
         if r.get("url"):
             result_by_url[r["url"]] = r
 
-    probe_urls = list(result_by_url.keys())  # ordered list of actually-probed URLs
-
     saved_finding_ids: list[int] = []
 
     # Persist findings and mark page complete.
     with Session(get_engine()) as s:
         for f in raw_findings:
-            llm_url = (f.get("affected_url") or "").strip()
-            if llm_url and llm_url != page_url:
-                # LLM returned a specific probe URL — use it directly.
-                affected_url = llm_url
-            elif probe_urls:
-                # LLM returned the page URL or nothing; prefer the first probe URL
-                # whose evidence string or URL appears in the finding description.
-                desc = (f.get("description", "") + " " + f.get("title", "")).lower()
-                match = next((u for u in probe_urls if u.lower() in desc), probe_urls[0])
-                affected_url = match
-            else:
-                affected_url = page_url
-            matched = result_by_url.get(affected_url, {})
-            # Use the pre-built evidence from the probe result if available;
-            # fall back to what the LLM wrote.
-            evidence = matched.get("evidence") or f.get("evidence", "")
-            screenshot = matched.get("screenshot_b64")
-            finding = ScanFinding(
-                test_run_id=run_id,
+            finding = _finding_from_llm(
+                run_id=run_id,
                 page_id=page_id,
-                owasp_category=f.get("owasp_category", "A00"),
-                severity=f.get("severity", "info"),
-                title=f.get("title", "Untitled finding"),
-                description=f.get("description", ""),
-                affected_url=affected_url,
-                evidence=evidence[:4000],
-                screenshot_b64=screenshot,
-                validation_status="validating",
-                validation_note="Validation queued.",
-                created_at=_utcnow(),
+                page_url=page_url,
+                raw=f,
+                result_by_url=result_by_url,
             )
             s.add(finding)
             s.flush()
@@ -501,6 +561,7 @@ async def _scan_page(
         bac_findings = await _run_bac_checks(
             run_id=run_id,
             page_id=page_id,
+            llm_cfg=llm_cfg,
             page_url=page_url,
             page_title=page_title,
             page_text=page_text,
@@ -543,6 +604,7 @@ _LOGIN_MARKERS = [
 async def _run_bac_checks(
     run_id: int,
     page_id: int,
+    llm_cfg: LLMConfig,
     page_url: str,
     page_title: str,
     page_text: str,
@@ -606,40 +668,47 @@ async def _run_bac_checks(
             log.info("  BAC: POSSIBLE — %s returned original content with HTTP %s for user '%s'",
                      page_url, resp.status_code, username)
 
-            # Build evidence block.
             cookie_preview = "; ".join(
                 f"{k}={v[:12]}…" for k, v in list(cookies.items())[:4]
             ) or "(none)"
-            evidence = (
-                f"BROKEN ACCESS CONTROL — Unauthorized access probe\n"
-                f"Tested as: {username} (this user lacked access during crawl)\n\n"
-                f"REQUEST:\n"
+            request_evidence = (
                 f"GET {page_url} HTTP/1.1\n"
-                f"Cookie: {cookie_preview}\n\n"
-                f"RESPONSE:\n"
+                f"Cookie: {cookie_preview}"
+            )
+            response_evidence = (
                 f"HTTP/1.1 {resp.status_code}\n"
                 f"Content-Type: {resp.headers.get('content-type', '')}\n"
                 f"Content-Length: {len(resp.content)}\n\n"
-                f"{resp.text[:600]}"
+                f"{resp.text[:1200]}"
             )
-
-            findings.append(ScanFinding(
-                test_run_id=run_id,
-                page_id=page_id,
-                owasp_category="A01",
-                severity="high",
-                title="Broken Access Control — Unauthorized Page Access",
-                description=(
-                    f"User '{username}' received HTTP {resp.status_code} when directly "
-                    f"requesting a page that was not discovered for them during the authenticated "
-                    f"crawl. The response included recognizable content from the originally "
-                    f"crawled page rather than a login page, denial, generic SPA shell, or "
-                    f"different user-specific page."
+            result = {
+                "desc": "Broken Access Control: unauthorized page access",
+                "url": page_url,
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp.text[:2000],
+                "evidence": (
+                    "A user that lacked access during crawl discovery received "
+                    "recognizable protected content via direct request."
                 ),
-                affected_url=page_url,
-                evidence=evidence[:4000],
-                created_at=_utcnow(),
-            ))
+                "request_evidence": request_evidence,
+                "response_evidence": response_evidence,
+                "screenshot_b64": None,
+                "as_user": username,
+            }
+            try:
+                generated = await llm_svc.analyse_probes(llm_cfg, page_url, [result])
+            except Exception as e:
+                log.warning("BAC finding write-up generation failed for %s: %s", page_url, e)
+                generated = []
+            for raw in generated:
+                findings.append(_finding_from_llm(
+                    run_id=run_id,
+                    page_id=page_id,
+                    page_url=page_url,
+                    raw=raw,
+                    result_by_url={page_url: result},
+                ))
 
         except Exception as e:
             log.debug("  BAC check error for %s as '%s': %s", page_url, username, e)
@@ -731,12 +800,13 @@ async def _passive_checks(
             pass
 
         headers_text = "\n".join(f"{k}: {v}" for k, v in headers.items())
-        evidence = (
-            f"REQUEST:\nGET {url} HTTP/1.1\n\n"
-            f"RESPONSE:\nHTTP/1.1 {status}\n{headers_text}\n\n{body}"
-            + (f"\n\nMISSING SECURITY HEADERS: {', '.join(missing)}" if missing else "")
-            + (f"\n\nANON REQUEST STATUS: {auth_bypass_status}" if auth_bypass_status else "")
+        request_evidence = f"GET {url} HTTP/1.1"
+        response_evidence = (
+            f"HTTP/1.1 {status}\n{headers_text}\n\n{body}"
+            + (f"\n\nMissing security headers: {', '.join(missing)}" if missing else "")
+            + (f"\nAnonymous request status: {auth_bypass_status}" if auth_bypass_status else "")
         )
+        evidence = _combined_evidence(request_evidence, response_evidence)
         results.append({
             "desc": "Passive: headers + auth-bypass check",
             "url": url,
@@ -744,6 +814,8 @@ async def _passive_checks(
             "headers": headers,
             "body": body,
             "evidence": evidence,
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
             "screenshot_b64": None,
             "missing_security_headers": missing,
             "auth_bypass_status": auth_bypass_status,
@@ -772,7 +844,12 @@ async def _passive_checks(
                     "status": status,
                     "headers": {},
                     "body": issue_text,
-                    "evidence": f"REQUEST:\nGET {url}\n\nCOOKIE ISSUES:\n{issue_text}",
+                    "evidence": _combined_evidence(
+                        f"GET {url} HTTP/1.1",
+                        f"Cookie issues:\n{issue_text}",
+                    ),
+                    "request_evidence": f"GET {url} HTTP/1.1",
+                    "response_evidence": f"Cookie issues:\n{issue_text}",
                     "screenshot_b64": None,
                 })
 
@@ -814,24 +891,29 @@ async def _run_http_probe(
             headers=request_headers,
         )
         resp = await client.send(req, follow_redirects=True)
-        resp_body = resp.text[:1000]
+        response_text = resp.text[:2000]
 
         req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
                                      if k.lower() not in ("cookie",))
         resp_headers_text = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
-        evidence = (
-            f"{user_note}REQUEST:\n{method} {req.url} HTTP/1.1\n{req_headers_text}\n"
-            + (f"\n{body_preview[:200]}" if body_preview else "")
-            + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{resp_body}"
+        request_evidence = (
+            f"{user_note}{method} {req.url} HTTP/1.1\n{req_headers_text}"
+            + (f"\n\n{body_preview[:2000]}" if body_preview else "")
         )
+        response_evidence = (
+            f"HTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{response_text}"
+        )
+        evidence = _combined_evidence(request_evidence, response_evidence)
         return {
             "desc": desc,
             "url": str(resp.url),
             "status": resp.status_code,
             "headers": dict(resp.headers),
-            "body": resp_body,
+            "body": response_text,
             "evidence": evidence,
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -849,8 +931,16 @@ async def _run_http_probe(
         else:
             return await _execute(hx)
     except Exception as e:
-        return {"desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
-                "evidence": f"REQUEST ERROR: {e}", "screenshot_b64": None, "as_user": as_user}
+        request_evidence = f"{method} {url} HTTP/1.1"
+        response_evidence = f"REQUEST ERROR: {e}"
+        return {
+            "desc": desc, "url": url, "status": None, "headers": {}, "body": str(e),
+            "evidence": _combined_evidence(request_evidence, response_evidence),
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
+            "screenshot_b64": None,
+            "as_user": as_user,
+        }
 
 
 def _prepare_probe_body(body, headers: dict | None) -> tuple[bytes | None, dict, str]:
@@ -1030,7 +1120,7 @@ async def _run_form_probe(
             resp = await resp_info.value
             response_status = resp.status
             try:
-                response_body = (await resp.text())[:500]
+                response_body = (await resp.text())[:2000]
             except Exception:
                 pass
         except Exception:
@@ -1038,7 +1128,7 @@ async def _run_form_probe(
                 await target_page.wait_for_load_state("networkidle", timeout=6_000)
             except Exception:
                 pass
-            response_body = (await target_page.content())[:500]
+            response_body = (await target_page.content())[:2000]
 
         screenshot_b64: Optional[str] = None
         try:
@@ -1049,12 +1139,15 @@ async def _run_form_probe(
             pass
 
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
-        evidence = (
-            f"{user_note}FORM PROBE:\nURL: {url}\nField selector: {selector}\n"
-            f"Payload: {payload}\n\n"
-            f"RESPONSE STATUS: {response_status}\n\n"
-            f"RESPONSE BODY (truncated):\n{response_body}"
+        request_evidence = (
+            f"{user_note}FORM PROBE\nURL: {url}\n"
+            f"Field selector: {selector}\nPayload: {payload}"
         )
+        response_evidence = (
+            f"Response status: {response_status}\n\n"
+            f"Response body excerpt:\n{response_body}"
+        )
+        evidence = _combined_evidence(request_evidence, response_evidence)
 
         return {
             "desc": desc,
@@ -1064,6 +1157,8 @@ async def _run_form_probe(
             "headers": {},
             "body": response_body,
             "evidence": evidence,
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
             "screenshot_b64": screenshot_b64,
             "as_user": as_user,
         }

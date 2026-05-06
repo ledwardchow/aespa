@@ -1608,12 +1608,31 @@ function TestRunDetail({ runId }) {
                   ${expandedFinding===f.id && html`
                     <tr key=${"ev-"+keyPrefix+f.id} className="finding-evidence-row">
                       <td colSpan="5">
-                        <div className="finding-description">${f.description}</div>
+                        <div className="finding-description">
+                          <div><strong>Description</strong></div>
+                          <div>${f.description || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Impact</strong></div>
+                          <div>${f.impact || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
+                          <div>${f.likelihood || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
+                          <div>${f.recommendation || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
+                          <div>
+                            ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
+                            ${f.cvss_vector ? html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>` : ""}
+                          </div>
+                        </div>
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
                           </div>`}
-                        ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                        ${f.request_evidence && html`
+                          <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
+                        ${f.response_evidence && html`
+                          <pre className="finding-evidence">RESPONSE:\n${f.response_evidence}</pre>`}
+                        ${!f.request_evidence && !f.response_evidence && f.evidence && html`
+                          <pre className="finding-evidence">${f.evidence}</pre>`}
                         ${f.screenshot_b64 && html`
                           <div className="finding-screenshot-wrap">
                             <div className="finding-affected-label">Screenshot</div>
@@ -1918,6 +1937,7 @@ const PROVIDER_LABELS = {
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
   openrouter:"OpenRouter",
   google:"Google Gemini",
+  bedrock:"Amazon Bedrock",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry",
 };
@@ -1926,21 +1946,25 @@ const PROVIDER_PLACEHOLDERS = {
   openai_compatible:"e.g. llama-3.1-8b-instruct",
   openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
+  bedrock:"e.g. anthropic.claude-3-7-sonnet-20250219-v1:0",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
 };
 const BASE_URL_LABELS = {
   openai_compatible:"Base URL",
+  bedrock:"Bedrock Runtime Endpoint",
   azure_openai:"Azure Endpoint",
   azure_foundry:"Endpoint URL",
 };
 const BASE_URL_PLACEHOLDERS = {
   openai_compatible:"http://localhost:1234/v1",
+  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com/",
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
+  bedrock:"Use the Bedrock Runtime endpoint for the region where your model is available.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
@@ -1959,7 +1983,7 @@ function llmProfileToForm(cfg) {
 }
 
 function llmPayload(form) {
-  const needsBaseUrl = ["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
   return {
     name:form.name.trim(),
     provider:form.provider,
@@ -1995,8 +2019,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = form&&["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&["anthropic","openai","openrouter","google","bedrock","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2026,7 +2050,7 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       ${needsKey&&html`
         <div className="field"><label>API Key</label>
           <input type="password" required value=${form.api_key}
-            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":""}
+            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":form.provider==="bedrock"?"Bedrock API key":""}
             onChange=${e=>upd({api_key:e.target.value})}/></div>`}
       ${form.provider==="openai_compatible"&&html`
         <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>

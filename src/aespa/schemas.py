@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime
 import re
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 
 class CredentialIn(BaseModel):
@@ -92,6 +99,7 @@ LLMProviderLiteral = Literal[
     "openai_compatible",
     "openrouter",
     "google",
+    "bedrock",
     "azure_openai",
     "azure_foundry",
 ]
@@ -127,6 +135,14 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+    ],
+    "bedrock": [
+        "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "amazon.nova-pro-v1:0",
+        "amazon.nova-lite-v1:0",
+        "meta.llama3-3-70b-instruct-v1:0",
     ],
     "azure_openai": [
         "gpt-4o",
@@ -167,10 +183,11 @@ class LLMConfigIn(BaseModel):
             "openai",
             "openrouter",
             "google",
+            "bedrock",
             "azure_openai",
             "azure_foundry",
         )
-        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
+        _needs_url = ("openai_compatible", "bedrock", "azure_openai", "azure_foundry")
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider in _needs_url and not self.base_url:
@@ -434,8 +451,15 @@ class ScanFindingOut(BaseModel):
     severity: str
     title: str
     description: str
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
     affected_url: str
     evidence: str
+    request_evidence: str = ""
+    response_evidence: str = ""
     screenshot_b64: str | None
     validation_status: str
     validation_note: str | None

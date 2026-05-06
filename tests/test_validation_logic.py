@@ -1,10 +1,8 @@
 import asyncio
 
-from aespa.services import llm
-from aespa.services import scanner
-from aespa.services import validator
-from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 from aespa.models import ScanFinding
+from aespa.services import llm, scanner, validator
+from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
 
 def test_validate_finding_result_without_probe_results_is_false_positive():
@@ -104,6 +102,69 @@ def test_bac_evidence_matches_original_user_content():
         "Account overview",
         original_text,
     ) is True
+
+
+def test_bac_check_uses_llm_generated_finding_text(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "<html><h1>Admin Dashboard</h1><p>Secret invoice data</p></html>"
+        content = text.encode()
+        headers = {"content-type": "text/html"}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return FakeResponse()
+
+    async def fake_analyse_probes(config, url, results):
+        captured["results"] = results
+        return [{
+            "owasp_category": "A01",
+            "title": "LLM generated BAC title",
+            "description": "Description written by the LLM.",
+            "impact": "Impact written by the LLM.",
+            "likelihood": "Likelihood written by the LLM.",
+            "recommendation": "Recommendation written by the LLM.",
+            "cvss_score": 8.1,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+            "severity": "high",
+            "affected_url": "https://target.local/admin",
+            "evidence": "LLM evidence summary.",
+        }]
+
+    monkeypatch.setattr(scanner.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(scanner.llm_svc, "analyse_probes", fake_analyse_probes)
+
+    findings = asyncio.run(scanner._run_bac_checks(
+        run_id=1,
+        page_id=2,
+        llm_cfg=object(),
+        page_url="https://target.local/admin",
+        page_title="Admin Dashboard",
+        page_text="Secret invoice data",
+        accessible_by=[1],
+        cred_sessions={
+            1: {"username": "alice", "cookies": {}},
+            2: {"username": "bob", "cookies": {"sid": "secret-session"}},
+        },
+    ))
+
+    assert findings[0].title == "LLM generated BAC title"
+    assert findings[0].description == "Description written by the LLM."
+    assert findings[0].impact == "Impact written by the LLM."
+    assert findings[0].request_evidence.startswith("GET https://target.local/admin")
+    assert "Secret invoice data" in findings[0].response_evidence
+    assert captured["results"][0]["as_user"] == "bob"
 
 
 def test_request_stop_cancels_running_validation(monkeypatch):
