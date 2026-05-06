@@ -577,7 +577,7 @@ of HTTP probes to test for OWASP Top 10 vulnerabilities.
 URL: {url}
 Title: {title}
 LLM Context: {context}
-
+{site_context_section}
 Page categories:
 - Authentication Required: {req_auth}
 - Takes User Input: {takes_input}
@@ -588,7 +588,7 @@ Applicable OWASP checks: {applicable}
 
 {users_section}
 {category_guidance}
-
+{xss_canary_section}
 Return ONLY valid JSON — an array of probe objects (no markdown fences):
 [
   {{
@@ -743,6 +743,13 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
             "  • Infer the business operation from the context (e.g. transfer, purchase, withdraw).\n"
             "  • Try negative amounts, zero amounts, and extremely large values.\n"
             "  • Try replay: re-send the same action twice rapidly.\n"
+            "  • GATE BYPASS (high value): Look for pre-flight check or validation endpoints "
+            "    (paths containing /check, /verify, /validate, /preflight, or similar) that the\n"
+            "    client calls before a sensitive action. Generate two probes:\n"
+            "      1. Call the check endpoint to observe what it enforces (e.g. requires_totp, requires_pin).\n"
+            "      2. Call the action endpoint DIRECTLY without completing the check step, omitting any\n"
+            "         field the check said was required (e.g. no totp_code, no pin). If the action\n"
+            "         succeeds anyway, the enforcement is client-side only and the gate is bypassable.\n"
             "  • Try skipping steps: access later steps of a multi-step flow directly.\n"
             "  • Try parameter tampering: change price/amount/quantity fields to 0 or -1."
         )
@@ -809,13 +816,24 @@ async def plan_probes(
     categories: dict[str, Any],
     applicable_checks: list[str],
     users: list[dict] | None = None,
+    site_context: str = "",
+    xss_canary: str = "",
 ) -> list[dict]:
     """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts.
 
     users: optional list of {"username": str, "label": str|None} describing the test accounts
     available. When provided, the LLM can set "as_user" on each probe to control which
     authenticated session is used when sending the request.
+
+    site_context: optional string summarising the site-level test plan produced by
+    generate_site_test_plan(). When provided, it primes the LLM with app-wide attack
+    hypotheses so individual page plans are more targeted.
+
+    xss_canary: optional unique run-scoped token. When provided, the LLM is instructed
+    to embed it in XSS payloads instead of alert(1), enabling cross-page stored XSS detection.
     """
+    site_ctx_section = ""
+    if site_context:
     prompt = _PLAN_PROMPT.format(
         url=url,
         title=title or "(no title)",
@@ -878,6 +896,36 @@ async def analyse_probes(
             "evidence",
         }
         return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
+    except Exception:
+        return []
+
+
+    This is the iterative-reasoning step: the LLM observes partial results, forms
+    hypotheses about what looks interesting, and generates deeper targeted probes.
+    Returns [] if nothing warrants follow-up or on failure.
+    """
+    if not initial_results:
+        return []
+    results_text = "\n\n".join(
+        f"--- {r.get('desc', '?')} ---\n"
+        f"URL: {r.get('url')}\n"
+        f"Status: {r.get('status')}\n"
+        f"Response body excerpt:\n{str(r.get('body', ''))[:600]}\n"
+        f"Response evidence excerpt:\n{str(r.get('response_evidence', ''))[:600]}"
+        for r in initial_results[:25]
+    )
+    prompt = _FOLLOWUP_PROMPT.format(
+        url=url,
+        context=context or "(no context)",
+        site_context=site_context or "(no site-level context available)",
+        initial_results=results_text,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        probes = _extract_json(raw or "", expect=list)
+        if not isinstance(probes, list):
+            return []
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
     except Exception:
         return []
 
