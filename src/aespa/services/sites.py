@@ -71,7 +71,12 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
     )
     for cred in payload.credentials:
         site.credentials.append(
-            Credential(username=cred.username, password=cred.password, label=cred.label)
+            Credential(
+                username=cred.username,
+                password=cred.password,
+                label=cred.label,
+                login_url=str(cred.login_url) if cred.login_url else None,
+            )
         )
 
     session.add(site)
@@ -97,7 +102,12 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     session.flush()
     for cred in payload.credentials:
         site.credentials.append(
-            Credential(username=cred.username, password=cred.password, label=cred.label)
+            Credential(
+                username=cred.username,
+                password=cred.password,
+                label=cred.label,
+                login_url=str(cred.login_url) if cred.login_url else None,
+            )
         )
 
     session.add(site)
@@ -132,11 +142,16 @@ def add_credential(session: Session, site_id: int, payload: CredentialIn) -> Cre
     site = get_site(session, site_id)
     if not site.requires_auth:
         raise SiteServiceError("Cannot add credentials to a site that does not require auth")
+    if not site.login_url and not payload.login_url:
+        raise SiteServiceError(
+            "Credential login_url is required when the site has no default login_url"
+        )
     cred = Credential(
         site_id=site.id,
         username=payload.username,
         password=payload.password,
         label=payload.label,
+        login_url=str(payload.login_url) if payload.login_url else None,
     )
     site.updated_at = _utcnow()
     session.add(cred)
