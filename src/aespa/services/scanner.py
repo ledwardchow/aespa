@@ -442,6 +442,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     max_steps=MAX_THINKING_STEPS,
                     current_step=step,
                     credentials=creds_for_llm,
+                    emit_fn=lambda evt: events_svc.emit(run_id, evt),
                 )
             except Exception as exc:
                 log.warning("thinking_next_action error at step %d: %s", step, exc)
@@ -543,6 +544,24 @@ async def _do_thinking_scan(run_id: int) -> None:
         })
         try:
             raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
+            # Normalise titles against existing findings so the same vulnerability
+            # class gets a consistent title regardless of which step found it.
+            if raw_findings:
+                with Session(get_engine()) as _s:
+                    _existing = _s.exec(
+                        select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                    ).all()
+                if _existing:
+                    _summaries = [
+                        {"title": f.title, "owasp_category": f.owasp_category, "severity": f.severity}
+                        for f in _existing
+                    ]
+                    try:
+                        raw_findings = await llm_svc.normalize_finding_titles(
+                            llm_cfg, _summaries, raw_findings
+                        )
+                    except Exception as _ne:
+                        log.warning("normalize_finding_titles failed (thinking scan): %s", _ne)
             with Session(get_engine()) as s:
                 result_by_url = {r["url"]: r for r in all_results}
 
@@ -1053,6 +1072,26 @@ async def _scan_page(
     except Exception as e:
         log.warning("analyse_probes failed for %s: %s", page_url, e)
         raw_findings = []
+
+    # Normalise titles against findings already saved for this run so that the
+    # same vulnerability class discovered on multiple pages gets a single
+    # consistent title and groups together in the report.
+    if raw_findings:
+        with Session(get_engine()) as s:
+            existing_saved = s.exec(
+                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            ).all()
+        if existing_saved:
+            existing_summaries = [
+                {"title": f.title, "owasp_category": f.owasp_category, "severity": f.severity}
+                for f in existing_saved
+            ]
+            try:
+                raw_findings = await llm_svc.normalize_finding_titles(
+                    llm_cfg, existing_summaries, raw_findings
+                )
+            except Exception as _ne:
+                log.warning("normalize_finding_titles failed for %s: %s", page_url, _ne)
 
     log.info("  %d findings for %s", len(raw_findings), page_url)
     if raw_findings:
