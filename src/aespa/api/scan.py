@@ -1,11 +1,13 @@
 """Scan API — start/stop/status/findings/validation endpoints."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, ScanFinding, TestRun, TestRunStatus
+from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import RunScannerPolicyOut, ScanFindingOut, ScannerPolicyIn, ScanStatusOut, ValidationStatusOut
 from aespa.services import scanner as scanner_svc
 from aespa.services import settings as settings_service
@@ -30,6 +32,31 @@ async def start_scan(run_id: int, session: Session = Depends(get_session)) -> Sc
         raise HTTPException(status_code=409, detail="Scan already running")
     await scanner_svc.start_scan(run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/start")
+async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Start an LLM-directed scan that dynamically chooses what to test next."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Thinking scan already running")
+    await scanner_svc.start_thinking_scan(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/stop")
+def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    scanner_svc.request_thinking_stop(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.get("/api/test-runs/{run_id}/thinking-scan/status")
+def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
 
 
 @router.post("/api/test-runs/{run_id}/pages/{page_id}/scan", response_model=ScanStatusOut)
@@ -193,3 +220,28 @@ def get_validation_status(
 ) -> ValidationStatusOut:
     _get_run_or_404(session, run_id)
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
+@router.get("/api/test-runs/{run_id}/scan-log")
+def get_scan_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .order_by(ScanLog.id)
+    ).all()
+    return [
+        {
+            "type": "scanner_phase",
+            "phase": e.phase,
+            "status": e.status,
+            "message": e.message,
+            "page_url": e.page_url,
+            "data": json.loads(e.data_json) if e.data_json else None,
+            "_persisted_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
