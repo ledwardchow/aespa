@@ -344,14 +344,35 @@ function SiteDetail({ siteId }) {
   const [site, setSite]   = useState(null);
   const [runs, setRuns]   = useState(null);
   const [error, setError] = useState(null);
+  const [editingRun, setEditingRun]   = useState(null);   // run object being edited
+  const [editForm, setEditForm]       = useState({});
+  const [editProfiles, setEditProfiles] = useState([]);
+  const [editSaving, setEditSaving]   = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([api.getSite(siteId), api.listRuns(siteId)]);
-      setSite(s); setRuns(r);
+      const [s, r, p] = await Promise.all([api.getSite(siteId), api.listRuns(siteId), api.listLLMProfiles()]);
+      setSite(s); setRuns(r); setEditProfiles(p || []);
     } catch(e) { setError(e.message); }
   }, [siteId]);
   useEffect(() => { load(); }, [load]);
+
+  const openEdit = (run) => {
+    setEditForm({ max_depth: run.max_depth, max_pages: run.max_pages, llm_config_id: run.llm_config_id || "" });
+    setEditingRun(run);
+  };
+  const saveEdit = async () => {
+    setEditSaving(true);
+    try {
+      const updated = await api.updateRun(editingRun.id, {
+        max_depth: Number(editForm.max_depth),
+        max_pages: Number(editForm.max_pages),
+        llm_config_id: editForm.llm_config_id ? Number(editForm.llm_config_id) : null,
+      });
+      setRuns(rs => rs.map(r => r.id === updated.id ? updated : r));
+      setEditingRun(null);
+    } catch(e) { setError(e.message); } finally { setEditSaving(false); }
+  };
 
   const deleteRun = async (run) => {
     if (!confirm(`Delete run "${run.name}"?`)) return;
@@ -373,6 +394,34 @@ function SiteDetail({ siteId }) {
     </div>
     <div className="content scroll-content stack">
       ${error && html`<div className="alert error">${error}</div>`}
+
+      ${editingRun && html`
+        <div className="card" style=${{padding:"20px 24px", border:"1px solid var(--accent)", marginBottom:8}}>
+          <div style=${{fontWeight:700, marginBottom:14}}>Edit run: ${editingRun.name}</div>
+          <div className="two-col" style=${{gap:12, marginBottom:12}}>
+            <div className="field" style=${{margin:0}}>
+              <label>Max depth</label>
+              <input type="number" min="1" max="10" value=${editForm.max_depth}
+                onInput=${e=>setEditForm(f=>({...f, max_depth:e.target.value}))} style=${{width:80}}/>
+            </div>
+            <div className="field" style=${{margin:0}}>
+              <label>Max pages</label>
+              <input type="number" min="5" max="500" value=${editForm.max_pages}
+                onInput=${e=>setEditForm(f=>({...f, max_pages:e.target.value}))} style=${{width:90}}/>
+            </div>
+          </div>
+          <div className="field" style=${{marginBottom:14}}>
+            <label>LLM profile <span className="field-optional">(leave blank to use the globally active profile)</span></label>
+            <select className="select" value=${editForm.llm_config_id||""} onChange=${e=>setEditForm(f=>({...f, llm_config_id:e.target.value}))}>
+              <option value="">— Use global active profile —</option>
+              ${editProfiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+            </select>
+          </div>
+          <div className="row" style=${{gap:8}}>
+            <button className="btn sm" onClick=${saveEdit} disabled=${editSaving}>${editSaving?"Saving…":"Save"}</button>
+            <button className="btn ghost sm" onClick=${()=>setEditingRun(null)}>Cancel</button>
+          </div>
+        </div>`}
 
       ${site && html`
         <div className="card" style=${{padding:"16px 20px"}}>
@@ -408,13 +457,17 @@ function SiteDetail({ siteId }) {
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
-                  <td><strong>${r.name}</strong></td>
+                  <td>
+                    <strong>${r.name}</strong>
+                    ${r.llm_config_id && html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>${(editProfiles.find(p=>p.id===r.llm_config_id)||{name:"LLM #"+r.llm_config_id}).name}</div>`}
+                  </td>
                   <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
                   <td className="subtle">${fmtDate(r.created_at)}</td>
                   <td>
                     <div className="row" style=${{justifyContent:"flex-end"}}>
                       <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${r.id}`)}>Open</button>
+                      <button className="btn secondary sm" onClick=${()=>openEdit(r)}>Edit</button>
                       <button className="btn danger-outline sm" onClick=${()=>deleteRun(r)}>Delete</button>
                     </div>
                   </td>
@@ -655,6 +708,9 @@ function TestRunDetail({ runId }) {
   const [editPages, setEditPages] = useState("");
   const [editLlmProfileId, setEditLlmProfileId] = useState(null);
   const [runProfiles, setRunProfiles] = useState([]);
+
+  // Load LLM profiles once so the read-only display and edit dropdown both work.
+  useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
   const [scanStatus, setScanStatus]         = useState(null);
   const [activityLog, setActivityLog]       = useState([]);
   const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
@@ -1234,7 +1290,6 @@ function TestRunDetail({ runId }) {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
     setEditLlmProfileId(run.llm_config_id || null);
-    api.listLLMProfiles().then(setRunProfiles).catch(()=>{});
     setEditingSettings(true);
   };
   const onSaveSettings = async () => {
@@ -1327,11 +1382,17 @@ function TestRunDetail({ runId }) {
 
   return html`
     <div className="topbar">
-      <div className="topbar-title">
-        <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
-        <span className="breadcrumb-sep"> / </span>
-        ${run ? run.name : "…"}
-        ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+      <div className="topbar-title" style=${{flexDirection:"column",alignItems:"flex-start",gap:2}}>
+        <div className="row" style=${{alignItems:"center",gap:0}}>
+          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
+          <span className="breadcrumb-sep"> / </span>
+          ${run ? run.name : "…"}
+          ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+        </div>
+        ${run && run.llm_config_id && runProfiles.length > 0 && html`
+          <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
+            LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
+          </div>`}
       </div>
       <div className="topbar-actions">
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
