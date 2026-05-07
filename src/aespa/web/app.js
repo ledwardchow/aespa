@@ -134,7 +134,7 @@ const defaultPolicyForm = () => ({
   scan_mode:"safe_active",
   max_probes_per_page:50,
   request_timeout_s:10,
-  min_delay_s:0.2,
+  min_delay_s:0.05,
   max_request_body_bytes:65536,
   response_body_read_limit_bytes:524288,
   allowed_schemes:"http, https",
@@ -689,8 +689,8 @@ function runWorkflowStatus(run, opts = {}) {
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
   if (thinkingStatus === "running") return { key:"running", label:"thinking scan" };
   if (thinkingStatus === "analysing") return { key:"running", label:"analysing thinking scan" };
-  if (thinkingStatus === "failed") return { key:"danger", label:"thinking scan failed" };
   if (scanStatus === "running") return { key:"running", label:"scanning" };
+  if (thinkingStatus === "failed") return { key:"danger", label:"thinking scan failed" };
   if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
   if (thinkingStatus === "stopped") return { key:"neutral", label:"thinking scan stopped" };

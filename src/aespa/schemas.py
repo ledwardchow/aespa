@@ -246,7 +246,7 @@ class ScannerPolicyBase(BaseModel):
     scan_mode: ScanModeLiteral = "safe_active"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
-    min_delay_s: float = Field(default=0.2, ge=0.0, le=60.0)
+    min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
     response_body_read_limit_bytes: int = Field(default=512 * 1024, ge=1024, le=10 * 1024 * 1024)
     allowed_schemes: list[SchemeLiteral] = Field(default_factory=lambda: ["http", "https"], min_length=1)

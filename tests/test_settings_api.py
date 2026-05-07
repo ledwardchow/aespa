@@ -211,6 +211,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     data = r.json()
     assert data["scan_mode"] == "safe_active"
     assert data["max_probes_per_page"] == 50
+    assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
 

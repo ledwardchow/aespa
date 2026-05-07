@@ -300,7 +300,7 @@ async def _validate_one(
                 results.append(result)
         except Exception as e:
             log.debug("Validation probe error (%s): %s", probe.get("desc", "?"), e)
-        await asyncio.sleep(scanner_policy.min_delay_s)
+        await scanner_svc.sleep_between_probes(scanner_policy)
 
     # Phase 3: LLM determines verdict.
     try:
