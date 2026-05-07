@@ -699,6 +699,7 @@ const workflowBadge = (run, opts = {}) => {
 
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
+  const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
@@ -757,6 +758,7 @@ function TestRunDetail({ runId }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(() => {});
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -1391,7 +1393,9 @@ function TestRunDetail({ runId }) {
     <div className="topbar">
       <div className="topbar-title" style=${{flexDirection:"column",alignItems:"flex-start",gap:2}}>
         <div className="row" style=${{alignItems:"center",gap:0}}>
-          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
+          <a href="#/" style=${{color:"var(--muted)",fontWeight:400}}>Sites</a>
+          <span className="breadcrumb-sep"> / </span>
+          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>${siteName || "…"}</a>
           <span className="breadcrumb-sep"> / </span>
           ${run ? run.name : "…"}
           ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
