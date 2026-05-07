@@ -8,9 +8,8 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
-from aespa.schemas import RunScannerPolicyOut, ScanFindingOut, ScannerPolicyIn, ScanStatusOut, ValidationStatusOut
+from aespa.schemas import ScanFindingOut, ScanStatusOut, ValidationStatusOut
 from aespa.services import scanner as scanner_svc
-from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
 
 router = APIRouter(tags=["scan"])
@@ -30,6 +29,8 @@ async def start_scan(run_id: int, session: Session = Depends(get_session)) -> Sc
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Thinking scan already running")
     await scanner_svc.start_scan(run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
 
@@ -40,6 +41,8 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+    if scanner_svc.is_running(run_id):
+        raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Thinking scan already running")
     await scanner_svc.start_thinking_scan(run_id)
@@ -70,6 +73,8 @@ async def scan_single_page(
         raise HTTPException(status_code=409, detail="Crawl is still running")
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Thinking scan already running")
     page = session.get(CrawledPage, page_id)
     if page is None or page.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -90,28 +95,6 @@ def stop_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatu
 def scan_status(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
     _get_run_or_404(session, run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.get("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
-def get_scan_policy(run_id: int, session: Session = Depends(get_session)) -> RunScannerPolicyOut:
-    run = _get_run_or_404(session, run_id)
-    return settings_service.get_run_scanner_policy(session, run)
-
-
-@router.patch("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
-def update_scan_policy(
-    run_id: int,
-    payload: ScannerPolicyIn,
-    session: Session = Depends(get_session),
-) -> RunScannerPolicyOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while crawl is running")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while scan is running")
-    if validator_svc.is_validating(run_id):
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while validation is running")
-    return settings_service.update_run_scanner_policy(session, run, payload)
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
