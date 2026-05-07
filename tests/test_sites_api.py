@@ -53,6 +53,55 @@ def test_create_site_with_auth_and_credentials(client):
     assert data["credentials"][0]["label"] == "admin"
 
 
+def test_create_site_supports_credential_specific_login_urls(client):
+    r = make_site(
+        client,
+        name="Multi Auth",
+        requires_auth=True,
+        login_url=None,
+        credentials=[
+            {
+                "username": "admin",
+                "password": "admin123",
+                "login_url": "https://app.local/admin/login",
+            },
+            {
+                "username": "customer",
+                "password": "user123",
+                "login_url": "https://app.local/customer/login",
+            },
+        ],
+    )
+
+    assert r.status_code == 201
+    data = r.json()
+    assert data["login_url"] is None
+    login_urls = {c["username"]: c["login_url"] for c in data["credentials"]}
+    assert login_urls == {
+        "admin": "https://app.local/admin/login",
+        "customer": "https://app.local/customer/login",
+    }
+
+
+def test_create_site_rejects_missing_credential_login_without_default(client):
+    r = make_site(
+        client,
+        name="Partial Multi Auth",
+        requires_auth=True,
+        login_url=None,
+        credentials=[
+            {"username": "admin", "password": "admin123"},
+            {
+                "username": "customer",
+                "password": "user123",
+                "login_url": "https://app.local/customer/login",
+            },
+        ],
+    )
+
+    assert r.status_code == 422
+
+
 def test_create_site_requires_auth_missing_login_url(client):
     r = make_site(client, requires_auth=True)
     assert r.status_code == 422
@@ -206,6 +255,26 @@ def test_add_credential(client):
     )
     assert r.status_code == 201
     assert r.json()["username"] == "newuser"
+
+
+def test_add_credential_accepts_login_url(client):
+    site = make_site(
+        client,
+        name="Auth Site",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+    ).json()
+    r = client.post(
+        f"/api/sites/{site['id']}/credentials",
+        json={
+            "username": "admin",
+            "password": "newpass",
+            "login_url": "https://auth.local/admin/login",
+        },
+    )
+
+    assert r.status_code == 201
+    assert r.json()["login_url"] == "https://auth.local/admin/login"
 
 
 def test_add_credential_to_non_auth_site_rejected(client):

@@ -62,6 +62,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _login_url_for_credential(default_login_url: Optional[str], cred) -> str:
+    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
+
+
 def _severity_from_cvss(score: float | int | str | None) -> str:
     try:
         value = float(score or 0.0)
@@ -410,7 +414,14 @@ async def _do_thinking_scan(run_id: int) -> None:
         )
         crawl_context += f"\n\nFindings already discovered by the regular scan (avoid re-testing these; focus on new areas):\n{finding_lines}"
 
-    creds_for_llm = [{"username": c.username, "password": c.password} for c in creds]
+    creds_for_llm = [
+        {
+            "username": c.username,
+            "password": c.password,
+            "login_url": _login_url_for_credential(login_url, c),
+        }
+        for c in creds
+    ]
 
     events_svc.emit(run_id, {
         "type": "scanner_phase",
@@ -435,7 +446,11 @@ async def _do_thinking_scan(run_id: int) -> None:
                 await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
             except Exception:
                 pass
-            await _authenticate(pw_page, login_url, creds[0])
+            await _authenticate(
+                pw_page,
+                _login_url_for_credential(login_url, creds[0]),
+                creds[0],
+            )
             raw_cookies = await ctx.cookies()
             cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
             for key in ["access_token", "token", "jwt", "auth_token", "id_token",
@@ -687,8 +702,9 @@ async def _export_cred_session(
             await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
         except Exception:
             pass
-        if login_url:
-            await _authenticate(page, login_url, cred)
+        credential_login_url = _login_url_for_credential(login_url, cred)
+        if credential_login_url:
+            await _authenticate(page, credential_login_url, cred)
         raw = await ctx.cookies()
         cookies = {c["name"]: c["value"] for c in raw}
         token: Optional[str] = None
@@ -857,8 +873,9 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
         if requires_auth and creds:
             from aespa.services.crawler import _authenticate
-            log.info("Authenticating at %s", login_url)
-            await _authenticate(pw_page, login_url, creds[0])
+            first_login_url = _login_url_for_credential(login_url, creds[0])
+            log.info("Authenticating at %s", first_login_url)
+            await _authenticate(pw_page, first_login_url, creds[0])
             log.info("Auth done. page.url=%s", pw_page.url)
 
         # ── Export auth state for httpx ───────────────────────────────────────
@@ -896,7 +913,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             for extra_cred in creds[1:]:
                 log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
                 ec_cookies, ec_token = await _export_cred_session(
-                    base_url, login_url, extra_cred
+                    base_url, _login_url_for_credential(login_url, extra_cred), extra_cred
                 )
                 cred_sessions[extra_cred.id] = {
                     "username": extra_cred.username,
