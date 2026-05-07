@@ -38,6 +38,9 @@ const api = {
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
+  startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
+  getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
@@ -644,6 +647,8 @@ function TestRunDetail({ runId }) {
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [scanStopRequested, setScanStopRequested]   = useState(false);
+  const [thinkingStatus, setThinkingStatus]         = useState(null);
+  const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
@@ -722,6 +727,9 @@ function TestRunDetail({ runId }) {
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
         if (evt.status && evt.status !== "running") setScanStopRequested(false);
+      } else if (evt.type === "thinking_scan_update") {
+        setThinkingStatus(evt);
+        if (evt.status && evt.status !== "running") setThinkingStopReq(false);
       } else if (evt.type === "scanner_phase") {
         setActivityLog(prev => {
           const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -778,6 +786,20 @@ function TestRunDetail({ runId }) {
     return () => clearInterval(iv);
   }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
 
+  // Poll thinking-scan status independently.
+  useEffect(() => {
+    const active = thinkingStatus?.status === "running" || thinkingStopRequested;
+    if (!active) return;
+    const iv = setInterval(() => {
+      api.getThinkingStatus(runId).then(s => {
+        setThinkingStatus(s);
+        if (thinkingStopRequested && s.status !== "running") setThinkingStopReq(false);
+        if (s.status !== "running") api.getFindings(runId).then(setFindings).catch(() => {});
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [runId, thinkingStatus?.status, thinkingStopRequested]);
+
   // Poll validation status while validating is running
   useEffect(() => {
     if (validateStatus?.status !== "running" && activeTab !== "findings") return;
@@ -801,6 +823,7 @@ function TestRunDetail({ runId }) {
   useEffect(() => {
     if (activeTab !== "scan") return;
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+    api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
@@ -823,14 +846,16 @@ function TestRunDetail({ runId }) {
       activeTab === "traffic" ||
       run?.status === "running" ||
       scanStatus?.status === "running" ||
+      thinkingStatus?.status === "running" ||
       crawlStopRequested ||
-      scanStopRequested
+      scanStopRequested ||
+      thinkingStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, runId, crawlStopRequested, scanStopRequested]);
+  }, [activeTab, run?.status, scanStatus?.status, thinkingStatus?.status, runId, crawlStopRequested, scanStopRequested, thinkingStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
@@ -1160,6 +1185,15 @@ function TestRunDetail({ runId }) {
     } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
+  const onStopThinkingScan = async () => {
+    try {
+      setThinkingStopReq(true);
+      const s = await api.stopThinkingScan(runId);
+      setThinkingStatus(s);
+      if (s.status !== "running") setThinkingStopReq(false);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
@@ -1231,11 +1265,12 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
 
-  const effectiveScanStatus = scanStatus?.status || run?.scan_status || "idle";
+  const effectiveScanStatus     = scanStatus?.status     || run?.scan_status || "idle";
+  const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
     crawlStopping: crawlStopRequested,
-    scanStopping: scanStopRequested,
+    scanStopping: scanStopRequested || thinkingStopRequested,
   });
   const STATUS_COLOR = {
     neutral:"var(--muted)",
@@ -1250,6 +1285,7 @@ function TestRunDetail({ runId }) {
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
   const canStopScan = effectiveScanStatus === "running";
+  const canStopThinking = effectiveThinkingStatus === "running";
 
   return html`
     <div className="topbar">
@@ -1263,6 +1299,7 @@ function TestRunDetail({ runId }) {
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
         ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop thinking scan"}</button>`}
       </div>
     </div>
 
@@ -1300,10 +1337,23 @@ function TestRunDetail({ runId }) {
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
         ${activeTab==="scan" && effectiveScanStatus==="running" && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping scan…" : "◼ Stop scan"}
+            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop scan"}
+          </button>`}
+        ${activeTab==="scan" && effectiveThinkingStatus==="running" && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
+            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
           </button>`}
         ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
+        ${activeTab==="scan" && !thinkingStopRequested && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
+          <button className="btn ghost sm" style=${{margin:"auto 4px auto 0"}} title="LLM autonomously decides what and where to test" onClick=${async () => {
+            try {
+              setThinkingStopReq(false);
+              setThinkingStatus({ status: "running" });
+              const s = await api.startThinkingScan(runId);
+              setThinkingStatus(s);
+            } catch(e) { setThinkingStopReq(false); setError(e.message); }
+          }}><${IconPlay}/> Thinking scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
