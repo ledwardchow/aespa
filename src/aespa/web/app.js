@@ -438,6 +438,19 @@ function SiteDetail({ siteId }) {
             </div>
           </div>
           ${site.notes && html`<div style=${{marginTop:10,fontSize:13,color:"var(--muted)"}}>${site.notes}</div>`}
+          ${site.requires_auth && site.credentials.length > 0 && html`
+            <div className="site-credentials-list">
+              ${site.credentials.map(c => html`
+                <div key=${c.id} className="site-credential-row">
+                  <div>
+                    <div className="site-credential-name">${c.label || c.username}</div>
+                    ${c.label && html`<div className="site-credential-user">${c.username}</div>`}
+                  </div>
+                  <div className="site-credential-login mono">
+                    ${c.login_url || site.login_url || "No login URL"}
+                  </div>
+                </div>`)}
+            </div>`}
         </div>`}
 
       <div>
@@ -555,9 +568,9 @@ function SiteForm({ siteId }) {
                 <div className="cred-row" key=${i}>
                   <div className="field"><label>Username</label><input type="text" required value=${c.username} onChange=${e=>updC(i,{username:e.target.value})}/></div>
                   <div className="field"><label>Password</label><input type="text" required value=${c.password} onChange=${e=>updC(i,{password:e.target.value})}/></div>
-                  <div className="field"><label>Login URL</label><input type="url" value=${c.login_url||""} placeholder=${form.login_url||"https://target.example.com/login"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
+                  <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value=${c.login_url||""} placeholder=${form.login_url?`Uses default: ${form.login_url}`:"Required if no default login URL"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
                   <div className="field"><label>Label</label><input type="text" value=${c.label} placeholder="admin" onChange=${e=>updC(i,{label:e.target.value})}/></div>
-                  <div style=${{paddingBottom:1}}><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
+                  <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
                 </div>`)}
               <button type="button" className="btn secondary sm" onClick=${addC}><${IconPlus}/> Add credential</button>
             </fieldset>`}

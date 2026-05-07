@@ -389,13 +389,43 @@ legend {
 
 .cred-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   gap: 8px;
   align-items: end;
   padding: 10px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 7px;
+}
+.cred-row .credential-login-field { grid-column: 1 / -1; }
+.cred-row .credential-remove-cell { padding-bottom:1px; }
+
+.site-credentials-list {
+  margin-top:12px;
+  border-top:1px solid var(--border);
+  padding-top:10px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.site-credential-row {
+  display:grid;
+  grid-template-columns:minmax(120px, 0.7fr) minmax(0, 1fr);
+  gap:12px;
+  align-items:center;
+  padding:8px 10px;
+  border:1px solid var(--border);
+  border-radius:7px;
+  background:var(--bg);
+}
+.site-credential-name { font-size:13px; font-weight:700; color:var(--text); }
+.site-credential-user { margin-top:2px; font-size:11px; color:var(--muted); }
+.site-credential-login {
+  color:var(--text-2);
+  font-size:12px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 
 /* ── Alerts ─────────────────────────────────────────────────── */
