@@ -53,6 +53,61 @@ def test_scanner_login_url_for_credential_prefers_override():
     ) == "https://target.local/customer/login"
 
 
+def test_followup_log_message_names_signal_and_hypothesis():
+    probes = [{
+        "type": "http",
+        "method": "POST",
+        "url": "https://target.local/api/transfers",
+        "body": {"amount": 100, "toAccount": "10000001"},
+        "interesting_result": "2FA check returned requires_2fa=true",
+        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+        "payload_purpose": "omit the 2FA token from the transfer request",
+        "desc": "Follow-up: submit transfer without 2FA token.",
+    }]
+
+    message = scanner._followup_log_message(probes)
+
+    assert "looked interesting" not in message
+    assert "2FA check returned requires_2fa=true" in message
+    assert "transfer endpoint may not enforce 2FA" in message
+    assert "omit the 2FA token" in message
+
+
+def test_thinking_jwt_helper_signs_hs256_token():
+    token = scanner._sign_hs256_jwt(
+        "test-secret",
+        {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+    )
+
+    header, payload, signature = token.split(".")
+
+    assert header
+    assert payload
+    assert signature
+    assert token == scanner._sign_hs256_jwt(
+        "test-secret",
+        {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+    )
+
+
+def test_credential_check_redacts_passwords():
+    redacted = scanner._redact_candidate({
+        "username": "admin",
+        "password": "admin123",
+    })
+
+    assert redacted == {"username": "admin", "password": "***"}
+
+
+def test_thinking_session_helpers_extract_and_redact_jwt():
+    token = scanner._sign_hs256_jwt("secret", {"sub": 1})
+    body = f'{{"success":true,"data":{{"token":"{token}"}}}}'
+
+    assert scanner._extract_bearer_token_from_body(body) == token
+    assert token not in scanner._redact_sensitive_text(body)
+    assert "[REDACTED_JWT]" in scanner._redact_sensitive_text(body)
+
+
 def test_spa_shell_is_not_treated_as_protected_content():
     body = """
     <!doctype html>

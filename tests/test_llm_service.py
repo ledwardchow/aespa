@@ -156,6 +156,226 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert "hypothesis" in captured["prompt"]
     assert "payload_purpose" in captured["prompt"]
     assert "found something interesting" in captured["prompt"]
+    assert "Raw asset and JavaScript mining" in captured["prompt"]
+    assert "endpoint inventory" in captured["prompt"]
+    assert "admin/admin123" in captured["prompt"]
+    assert "Business-logic gate bypass" in captured["prompt"]
+    assert "actual action endpoint directly without the required field" in captured["prompt"]
+    assert "individual detail endpoints" in captured["prompt"]
+    assert "SQL error disclosure" in captured["prompt"]
+    assert "/api/health" in captured["prompt"]
+    assert "jwt_secret" in captured["prompt"]
+    assert "CORS" in captured["prompt"]
+    assert "loan/account creation rules" in captured["prompt"]
+    assert '"action": "browser"' in captured["prompt"]
+    assert '"action": "jwt"' in captured["prompt"]
+    assert '"action": "credential_check"' in captured["prompt"]
+    assert "Maximum 20 candidates" in captured["prompt"]
+    assert "use_session" in captured["prompt"]
+    assert "Supported ops: goto, fill, type, click, press, wait, snapshot" in captured["prompt"]
+
+
+def test_thinking_next_action_history_includes_response_headers(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "http",
+          "method": "GET",
+          "url": "https://target.local/admin/",
+          "headers": {},
+          "body": null,
+          "observation": "homepage linked an admin panel",
+          "hypothesis": "admin panel may expose auth or asset clues",
+          "payload_purpose": null,
+          "note": "Fetch the admin panel after discovering the public link."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/",
+        history=[{
+            "step": 1,
+            "method": "GET",
+            "url": "https://target.local/",
+            "note": "Initial fingerprinting",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {
+                "content-type": "text/html",
+                "x-frame-options": "DENY",
+            },
+            "response_body": "<a href=\"/admin/\">Admin</a>",
+        }],
+        sessions=[{
+            "label": "found_admin_1",
+            "kind": "bearer",
+            "username": "admin",
+            "source": "credential_check",
+        }],
+        max_steps=120,
+        current_step=2,
+    ))
+
+    assert action["url"] == "https://target.local/admin/"
+    assert "Response headers:" in captured["prompt"]
+    assert "x-frame-options" in captured["prompt"]
+    assert "content-type" in captured["prompt"]
+    assert "found_admin_1" in captured["prompt"]
+    assert "secrets are not shown" in captured["prompt"]
+
+
+def test_thinking_next_action_accepts_browser_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "browser",
+          "url": "https://target.local/banking/#/login",
+          "steps": [
+            {"op": "goto", "url": "https://target.local/banking/#/login"},
+            {"op": "fill", "selector": "input[name='email']", "value": "test@example.com"},
+            {"op": "fill", "selector": "input[name='password']", "value": "password123"},
+            {"op": "click", "selector": "button[type='submit']"},
+            {"op": "wait", "state": "networkidle"},
+            {"op": "snapshot"}
+          ],
+          "observation": "The login flow is client-side rendered behind a hash route.",
+          "hypothesis": "Browser execution may reveal authenticated API calls or DOM-only routes.",
+          "payload_purpose": "Exercise the JS login form instead of guessing API behavior.",
+          "note": "Use Playwright to execute the SPA login route and capture DOM/network evidence."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/banking/#/login [takes-input]",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "browser"
+    assert action["steps"][0]["op"] == "goto"
+    assert action["steps"][-1]["op"] == "snapshot"
+
+
+def test_thinking_next_action_accepts_jwt_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "jwt",
+          "secret": "test-secret",
+          "claims": {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+          "header": {"typ": "JWT", "alg": "HS256"},
+          "store_as": "customer_sub_1_token",
+          "observation": "/api/health exposed jwt_secret.",
+          "hypothesis": "The API may trust HS256 tokens signed with that secret.",
+          "payload_purpose": "Create a controlled read-only impersonation token.",
+          "note": "Forge a customer token, then use it on /api/profile."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="API endpoints:\n  https://target.local/api/health",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "jwt"
+    assert action["claims"]["sub"] == 1
+    assert action["store_as"] == "customer_sub_1_token"
+
+
+def test_thinking_next_action_accepts_credential_check_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "credential_check",
+          "url": "https://target.local/api/admin/auth/login",
+          "method": "POST",
+          "username_field": "username",
+          "password_field": "password",
+          "candidates": [
+            {"username": "admin", "password": "admin"},
+            {"username": "admin", "password": "admin123"}
+          ],
+          "headers": {"Content-Type": "application/json"},
+          "success_statuses": [200],
+          "observation": "The public admin login uses a default username placeholder.",
+          "hypothesis": "The demo admin account may still use a seeded password.",
+          "payload_purpose": "Try a tiny bounded dictionary, not brute force.",
+          "note": "Check two obvious admin credentials and record any success."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/admin/",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "credential_check"
+    assert len(action["candidates"]) == 2
+    assert action["candidates"][1]["password"] == "admin123"
+
+
+def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):
+        captured: dict[str, str] = {}
+
+        async def fake_call(config, prompt, screenshot_b64):
+                captured["prompt"] = prompt
+                return """[
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "url": "https://target.local/api/transfers",
+                        "params": {},
+                        "headers": {},
+                        "body": {"amount":100},
+                        "as_user": null,
+                        "interesting_result": "2FA check returned requires_2fa=true",
+                        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+                        "payload_purpose": "omit 2FA token",
+                        "desc": "Follow-up: submit transfer without 2FA."
+                    }
+                ]"""
+
+        monkeypatch.setattr(llm, "_call", fake_call)
+
+        config = LLMConfig(provider="openai_compatible", model="local")
+        probes = asyncio.run(llm.plan_followup_probes(
+                config,
+                "https://target.local/transfer",
+                "Transfer page",
+                [{
+                        "desc": "2FA check",
+                        "url": "https://target.local/api/transfer/check",
+                        "status": 200,
+                        "body": '{"requires_2fa":true}',
+                        "response_evidence": "Status: 200\nrequires_2fa=true",
+                }],
+        ))
+
+        assert probes[0]["interesting_result"].startswith("2FA check")
+        assert "interesting_result" in captured["prompt"]
+        assert "hypothesis" in captured["prompt"]
+        assert "payload_purpose" in captured["prompt"]
+        assert "looked interesting" in captured["prompt"]
 
 
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):

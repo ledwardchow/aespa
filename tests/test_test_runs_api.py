@@ -221,6 +221,67 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     assert r.json()["status"] == "stopped"
 
 
+def test_normal_scan_start_does_not_start_thinking_scan(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    calls = {"normal": [], "thinking": []}
+
+    async def fake_start_scan(run_id, page_ids=None):
+        calls["normal"].append((run_id, page_ids))
+
+    async def fake_start_thinking_scan(run_id):
+        calls["thinking"].append(run_id)
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "get_scan_status", lambda run_id: {
+        "total_pages": 0,
+        "pages_done": 0,
+        "findings_count": 0,
+        "status": "running",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+
+    assert r.status_code == 200
+    assert calls["normal"] == [(run["id"], None)]
+    assert calls["thinking"] == []
+    assert r.json()["status"] == "running"
+
+
+def test_thinking_scan_start_does_not_start_normal_scan(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    calls = {"normal": [], "thinking": []}
+
+    async def fake_start_scan(run_id, page_ids=None):
+        calls["normal"].append((run_id, page_ids))
+
+    async def fake_start_thinking_scan(run_id):
+        calls["thinking"].append(run_id)
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "get_thinking_scan_status", lambda run_id: {
+        "status": "running",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert r.status_code == 200
+    assert calls["normal"] == []
+    assert calls["thinking"] == [run["id"]]
+    assert r.json()["status"] == "running"
+
+
 # ── Graph / pages on empty run ────────────────────────────────────────────────
 
 def test_get_graph_empty(client: TestClient):
