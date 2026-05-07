@@ -20,6 +20,7 @@ class CredentialIn(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
     label: str | None = None
+    login_url: HttpUrl | None = None
 
 
 class CredentialOut(BaseModel):
@@ -29,6 +30,7 @@ class CredentialOut(BaseModel):
     username: str
     password: str
     label: str | None = None
+    login_url: str | None = None
 
 
 class SiteBase(BaseModel):
@@ -42,8 +44,6 @@ class SiteBase(BaseModel):
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
-        if self.requires_auth and self.login_url is None:
-            raise ValueError("login_url is required when requires_auth is true")
         if not self.requires_auth and self.login_url is not None:
             raise ValueError("login_url must be omitted when requires_auth is false")
         return self
@@ -56,6 +56,11 @@ class SiteCreate(SiteBase):
     def _check_credentials(self) -> "SiteCreate":
         if self.credentials and not self.requires_auth:
             raise ValueError("credentials are only allowed when requires_auth is true")
+        if self.requires_auth:
+            if self.login_url is None and not self.credentials:
+                raise ValueError("login_url is required when no credential login_url is provided")
+            if self.login_url is None and any(c.login_url is None for c in self.credentials):
+                raise ValueError("each credential must include login_url when site login_url is omitted")
         return self
 
 
