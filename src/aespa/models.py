@@ -231,3 +231,18 @@ class ScanFinding(SQLModel, table=True):
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanLog(SQLModel, table=True):
+    """Persisted scanner_phase event so the activity log survives page navigation."""
+
+    __tablename__ = "scan_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    phase: str                              # thinking_step | site_plan | page_plan | …
+    status: str = Field(default="")        # start | complete | running | deciding | …
+    message: str = Field(default="")
+    page_url: Optional[str] = Field(default=None)
+    data_json: Optional[str] = Field(default=None)  # JSON blob for extra phase data

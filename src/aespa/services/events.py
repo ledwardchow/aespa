@@ -13,12 +13,42 @@ _queues: dict[int, list[asyncio.Queue]] = {}
 
 
 def emit(run_id: int, event: dict) -> None:
-    """Push an event to all active SSE subscribers for a run (non-blocking)."""
+    """Push an event to all active SSE subscribers for a run (non-blocking).
+
+    scanner_phase events are also persisted to the scan_log table so the
+    activity log survives page navigation.
+    """
     for q in _queues.get(run_id, []):
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
             pass  # slow client — drop the event rather than block
+
+    if event.get("type") == "scanner_phase":
+        _persist_phase_event(run_id, event)
+
+
+def _persist_phase_event(run_id: int, event: dict) -> None:
+    """Write a scanner_phase event to scan_log (best-effort, never raises)."""
+    try:
+        from aespa.db import get_engine
+        from aespa.models import ScanLog
+        from sqlmodel import Session
+
+        data = event.get("data")
+        entry = ScanLog(
+            test_run_id=run_id,
+            phase=str(event.get("phase") or ""),
+            status=str(event.get("status") or ""),
+            message=str(event.get("message") or ""),
+            page_url=event.get("page_url") or None,
+            data_json=json.dumps(data) if data is not None else None,
+        )
+        with Session(get_engine()) as s:
+            s.add(entry)
+            s.commit()
+    except Exception:
+        pass  # never let persistence failures break the scan
 
 
 async def stream(run_id: int) -> AsyncGenerator[str, None]:
