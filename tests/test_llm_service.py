@@ -158,6 +158,50 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert "found something interesting" in captured["prompt"]
 
 
+def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):
+        captured: dict[str, str] = {}
+
+        async def fake_call(config, prompt, screenshot_b64):
+                captured["prompt"] = prompt
+                return """[
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "url": "https://target.local/api/transfers",
+                        "params": {},
+                        "headers": {},
+                        "body": {"amount":100},
+                        "as_user": null,
+                        "interesting_result": "2FA check returned requires_2fa=true",
+                        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+                        "payload_purpose": "omit 2FA token",
+                        "desc": "Follow-up: submit transfer without 2FA."
+                    }
+                ]"""
+
+        monkeypatch.setattr(llm, "_call", fake_call)
+
+        config = LLMConfig(provider="openai_compatible", model="local")
+        probes = asyncio.run(llm.plan_followup_probes(
+                config,
+                "https://target.local/transfer",
+                "Transfer page",
+                [{
+                        "desc": "2FA check",
+                        "url": "https://target.local/api/transfer/check",
+                        "status": 200,
+                        "body": '{"requires_2fa":true}',
+                        "response_evidence": "Status: 200\nrequires_2fa=true",
+                }],
+        ))
+
+        assert probes[0]["interesting_result"].startswith("2FA check")
+        assert "interesting_result" in captured["prompt"]
+        assert "hypothesis" in captured["prompt"]
+        assert "payload_purpose" in captured["prompt"]
+        assert "looked interesting" in captured["prompt"]
+
+
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
     captured: dict[str, object] = {}
 

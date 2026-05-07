@@ -138,6 +138,64 @@ def _thinking_action_log_message(step: int, method: str, url: str, action: dict)
     return f"{message} — {method} {url}"
 
 
+def _summary_list(values: list[str], limit: int = 3) -> str:
+    unique: list[str] = []
+    for value in values:
+        compact = _compact_log_value(value, 180)
+        if compact and compact not in unique:
+            unique.append(compact)
+    if not unique:
+        return ""
+    shown = unique[:limit]
+    suffix = f"; +{len(unique) - limit} more" if len(unique) > limit else ""
+    return "; ".join(shown) + suffix
+
+
+def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
+    interesting = _summary_list([
+        str(
+            probe.get("interesting_result")
+            or probe.get("observation")
+            or probe.get("trigger")
+            or probe.get("reason")
+            or ""
+        )
+        for probe in followup_probes
+    ])
+    hypotheses = _summary_list([
+        str(
+            probe.get("hypothesis")
+            or probe.get("tests")
+            or probe.get("objective")
+            or probe.get("desc")
+            or ""
+        )
+        for probe in followup_probes
+    ])
+    payloads = _summary_list([
+        str(probe.get("payload_purpose") or _thinking_payload_summary(probe.get("url") or "", probe.get("body")))
+        for probe in followup_probes
+    ])
+    return {"interesting": interesting, "hypotheses": hypotheses, "payloads": payloads}
+
+
+def _followup_log_message(followup_probes: list[dict], *, tense: str = "planning") -> str:
+    count = len(followup_probes)
+    plural = "s" if count != 1 else ""
+    details = _followup_log_details(followup_probes)
+    if tense == "complete":
+        message = f"{count} follow-up probe{plural} executed"
+    else:
+        message = f"{count} follow-up probe{plural} planned"
+    if details["interesting"]:
+        message += f" because: {details['interesting']}"
+    if details["hypotheses"]:
+        message += f"; testing: {details['hypotheses']}"
+    if details["payloads"]:
+        message += f"; payload purpose: {details['payloads']}"
+    return message
+
+
 def _combined_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
     parts = []
     if summary:
@@ -1112,6 +1170,17 @@ async def _scan_page(
             log.warning("plan_followup_probes failed for %s: %s", page_url, e)
             followup_probes = []
 
+        if followup_probes:
+            followup_details = _followup_log_details(followup_probes)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "page_followup",
+                "status": "start",
+                "page_url": page_url,
+                "message": _followup_log_message(followup_probes),
+                "data": {"followup_count": len(followup_probes), **followup_details},
+            })
+
         for probe in followup_probes:
             if run_id in _stop_requested:
                 break
@@ -1134,13 +1203,14 @@ async def _scan_page(
             await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
 
         if followup_probes:
+            followup_details = _followup_log_details(followup_probes)
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "page_followup",
                 "status": "complete",
                 "page_url": page_url,
-                "message": f"{len(followup_probes)} follow-up probe{'s' if len(followup_probes) != 1 else ''} executed — initial results looked interesting",
-                "data": {"followup_count": len(followup_probes)},
+                "message": _followup_log_message(followup_probes, tense="complete"),
+                "data": {"followup_count": len(followup_probes), **followup_details},
             })
 
     # Phase 3: LLM analyses results and produces findings.

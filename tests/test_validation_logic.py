@@ -53,6 +53,26 @@ def test_scanner_login_url_for_credential_prefers_override():
     ) == "https://target.local/customer/login"
 
 
+def test_followup_log_message_names_signal_and_hypothesis():
+    probes = [{
+        "type": "http",
+        "method": "POST",
+        "url": "https://target.local/api/transfers",
+        "body": {"amount": 100, "toAccount": "10000001"},
+        "interesting_result": "2FA check returned requires_2fa=true",
+        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+        "payload_purpose": "omit the 2FA token from the transfer request",
+        "desc": "Follow-up: submit transfer without 2FA token.",
+    }]
+
+    message = scanner._followup_log_message(probes)
+
+    assert "looked interesting" not in message
+    assert "2FA check returned requires_2fa=true" in message
+    assert "transfer endpoint may not enforce 2FA" in message
+    assert "omit the 2FA token" in message
+
+
 def test_spa_shell_is_not_treated_as_protected_content():
     body = """
     <!doctype html>
