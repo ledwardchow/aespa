@@ -692,6 +692,7 @@ const workflowBadge = (run, opts = {}) => {
 
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
+  const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
@@ -750,6 +751,7 @@ function TestRunDetail({ runId }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -1384,7 +1386,7 @@ function TestRunDetail({ runId }) {
     <div className="topbar">
       <div className="topbar-title" style=${{flexDirection:"column",alignItems:"flex-start",gap:2}}>
         <div className="row" style=${{alignItems:"center",gap:0}}>
-          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
+          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>${siteName || "Site"}</a>
           <span className="breadcrumb-sep"> / </span>
           ${run ? run.name : "…"}
           ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
@@ -1905,41 +1907,41 @@ function TestRunDetail({ runId }) {
 
       ${activeTab==="activity" && html`
         <div className="activity-panel">
-          ${sitePlanData && html`
-            <div className="site-plan-card">
-              <div className="site-plan-header">
-                <span className="site-plan-label">Site Test Plan</span>
-                <span className="site-plan-badge">LLM Analysis</span>
-              </div>
-              <div className="site-plan-summary">${sitePlanData.app_summary}</div>
-              ${(sitePlanData.hypotheses||[]).length > 0 && html`
-                <div className="site-plan-section">
-                  <div className="site-plan-section-title">Attack Hypotheses</div>
-                  <div className="hypotheses-list">
-                    ${(sitePlanData.hypotheses||[]).map((h, i) => html`
-                      <div key=${i} className="hypothesis-row">
-                        <span className="owasp-badge">${h.owasp || "?"}</span>
-                        <div className="hypothesis-body">
-                          <div className="hypothesis-label">${h.hypothesis}</div>
-                          <div className="hypothesis-desc">${h.description}</div>
-                        </div>
-                      </div>`)}
-                  </div>
-                </div>`}
-              ${(sitePlanData.critical_areas||[]).length > 0 && html`
-                <div className="site-plan-section">
-                  <div className="site-plan-section-title">Critical Areas</div>
-                  <div className="critical-areas-list">
-                    ${(sitePlanData.critical_areas||[]).map((a, i) => html`<span key=${i} className="critical-area-tag">${a}</span>`)}
-                  </div>
-                </div>`}
-              ${sitePlanData.test_notes && html`
-                <div className="site-plan-section">
-                  <div className="site-plan-section-title">Test Notes</div>
-                  <div className="site-plan-notes">${sitePlanData.test_notes}</div>
-                </div>`}
-            </div>`}
           <div className="activity-feed" ref=${activityFeedRef}>
+            ${sitePlanData && html`
+              <div className="site-plan-card">
+                <div className="site-plan-header">
+                  <span className="site-plan-label">Site Test Plan</span>
+                  <span className="site-plan-badge">LLM Analysis</span>
+                </div>
+                <div className="site-plan-summary">${sitePlanData.app_summary}</div>
+                ${(sitePlanData.hypotheses||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Attack Hypotheses</div>
+                    <div className="hypotheses-list">
+                      ${(sitePlanData.hypotheses||[]).map((h, i) => html`
+                        <div key=${i} className="hypothesis-row">
+                          <span className="owasp-badge">${h.owasp || "?"}</span>
+                          <div className="hypothesis-body">
+                            <div className="hypothesis-label">${h.hypothesis}</div>
+                            <div className="hypothesis-desc">${h.description}</div>
+                          </div>
+                        </div>`)}
+                    </div>
+                  </div>`}
+                ${(sitePlanData.critical_areas||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Critical Areas</div>
+                    <div className="critical-areas-list">
+                      ${(sitePlanData.critical_areas||[]).map((a, i) => html`<span key=${i} className="critical-area-tag">${a}</span>`)}
+                    </div>
+                  </div>`}
+                ${sitePlanData.test_notes && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Test Notes</div>
+                    <div className="site-plan-notes">${sitePlanData.test_notes}</div>
+                  </div>`}
+              </div>`}
             ${activityLog.length === 0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
                 ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
