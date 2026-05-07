@@ -514,16 +514,18 @@ function SiteForm({ siteId }) {
 // ── Test run form ─────────────────────────────────────────────────────────────
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active" });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active", llm_config_id:null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const upd = p => setForm(f=>({...f,...p}));
 
   useEffect(() => {
     (async () => {
       try {
-        const policy = await api.getScannerPolicy();
+        const [policy, profs] = await Promise.all([api.getScannerPolicy(), api.listLLMProfiles()]);
         if (policy?.scan_mode) upd({scan_mode:policy.scan_mode});
+        setProfiles(profs || []);
       } catch(e) { setError(e.message); }
     })();
   }, []);
@@ -536,6 +538,7 @@ function TestRunForm({ siteId }) {
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
         scan_mode: form.scan_mode,
+        llm_config_id: form.llm_config_id || null,
       });
       nav(`#/runs/${run.id}`);
     } catch(e) { setError(e.message); setSaving(false); }
@@ -576,6 +579,14 @@ function TestRunForm({ siteId }) {
         </div>
         <${ScanModeDefinitions} selected=${form.scan_mode}/>
         <div className="divider"/>
+        <div className="form-section-title">LLM Profile</div>
+        <div className="field">
+          <label>LLM profile <span className="field-optional">(optional — uses the globally active profile if not set)</span></label>
+          <select className="select" value=${form.llm_config_id||""} onChange=${e=>upd({llm_config_id:e.target.value?Number(e.target.value):null})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+          </select>
+        </div>
         <div className="row spread">
           <button type="button" className="btn ghost" onClick=${()=>nav(`#/sites/${siteId}`)}>Cancel</button>
           <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
@@ -642,6 +653,8 @@ function TestRunDetail({ runId }) {
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
+  const [editLlmProfileId, setEditLlmProfileId] = useState(null);
+  const [runProfiles, setRunProfiles] = useState([]);
   const [scanStatus, setScanStatus]         = useState(null);
   const [activityLog, setActivityLog]       = useState([]);
   const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
@@ -1220,6 +1233,8 @@ function TestRunDetail({ runId }) {
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
+    setEditLlmProfileId(run.llm_config_id || null);
+    api.listLLMProfiles().then(setRunProfiles).catch(()=>{});
     setEditingSettings(true);
   };
   const onSaveSettings = async () => {
@@ -1227,7 +1242,7 @@ function TestRunDetail({ runId }) {
     const p = parseInt(editPages, 10);
     if (!d || !p || d < 1 || d > 10 || p < 5 || p > 500) return;
     try {
-      const r = await api.updateRun(runId, { max_depth: d, max_pages: p });
+      const r = await api.updateRun(runId, { max_depth: d, max_pages: p, llm_config_id: editLlmProfileId || null });
       setRun(r);
       setEditingSettings(false);
     } catch(e) { setError(e.message); }
@@ -1408,6 +1423,11 @@ function TestRunDetail({ runId }) {
               <span className="run-stat-val">${run.max_pages}</span>
               <span className="run-stat-lbl">Max pages</span>
             </div>
+            ${run.llm_config_id && runProfiles.length > 0 && html`
+              <div className="run-stat">
+                <span className="run-stat-val" style=${{fontSize:12}}>${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}</span>
+                <span className="run-stat-lbl">LLM profile</span>
+              </div>`}
             ${run.status !== "running" && html`
               <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
                 title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}

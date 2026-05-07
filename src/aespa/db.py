@@ -66,6 +66,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
+    _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     # page_credential_view — created as a full table (not an ALTER)
