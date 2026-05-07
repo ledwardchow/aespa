@@ -129,6 +129,9 @@ def _migrate(engine: Engine) -> None:
             )
         """))
         conn.commit()
+
+
+def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
     """Add *column* to *table* if it does not already exist (SQLite safe)."""
     with engine.connect() as conn:
         result = conn.execute(
