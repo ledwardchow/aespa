@@ -38,7 +38,7 @@ def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     }
     assert captured["completion"] == {
         "model": "openrouter/owl-alpha",
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "temperature": 0.0,
         "messages": [{"role": "user", "content": "hello"}],
     }
@@ -92,6 +92,72 @@ def test_extract_message_text_falls_back_to_reasoning_content():
     assert llm._extract_message_text(message) == '{"context":"from fallback"}'
 
 
+def test_extract_message_text_falls_back_when_content_json_is_truncated():
+    message = SimpleNamespace(
+        content='[\n  {"owasp_category": "A03", "title": "partial", "cvss_vector": "CVSS:3.1/AV:N',
+        reasoning_content="""
+The final answer was:
+```json
+[
+  {
+    "owasp_category": "A03",
+    "severity": "medium",
+    "title": "Reflected XSS in Query Parameter",
+    "description": "The q parameter is reflected without encoding.",
+    "impact": "An attacker can execute script in another user's browser.",
+    "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+    "recommendation": "Encode reflected output and validate the parameter.",
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "affected_url": "http://localhost:3000/assets/i18n/en.json?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E",
+    "evidence": "Payload is reflected in the response."
+  }
+]
+```
+""",
+    )
+
+    extracted = llm._extract_message_text(message)
+
+    assert llm._extract_json(extracted, expect=list)[0]["title"] == "Reflected XSS in Query Parameter"
+
+
+def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "http",
+          "method": "GET",
+          "url": "https://target.local/search?q=test",
+          "headers": {},
+          "body": null,
+          "observation": "search accepts a q parameter",
+          "hypothesis": "reflected input handling in search",
+          "payload_purpose": "baseline reflection probe",
+          "note": "Probe search reflection before adding XSS payloads."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/search [takes-input]",
+        history=[],
+        max_steps=80,
+        current_step=1,
+    ))
+
+    assert action["observation"] == "search accepts a q parameter"
+    assert "observation" in captured["prompt"]
+    assert "hypothesis" in captured["prompt"]
+    assert "payload_purpose" in captured["prompt"]
+    assert "found something interesting" in captured["prompt"]
+
+
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -121,7 +187,7 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(m
     assert result == "ok"
     assert captured["completion"] == {
         "model": "o3-mini",
-        "max_completion_tokens": 1024,
+        "max_completion_tokens": 2048,
         "messages": [{"role": "user", "content": "hello"}],
     }
 
@@ -163,5 +229,110 @@ def test_openai_compatible_retries_reasoning_parameter_mismatch(monkeypatch):
         "model": "local-reasoning-model",
         "messages": [{"role": "user", "content": "hello"}],
         "temperature": 0.0,
-        "max_completion_tokens": 1024,
+        "max_completion_tokens": 2048,
     }
+
+
+def test_bedrock_call_uses_converse_api_key(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["request"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["client"] == {"timeout": 120}
+    assert captured["url"] == (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
+        "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse"
+    )
+    assert captured["request"] == {
+        "headers": {
+            "Authorization": "Bearer bedrock-test-key",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        "json": {
+            "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+            "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
+        },
+    }
+
+
+def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """
+        [{
+          "owasp_category": "A03",
+          "severity": "medium",
+          "title": "Reflected XSS in search",
+          "description": "The q parameter is reflected without encoding.",
+          "impact": "An attacker can execute script in another user's browser.",
+          "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+          "recommendation": "Encode reflected output and validate the parameter.",
+          "cvss_score": 6.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          "affected_url": "https://target.local/search?q=<script>alert(1)</script>",
+          "evidence": "Payload is reflected in the response."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
+        "desc": "XSS probe",
+        "url": "https://target.local/search?q=<script>alert(1)</script>",
+        "status": 200,
+        "headers": {"content-type": "text/html"},
+        "body": "<script>alert(1)</script>",
+        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+    }]))
+
+    assert findings[0]["impact"].startswith("An attacker")
+    assert findings[0]["cvss_score"] == 6.1
+    assert "description" in captured["prompt"]
+    assert "CVSS v3.1" in captured["prompt"]
+    assert "GET /search" in captured["prompt"]
+    assert "HTTP/1.1 200" in captured["prompt"]

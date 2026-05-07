@@ -24,7 +24,7 @@ from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, Tes
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config, get_llm_config_for_run
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -40,6 +40,9 @@ _UA = (
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
+    task = _active_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def is_running(run_id: int) -> bool:
@@ -65,6 +68,17 @@ async def start_crawl(run_id: int) -> None:
 async def _crawl_task(run_id: int) -> None:
     try:
         await _do_crawl(run_id)
+    except asyncio.CancelledError:
+        log.info("Crawl task cancelled (stop requested) for run_id=%s", run_id)
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run and run.status == TestRunStatus.running:
+                run.status = TestRunStatus.stopped
+                run.completed_at = _utcnow()
+                s.add(run)
+                s.commit()
+        events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+        raise
     except Exception as exc:
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
@@ -96,7 +110,7 @@ async def _do_crawl(run_id: int) -> None:
             raise ValueError(f"TestRun {run_id} not found")
         from aespa.models import Site
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
         creds = list(site.credentials)
@@ -238,6 +252,10 @@ async def _crawl_as_credential(
                     request_headers = await response.request.all_headers()
                 except Exception:
                     request_headers = dict(response.request.headers)
+                try:
+                    response_headers = dict(response.headers)
+                except Exception:
+                    response_headers = {}
                 observed_api_calls.append({
                     "url": response.url,
                     "method": response.request.method,
@@ -245,6 +263,7 @@ async def _crawl_as_credential(
                     "request_body": response.request.post_data,
                     "status": response.status,
                     "content_type": content_type,
+                    "response_headers": response_headers,
                     "body": body,
                 })
             except Exception as exc:
@@ -742,22 +761,36 @@ def _api_analysis_text(call: dict) -> str:
 
 def _api_page_text(call: dict) -> str:
     method = str(call.get("method") or "GET").upper()
+    url = call.get("url") or ""
     status = call.get("status")
-    content_type = call.get("content_type") or ""
     request_headers = call.get("request_headers") or {}
-    request_content_type = _header_value(request_headers, "content-type") or "unknown"
+    response_headers = call.get("response_headers") or {}
     request_body = (call.get("request_body") or "")[:8000]
     body = (call.get("body") or "")[:8000]
     return (
-        f"API endpoint observed during crawl.\n"
-        f"Method: {method}\n"
-        f"URL: {call.get('url') or ''}\n"
-        f"Request Content-Type: {request_content_type}\n"
-        f"HTTP status: {status if status is not None else 'unknown'}\n"
-        f"Response Content-Type: {content_type or 'unknown'}\n\n"
-        f"Request body excerpt:\n{request_body or '(none)'}\n\n"
-        f"Response body excerpt:\n{body}"
+        f"=== HTTP exchange observed during crawl ===\n"
+        f"\nREQUEST\n"
+        f"{method} {url}\n"
+        f"Headers:\n{_format_headers(request_headers)}\n"
+        f"\nBody:\n{request_body or '(none)'}\n"
+        f"\nRESPONSE\n"
+        f"Status: {status if status is not None else 'unknown'}\n"
+        f"Headers:\n{_format_headers(response_headers)}\n"
+        f"\nBody:\n{body or '(none)'}"
     )
+
+
+def _format_headers(headers: dict, *, max_value_len: int = 200) -> str:
+    """Format HTTP headers for display, abbreviating long cookie/set-cookie values."""
+    lines = []
+    for k, v in (headers or {}).items():
+        v_str = str(v)
+        if k.lower() in ("cookie", "set-cookie") and len(v_str) > 80:
+            v_str = v_str[:80] + f"… ({len(v_str)} chars total)"
+        elif len(v_str) > max_value_len:
+            v_str = v_str[:max_value_len] + "…"
+        lines.append(f"  {k}: {v_str}")
+    return "\n".join(lines) if lines else "  (none)"
 
 
 def _header_value(headers: dict, name: str) -> str | None:

@@ -38,8 +38,12 @@ const api = {
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
+  startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
+  getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
+  getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -340,14 +344,35 @@ function SiteDetail({ siteId }) {
   const [site, setSite]   = useState(null);
   const [runs, setRuns]   = useState(null);
   const [error, setError] = useState(null);
+  const [editingRun, setEditingRun]   = useState(null);   // run object being edited
+  const [editForm, setEditForm]       = useState({});
+  const [editProfiles, setEditProfiles] = useState([]);
+  const [editSaving, setEditSaving]   = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([api.getSite(siteId), api.listRuns(siteId)]);
-      setSite(s); setRuns(r);
+      const [s, r, p] = await Promise.all([api.getSite(siteId), api.listRuns(siteId), api.listLLMProfiles()]);
+      setSite(s); setRuns(r); setEditProfiles(p || []);
     } catch(e) { setError(e.message); }
   }, [siteId]);
   useEffect(() => { load(); }, [load]);
+
+  const openEdit = (run) => {
+    setEditForm({ max_depth: run.max_depth, max_pages: run.max_pages, llm_config_id: run.llm_config_id || "" });
+    setEditingRun(run);
+  };
+  const saveEdit = async () => {
+    setEditSaving(true);
+    try {
+      const updated = await api.updateRun(editingRun.id, {
+        max_depth: Number(editForm.max_depth),
+        max_pages: Number(editForm.max_pages),
+        llm_config_id: editForm.llm_config_id ? Number(editForm.llm_config_id) : null,
+      });
+      setRuns(rs => rs.map(r => r.id === updated.id ? updated : r));
+      setEditingRun(null);
+    } catch(e) { setError(e.message); } finally { setEditSaving(false); }
+  };
 
   const deleteRun = async (run) => {
     if (!confirm(`Delete run "${run.name}"?`)) return;
@@ -369,6 +394,34 @@ function SiteDetail({ siteId }) {
     </div>
     <div className="content scroll-content stack">
       ${error && html`<div className="alert error">${error}</div>`}
+
+      ${editingRun && html`
+        <div className="card" style=${{padding:"20px 24px", border:"1px solid var(--accent)", marginBottom:8}}>
+          <div style=${{fontWeight:700, marginBottom:14}}>Edit run: ${editingRun.name}</div>
+          <div className="two-col" style=${{gap:12, marginBottom:12}}>
+            <div className="field" style=${{margin:0}}>
+              <label>Max depth</label>
+              <input type="number" min="1" max="10" value=${editForm.max_depth}
+                onInput=${e=>setEditForm(f=>({...f, max_depth:e.target.value}))} style=${{width:80}}/>
+            </div>
+            <div className="field" style=${{margin:0}}>
+              <label>Max pages</label>
+              <input type="number" min="5" max="500" value=${editForm.max_pages}
+                onInput=${e=>setEditForm(f=>({...f, max_pages:e.target.value}))} style=${{width:90}}/>
+            </div>
+          </div>
+          <div className="field" style=${{marginBottom:14}}>
+            <label>LLM profile <span className="field-optional">(leave blank to use the globally active profile)</span></label>
+            <select className="select" value=${editForm.llm_config_id||""} onChange=${e=>setEditForm(f=>({...f, llm_config_id:e.target.value}))}>
+              <option value="">— Use global active profile —</option>
+              ${editProfiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+            </select>
+          </div>
+          <div className="row" style=${{gap:8}}>
+            <button className="btn sm" onClick=${saveEdit} disabled=${editSaving}>${editSaving?"Saving…":"Save"}</button>
+            <button className="btn ghost sm" onClick=${()=>setEditingRun(null)}>Cancel</button>
+          </div>
+        </div>`}
 
       ${site && html`
         <div className="card" style=${{padding:"16px 20px"}}>
@@ -404,13 +457,17 @@ function SiteDetail({ siteId }) {
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
-                  <td><strong>${r.name}</strong></td>
+                  <td>
+                    <strong>${r.name}</strong>
+                    ${r.llm_config_id && html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>${(editProfiles.find(p=>p.id===r.llm_config_id)||{name:"LLM #"+r.llm_config_id}).name}</div>`}
+                  </td>
                   <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
                   <td className="subtle">${fmtDate(r.created_at)}</td>
                   <td>
                     <div className="row" style=${{justifyContent:"flex-end"}}>
                       <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${r.id}`)}>Open</button>
+                      <button className="btn secondary sm" onClick=${()=>openEdit(r)}>Edit</button>
                       <button className="btn danger-outline sm" onClick=${()=>deleteRun(r)}>Delete</button>
                     </div>
                   </td>
@@ -510,16 +567,18 @@ function SiteForm({ siteId }) {
 // ── Test run form ─────────────────────────────────────────────────────────────
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active" });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active", llm_config_id:null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const upd = p => setForm(f=>({...f,...p}));
 
   useEffect(() => {
     (async () => {
       try {
-        const policy = await api.getScannerPolicy();
+        const [policy, profs] = await Promise.all([api.getScannerPolicy(), api.listLLMProfiles()]);
         if (policy?.scan_mode) upd({scan_mode:policy.scan_mode});
+        setProfiles(profs || []);
       } catch(e) { setError(e.message); }
     })();
   }, []);
@@ -532,6 +591,7 @@ function TestRunForm({ siteId }) {
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
         scan_mode: form.scan_mode,
+        llm_config_id: form.llm_config_id || null,
       });
       nav(`#/runs/${run.id}`);
     } catch(e) { setError(e.message); setSaving(false); }
@@ -572,6 +632,14 @@ function TestRunForm({ siteId }) {
         </div>
         <${ScanModeDefinitions} selected=${form.scan_mode}/>
         <div className="divider"/>
+        <div className="form-section-title">LLM Profile</div>
+        <div className="field">
+          <label>LLM profile <span className="field-optional">(optional — uses the globally active profile if not set)</span></label>
+          <select className="select" value=${form.llm_config_id||""} onChange=${e=>upd({llm_config_id:e.target.value?Number(e.target.value):null})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+          </select>
+        </div>
         <div className="row spread">
           <button type="button" className="btn ghost" onClick=${()=>nav(`#/sites/${siteId}`)}>Cancel</button>
           <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
@@ -624,6 +692,7 @@ const workflowBadge = (run, opts = {}) => {
 
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
+  const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
@@ -638,9 +707,23 @@ function TestRunDetail({ runId }) {
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
+  const [editLlmProfileId, setEditLlmProfileId] = useState(null);
+  const [runProfiles, setRunProfiles] = useState([]);
+
+  // Load LLM profiles once so the read-only display and edit dropdown both work.
+  useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
   const [scanStatus, setScanStatus]         = useState(null);
+  const [activityLog, setActivityLog]       = useState([]);
+  const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
+  const toggleLogId = (id) => setExpandedLogIds(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
+  const [sitePlanData, setSitePlanData]     = useState(null);
+  const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [scanStopRequested, setScanStopRequested]   = useState(false);
+  const [thinkingStatus, setThinkingStatus]         = useState(null);
+  const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
@@ -668,9 +751,28 @@ function TestRunDetail({ runId }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Seed activity log from persisted DB entries on mount so it survives navigation.
+  useEffect(() => {
+    api.getScanLog(runId).then(entries => {
+      if (!entries || entries.length === 0) return;
+      setActivityLog(
+        entries.map(e => {
+          const ts = e._persisted_at
+            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
+        })
+      );
+      // Restore site plan data from persisted log.
+      const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
+      if (planComplete) setSitePlanData(planComplete.data);
+    }).catch(() => {});
+  }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
@@ -719,6 +821,19 @@ function TestRunDetail({ runId }) {
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
         if (evt.status && evt.status !== "running") setScanStopRequested(false);
+      } else if (evt.type === "thinking_scan_update") {
+        setThinkingStatus(evt);
+        if (evt.status && evt.status !== "running") setThinkingStopReq(false);
+      } else if (evt.type === "scanner_phase") {
+        setActivityLog(prev => {
+          const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          const entry = { ...evt, _ts: ts, _id: Date.now() + Math.random() };
+          const next = [...prev, entry];
+          return next.length > 500 ? next.slice(-500) : next;
+        });
+        if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
+          setSitePlanData(evt.data);
+        }
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -765,6 +880,20 @@ function TestRunDetail({ runId }) {
     return () => clearInterval(iv);
   }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
 
+  // Poll thinking-scan status independently.
+  useEffect(() => {
+    const active = thinkingStatus?.status === "running" || thinkingStopRequested;
+    if (!active) return;
+    const iv = setInterval(() => {
+      api.getThinkingStatus(runId).then(s => {
+        setThinkingStatus(s);
+        if (thinkingStopRequested && s.status !== "running") setThinkingStopReq(false);
+        if (s.status !== "running") api.getFindings(runId).then(setFindings).catch(() => {});
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [runId, thinkingStatus?.status, thinkingStopRequested]);
+
   // Poll validation status while validating is running
   useEffect(() => {
     if (validateStatus?.status !== "running" && activeTab !== "findings") return;
@@ -788,6 +917,7 @@ function TestRunDetail({ runId }) {
   useEffect(() => {
     if (activeTab !== "scan") return;
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+    api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
@@ -810,20 +940,28 @@ function TestRunDetail({ runId }) {
       activeTab === "traffic" ||
       run?.status === "running" ||
       scanStatus?.status === "running" ||
+      thinkingStatus?.status === "running" ||
       crawlStopRequested ||
-      scanStopRequested
+      scanStopRequested ||
+      thinkingStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, runId, crawlStopRequested, scanStopRequested]);
+  }, [activeTab, run?.status, scanStatus?.status, thinkingStatus?.status, runId, crawlStopRequested, scanStopRequested, thinkingStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
     if (!autoScroll || activeTab !== "traffic" || !trafficTableRef.current) return;
     trafficTableRef.current.scrollTop = trafficTableRef.current.scrollHeight;
   }, [traffic.length, activeTab, autoScroll]);
+
+  // Auto-scroll activity feed when new entries arrive
+  useEffect(() => {
+    if (activeTab !== "activity" || !activityFeedRef.current) return;
+    activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
+  }, [activityLog.length, activeTab]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -1141,9 +1279,19 @@ function TestRunDetail({ runId }) {
     } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
+  const onStopThinkingScan = async () => {
+    try {
+      setThinkingStopReq(true);
+      const s = await api.stopThinkingScan(runId);
+      setThinkingStatus(s);
+      if (s.status !== "running") setThinkingStopReq(false);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
+    setEditLlmProfileId(run.llm_config_id || null);
     setEditingSettings(true);
   };
   const onSaveSettings = async () => {
@@ -1151,7 +1299,7 @@ function TestRunDetail({ runId }) {
     const p = parseInt(editPages, 10);
     if (!d || !p || d < 1 || d > 10 || p < 5 || p > 500) return;
     try {
-      const r = await api.updateRun(runId, { max_depth: d, max_pages: p });
+      const r = await api.updateRun(runId, { max_depth: d, max_pages: p, llm_config_id: editLlmProfileId || null });
       setRun(r);
       setEditingSettings(false);
     } catch(e) { setError(e.message); }
@@ -1212,11 +1360,12 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
 
-  const effectiveScanStatus = scanStatus?.status || run?.scan_status || "idle";
+  const effectiveScanStatus     = scanStatus?.status     || run?.scan_status || "idle";
+  const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
     crawlStopping: crawlStopRequested,
-    scanStopping: scanStopRequested,
+    scanStopping: scanStopRequested || thinkingStopRequested,
   });
   const STATUS_COLOR = {
     neutral:"var(--muted)",
@@ -1230,18 +1379,28 @@ function TestRunDetail({ runId }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
+  const canStopScan = effectiveScanStatus === "running";
+  const canStopThinking = effectiveThinkingStatus === "running";
 
   return html`
     <div className="topbar">
-      <div className="topbar-title">
-        <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
-        <span className="breadcrumb-sep"> / </span>
-        ${run ? run.name : "…"}
-        ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+      <div className="topbar-title" style=${{flexDirection:"column",alignItems:"flex-start",gap:2}}>
+        <div className="row" style=${{alignItems:"center",gap:0}}>
+          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>${siteName || "Site"}</a>
+          <span className="breadcrumb-sep"> / </span>
+          ${run ? run.name : "…"}
+          ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+        </div>
+        ${run && run.llm_config_id && runProfiles.length > 0 && html`
+          <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
+            LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
+          </div>`}
       </div>
       <div className="topbar-actions">
-        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
+        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop thinking scan"}</button>`}
       </div>
     </div>
 
@@ -1251,8 +1410,12 @@ function TestRunDetail({ runId }) {
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
+        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+        <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
+          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
+          Thinking${scanStatus?.status==="running" && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
           onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
@@ -1275,10 +1438,23 @@ function TestRunDetail({ runId }) {
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
         ${activeTab==="scan" && effectiveScanStatus==="running" && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping scan…" : "◼ Stop scan"}
+            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop scan"}
+          </button>`}
+        ${activeTab==="scan" && effectiveThinkingStatus==="running" && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
+            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
           </button>`}
         ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
+        ${activeTab==="scan" && !thinkingStopRequested && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
+          <button className="btn ghost sm" style=${{margin:"auto 4px auto 0"}} title="LLM autonomously decides what and where to test" onClick=${async () => {
+            try {
+              setThinkingStopReq(false);
+              setThinkingStatus({ status: "running" });
+              const s = await api.startThinkingScan(runId);
+              setThinkingStatus(s);
+            } catch(e) { setThinkingStopReq(false); setError(e.message); }
+          }}><${IconPlay}/> Thinking scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -1310,6 +1486,11 @@ function TestRunDetail({ runId }) {
               <span className="run-stat-val">${run.max_pages}</span>
               <span className="run-stat-lbl">Max pages</span>
             </div>
+            ${run.llm_config_id && runProfiles.length > 0 && html`
+              <div className="run-stat">
+                <span className="run-stat-val" style=${{fontSize:12}}>${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}</span>
+                <span className="run-stat-lbl">LLM profile</span>
+              </div>`}
             ${run.status !== "running" && html`
               <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
                 title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}
@@ -1395,7 +1576,7 @@ function TestRunDetail({ runId }) {
           onSaved=${policy=>setRun(r=>r?{...r, scan_mode:policy.scan_mode, scanner_policy:policy}:r)}
         />`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy"||activeTab==="activity") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1527,11 +1708,11 @@ function TestRunDetail({ runId }) {
               </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
-              ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives}/${validateStatus.total}</span>`
+              ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives+(validateStatus.unconfirmed||0)}/${validateStatus.total}</span>`
               : validateStatus?.status==="stopped"
                 ? html`<span className="val-status-badge val-fp">Validation stopped</span>`
               : validateStatus?.status==="complete"
-                ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.false_positives} false positive${validateStatus.false_positives!==1?"s":""}</span>`
+                ? html`<span className="val-status-badge val-complete">${validateStatus.confirmed} confirmed · ${validateStatus.unconfirmed||0} unconfirmed · ${validateStatus.false_positives} low confidence</span>`
                 : null}
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
@@ -1548,12 +1729,18 @@ function TestRunDetail({ runId }) {
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, false_positive:3};
-                const FP_GROUP_KEY = "__false_positives__";
+                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4};
+                const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
+                const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
+                const unconfirmedMap = {};
                 const fpMap = {};
                 for (const f of findings) {
-                  const target = f.validation_status === "false_positive" ? fpMap : activeMap;
+                  const target = f.validation_status === "false_positive"
+                    ? fpMap
+                    : f.validation_status === "unconfirmed"
+                      ? unconfirmedMap
+                      : activeMap;
                   (target[f.title] = target[f.title]||[]).push(f);
                 }
                 const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
@@ -1570,14 +1757,17 @@ function TestRunDetail({ runId }) {
                   return (SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99);
                 });
                 const groups = makeGroups(activeMap);
+                const unconfirmedGroups = makeGroups(unconfirmedMap);
                 const fpGroups = makeGroups(fpMap);
+                const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
                     <td>
                       ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
-                      ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">false +</span>`}
+                      ${f.validation_status==="unconfirmed"   && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
+                      ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">low conf</span>`}
                       ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
                     </td>
                     <td></td>
@@ -1588,7 +1778,7 @@ function TestRunDetail({ runId }) {
                     </td>
                     <td>
                       <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
-                        ${(f.validation_status==="unvalidated"||f.validation_status==="false_positive") && html`
+                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive") && html`
                           <button className="btn ghost sm finding-del-btn" title="Validate"
                             onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
                         <button className="btn ghost sm finding-del-btn" title="Delete"
@@ -1599,12 +1789,31 @@ function TestRunDetail({ runId }) {
                   ${expandedFinding===f.id && html`
                     <tr key=${"ev-"+keyPrefix+f.id} className="finding-evidence-row">
                       <td colSpan="5">
-                        <div className="finding-description">${f.description}</div>
+                        <div className="finding-description">
+                          <div><strong>Description</strong></div>
+                          <div>${f.description || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Impact</strong></div>
+                          <div>${f.impact || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
+                          <div>${f.likelihood || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
+                          <div>${f.recommendation || "—"}</div>
+                          <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
+                          <div>
+                            ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
+                            ${f.cvss_vector ? html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>` : ""}
+                          </div>
+                        </div>
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
                           </div>`}
-                        ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                        ${f.request_evidence && html`
+                          <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
+                        ${f.response_evidence && html`
+                          <pre className="finding-evidence">RESPONSE:\n${f.response_evidence}</pre>`}
+                        ${!f.request_evidence && !f.response_evidence && f.evidence && html`
+                          <pre className="finding-evidence">${f.evidence}</pre>`}
                         ${f.screenshot_b64 && html`
                           <div className="finding-screenshot-wrap">
                             <div className="finding-affected-label">Screenshot</div>
@@ -1614,23 +1823,25 @@ function TestRunDetail({ runId }) {
                       </td>
                     </tr>`}
                 `;
-                const fpRows = fpGroups.map(g => {
-                  const fpKey = "fp:" + g.title;
+                const renderStatusRows = (statusGroups, keyPrefix) => statusGroups.map(g => {
+                  const groupKey = keyPrefix + ":" + g.title;
                   return html`
-                    <tr key=${fpKey} className="finding-group-row"
-                      onClick=${()=>toggleGroup(fpKey)}>
+                    <tr key=${groupKey} className="finding-group-row"
+                      onClick=${()=>toggleGroup(groupKey)}>
                       <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
                       <td><span className="owasp-badge">${g.owasp}</span></td>
                       <td className="finding-title">
-                        <span className="group-chevron">${expandedGroups.has(fpKey)?"▾":"▸"}</span>
+                        <span className="group-chevron">${expandedGroups.has(groupKey)?"▾":"▸"}</span>
                         ${g.title}
                       </td>
                       <td><span className="finding-count-badge">${g.count}</span></td>
                       <td></td>
                     </tr>
-                    ${expandedGroups.has(fpKey) && g.items.map(f => renderFinding(f,"fp-"))}
+                    ${expandedGroups.has(groupKey) && g.items.map(f => renderFinding(f,keyPrefix+"-"))}
                   `;
                 });
+                const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
+                const fpRows = renderStatusRows(fpGroups, "fp");
                 return html`
                 <table className="findings-table">
                   <thead>
@@ -1660,14 +1871,28 @@ function TestRunDetail({ runId }) {
                       </tr>
                       ${expandedGroups.has(g.title) && g.items.map(f => renderFinding(f))}
                     `)}
+                    ${unconfirmedCount > 0 && html`
+                      <tr key=${UNCONFIRMED_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(UNCONFIRMED_GROUP_KEY)}>
+                        <td><span className="val-badge val-unconfirmed">unconfirmed</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(UNCONFIRMED_GROUP_KEY)?"▾":"▸"}</span>
+                          Unconfirmed Findings
+                        </td>
+                        <td><span className="finding-count-badge">${unconfirmedCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(UNCONFIRMED_GROUP_KEY) && unconfirmedRows}
+                    `}
                     ${fpCount > 0 && html`
                       <tr key=${FP_GROUP_KEY} className="finding-group-row"
                         onClick=${()=>toggleGroup(FP_GROUP_KEY)}>
-                        <td><span className="val-badge val-fp">false +</span></td>
+                        <td><span className="val-badge val-fp">low conf</span></td>
                         <td></td>
                         <td className="finding-title">
                           <span className="group-chevron">${expandedGroups.has(FP_GROUP_KEY)?"▾":"▸"}</span>
-                          False Positives
+                          Low Confidence
                         </td>
                         <td><span className="finding-count-badge">${fpCount}</span></td>
                         <td></td>
@@ -1679,6 +1904,86 @@ function TestRunDetail({ runId }) {
               })()}
               </div>`}
         </div>`}
+
+      ${activeTab==="activity" && html`
+        <div className="activity-panel">
+          <div className="activity-feed" ref=${activityFeedRef}>
+            ${sitePlanData && html`
+              <div className="site-plan-card">
+                <div className="site-plan-header">
+                  <span className="site-plan-label">Site Test Plan</span>
+                  <span className="site-plan-badge">LLM Analysis</span>
+                </div>
+                <div className="site-plan-summary">${sitePlanData.app_summary}</div>
+                ${(sitePlanData.hypotheses||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Attack Hypotheses</div>
+                    <div className="hypotheses-list">
+                      ${(sitePlanData.hypotheses||[]).map((h, i) => html`
+                        <div key=${i} className="hypothesis-row">
+                          <span className="owasp-badge">${h.owasp || "?"}</span>
+                          <div className="hypothesis-body">
+                            <div className="hypothesis-label">${h.hypothesis}</div>
+                            <div className="hypothesis-desc">${h.description}</div>
+                          </div>
+                        </div>`)}
+                    </div>
+                  </div>`}
+                ${(sitePlanData.critical_areas||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Critical Areas</div>
+                    <div className="critical-areas-list">
+                      ${(sitePlanData.critical_areas||[]).map((a, i) => html`<span key=${i} className="critical-area-tag">${a}</span>`)}
+                    </div>
+                  </div>`}
+                ${sitePlanData.test_notes && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Test Notes</div>
+                    <div className="site-plan-notes">${sitePlanData.test_notes}</div>
+                  </div>`}
+              </div>`}
+            ${activityLog.length === 0 && html`
+              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
+              </div>`}
+            ${activityLog.map(entry => {
+              const PHASE_META = {
+                site_plan:     { label: "Plan",      cls: "phase-plan" },
+                page_plan:     { label: "Probes",    cls: "phase-probes" },
+                page_followup: { label: "Follow-up", cls: "phase-followup" },
+                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:         { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
+              };
+              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const isExpanded = expandedLogIds.has(entry._id);
+              return html`
+                <div key=${entry._id}>
+                  <div className=${"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")}
+                       onClick=${hasPayload ? () => toggleLogId(entry._id) : undefined}>
+                    <span className="activity-ts">${entry._ts}</span>
+                    <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
+                    ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
+                    <span className="activity-msg">${entry.message}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                  </div>
+                  ${isExpanded && html`
+                    <div className="activity-payload">
+                      ${entry.data?.prompt && html`
+                        <div className="activity-payload-label">Prompt</div>
+                        <pre>${entry.data.prompt}</pre>`}
+                      ${entry.data?.raw_response && html`
+                        <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
+                        <pre>${entry.data.raw_response}</pre>`}
+                    </div>`}
+                </div>`;
+            })}
+          </div>
+        </div>`}
+
       ${activeTab==="traffic" && html`
         <div className="traffic-panel">
           <div className="traffic-toolbar">
@@ -1893,6 +2198,7 @@ const PROVIDER_LABELS = {
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
   openrouter:"OpenRouter",
   google:"Google Gemini",
+  bedrock:"Amazon Bedrock",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry",
 };
@@ -1901,21 +2207,25 @@ const PROVIDER_PLACEHOLDERS = {
   openai_compatible:"e.g. llama-3.1-8b-instruct",
   openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
+  bedrock:"e.g. anthropic.claude-3-7-sonnet-20250219-v1:0",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
 };
 const BASE_URL_LABELS = {
   openai_compatible:"Base URL",
+  bedrock:"Bedrock Runtime Endpoint",
   azure_openai:"Azure Endpoint",
   azure_foundry:"Endpoint URL",
 };
 const BASE_URL_PLACEHOLDERS = {
   openai_compatible:"http://localhost:1234/v1",
+  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com/",
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
+  bedrock:"Use the Bedrock Runtime endpoint for the region where your model is available.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
@@ -1934,7 +2244,7 @@ function llmProfileToForm(cfg) {
 }
 
 function llmPayload(form) {
-  const needsBaseUrl = ["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
   return {
     name:form.name.trim(),
     provider:form.provider,
@@ -1970,8 +2280,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = form&&["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&["anthropic","openai","openrouter","google","bedrock","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2001,7 +2311,7 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       ${needsKey&&html`
         <div className="field"><label>API Key</label>
           <input type="password" required value=${form.api_key}
-            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":""}
+            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":form.provider==="bedrock"?"Bedrock API key":""}
             onChange=${e=>upd({api_key:e.target.value})}/></div>`}
       ${form.provider==="openai_compatible"&&html`
         <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
