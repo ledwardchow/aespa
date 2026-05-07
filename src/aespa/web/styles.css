@@ -715,6 +715,29 @@ legend {
   max-height:160px;
   overflow-y:auto;
 }
+.api-transcript-label {
+  padding:7px 10px 0;
+  color:var(--muted);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.api-transcript {
+  margin:8px 10px 10px;
+  padding:10px 12px;
+  max-height:340px;
+  overflow:auto;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:var(--bg);
+  color:var(--text-2);
+  font-family:ui-monospace, "Cascadia Code", "SF Mono", monospace;
+  font-size:11px;
+  line-height:1.55;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
 .scan-node-pending  { background: rgba(239,68,68,0.15);  color: #ef4444; }
 .scan-node-running  { background: rgba(234,179,8,0.15);  color: #eab308; }
 .scan-node-complete { background: rgba(59,130,246,0.15); color: #3b82f6; }
