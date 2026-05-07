@@ -15,8 +15,10 @@ def test_get_default_models(client: TestClient):
     assert "openai" in data
     assert "openai_compatible" in data
     assert "openrouter" in data
+    assert "bedrock" in data
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
+    assert isinstance(data["bedrock"], list)
 
 
 def test_upsert_anthropic(client: TestClient):
@@ -92,6 +94,23 @@ def test_upsert_openrouter(client: TestClient):
     assert data["base_url"] is None
 
 
+def test_upsert_bedrock(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "bedrock",
+        "api_key": "bedrock-test-key",
+        "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com/",
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "bedrock"
+    assert data["api_key"] == "bedrock-test-key"
+    assert data["base_url"] == "https://bedrock-runtime.us-east-1.amazonaws.com"
+    assert data["model"] == "anthropic.claude-3-7-sonnet-20250219-v1:0"
+
+
 def test_upsert_is_idempotent(client: TestClient):
     payload = {
         "provider": "anthropic",
@@ -124,6 +143,28 @@ def test_upsert_openrouter_missing_api_key(client: TestClient):
     r = client.put("/api/settings/llm", json={
         "provider": "openrouter",
         "model": "openrouter/owl-alpha",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_bedrock_missing_api_key(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "bedrock",
+        "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_bedrock_missing_base_url(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "bedrock",
+        "api_key": "bedrock-test-key",
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "max_tokens": 4096,
         "temperature": 0.0,
     })

@@ -52,12 +52,12 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     s.scan_total_pages = len(scan_pages)
     s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
     em = run.error_message or ""
-    if em.startswith("scan:"):
+    if scanner_svc.is_running(run.id):
+        s.scan_status = "running"
+    elif em.startswith("scan:"):
         parts = em.split(":", 2)
         s.scan_status = parts[1] if len(parts) > 1 else "idle"
         s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
-    elif scanner_svc.is_running(run.id):
-        s.scan_status = "running"
     elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
         s.scan_status = "complete"
     return s
@@ -101,6 +101,7 @@ def create_test_run(
         max_pages=payload.max_pages,
         scan_mode=policy.scan_mode,
         scanner_policy_json=settings_service.scanner_policy_snapshot(policy),
+        llm_config_id=payload.llm_config_id,
     )
     session.add(run)
     session.commit()
@@ -161,6 +162,12 @@ def update_test_run(
         raise HTTPException(status_code=409, detail="Cannot edit settings while crawl is running")
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    if payload.llm_config_id is not None:
+        # Validate the profile exists
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
+    run.llm_config_id = payload.llm_config_id
     session.add(run)
     session.commit()
     session.refresh(run)

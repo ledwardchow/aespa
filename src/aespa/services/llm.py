@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from typing import Any, Optional
+from urllib.parse import quote
 
 from aespa.models import LLMConfig
 
+log = logging.getLogger("aespa.llm")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -52,7 +55,16 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     close_ch = "]" if expect is list else "}"
     starts = [i for i, ch in enumerate(text) if ch == open_ch]
     if not starts:
-        raise ValueError(f"no '{open_ch}' found in LLM response")
+        # Stripped text has no JSON delimiters — the model may have embedded the answer
+        # inside a thinking block.  Try searching the un-stripped original text so we can
+        # still extract JSON that appears within <think>...</think> tags.
+        raw_no_fence = re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
+        if alt_starts:
+            text = raw_no_fence
+            starts = alt_starts
+        else:
+            raise ValueError(f"no '{open_ch}' found in LLM response")
 
     for start in starts:
         depth = 0
@@ -239,6 +251,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _azure_foundry(config, prompt, screenshot_b64)
     if config.provider == "openrouter":
         return await _openrouter(config, prompt, screenshot_b64)
+    if config.provider == "bedrock":
+        return await _bedrock(config, prompt, screenshot_b64)
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
@@ -281,15 +295,36 @@ def _extract_message_text(message: Any) -> str:
     else:
         text = ""
 
-    if text:
-        return _strip_thinking_blocks(text).strip()
-
+    fallback_texts: list[str] = []
     # OpenAI-compatible gateways and local servers vary on where they expose
     # visible chain-of-thought / final text for reasoning models.
     for attr in ("reasoning_content", "reasoning", "output_text", "text"):
         value = getattr(message, attr, None)
         if isinstance(value, str) and value.strip():
-            return _strip_thinking_blocks(value).strip()
+            fallback_texts.append(_strip_thinking_blocks(value).strip())
+
+    if text:
+        cleaned = _strip_thinking_blocks(text).strip()
+        if not cleaned:
+            # Stripping removed everything (entire content was a thinking block with no
+            # answer outside).  Prefer a separate reasoning_content / fallback field when
+            # available; otherwise return the original text so _extract_json can still
+            # find JSON that was embedded inside the thinking block.
+            if fallback_texts:
+                return fallback_texts[0]
+            return text
+        if fallback_texts and any(ch in cleaned for ch in ("[", "{")):
+            try:
+                _extract_json(cleaned, expect=list)
+            except Exception:
+                try:
+                    _extract_json(cleaned, expect=dict)
+                except Exception:
+                    return fallback_texts[0]
+        return cleaned
+
+    if fallback_texts:
+        return fallback_texts[0]
     return ""
 
 
@@ -507,6 +542,52 @@ async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optiona
     return _extract_first_choice_text(resp)
 
 
+def _extract_bedrock_text(data: dict[str, Any]) -> str:
+    content = (((data.get("output") or {}).get("message") or {}).get("content") or [])
+    if not isinstance(content, list):
+        return ""
+    return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+
+
+async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    import httpx
+
+    if not config.api_key:
+        raise ValueError("Amazon Bedrock API key is required")
+    if not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required")
+
+    content: list[dict[str, Any]] = []
+    if screenshot_b64:
+        content.append({
+            "image": {
+                "format": "png",
+                "source": {"bytes": screenshot_b64},
+            }
+        })
+    content.append({"text": prompt})
+
+    payload: dict[str, Any] = {
+        "messages": [{"role": "user", "content": content}],
+        "inferenceConfig": {
+            "maxTokens": config.max_tokens,
+            "temperature": config.temperature,
+        },
+    }
+    model_id = quote(config.model, safe="")
+    url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        return _extract_bedrock_text(resp.json())
+
+
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
 
 _PLAN_PROMPT = """\
@@ -516,7 +597,7 @@ of HTTP probes to test for OWASP Top 10 vulnerabilities.
 URL: {url}
 Title: {title}
 LLM Context: {context}
-
+{site_context_section}
 Page categories:
 - Authentication Required: {req_auth}
 - Takes User Input: {takes_input}
@@ -527,7 +608,7 @@ Applicable OWASP checks: {applicable}
 
 {users_section}
 {category_guidance}
-
+{xss_canary_section}
 Return ONLY valid JSON — an array of probe objects (no markdown fences):
 [
   {{
@@ -682,6 +763,13 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
             "  • Infer the business operation from the context (e.g. transfer, purchase, withdraw).\n"
             "  • Try negative amounts, zero amounts, and extremely large values.\n"
             "  • Try replay: re-send the same action twice rapidly.\n"
+            "  • GATE BYPASS (high value): Look for pre-flight check or validation endpoints "
+            "    (paths containing /check, /verify, /validate, /preflight, or similar) that the\n"
+            "    client calls before a sensitive action. Generate two probes:\n"
+            "      1. Call the check endpoint to observe what it enforces (e.g. requires_totp, requires_pin).\n"
+            "      2. Call the action endpoint DIRECTLY without completing the check step, omitting any\n"
+            "         field the check said was required (e.g. no totp_code, no pin). If the action\n"
+            "         succeeds anyway, the enforcement is client-side only and the gate is bypassable.\n"
             "  • Try skipping steps: access later steps of a multi-step flow directly.\n"
             "  • Try parameter tampering: change price/amount/quantity fields to 0 or -1."
         )
@@ -707,15 +795,29 @@ Return ONLY valid JSON — an array of findings (empty array [] if none found, n
 [
   {{
     "owasp_category": "A03",
-    "severity": "high",
     "title": "Reflected XSS in search parameter",
-    "description": "The search parameter reflects user input without encoding, allowing script injection.",
+    "description": "The search parameter reflects user input without encoding.",
+    "impact": "An attacker could execute JavaScript in a victim's browser and act as that user.",
+    "likelihood": "Likely when attacker-controlled links can be delivered to authenticated users.",
+    "recommendation": "Encode output by context, validate input, and add regression tests for this parameter.",
+    "cvss_score": 6.1,
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+    "severity": "medium",
     "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
-    "evidence": "The payload was reflected verbatim in the response body at position 234."
+    "evidence": "Short summary of the exact request and response evidence that proves the finding."
   }}
 ]
 
 The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
+Write each finding using the report headings represented by these JSON fields:
+- description: what is vulnerable and where.
+- impact: what an attacker could achieve.
+- likelihood: practical exploitability in this observed context.
+- recommendation: specific remediation steps.
+
+Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
+Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
+medium 4.0-6.9, low 0.1-3.9, info 0.0.
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
@@ -734,17 +836,39 @@ async def plan_probes(
     categories: dict[str, Any],
     applicable_checks: list[str],
     users: list[dict] | None = None,
+    site_context: str = "",
+    xss_canary: str = "",
 ) -> list[dict]:
     """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts.
 
     users: optional list of {"username": str, "label": str|None} describing the test accounts
     available. When provided, the LLM can set "as_user" on each probe to control which
     authenticated session is used when sending the request.
+
+    site_context: optional string summarising the site-level test plan produced by
+    generate_site_test_plan(). When provided, it primes the LLM with app-wide attack
+    hypotheses so individual page plans are more targeted.
+
+    xss_canary: optional unique run-scoped token. When provided, the LLM is instructed
+    to embed it in XSS payloads instead of alert(1), enabling cross-page stored XSS detection.
     """
+    site_ctx_section = ""
+    if site_context:
+        site_ctx_section = f"\nSite-level test plan context (use to inform probe selection):\n{site_context}\n"
+    xss_canary_section = ""
+    if xss_canary:
+        xss_canary_section = (
+            f"\nStored XSS canary: use '{xss_canary}' as the alert argument in every XSS probe "
+            f"instead of alert(1) — e.g. alert('{xss_canary}'), "
+            f"onerror=alert('{xss_canary}'), onload=alert('{xss_canary}'). "
+            f"Also include a probe that submits the bare token <{xss_canary}> as an input value. "
+            f"This allows cross-page stored XSS to be detected in a post-scan sweep.\n"
+        )
     prompt = _PLAN_PROMPT.format(
         url=url,
         title=title or "(no title)",
         context=context or "(no context)",
+        site_context_section=site_ctx_section,
         req_auth=categories.get("req_auth"),
         takes_input=categories.get("takes_input"),
         has_object_ref=categories.get("has_object_ref"),
@@ -752,6 +876,7 @@ async def plan_probes(
         applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
         users_section=_build_users_section(users),
         category_guidance=_build_category_guidance(categories, users=users),
+        xss_canary_section=xss_canary_section,
     )
     raw = await _call(config, prompt, None)
     try:
@@ -761,7 +886,13 @@ async def plan_probes(
         # Include "idor" probes so that as_user set by the LLM is preserved when the
         # scanner expands them into concrete HTTP requests.
         return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")]
-    except Exception:
+    except Exception as _exc:
+        log.warning(
+            "plan_probes: failed to extract probe list from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            _exc,
+            (raw or "")[:500],
+        )
         return []
 
 
@@ -776,9 +907,12 @@ async def analyse_probes(
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
         f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
+        f"URL: {r.get('url')}\n"
         f"Status: {r.get('status')}\n"
+        f"Request evidence:\n{str(r.get('request_evidence') or '')[:2000]}\n\n"
+        f"Response evidence:\n{str(r.get('response_evidence') or '')[:3000]}\n\n"
         f"Response headers: {json.dumps(r.get('headers', {}))}\n"
-        f"Response body (truncated): {str(r.get('body', ''))[:500]}"
+        f"Response body excerpt: {str(r.get('body', ''))[:1000]}"
         for r in results
     )
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
@@ -787,10 +921,418 @@ async def analyse_probes(
         findings = _extract_json(raw or "", expect=list)
         if not isinstance(findings, list):
             return []
-        required = {"owasp_category", "severity", "title", "description", "evidence"}
+        required = {
+            "owasp_category",
+            "severity",
+            "title",
+            "description",
+            "impact",
+            "likelihood",
+            "recommendation",
+            "cvss_score",
+            "affected_url",
+            "evidence",
+        }
         return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
     except Exception:
         return []
+
+
+# ── Site-level test plan ──────────────────────────────────────────────────────
+
+_SITE_PLAN_PROMPT = """\
+You are a senior web application penetration tester preparing a security assessment.
+
+Below is a summary of all pages discovered during crawling of the target web application.
+Analyse the attack surface, reason through the application's architecture, and produce a
+structured test plan with specific, actionable vulnerability hypotheses.
+
+Target base URL: {base_url}
+
+Discovered pages ({page_count} total):
+{pages_summary}
+
+Consider:
+- What kind of application is this? (auth model, user roles, key data objects)
+- What are the highest-value attack targets? (admin panels, financial operations, \
+ID-bearing endpoints, privileged actions)
+- What systemic vulnerabilities are likely based on the observed structure and page categories?
+- What cross-endpoint attack chains deserve testing? For example: auth bypass by calling a \
+final step directly without going through a gated check step; IDOR across resource types; \
+privilege escalation by sending a lower-privilege token to an admin endpoint.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "app_summary": "2-3 sentence description of the application, its key roles, and security-relevant features",
+  "attack_hypotheses": [
+    {{
+      "hypothesis": "Short label for this attack scenario",
+      "description": "What to test, why it may be vulnerable, and which endpoints are involved",
+      "target_pages": ["partial URL or pattern"],
+      "owasp": "A01"
+    }}
+  ],
+  "critical_areas": ["URL pattern or page type that deserves the most thorough testing"],
+  "test_notes": "Specific techniques, IDs, credentials, header patterns, or sequences the scanner should use"
+}}
+
+Limit to the 8 most valuable attack hypotheses. Be specific and actionable."""
+
+
+async def generate_site_test_plan(
+    config: LLMConfig,
+    base_url: str,
+    pages: list[dict],
+) -> dict:
+    """Generate a site-level test plan from crawled page metadata.
+
+    Returns a dict with keys: app_summary, attack_hypotheses, critical_areas, test_notes.
+    Returns {} on failure.
+    """
+    if not pages:
+        return {}
+    pages_summary = "\n".join(
+        f"  - {p['url']} | title={p.get('title') or '(no title)'!r} | "
+        f"auth={p.get('req_auth')}, input={p.get('takes_input')}, "
+        f"obj_ref={p.get('has_object_ref')}, biz_logic={p.get('has_business_logic')} | "
+        f"{(p.get('context') or '')[:180]}"
+        for p in pages[:60]
+    )
+    prompt = _SITE_PLAN_PROMPT.format(
+        base_url=base_url,
+        page_count=len(pages),
+        pages_summary=pages_summary,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        plan = _extract_json(raw or "", expect=dict)
+        if isinstance(plan, dict):
+            return plan
+    except Exception:
+        pass
+    return {}
+
+
+# ── Follow-up probe planning ──────────────────────────────────────────────────
+
+_FOLLOWUP_PROMPT = """\
+You are a senior web application penetration tester reviewing mid-scan probe results.
+
+You have just run an initial set of probes against the page below and received the results.
+Your task is to reason through what you observe, identify any promising leads, and generate
+targeted follow-up probes that would confirm, deepen, or chain from the potential issues.
+
+Page URL: {url}
+Page context: {context}
+
+Site-level test plan context:
+{site_context}
+
+Initial probe results:
+{initial_results}
+
+Think through:
+- Which results look anomalous or potentially vulnerable? (unexpected 200s on restricted pages, \
+error messages that disclose stack traces or internals, reflected or stored payloads, \
+differing responses for different input values, auth bypass indicators)
+- For each interesting result, what follow-up probe would confirm or rule out the issue?
+- Are there attack chains implied by multiple results together? In particular:
+  • If a check/validate/verify endpoint responded saying something is required (e.g. TOTP, pin,
+    2FA code, elevated privilege), probe the corresponding action endpoint DIRECTLY without
+    providing that requirement, to test whether enforcement is server-side or only client-side.
+  • If a response revealed a new endpoint URL, resource ID, token, or parameter — probe it.
+  • If a check returned requires_X: true but the action endpoint is not yet probed — add a probe
+    calling the action endpoint with the required field absent or empty.
+- Did any response reveal new endpoints, IDs, tokens, or parameters worth testing?
+
+Generate targeted follow-up probes. Prefer quality over quantity — a focused probe testing a
+specific hypothesis is more valuable than re-running broad coverage.
+
+Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [] if no leads):
+[
+  {{
+    "type": "http",
+    "method": "GET",
+    "url": "https://...",
+    "params": {{}},
+    "headers": {{}},
+    "body": null,
+    "as_user": null,
+    "desc": "Follow-up: what this tests and why"
+  }}
+]
+
+Return [] if no results look promising enough to warrant follow-up investigation."""
+
+
+async def plan_followup_probes(
+    config: LLMConfig,
+    url: str,
+    context: str,
+    initial_results: list[dict],
+    site_context: str = "",
+) -> list[dict]:
+    """Reason about initial probe results and generate targeted follow-up probes.
+
+    This is the iterative-reasoning step: the LLM observes partial results, forms
+    hypotheses about what looks interesting, and generates deeper targeted probes.
+    Returns [] if nothing warrants follow-up or on failure.
+    """
+    if not initial_results:
+        return []
+    results_text = "\n\n".join(
+        f"--- {r.get('desc', '?')} ---\n"
+        f"URL: {r.get('url')}\n"
+        f"Status: {r.get('status')}\n"
+        f"Response body excerpt:\n{str(r.get('body', ''))[:600]}\n"
+        f"Response evidence excerpt:\n{str(r.get('response_evidence', ''))[:600]}"
+        for r in initial_results[:25]
+    )
+    prompt = _FOLLOWUP_PROMPT.format(
+        url=url,
+        context=context or "(no context)",
+        site_context=site_context or "(no site-level context available)",
+        initial_results=results_text,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        probes = _extract_json(raw or "", expect=list)
+        if not isinstance(probes, list):
+            return []
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+    except Exception:
+        return []
+
+
+# ── Finding title normalisation ───────────────────────────────────────────────
+
+_NORMALIZE_TITLES_PROMPT = """\
+You are deduplicating security findings from a web application penetration test report.
+
+EXISTING confirmed findings for this test run:
+{existing_list}
+
+NEW candidate findings just discovered (normalize these):
+{new_list}
+
+Rules:
+- If a new finding is the same vulnerability class as an existing one (same OWASP category \
+and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
+- If two new findings in this batch are the same class, give them the SAME title (pick the \
+clearest one).
+- If a new finding is genuinely different, keep its title as-is.
+- Do NOT merge or drop findings — return one entry per new finding.
+
+Return ONLY a JSON array, one object per new finding in the same order:
+[{{"index": 0, "title": "..."}}, ...]
+"""
+
+
+async def normalize_finding_titles(
+    config: "LLMConfig",
+    existing_findings: list[dict],   # [{"title": ..., "owasp_category": ..., "severity": ...}]
+    new_findings: list[dict],        # raw finding dicts from analyse_probes
+) -> list[dict]:
+    """Return new_findings with titles normalised against existing ones.
+
+    On any failure the original new_findings list is returned unchanged.
+    """
+    if not new_findings or not existing_findings:
+        return new_findings
+
+    existing_list = "\n".join(
+        f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        for i, f in enumerate(existing_findings[:60])
+    )
+    new_list = "\n".join(
+        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] "
+        f"{f.get('title', '?')} — {(f.get('description') or '')[:120]}"
+        for i, f in enumerate(new_findings)
+    )
+
+    prompt = _NORMALIZE_TITLES_PROMPT.format(
+        existing_list=existing_list,
+        new_list=new_list,
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        mappings = _extract_json(raw or "", expect=list)
+        if not isinstance(mappings, list):
+            return new_findings
+        result = [dict(f) for f in new_findings]
+        for entry in mappings:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            title = (entry.get("title") or "").strip()
+            if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                result[idx] = {**result[idx], "title": title}
+        return result
+    except Exception as exc:
+        log.warning("normalize_finding_titles failed: %s", exc)
+        return new_findings
+
+
+# ── LLM-directed (thinking) scan ─────────────────────────────────────────────
+
+_THINKING_NEXT_ACTION_PROMPT = """\
+You are an expert web application penetration tester conducting a hands-on security assessment.
+You are working iteratively: each turn you review everything learned so far and decide on ONE
+specific HTTP request to send next, exactly like a human tester driving curl.
+
+Target base URL: {target_url}
+
+Application context discovered during crawling:
+{crawl_context}
+
+{credentials_section}
+Step {current_step} of {max_steps}.
+
+History of previous actions and responses:
+{history_text}
+
+────────────────────────────────────────────────────────────────────────────────
+TASK: What is the single most valuable HTTP request to send RIGHT NOW?
+
+Think like a human tester:
+- Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
+  API endpoints, error messages, and any other signals.
+- Use discovered tokens in Authorization headers for subsequent requests.
+- Test for IDOR by swapping IDs you found from one response into requests for another resource.
+- Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
+- When you find something interesting, follow it up immediately — don't move on too quickly.
+- If step count is getting high, prefer confirming likely findings over exploring new areas.
+- Be explicit about what made the next request worthwhile. Do not use vague phrases like
+    "found something interesting" unless you also name the specific signal and hypothesis.
+
+Return ONLY valid JSON (no markdown, no prose):
+
+To make one HTTP request:
+{{
+  "action": "http",
+  "method": "GET",
+  "url": "https://...",
+  "headers": {{}},
+  "body": null,
+    "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
+    "hypothesis": "Specific issue or behavior this request is investigating",
+    "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
+    "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
+}}
+
+Body rules:
+- Omit or set null when there is no body.
+- Use a JSON object for JSON API payloads (Content-Type will be set automatically).
+- Use a plain string for form-encoded or raw bodies.
+
+To finish the assessment (all key areas covered, or steps nearly exhausted):
+{{
+  "action": "done",
+  "summary": "2-3 sentence summary of notable findings and tested areas"
+}}
+"""
+
+
+async def thinking_next_action(
+    config: LLMConfig,
+    target_url: str,
+    crawl_context: str,
+    history: list[dict],
+    max_steps: int,
+    current_step: int,
+    credentials: list[dict] | None = None,
+    emit_fn=None,
+) -> dict:
+    """Ask the LLM for the next action in an agentic (thinking) scan.
+
+    Returns a dict with either:
+      {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
+    or:
+      {"action": "done", "summary": ...}
+    """
+    # Format history — give full detail for recent steps, compress older ones.
+    RECENT = 8
+    if not history:
+        history_text = "(none — this is the first step)"
+    else:
+        lines: list[str] = []
+        for i, h in enumerate(history):
+            is_recent = i >= len(history) - RECENT
+            body_limit = 3000 if is_recent else 400
+            resp_excerpt = str(h.get("response_body") or "")[:body_limit]
+            req_body = h.get("request_body")
+            req_body_str = (
+                json.dumps(req_body)[:400] if isinstance(req_body, dict)
+                else str(req_body or "")[:400]
+            )
+            lines.append(
+                f"Step {h['step']}: {h['method']} {h['url']}\n"
+                f"  Note: {h.get('note', '')}\n"
+                f"  Request body: {req_body_str or '(none)'}\n"
+                f"  Response status: {h['response_status']}\n"
+                f"  Response body: {resp_excerpt}"
+            )
+        history_text = "\n\n".join(lines)
+
+    credentials_section = ""
+    if credentials:
+        cred_lines = [
+            f"  - username={c['username']}  password={c['password']}"
+            for c in credentials
+        ]
+        credentials_section = (
+            "Test credentials (use these to authenticate):\n"
+            + "\n".join(cred_lines)
+        )
+
+    prompt = _THINKING_NEXT_ACTION_PROMPT.format(
+        target_url=target_url,
+        crawl_context=crawl_context,
+        credentials_section=credentials_section,
+        current_step=current_step,
+        max_steps=max_steps,
+        history_text=history_text,
+    )
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_request",
+                "status": "pending",
+                "message": f"Step {current_step}: sending prompt ({len(prompt):,} chars) to LLM…",
+                "data": {"step": current_step, "prompt": prompt},
+            })
+        except Exception:
+            pass
+    raw = await _call(config, prompt, None)
+    action: dict
+    try:
+        action = _extract_json(raw or "", expect=dict)
+        if not isinstance(action, dict) or action.get("action") not in ("http", "done"):
+            raise ValueError("unexpected action")
+    except Exception as exc:
+        log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
+        action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_response",
+                "status": "complete",
+                "message": (
+                    f"Step {current_step}: LLM → {action.get('action')}"
+                    + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
+                    + (
+                        f": {action.get('hypothesis') or action.get('note','')}"
+                        if action.get('hypothesis') or action.get('note')
+                        else ""
+                    )
+                ),
+                "data": {"step": current_step, "raw_response": raw, "action": action},
+            })
+        except Exception:
+            pass
+    return action
 
 
 # ── Validation LLM functions ──────────────────────────────────────────────────
