@@ -324,7 +324,6 @@ class TestRunCreate(BaseModel):
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=50, ge=5, le=500)
-    scan_mode: ScanModeLiteral = "safe_active"
     llm_config_id: int | None = None
 
 

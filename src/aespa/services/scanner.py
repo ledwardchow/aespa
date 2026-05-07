@@ -402,17 +402,21 @@ def is_thinking_running(run_id: int) -> bool:
 
 def request_thinking_stop(run_id: int) -> None:
     _thinking_stop_requested.add(run_id)
-    task = _thinking_tasks.get(run_id)
-    if task and not task.done():
-        task.cancel()
+    if is_thinking_running(run_id):
+        _thinking_scan_status[run_id] = "stopping"
+        _emit_thinking_status(run_id)
 
 
 def get_thinking_scan_status(run_id: int) -> dict:
     if is_thinking_running(run_id):
-        status = "running"
+        status = _thinking_scan_status.get(run_id, "running")
     else:
         status = _thinking_scan_status.get(run_id, "idle")
-    return {"status": status}
+    with Session(get_engine()) as s:
+        findings_count = len(s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all())
+    return {"status": status, "findings_count": findings_count}
 
 
 async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
@@ -468,16 +472,23 @@ def _emit_thinking_status(run_id: int) -> None:
 
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
+    _mark_run(run_id, scan_status="running")
+    _emit_scan_update(run_id)
+    _emit_thinking_status(run_id)
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
+        _mark_run(run_id, scan_status="stopped")
+        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
         raise
-    except Exception:
+    except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
+        _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
+        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
     finally:
         _thinking_stop_requested.discard(run_id)
@@ -1070,7 +1081,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                 await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
 
     # ── Analyse results ───────────────────────────────────────────────────────
-    if all_results and run_id not in _thinking_stop_requested:
+    if all_results:
+        _thinking_scan_status[run_id] = "analysing"
+        _emit_thinking_status(run_id)
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_analysis",
@@ -1139,6 +1152,8 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     stopped = run_id in _thinking_stop_requested
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
+    _mark_run(run_id, scan_status="stopped" if stopped else "complete")
+    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
@@ -1206,7 +1221,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
     log.info("=== Scan start: run_id=%s base_url=%s ===", run_id, base_url)
 
-    # Mark target pages as scan_status=pending; clear their existing findings.
+    # Mark target pages as scan_status=pending. Findings are append-only until
+    # the user explicitly deletes them, so scans can be compared across runs.
     with Session(get_engine()) as s:
         q = (
             select(CrawledPage)
@@ -1219,20 +1235,11 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         if page_ids:
             q = q.where(CrawledPage.id.in_(page_ids))
         pages = s.exec(q).all()
-        target_ids = [p.id for p in pages]
         for p in pages:
             p.scan_status = "pending"
             s.add(p)
-        # Clear existing findings only for the pages we're about to scan.
-        old = s.exec(
-            select(ScanFinding)
-            .where(ScanFinding.test_run_id == run_id)
-            .where(ScanFinding.page_id.in_(target_ids))
-        ).all()
-        for f in old:
-            s.delete(f)
         s.commit()
-        page_ids = target_ids  # use resolved list from here on
+        page_ids = [p.id for p in pages]  # use resolved list from here on
 
     if not page_ids:
         log.info("No in-scope pages to scan.")
