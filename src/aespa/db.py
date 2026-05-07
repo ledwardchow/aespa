@@ -112,9 +112,23 @@ def _migrate(engine: Engine) -> None:
             )
         """))
         conn.commit()
-
-
-def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
+    # llm_call_log — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS llm_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                test_run_id INTEGER,
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                call_type TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER,
+                prompt TEXT,
+                response TEXT,
+                error TEXT
+            )
+        """))
+        conn.commit()
     """Add *column* to *table* if it does not already exist (SQLite safe)."""
     with engine.connect() as conn:
         result = conn.execute(

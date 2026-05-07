@@ -5,14 +5,55 @@ import base64
 import json
 import logging
 import re
+import time
+from contextvars import ContextVar
 from typing import Any, Optional
 from urllib.parse import quote
 
-from aespa.models import LLMConfig
+from aespa.models import LLMCallLog, LLMConfig
 
 log = logging.getLogger("aespa.llm")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Context variables so callers can annotate LLM calls without threading extra args
+# through every helper.  Set them before calling any public llm_svc function.
+_ctx_run_id: ContextVar[Optional[int]] = ContextVar("llm_run_id", default=None)
+_ctx_call_type: ContextVar[str] = ContextVar("llm_call_type", default="")
+
+
+def set_llm_context(run_id: Optional[int] = None, call_type: str = "") -> None:
+    """Set run_id / call_type for subsequent LLM calls in this async context."""
+    _ctx_run_id.set(run_id)
+    _ctx_call_type.set(call_type)
+
+
+def _persist_llm_call(
+    config: LLMConfig,
+    prompt: str,
+    response: Optional[str],
+    duration_ms: int,
+    error: Optional[str] = None,
+) -> None:
+    """Best-effort: write one LLMCallLog row. Never raises."""
+    try:
+        from aespa.db import get_engine
+        from sqlmodel import Session
+        entry = LLMCallLog(
+            test_run_id=_ctx_run_id.get(),
+            provider=config.provider,
+            model=config.model,
+            call_type=_ctx_call_type.get(),
+            duration_ms=duration_ms,
+            prompt=prompt,
+            response=response,
+            error=error,
+        )
+        with Session(get_engine()) as s:
+            s.add(entry)
+            s.commit()
+    except Exception:
+        pass
 
 
 def _strip_thinking_blocks(raw: str) -> str:
@@ -150,6 +191,7 @@ async def analyse_page(
     screenshot_b64: Optional[str] = None,
 ) -> tuple[str, list[str], PageCategories]:
     """Return (context_description, suggested_links_list, categories_dict)."""
+    _ctx_call_type.set("analyse_page")
     prompt = _ANALYSIS_PROMPT.format(
         url=url,
         title=title or "(no title)",
@@ -241,19 +283,32 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    if config.provider == "anthropic":
-        return await _anthropic(config, prompt, screenshot_b64)
-    if config.provider == "google":
-        return await _google(config, prompt, screenshot_b64)
-    if config.provider == "azure_openai":
-        return await _azure_openai(config, prompt, screenshot_b64)
-    if config.provider == "azure_foundry":
-        return await _azure_foundry(config, prompt, screenshot_b64)
-    if config.provider == "openrouter":
-        return await _openrouter(config, prompt, screenshot_b64)
-    if config.provider == "bedrock":
-        return await _bedrock(config, prompt, screenshot_b64)
-    return await _openai_compat(config, prompt, screenshot_b64)
+    t0 = time.monotonic()
+    error: Optional[str] = None
+    raw: str = ""
+    try:
+        if config.provider == "anthropic":
+            raw = await _anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "google":
+            raw = await _google(config, prompt, screenshot_b64)
+        elif config.provider == "azure_openai":
+            raw = await _azure_openai(config, prompt, screenshot_b64)
+        elif config.provider == "azure_foundry":
+            raw = await _azure_foundry(config, prompt, screenshot_b64)
+        elif config.provider == "openrouter":
+            raw = await _openrouter(config, prompt, screenshot_b64)
+        elif config.provider == "bedrock":
+            raw = await _bedrock(config, prompt, screenshot_b64)
+        else:
+            raw = await _openai_compat(config, prompt, screenshot_b64)
+    except Exception as exc:
+        error = str(exc)
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        _persist_llm_call(config, prompt, None, duration_ms, error=error)
+        raise
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    _persist_llm_call(config, prompt, raw, duration_ms)
+    return raw
 
 
 def _content_part_text(part: Any) -> str:
@@ -856,6 +911,7 @@ async def plan_probes(
     if site_context:
         site_ctx_section = f"\nSite-level test plan context (use to inform probe selection):\n{site_context}\n"
     xss_canary_section = ""
+    _ctx_call_type.set("plan_probes")
     if xss_canary:
         xss_canary_section = (
             f"\nStored XSS canary: use '{xss_canary}' as the alert argument in every XSS probe "
@@ -902,6 +958,7 @@ async def analyse_probes(
     results: list[dict],
 ) -> list[dict]:
     """Ask the LLM to analyse probe results and return a list of findings."""
+    _ctx_call_type.set("analyse_probes")
     if not results:
         return []
     results_text = "\n\n".join(
@@ -989,6 +1046,7 @@ async def generate_site_test_plan(
     Returns a dict with keys: app_summary, attack_hypotheses, critical_areas, test_notes.
     Returns {} on failure.
     """
+    _ctx_call_type.set("generate_site_test_plan")
     if not pages:
         return {}
     pages_summary = "\n".join(
@@ -1154,6 +1212,7 @@ async def normalize_finding_titles(
         existing_list=existing_list,
         new_list=new_list,
     )
+    _ctx_call_type.set("normalize_finding_titles")
     try:
         raw = await _call(config, prompt, None)
         mappings = _extract_json(raw or "", expect=list)
@@ -1280,6 +1339,7 @@ async def thinking_next_action(
             + "\n".join(cred_lines)
         )
 
+    _ctx_call_type.set("thinking_next_action")
     prompt = _THINKING_NEXT_ACTION_PROMPT.format(
         target_url=target_url,
         crawl_context=crawl_context,

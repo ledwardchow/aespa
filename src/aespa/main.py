@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from aespa.api.events import router as events_router
+from aespa.api.logging import router as logging_router
 from aespa.api.scan import router as scan_router
 from aespa.api.traffic import router as traffic_router
 from aespa.api.settings import router as settings_router
@@ -33,6 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events_router)
     app.include_router(scan_router)
     app.include_router(traffic_router)
+    app.include_router(logging_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

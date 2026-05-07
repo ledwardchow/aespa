@@ -104,6 +104,7 @@ class _CrawlShared:
 # ── Core orchestrator ─────────────────────────────────────────────────────────
 
 async def _do_crawl(run_id: int) -> None:
+    llm_svc.set_llm_context(run_id=run_id, call_type="analyse_page")
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
         if run is None:

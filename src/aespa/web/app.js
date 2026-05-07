@@ -57,6 +57,7 @@ const api = {
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
+  listLLMCalls:     (runId)       => req(`/api/logs/llm-calls${runId != null ? "?run_id="+runId : ""}`),
 };
 
 async function req(url, opts = {}) {
@@ -100,6 +101,7 @@ function useRoute() {
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
+  if (hash === "#/logging/llm-calls")                    return { name: "llm-calls" };
 
   return { name: "list" };
 }
@@ -257,6 +259,10 @@ function App() {
           <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")}>
             <span className="nav-icon"><${IconShield}/></span> Scan Policy
           </a>
+          <div className="nav-section-label" style=${{marginTop:8}}>Logging</div>
+          <a href="#/logging/llm-calls" className=${"nav-item"+(onLogging?" active":"")}>
+            <span className="nav-icon"><${IconLog}/></span> LLM Calls
+          </a>
         </nav>
         <div className="sidebar-footer">${appVersion ? `v${appVersion}` : ""}</div>
       </aside>
@@ -270,6 +276,7 @@ function App() {
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id}/>`}
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
+        ${route.name==="llm-calls"   && html`<${LLMCallsLog}/>`}
       </div>
     </div>
   `;
@@ -1676,10 +1683,16 @@ function TestRunDetail({ runId }) {
                       <div className="credential-view-context">
                         ${v.llm_context || "No context."}
                       </div>
+                      ${v.page_text && v.page_text.startsWith("=== HTTP") && html`
+                        <div className="graph-panel-section-label" style=${{marginTop:8}}>HTTP Exchange</div>
+                        <pre style=${{margin:"6px 0 0",fontSize:11,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-all",background:"var(--surface2)",padding:"8px 10px",borderRadius:4,border:"1px solid var(--border)",maxHeight:340,overflowY:"auto"}}>${v.page_text}</pre>`}
                     </div>`)}
                 ` : html`
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
                   <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>
+                  ${pageDetail.page_text && pageDetail.page_text.startsWith("=== HTTP") && html`
+                    <div className="graph-panel-section-label" style=${{marginTop:12}}>HTTP Exchange</div>
+                    <pre style=${{margin:"6px 0 0",fontSize:11,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-all",background:"var(--surface2)",padding:"8px 10px",borderRadius:4,border:"1px solid var(--border)",maxHeight:340,overflowY:"auto"}}>${pageDetail.page_text}</pre>`}
                   ${pageDetail.screenshot_b64 && html`
                     <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
                     <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
@@ -2045,6 +2058,96 @@ function TestRunDetail({ runId }) {
             </div>`}
         </div>`}
     </div>`;
+}
+
+// ── LLM Calls Log ─────────────────────────────────────────────────────────────
+
+function LLMCallsLog() {
+  const [calls, setCalls]       = useState(null);
+  const [error, setError]       = useState(null);
+  const [expandedIds, setExpandedIds] = useState(new Set());
+  const [runs, setRuns]         = useState({});   // id → name cache
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.listLLMCalls();
+      setCalls(data || []);
+    } catch(e) { setError(e.message); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Resolve run names for any run_ids we see.
+  useEffect(() => {
+    if (!calls) return;
+    const missing = [...new Set(calls.map(c => c.test_run_id).filter(id => id != null && !(id in runs)))];
+    if (!missing.length) return;
+    Promise.all(missing.map(id => api.getRun(id).then(r => [id, r.name]).catch(() => [id, "#"+id])))
+      .then(pairs => setRuns(prev => { const next={...prev}; pairs.forEach(([id,name])=>{ next[id]=name; }); return next; }));
+  }, [calls]);
+
+  const toggle = (id) => setExpandedIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const PROVIDER_COLOR = { anthropic:"#d97706", openai:"#10b981", openrouter:"#818cf8", google:"#f43f5e", bedrock:"#fb923c", azure_openai:"#38bdf8", azure_foundry:"#38bdf8", openai_compatible:"#94a3b8" };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">LLM Calls</div>
+      <div className="topbar-actions">
+        <button className="btn secondary" onClick=${load}>Refresh</button>
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${calls === null && html`<div className="subtle">Loading…</div>`}
+      ${calls !== null && calls.length === 0 && html`
+        <div className="empty-state" style=${{padding:"48px"}}>
+          <div className="empty-msg">No LLM calls recorded yet</div>
+          <div className="empty-sub">Calls will appear here once a crawl or scan runs.</div>
+        </div>`}
+      ${calls !== null && calls.length > 0 && html`
+        <div className="card" style=${{padding:0, overflow:"hidden"}}>
+          ${calls.map(c => {
+            const isExpanded = expandedIds.has(c.id);
+            const ts = c.created_at ? new Date(c.created_at).toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "--";
+            const runLabel = c.test_run_id != null ? (runs[c.test_run_id] || "#"+c.test_run_id) : "—";
+            const dur = c.duration_ms != null ? (c.duration_ms < 1000 ? c.duration_ms+"ms" : (c.duration_ms/1000).toFixed(1)+"s") : null;
+            const provColor = PROVIDER_COLOR[c.provider] || "var(--muted)";
+            return html`
+              <div key=${c.id} style=${{borderBottom:"1px solid var(--border)"}}>
+                <div
+                  className="activity-entry--expandable"
+                  style=${{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",cursor:"pointer",userSelect:"none"}}
+                  onClick=${()=>toggle(c.id)}
+                >
+                  <span style=${{fontSize:10,fontWeight:700,color:provColor,minWidth:80,textTransform:"uppercase",letterSpacing:"0.5px"}}>${c.provider}</span>
+                  <span style=${{fontSize:12,fontFamily:"monospace",color:"var(--text)",flex:"1 1 0",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>${c.model}</span>
+                  <span style=${{fontSize:11,color:"var(--muted)",minWidth:120,textAlign:"right"}}>${c.call_type || ""}</span>
+                  <span style=${{fontSize:11,color:"var(--muted)",minWidth:120,textAlign:"right",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title=${runLabel}>${runLabel}</span>
+                  ${dur && html`<span style=${{fontSize:11,color:"var(--muted)",minWidth:48,textAlign:"right"}}>${dur}</span>`}
+                  ${c.error && html`<span className="badge err" style=${{fontSize:10}}>error</span>`}
+                  <span style=${{fontSize:11,color:"var(--muted)",minWidth:140,textAlign:"right",flexShrink:0}}>${ts}</span>
+                  <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+                </div>
+                ${isExpanded && html`
+                  <div style=${{padding:"0 16px 14px 16px",background:"var(--surface2)"}}>
+                    ${c.error && html`
+                      <div className="activity-payload-label" style=${{color:"#f87171"}}>Error</div>
+                      <pre style=${{margin:"0 0 10px",fontSize:11,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-all",color:"#f87171"}}>${c.error}</pre>`}
+                    <div className="activity-payload-label">Prompt</div>
+                    <pre style=${{margin:"0 0 10px",fontSize:11,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:360,overflowY:"auto",background:"var(--surface)",padding:"8px 10px",borderRadius:4,border:"1px solid var(--border)"}}>${c.prompt || "(none)"}</pre>
+                    <div className="activity-payload-label">Response</div>
+                    <pre style=${{margin:0,fontSize:11,fontFamily:"monospace",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:360,overflowY:"auto",background:"var(--surface)",padding:"8px 10px",borderRadius:4,border:"1px solid var(--border)"}}>${c.response || "(none)"}</pre>
+                  </div>`}
+              </div>`;
+          })}
+        </div>`}
+    </div>
+  `;
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

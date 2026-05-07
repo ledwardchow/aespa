@@ -248,3 +248,23 @@ class ScanLog(SQLModel, table=True):
     message: str = Field(default="")
     page_url: Optional[str] = Field(default=None)
     data_json: Optional[str] = Field(default=None)  # JSON blob for extra phase data
+
+
+class LLMCallLog(SQLModel, table=True):
+    """One LLM API call — request + response — persisted for the Logging view."""
+
+    __tablename__ = "llm_call_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    # Which run triggered the call (null for calls made outside a scan context)
+    test_run_id: Optional[int] = Field(default=None, index=True)
+    # Call metadata
+    provider: str = Field(default="")
+    model: str = Field(default="")
+    call_type: str = Field(default="")     # analyse_page | plan_probes | analyse_probes | thinking_next_action | …
+    duration_ms: Optional[int] = Field(default=None)
+    # Payload (can be large — stored as plain text)
+    prompt: Optional[str] = Field(default=None)
+    response: Optional[str] = Field(default=None)
+    error: Optional[str] = Field(default=None)  # non-null if the call failed

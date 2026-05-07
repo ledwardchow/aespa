@@ -258,6 +258,7 @@ async def _do_thinking_scan(run_id: int) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
     tester working through curl."""
+    llm_svc.set_llm_context(run_id=run_id, call_type="thinking_next_action")
     # ── Load config ───────────────────────────────────────────────────────────
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
@@ -650,6 +651,7 @@ async def _export_cred_session(
 async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     from playwright.async_api import async_playwright
 
+    llm_svc.set_llm_context(run_id=run_id, call_type="scan")
     # Load site, credentials, and LLM config (expunge before session closes).
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
