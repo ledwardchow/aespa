@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from typing import Any, Optional
 from urllib.parse import quote
 
 from aespa.models import LLMConfig
+
+log = logging.getLogger("aespa.llm")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -52,7 +55,16 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     close_ch = "]" if expect is list else "}"
     starts = [i for i, ch in enumerate(text) if ch == open_ch]
     if not starts:
-        raise ValueError(f"no '{open_ch}' found in LLM response")
+        # Stripped text has no JSON delimiters — the model may have embedded the answer
+        # inside a thinking block.  Try searching the un-stripped original text so we can
+        # still extract JSON that appears within <think>...</think> tags.
+        raw_no_fence = re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
+        if alt_starts:
+            text = raw_no_fence
+            starts = alt_starts
+        else:
+            raise ValueError(f"no '{open_ch}' found in LLM response")
 
     for start in starts:
         depth = 0
@@ -293,6 +305,14 @@ def _extract_message_text(message: Any) -> str:
 
     if text:
         cleaned = _strip_thinking_blocks(text).strip()
+        if not cleaned:
+            # Stripping removed everything (entire content was a thinking block with no
+            # answer outside).  Prefer a separate reasoning_content / fallback field when
+            # available; otherwise return the original text so _extract_json can still
+            # find JSON that was embedded inside the thinking block.
+            if fallback_texts:
+                return fallback_texts[0]
+            return text
         if fallback_texts and any(ch in cleaned for ch in ("[", "{")):
             try:
                 _extract_json(cleaned, expect=list)
@@ -866,7 +886,13 @@ async def plan_probes(
         # Include "idor" probes so that as_user set by the LLM is preserved when the
         # scanner expands them into concrete HTTP requests.
         return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")]
-    except Exception:
+    except Exception as _exc:
+        log.warning(
+            "plan_probes: failed to extract probe list from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            _exc,
+            (raw or "")[:500],
+        )
         return []
 
 
@@ -1076,6 +1102,130 @@ async def plan_followup_probes(
         return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
     except Exception:
         return []
+
+
+# ── LLM-directed (thinking) scan ─────────────────────────────────────────────
+
+_THINKING_NEXT_ACTION_PROMPT = """\
+You are an expert web application penetration tester conducting a hands-on security assessment.
+You are working iteratively: each turn you review everything learned so far and decide on ONE
+specific HTTP request to send next, exactly like a human tester driving curl.
+
+Target base URL: {target_url}
+
+Application context discovered during crawling:
+{crawl_context}
+
+{credentials_section}
+Step {current_step} of {max_steps}.
+
+History of previous actions and responses:
+{history_text}
+
+────────────────────────────────────────────────────────────────────────────────
+TASK: What is the single most valuable HTTP request to send RIGHT NOW?
+
+Think like a human tester:
+- Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
+  API endpoints, error messages, and any other signals.
+- Use discovered tokens in Authorization headers for subsequent requests.
+- Test for IDOR by swapping IDs you found from one response into requests for another resource.
+- Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
+- When you find something interesting, follow it up immediately — don't move on too quickly.
+- If step count is getting high, prefer confirming likely findings over exploring new areas.
+
+Return ONLY valid JSON (no markdown, no prose):
+
+To make one HTTP request:
+{{
+  "action": "http",
+  "method": "GET",
+  "url": "https://...",
+  "headers": {{}},
+  "body": null,
+  "note": "One sentence: what this tests and why"
+}}
+
+Body rules:
+- Omit or set null when there is no body.
+- Use a JSON object for JSON API payloads (Content-Type will be set automatically).
+- Use a plain string for form-encoded or raw bodies.
+
+To finish the assessment (all key areas covered, or steps nearly exhausted):
+{{
+  "action": "done",
+  "summary": "2-3 sentence summary of notable findings and tested areas"
+}}
+"""
+
+
+async def thinking_next_action(
+    config: LLMConfig,
+    target_url: str,
+    crawl_context: str,
+    history: list[dict],
+    max_steps: int,
+    current_step: int,
+    credentials: list[dict] | None = None,
+) -> dict:
+    """Ask the LLM for the next action in an agentic (thinking) scan.
+
+    Returns a dict with either:
+      {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
+    or:
+      {"action": "done", "summary": ...}
+    """
+    # Format history — give full detail for recent steps, compress older ones.
+    RECENT = 8
+    if not history:
+        history_text = "(none — this is the first step)"
+    else:
+        lines: list[str] = []
+        for i, h in enumerate(history):
+            is_recent = i >= len(history) - RECENT
+            body_limit = 3000 if is_recent else 400
+            resp_excerpt = str(h.get("response_body") or "")[:body_limit]
+            req_body = h.get("request_body")
+            req_body_str = (
+                json.dumps(req_body)[:400] if isinstance(req_body, dict)
+                else str(req_body or "")[:400]
+            )
+            lines.append(
+                f"Step {h['step']}: {h['method']} {h['url']}\n"
+                f"  Note: {h.get('note', '')}\n"
+                f"  Request body: {req_body_str or '(none)'}\n"
+                f"  Response status: {h['response_status']}\n"
+                f"  Response body: {resp_excerpt}"
+            )
+        history_text = "\n\n".join(lines)
+
+    credentials_section = ""
+    if credentials:
+        cred_lines = [
+            f"  - username={c['username']}  password={c['password']}"
+            for c in credentials
+        ]
+        credentials_section = (
+            "Test credentials (use these to authenticate):\n"
+            + "\n".join(cred_lines)
+        )
+
+    prompt = _THINKING_NEXT_ACTION_PROMPT.format(
+        target_url=target_url,
+        crawl_context=crawl_context,
+        credentials_section=credentials_section,
+        current_step=current_step,
+        max_steps=max_steps,
+        history_text=history_text,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        action = _extract_json(raw or "", expect=dict)
+        if isinstance(action, dict) and action.get("action") in ("http", "done"):
+            return action
+    except Exception as exc:
+        log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
+    return {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
 
 
 # ── Validation LLM functions ──────────────────────────────────────────────────

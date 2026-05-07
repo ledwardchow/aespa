@@ -32,6 +32,31 @@ async def start_scan(run_id: int, session: Session = Depends(get_session)) -> Sc
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
 
 
+@router.post("/api/test-runs/{run_id}/thinking-scan/start")
+async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Start an LLM-directed scan that dynamically chooses what to test next."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Thinking scan already running")
+    await scanner_svc.start_thinking_scan(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/stop")
+def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    scanner_svc.request_thinking_stop(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.get("/api/test-runs/{run_id}/thinking-scan/status")
+def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
 @router.post("/api/test-runs/{run_id}/pages/{page_id}/scan", response_model=ScanStatusOut)
 async def scan_single_page(
     run_id: int,
