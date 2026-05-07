@@ -127,6 +127,8 @@ class TestRun(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
+    # Optional per-run LLM profile override (null = use the globally active one)
+    llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
 
 
 class CrawledPage(SQLModel, table=True):

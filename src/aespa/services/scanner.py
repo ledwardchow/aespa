@@ -26,7 +26,7 @@ from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config, get_run_scanner_policy
+from aespa.services.settings import get_llm_config, get_llm_config_for_run, get_run_scanner_policy
 
 log = logging.getLogger("aespa.scanner")
 
@@ -264,7 +264,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
@@ -656,7 +656,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
