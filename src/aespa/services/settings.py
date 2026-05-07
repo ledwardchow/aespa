@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, ScannerPolicy, TestRun
-from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyBase, ScannerPolicyIn, ScannerPolicyOut
+from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyIn, ScannerPolicyOut
 
 _SINGLETON_ID = 1
 
@@ -177,23 +177,6 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
     return _policy_from_model(cfg)
 
 
-def scanner_policy_snapshot(policy: ScannerPolicyBase) -> str:
-    return policy.model_dump_json()
-
-
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
-    snapshot = _json_loads(run.scanner_policy_json, {})
-    if snapshot:
-        policy = ScannerPolicyIn(**snapshot)
-        return RunScannerPolicyOut(**policy.model_dump(), source="run_snapshot", updated_at=None)
     policy = get_scanner_policy(session)
     return RunScannerPolicyOut(**policy.model_dump(exclude={"updated_at"}), source="global_default", updated_at=policy.updated_at)
-
-
-def update_run_scanner_policy(session: Session, run: TestRun, payload: ScannerPolicyIn) -> RunScannerPolicyOut:
-    run.scan_mode = payload.scan_mode
-    run.scanner_policy_json = scanner_policy_snapshot(payload)
-    session.add(run)
-    session.commit()
-    session.refresh(run)
-    return get_run_scanner_policy(session, run)

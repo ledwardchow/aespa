@@ -33,13 +33,19 @@ def test_create_run_custom_name(client: TestClient):
     assert r.json()["name"] == "Initial recon"
 
 
-def test_create_run_with_scan_mode(client: TestClient):
+def test_create_run_uses_global_scan_policy(client: TestClient):
+    policy = client.get("/api/settings/scanner-policy").json()
+    policy["scan_mode"] = "aggressive"
+    policy["max_probes_per_page"] = 7
+    client.put("/api/settings/scanner-policy", json=policy)
+
     site = _make_site(client)
-    r = _make_run(client, site["id"], scan_mode="aggressive")
+    r = _make_run(client, site["id"])
     assert r.status_code == 201
     data = r.json()
     assert data["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["scan_mode"] == "aggressive"
+    assert data["scanner_policy"]["max_probes_per_page"] == 7
 
 
 def test_create_run_auto_increments(client: TestClient):
@@ -137,44 +143,30 @@ def test_create_run_invalid_max_pages(client: TestClient):
     assert r.status_code == 422
 
 
-def test_create_run_invalid_scan_mode(client: TestClient):
-    site = _make_site(client)
-    r = _make_run(client, site["id"], scan_mode="reckless")
-    assert r.status_code == 422
-
-
-def test_run_scan_policy_snapshots_global_defaults(client: TestClient):
+def test_run_scan_policy_tracks_global_defaults(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["max_probes_per_page"] = 7
     client.put("/api/settings/scanner-policy", json=policy)
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
-    r = client.get(f"/api/test-runs/{run['id']}/scan/policy")
-    assert r.status_code == 200
-    assert r.json()["source"] == "run_snapshot"
-    assert r.json()["max_probes_per_page"] == 7
+    assert run["scanner_policy"]["source"] == "global_default"
+    assert run["scanner_policy"]["max_probes_per_page"] == 7
 
     policy["max_probes_per_page"] = 30
-    client.put("/api/settings/scanner-policy", json=policy)
-    r2 = client.get(f"/api/test-runs/{run['id']}/scan/policy")
-    assert r2.json()["max_probes_per_page"] == 7
-
-
-def test_update_run_scan_policy(client: TestClient):
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    policy = client.get(f"/api/test-runs/{run['id']}/scan/policy").json()
     policy["scan_mode"] = "passive"
-    policy["max_probes_per_page"] = 0
-    r = client.patch(f"/api/test-runs/{run['id']}/scan/policy", json=policy)
-    assert r.status_code == 200
-    assert r.json()["scan_mode"] == "passive"
-    assert r.json()["max_probes_per_page"] == 0
-
+    client.put("/api/settings/scanner-policy", json=policy)
     run2 = client.get(f"/api/test-runs/{run['id']}").json()
     assert run2["scan_mode"] == "passive"
-    assert run2["scanner_policy"]["max_probes_per_page"] == 0
+    assert run2["scanner_policy"]["source"] == "global_default"
+    assert run2["scanner_policy"]["max_probes_per_page"] == 30
+
+
+def test_run_scan_policy_endpoint_removed(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    r = client.get(f"/api/test-runs/{run['id']}/scan/policy")
+    assert r.status_code == 404
 
 
 # ── Start without LLM config ──────────────────────────────────────────────────
@@ -280,6 +272,25 @@ def test_thinking_scan_start_does_not_start_normal_scan(client: TestClient, monk
     assert calls["normal"] == []
     assert calls["thinking"] == [run["id"]]
     assert r.json()["status"] == "running"
+
+
+def test_scan_modes_block_each_other(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: True)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Scan already running"
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
+    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Thinking scan already running"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────
