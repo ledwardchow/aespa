@@ -487,6 +487,7 @@ class PageCredentialViewOut(BaseModel):
     username: str | None
     screenshot_b64: str | None
     llm_context: str | None
+    page_text: str | None
     req_auth: bool | None
     takes_input: bool | None
     has_object_ref: bool | None
