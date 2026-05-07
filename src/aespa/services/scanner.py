@@ -85,6 +85,55 @@ def _cvss_score(value: float | int | str | None) -> float:
         return 0.0
 
 
+def _compact_log_value(value, limit: int = 180) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, separators=(",", ":"))
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _thinking_payload_summary(url: str, body) -> str:
+    parts: list[str] = []
+    query = parse_qs(urlparse(url).query, keep_blank_values=True)
+    if query:
+        preview = ", ".join(
+            f"{key}={_compact_log_value(values[-1], 60)}"
+            for key, values in list(query.items())[:4]
+        )
+        parts.append(f"query payloads: {preview}")
+    body_preview = _compact_log_value(body)
+    if body_preview:
+        parts.append(f"body payload: {body_preview}")
+    return "; ".join(parts)
+
+
+def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
+    note = _compact_log_value(action.get("note"), 240)
+    observation = _compact_log_value(action.get("observation"), 220)
+    hypothesis = _compact_log_value(
+        action.get("hypothesis") or action.get("investigation") or action.get("objective"),
+        220,
+    )
+    payload_purpose = _compact_log_value(action.get("payload_purpose"), 180)
+    payload_summary = _thinking_payload_summary(url, action.get("body"))
+
+    lead = hypothesis or note or "next target behavior"
+    message = f"Step {step}: investigating {lead}"
+    if observation:
+        message += f" after observing {observation}"
+    if payload_purpose:
+        message += f"; payload purpose: {payload_purpose}"
+    if payload_summary:
+        message += f" ({payload_summary})"
+    return f"{message} — {method} {url}"
+
+
 def _combined_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
     parts = []
     if summary:
@@ -464,6 +513,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             headers = action.get("headers") or {}
             body    = action.get("body")
             note    = action.get("note") or f"Step {step}"
+            action_message = _thinking_action_log_message(step, method, url, action)
+            payload_summary = _thinking_payload_summary(url, body)
 
             if not url:
                 log.warning("Thinking scan step %d: LLM returned empty URL — stopping.", step)
@@ -473,8 +524,17 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "type": "scanner_phase",
                 "phase": "thinking_step",
                 "status": "running",
-                "message": f"Step {step}: {method} {url} — {note}",
-                "data": {"step": step, "method": method, "url": url, "note": note},
+                "message": action_message,
+                "data": {
+                    "step": step,
+                    "method": method,
+                    "url": url,
+                    "note": note,
+                    "observation": action.get("observation"),
+                    "hypothesis": action.get("hypothesis"),
+                    "payload_purpose": action.get("payload_purpose"),
+                    "payload_summary": payload_summary,
+                },
             })
 
             req_body_str = ""
