@@ -42,6 +42,17 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
     assert "no alternate user sessions" in reason
 
 
+class _ScannerCredWithLogin:
+    login_url = "https://target.local/customer/login"
+
+
+def test_scanner_login_url_for_credential_prefers_override():
+    assert scanner._login_url_for_credential(
+        "https://target.local/login",
+        _ScannerCredWithLogin(),
+    ) == "https://target.local/customer/login"
+
+
 def test_spa_shell_is_not_treated_as_protected_content():
     body = """
     <!doctype html>

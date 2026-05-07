@@ -37,6 +37,7 @@ class Credential(SQLModel, table=True):
     username: str
     password: str  # plaintext — local pentesting tool
     label: Optional[str] = Field(default=None)
+    login_url: Optional[str] = Field(default=None)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 

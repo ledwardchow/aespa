@@ -496,21 +496,26 @@ function SiteForm({ siteId }) {
         const d = await api.getSite(siteId);
         setForm({ name:d.name, base_url:d.base_url, requires_auth:d.requires_auth,
           login_url:d.login_url||"", notes:d.notes||"",
-          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||""})) });
+          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||""})) });
       } catch(e) { setError(e.message); } finally { setLoading(false); }
     })();
   }, [isEdit, siteId]);
 
   const upd = p => { setForm(f=>({...f,...p})); };
   const updC = (i,p) => setForm(f=>({...f,credentials:f.credentials.map((c,j)=>j===i?{...c,...p}:c)}));
-  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:""}] });
+  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:""}] });
   const rmC  = i  => upd({ credentials:form.credentials.filter((_,j)=>j!==i) });
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true);
     const payload = { name:form.name.trim(), base_url:form.base_url.trim(), requires_auth:form.requires_auth,
-      login_url:form.requires_auth?form.login_url.trim():null, notes:form.notes.trim()||null,
-      credentials:form.requires_auth?form.credentials.map(c=>({username:c.username,password:c.password,label:c.label||null})):[] };
+      login_url:form.requires_auth?(form.login_url.trim()||null):null, notes:form.notes.trim()||null,
+      credentials:form.requires_auth?form.credentials.map(c=>({
+        username:c.username,
+        password:c.password,
+        label:c.label||null,
+        login_url:c.login_url?.trim()||null,
+      })):[] };
     try {
       if (isEdit) { await api.updateSite(siteId,payload); nav(`#/sites/${siteId}`); }
       else        { const s = await api.createSite(payload); nav(`#/sites/${s.id}`); }
@@ -542,14 +547,15 @@ function SiteForm({ siteId }) {
             <span>This site requires authentication</span>
           </label>
           ${form.requires_auth && html`
-            <div className="field"><label>Login page URL</label>
-              <input type="url" required value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
+            <div className="field"><label>Default login page URL</label>
+              <input type="url" value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
             <fieldset><legend>Credentials</legend>
               ${form.credentials.length===0&&html`<div className="subtle">No credentials yet.</div>`}
               ${form.credentials.map((c,i)=>html`
                 <div className="cred-row" key=${i}>
                   <div className="field"><label>Username</label><input type="text" required value=${c.username} onChange=${e=>updC(i,{username:e.target.value})}/></div>
                   <div className="field"><label>Password</label><input type="text" required value=${c.password} onChange=${e=>updC(i,{password:e.target.value})}/></div>
+                  <div className="field"><label>Login URL</label><input type="url" value=${c.login_url||""} placeholder=${form.login_url||"https://target.example.com/login"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
                   <div className="field"><label>Label</label><input type="text" value=${c.label} placeholder="admin" onChange=${e=>updC(i,{label:e.target.value})}/></div>
                   <div style=${{paddingBottom:1}}><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
                 </div>`)}
@@ -1667,21 +1673,24 @@ function TestRunDetail({ runId }) {
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>
                     Views by User
                   </div>
-                  ${pageViews.map(v => html`
-                    <div key=${v.id} className="credential-view-card">
-                      <div className="credential-view-label">
-                        ${v.username || "Anonymous"}
-                      </div>
-                      ${v.screenshot_b64 && html`
-                        <img src=${"data:image/png;base64,"+v.screenshot_b64}
-                          className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
-                      ${!v.screenshot_b64 && isApiTranscript(v.page_text) && html`
-                        <div className="api-transcript-label">API Request / Response</div>
-                        <pre className="api-transcript">${v.page_text}</pre>`}
-                      <div className="credential-view-context">
-                        ${v.llm_context || "No context."}
-                      </div>
-                    </div>`)}
+                  ${pageViews.map(v => {
+                    const apiTranscript = apiTranscriptText(v.page_text || pageDetail.page_text);
+                    return html`
+                      <div key=${v.id} className="credential-view-card">
+                        <div className="credential-view-label">
+                          ${v.username || "Anonymous"}
+                        </div>
+                        ${v.screenshot_b64 && html`
+                          <img src=${"data:image/png;base64,"+v.screenshot_b64}
+                            className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
+                        ${!v.screenshot_b64 && apiTranscript && html`
+                          <div className="api-transcript-label">API Request / Response</div>
+                          <pre className="api-transcript">${apiTranscript}</pre>`}
+                        <div className="credential-view-context">
+                          ${v.llm_context || "No context."}
+                        </div>
+                      </div>`;
+                  })}
                 ` : html`
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
                   <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>
@@ -1689,9 +1698,9 @@ function TestRunDetail({ runId }) {
                     <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
                     <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
                       style=${{width:"100%",borderRadius:6,border:"1px solid var(--border)"}} alt="screenshot"/>`}
-                  ${!pageDetail.screenshot_b64 && isApiTranscript(pageDetail.page_text) && html`
+                  ${!pageDetail.screenshot_b64 && apiTranscriptText(pageDetail.page_text) && html`
                     <div className="graph-panel-section-label" style=${{marginTop:12}}>API Request / Response</div>
-                    <pre className="api-transcript">${pageDetail.page_text}</pre>`}
+                    <pre className="api-transcript">${apiTranscriptText(pageDetail.page_text)}</pre>`}
                 `}
               </div>` : html`<div className="subtle" style=${{padding:12}}>Loading…</div>`}
           </div>`}
@@ -2461,8 +2470,10 @@ function truncUrl(url, maxLen=40) {
   } catch { return url.slice(0, maxLen); }
 }
 
-function isApiTranscript(text) {
-  return !!text && text.startsWith("=== HTTP exchange observed during crawl ===");
+function apiTranscriptText(text) {
+  if (!text) return "";
+  const value = String(text).trim();
+  return value.includes("REQUEST\n") && value.includes("RESPONSE\n") ? value : "";
 }
 
 createRoot(document.getElementById("root")).render(html`<${App}/>`);

@@ -1278,6 +1278,7 @@ async def thinking_next_action(
     if credentials:
         cred_lines = [
             f"  - username={c['username']}  password={c['password']}"
+            + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
             for c in credentials
         ]
         credentials_section = (
