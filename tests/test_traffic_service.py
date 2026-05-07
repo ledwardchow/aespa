@@ -2,6 +2,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from aespa.models import CrawledPage, PageCredentialView, TestRun as RunModel, TrafficEntry
+from aespa.schemas import PageCredentialViewOut
 from aespa.services import traffic
 
 
@@ -93,3 +94,25 @@ def test_clear_traffic_preserves_scanner_visible_crawl_state(monkeypatch):
         assert page.takes_input is True
         assert '"accountId":"10000001"' in view.page_text
         assert '"accountId":"10000001"' in view.llm_context
+
+
+def test_page_credential_view_out_includes_api_transcript_text():
+    view = PageCredentialView(
+        id=1,
+        page_id=2,
+        test_run_id=3,
+        credential_id=7,
+        username="alice",
+        page_text=(
+            "=== HTTP exchange observed during crawl ===\n"
+            "\nREQUEST\nPOST https://target.local/api/accounts/lookup\n"
+            "\nBody:\n{\"accountId\":\"10000001\"}\n"
+            "\nRESPONSE\nStatus: 200\n\nBody:\n{\"ok\":true}"
+        ),
+        llm_context="[API endpoint] Observed POST request during crawl.",
+    )
+
+    payload = PageCredentialViewOut.model_validate(view).model_dump()
+
+    assert payload["page_text"].startswith("=== HTTP exchange observed during crawl ===")
+    assert '"accountId":"10000001"' in payload["page_text"]
