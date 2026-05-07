@@ -122,6 +122,42 @@ The final answer was:
     assert llm._extract_json(extracted, expect=list)[0]["title"] == "Reflected XSS in Query Parameter"
 
 
+def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "http",
+          "method": "GET",
+          "url": "https://target.local/search?q=test",
+          "headers": {},
+          "body": null,
+          "observation": "search accepts a q parameter",
+          "hypothesis": "reflected input handling in search",
+          "payload_purpose": "baseline reflection probe",
+          "note": "Probe search reflection before adding XSS payloads."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/search [takes-input]",
+        history=[],
+        max_steps=80,
+        current_step=1,
+    ))
+
+    assert action["observation"] == "search accepts a q parameter"
+    assert "observation" in captured["prompt"]
+    assert "hypothesis" in captured["prompt"]
+    assert "payload_purpose" in captured["prompt"]
+    assert "found something interesting" in captured["prompt"]
+
+
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
     captured: dict[str, object] = {}
 
