@@ -1058,11 +1058,15 @@ Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [
     "headers": {{}},
     "body": null,
     "as_user": null,
+        "interesting_result": "Specific response status/body/header/behavior that made this worth following up",
+        "hypothesis": "Specific vulnerability or enforcement behavior this probe is testing",
+        "payload_purpose": "What the generated URL/body/header payload is intended to confirm or rule out, or null",
     "desc": "Follow-up: what this tests and why"
   }}
 ]
 
-Return [] if no results look promising enough to warrant follow-up investigation."""
+Return [] if no results look promising enough to warrant follow-up investigation.
+Do not use vague wording like "looked interesting" without naming the exact signal and hypothesis."""
 
 
 async def plan_followup_probes(
@@ -1175,10 +1179,99 @@ async def normalize_finding_titles(
 
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
 
+_THINKING_PENTEST_PLAYBOOK = """\
+Recommended assessment strategy, distilled from effective manual pentest workflow:
+
+1. Passive recon and fingerprinting
+     - Start with the base URL, visible login/app/admin paths, robots.txt, sitemap.xml,
+         and response headers.
+     - Note missing or weak security headers, server/framework hints, public admin areas,
+         exposed account data, comments, forms, and route/link structure.
+
+2. Raw asset and JavaScript mining
+     - Fetch raw HTML for important pages and enumerate every script src and link href.
+     - Fetch JavaScript bundles and look for API base paths, endpoint lists, token storage
+         keys, hardcoded routes, feature flags, role-specific APIs, preflight/check endpoints,
+         and client-side-only enforcement.
+     - Build and maintain an endpoint inventory from the JS and crawl context before
+         spending too many steps on generic payloads.
+
+3. API map and authentication boundary checks
+     - Always check common unauthenticated operational endpoints early when in scope:
+         /api/health, /health, /status, /api/status, /api/config, /api/debug, and
+         /.well-known/security.txt. Treat jwt_secret, app keys, DB settings, phpinfo,
+         environment, server versions, or stack traces as high-priority leads.
+     - Test CORS on representative API endpoints by sending a harmless Origin header
+         such as https://evil.example and inspect Access-Control-Allow-Origin and
+         Access-Control-Allow-Credentials.
+     - Probe discovered API endpoints unauthenticated first, then with available user tokens.
+     - Compare 401/403/404/200 behavior on user, admin, account, profile, transaction,
+         address-book, settings, and system endpoints.
+     - Try lower-privilege tokens against admin endpoints and admin tokens against user
+         endpoints if both token types are available.
+     - If a public admin panel or admin login is discovered, try a very small set of obvious
+         default credentials derived from the app context, such as admin/admin, admin/password,
+         admin/admin123. Use credential_check for these bounded dictionaries. Do not brute-force.
+     - For demo/seeded customer apps, test a tiny bounded set of obvious seeded passwords
+         such as password and Password123! against discovered example users. Use at most a
+         handful of users and passwords.
+
+4. Account bootstrap and session/token analysis
+     - If registration is available, create or use a disposable test account to obtain a
+         legitimate session and inspect registration/login/profile responses for sensitive
+         fields such as password_hash, totp_secret, roles, IDs, balances, account numbers,
+         or JWTs.
+     - Decode JWT payloads client-side when visible, then test only low-impact JWT issues
+         such as alg=none rejection or issuer/role boundary confusion when appropriate.
+     - If a response exposes a JWT signing secret, use the jwt action to create a
+         controlled HS256 token for a small number of candidate customer IDs, then verify
+         access with read-only endpoints such as /api/profile and /api/accounts.
+
+5. Object ownership and IDOR testing
+     - Enumerate IDs from list endpoints, detail endpoints, admin views, account numbers,
+         transaction IDs, address-book IDs, and response bodies.
+     - Test both list endpoints and individual detail endpoints because one may be scoped
+         correctly while the other is vulnerable.
+     - For every object lookup, ask: does the server verify this object belongs to the
+         current user, or is it only fetching by numeric ID?
+
+6. Business-logic gate bypass
+     - Identify two-step flows with /check, /verify, /validate, /preflight, /setup, or
+         client-side UI gating before a sensitive action.
+     - First call the check endpoint to learn what it claims is required. Then call the
+         actual action endpoint directly without the required field (for example no totp_code,
+         pin, approval token, or confirmation) and verify whether the server enforces it.
+     - For money/account flows, use disposable accounts and low-impact amounts where possible.
+     - For banking apps, explicitly check loan/account creation rules, credit limits,
+         redraw/transfer limits, sufficient-funds behavior, and whether action endpoints
+         verify that source accounts belong to the authenticated user.
+
+7. Input validation, stored XSS, and SQL injection
+     - Prefer inputs discovered from actual forms/API bodies: search/filter/sort, name/title/
+         description/comment/message, email/username, IDs, amount/quantity.
+     - For SQLi, compare a baseline nonmatching search to quote-breaking, boolean, ORDER BY,
+         UNION, and low-delay timing probes. Treat SQL error disclosure as valuable evidence.
+     - For XSS, test both reflected and stored paths. If the server accepts raw HTML/JS in a
+         create/update response, follow up by viewing the listing/detail/admin page where the
+         value is rendered.
+
+8. Error disclosure, rate limiting, and configuration checks
+     - Send malformed-but-valid-shape requests to endpoints with typed parameters to look for
+         stack traces, SQL errors, absolute file paths, class names, and debug traces.
+     - Check login error differences for user enumeration, and use only a small bounded set
+         of failed login attempts to detect missing throttling/lockout.
+     - Re-check CSP, HSTS, X-Frame-Options, content sniffing, and referrer-policy headers on
+         representative HTML and API responses.
+
+Work like the transcript: recon → endpoint extraction → auth/session bootstrap → boundary tests →
+business-logic bypass → IDOR/injection/error disclosure → concise confirmation. When a response
+reveals a stronger lead than the current plan, follow that lead immediately.
+"""
+
 _THINKING_NEXT_ACTION_PROMPT = """\
 You are an expert web application penetration tester conducting a hands-on security assessment.
 You are working iteratively: each turn you review everything learned so far and decide on ONE
-specific HTTP request to send next, exactly like a human tester driving curl.
+specific action to take next, exactly like a human tester switching between curl and a browser.
 
 Target base URL: {target_url}
 
@@ -1186,13 +1279,16 @@ Application context discovered during crawling:
 {crawl_context}
 
 {credentials_section}
+{sessions_section}
 Step {current_step} of {max_steps}.
+
+{pentest_playbook}
 
 History of previous actions and responses:
 {history_text}
 
 ────────────────────────────────────────────────────────────────────────────────
-TASK: What is the single most valuable HTTP request to send RIGHT NOW?
+TASK: What is the single most valuable action to take RIGHT NOW?
 
 Think like a human tester:
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
@@ -1200,7 +1296,16 @@ Think like a human tester:
 - Use discovered tokens in Authorization headers for subsequent requests.
 - Test for IDOR by swapping IDs you found from one response into requests for another resource.
 - Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
+- Mine raw HTML and JavaScript for endpoint discovery before guessing paths blindly.
+- Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
+- Use browser actions when the next probe depends on JavaScript execution, hash routes,
+    form interaction, client-side state, DOM rendering, or screenshot evidence.
+- Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
+    followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
+- Do not finish until you have covered the endpoint inventory, authentication boundaries,
+    object ownership, business-logic gates, input validation, error disclosure, and headers,
+    unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
 - If step count is getting high, prefer confirming likely findings over exploring new areas.
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
@@ -1212,6 +1317,7 @@ To make one HTTP request:
   "action": "http",
   "method": "GET",
   "url": "https://...",
+  "use_session": null,
   "headers": {{}},
   "body": null,
     "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
@@ -1220,10 +1326,89 @@ To make one HTTP request:
     "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
 }}
 
-Body rules:
+HTTP body rules:
 - Omit or set null when there is no body.
 - Use a JSON object for JSON API payloads (Content-Type will be set automatically).
 - Use a plain string for form-encoded or raw bodies.
+- Set use_session to one of the reusable session labels when you want the scanner to
+  attach a discovered token/session automatically.
+
+To use the browser:
+{{
+  "action": "browser",
+  "url": "https://...",
+  "use_session": null,
+  "steps": [
+    {{"op": "goto", "url": "https://..."}},
+    {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
+    {{"op": "click", "selector": "button[type='submit']"}},
+    {{"op": "wait", "state": "networkidle"}},
+    {{"op": "snapshot"}}
+  ],
+  "observation": "Specific signal from prior responses that requires browser/DOM follow-up",
+  "hypothesis": "Specific issue or behavior this browser interaction is investigating",
+  "payload_purpose": "What the typed/clicked payload is meant to test, or null",
+  "note": "One sentence combining the observation, hypothesis, and why this browser action is valuable"
+}}
+
+Browser step rules:
+- Supported ops: goto, fill, type, click, press, wait, snapshot.
+- For press, include selector and key (for example "Enter").
+- For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
+- Keep browser actions short and targeted; do not browse aimlessly.
+- Browser use_session currently applies bearer tokens as extra HTTP headers for navigation
+  and fetches made after the session is selected.
+
+To forge a JWT after discovering an exposed HS256 signing secret:
+{{
+  "action": "jwt",
+  "secret": "secret-from-prior-response",
+  "claims": {{
+    "iss": "BankOfEd",
+    "sub": 1,
+    "jti": "aespa-test",
+    "iat": 1778072559,
+    "exp": 1778158959
+  }},
+  "header": {{"typ": "JWT", "alg": "HS256"}},
+  "store_as": "customer_sub_1_token",
+  "observation": "Specific response field that exposed the signing secret",
+  "hypothesis": "Changing sub may impersonate another customer because the API trusts HS256 JWTs",
+  "payload_purpose": "Create a controlled token for a read-only impersonation check",
+  "note": "Forge an HS256 token from the exposed secret, then use it in a follow-up Authorization header."
+}}
+
+JWT rules:
+- Only use this after a signing secret or equivalent HMAC key was observed in prior responses.
+- Keep claims minimal and use read-only follow-up endpoints first.
+- Do not forge admin tokens unless a distinct admin issuer/secret is observed.
+- The scanner stores successful forged tokens as reusable in-memory sessions under store_as.
+
+To test a tiny explicit login dictionary:
+{{
+  "action": "credential_check",
+  "url": "https://.../api/admin/auth/login",
+  "method": "POST",
+  "username_field": "username",
+  "password_field": "password",
+  "candidates": [
+    {{"username": "admin", "password": "admin"}},
+    {{"username": "admin", "password": "admin123"}}
+  ],
+  "headers": {{"Content-Type": "application/json"}},
+  "success_statuses": [200, 201],
+  "observation": "Specific login endpoint and account naming clue that justify this check",
+  "hypothesis": "The deployed demo/admin account may use default or seeded credentials",
+  "payload_purpose": "Try a tiny bounded dictionary, not a brute-force attack",
+  "note": "Check a small explicit credential list and stop after recording any successes."
+}}
+
+Credential-check rules:
+- Maximum 20 candidates. Use fewer when possible.
+- Only use obvious defaults, seeded/demo credentials, or credentials explicitly found in prior responses.
+- Do not use generated wordlists, mutations, high-rate retries, or password spraying.
+- Successful login responses with bearer tokens are stored as reusable in-memory sessions.
+- Later actions should reference those sessions with use_session rather than copying tokens.
 
 To finish the assessment (all key areas covered, or steps nearly exhausted):
 {{
@@ -1241,12 +1426,16 @@ async def thinking_next_action(
     max_steps: int,
     current_step: int,
     credentials: list[dict] | None = None,
+    sessions: list[dict] | None = None,
     emit_fn=None,
 ) -> dict:
     """Ask the LLM for the next action in an agentic (thinking) scan.
 
     Returns a dict with either:
       {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
+      {"action": "browser", "url": ..., "steps": [...], "note": ...}
+      {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
+      {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
     or:
       {"action": "done", "summary": ...}
     """
@@ -1265,11 +1454,14 @@ async def thinking_next_action(
                 json.dumps(req_body)[:400] if isinstance(req_body, dict)
                 else str(req_body or "")[:400]
             )
+            response_headers = h.get("response_headers") or {}
+            response_headers_str = json.dumps(response_headers)[:800] if response_headers else "{}"
             lines.append(
                 f"Step {h['step']}: {h['method']} {h['url']}\n"
                 f"  Note: {h.get('note', '')}\n"
                 f"  Request body: {req_body_str or '(none)'}\n"
                 f"  Response status: {h['response_status']}\n"
+                f"  Response headers: {response_headers_str}\n"
                 f"  Response body: {resp_excerpt}"
             )
         history_text = "\n\n".join(lines)
@@ -1286,12 +1478,28 @@ async def thinking_next_action(
             + "\n".join(cred_lines)
         )
 
+    sessions_section = ""
+    if sessions:
+        session_lines = [
+            f"  - label={s.get('label')}  kind={s.get('kind', 'bearer')}"
+            + (f"  username={s.get('username')}" if s.get("username") else "")
+            + (f"  source={s.get('source')}" if s.get("source") else "")
+            for s in sessions
+        ]
+        sessions_section = (
+            "Reusable in-memory sessions discovered during this Thinking scan "
+            "(set use_session to one of these labels; secrets are not shown):\n"
+            + "\n".join(session_lines)
+        )
+
     prompt = _THINKING_NEXT_ACTION_PROMPT.format(
         target_url=target_url,
         crawl_context=crawl_context,
         credentials_section=credentials_section,
+        sessions_section=sessions_section,
         current_step=current_step,
         max_steps=max_steps,
+        pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
         history_text=history_text,
     )
     if emit_fn:
@@ -1309,7 +1517,8 @@ async def thinking_next_action(
     action: dict
     try:
         action = _extract_json(raw or "", expect=dict)
-        if not isinstance(action, dict) or action.get("action") not in ("http", "done"):
+        valid_actions = ("http", "browser", "jwt", "credential_check", "done")
+        if not isinstance(action, dict) or action.get("action") not in valid_actions:
             raise ValueError("unexpected action")
     except Exception as exc:
         log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
@@ -1323,6 +1532,9 @@ async def thinking_next_action(
                 "message": (
                     f"Step {current_step}: LLM → {action.get('action')}"
                     + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'browser' else '')
+                    + (f" {action.get('store_as','')}" if action.get('action') == 'jwt' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'credential_check' else '')
                     + (
                         f": {action.get('hypothesis') or action.get('note','')}"
                         if action.get('hypothesis') or action.get('note')

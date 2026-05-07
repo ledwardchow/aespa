@@ -1307,6 +1307,15 @@ function TestRunDetail({ runId }) {
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
+  const onStartThinkingScan = async () => {
+    try {
+      setThinkingStopReq(false);
+      setThinkingStatus({ status: "running" });
+      const s = await api.startThinkingScan(runId);
+      setThinkingStatus(s);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
@@ -1384,7 +1393,7 @@ function TestRunDetail({ runId }) {
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
     crawlStopping: crawlStopRequested,
-    scanStopping: scanStopRequested || thinkingStopRequested,
+    scanStopping: scanStopRequested,
   });
   const STATUS_COLOR = {
     neutral:"var(--muted)",
@@ -1433,7 +1442,7 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
-          Thinking${scanStatus?.status==="running" && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Activity${(scanStatus?.status==="running" || thinkingStatus?.status==="running") && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
           onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
@@ -1464,16 +1473,9 @@ function TestRunDetail({ runId }) {
             ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
           </button>`}
         ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start normal scan</button>`}
         ${activeTab==="scan" && !thinkingStopRequested && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
-          <button className="btn ghost sm" style=${{margin:"auto 4px auto 0"}} title="LLM autonomously decides what and where to test" onClick=${async () => {
-            try {
-              setThinkingStopReq(false);
-              setThinkingStatus({ status: "running" });
-              const s = await api.startThinkingScan(runId);
-              setThinkingStatus(s);
-            } catch(e) { setThinkingStopReq(false); setError(e.message); }
-          }}><${IconPlay}/> Thinking scan</button>`}
+          <button className="btn ghost sm" style=${{margin:"auto 4px auto 0"}} title="Run the autonomous Thinking scan only" onClick=${onStartThinkingScan}><${IconPlay}/> Start Thinking scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -1527,21 +1529,23 @@ function TestRunDetail({ runId }) {
         </div>
         ${(()=>{
           if (activeTab === "scan") {
-            if (!scanStatus || (scanStatus.status === "idle" && scanStatus.pages_done === 0)) return null;
-            const total   = scanStatus.total_pages || 0;
-            const done    = scanStatus.pages_done  || 0;
+            const showNormalScan = scanStatus && !(scanStatus.status === "idle" && scanStatus.pages_done === 0);
+            const showThinkingScan = thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle";
+            if (!showNormalScan && !showThinkingScan) return null;
+            const total   = scanStatus?.total_pages || 0;
+            const done    = scanStatus?.pages_done  || 0;
             const scanPct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
             const currentPage = graph?.nodes.find(n => n.scan_status === "running");
-            return html`
+            const normalScanStrip = showNormalScan ? html`
               <div className="scan-progress-strip">
                 <div className="scan-progress-bar">
                   <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
                 </div>
                 <div className="scan-progress-strip-row">
                   <span className="scan-progress-counts">
-                    ${scanStopRequested ? "Stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
+                    Normal scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
                   </span>
-                  ${scanStatus.findings_count > 0 && html`
+                  ${(scanStatus?.findings_count || 0) > 0 && html`
                     <span className="scan-progress-findings">
                       ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
                     </span>`}
@@ -1550,6 +1554,24 @@ function TestRunDetail({ runId }) {
                       ${truncUrl(currentPage.url, 48)}
                     </span>`}
                 </div>
+              </div>` : null;
+            const thinkingLabel = thinkingStopRequested ? "stop requested" : (
+              thinkingStatus?.status === "running" ? "running" :
+              thinkingStatus?.status === "complete" ? "complete" :
+              thinkingStatus?.status === "stopped" ? "stopped" :
+              thinkingStatus?.status === "failed" ? "failed" : thinkingStatus?.status
+            );
+            const thinkingStrip = showThinkingScan ? html`
+              <div className="scan-progress-strip">
+                <div className="scan-progress-strip-row">
+                  <span className="scan-progress-counts">Thinking scan: ${thinkingLabel}</span>
+                  <span className="scan-progress-url">Autonomous request-by-request assessment</span>
+                </div>
+              </div>` : null;
+            return html`
+              <div className="scan-progress-stack">
+                ${normalScanStrip}
+                ${thinkingStrip}
               </div>`;
           }
           const credList = run.credentials || [];
