@@ -1,11 +1,13 @@
 """Scan API — start/stop/status/findings/validation endpoints."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, ScanFinding, TestRun, TestRunStatus
+from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import RunScannerPolicyOut, ScanFindingOut, ScannerPolicyIn, ScanStatusOut, ValidationStatusOut
 from aespa.services import scanner as scanner_svc
 from aespa.services import settings as settings_service
@@ -218,3 +220,28 @@ def get_validation_status(
 ) -> ValidationStatusOut:
     _get_run_or_404(session, run_id)
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
+@router.get("/api/test-runs/{run_id}/scan-log")
+def get_scan_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .order_by(ScanLog.id)
+    ).all()
+    return [
+        {
+            "type": "scanner_phase",
+            "phase": e.phase,
+            "status": e.status,
+            "message": e.message,
+            "page_url": e.page_url,
+            "data": json.loads(e.data_json) if e.data_json else None,
+            "_persisted_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]

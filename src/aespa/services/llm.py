@@ -1104,6 +1104,75 @@ async def plan_followup_probes(
         return []
 
 
+# ── Finding title normalisation ───────────────────────────────────────────────
+
+_NORMALIZE_TITLES_PROMPT = """\
+You are deduplicating security findings from a web application penetration test report.
+
+EXISTING confirmed findings for this test run:
+{existing_list}
+
+NEW candidate findings just discovered (normalize these):
+{new_list}
+
+Rules:
+- If a new finding is the same vulnerability class as an existing one (same OWASP category \
+and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
+- If two new findings in this batch are the same class, give them the SAME title (pick the \
+clearest one).
+- If a new finding is genuinely different, keep its title as-is.
+- Do NOT merge or drop findings — return one entry per new finding.
+
+Return ONLY a JSON array, one object per new finding in the same order:
+[{{"index": 0, "title": "..."}}, ...]
+"""
+
+
+async def normalize_finding_titles(
+    config: "LLMConfig",
+    existing_findings: list[dict],   # [{"title": ..., "owasp_category": ..., "severity": ...}]
+    new_findings: list[dict],        # raw finding dicts from analyse_probes
+) -> list[dict]:
+    """Return new_findings with titles normalised against existing ones.
+
+    On any failure the original new_findings list is returned unchanged.
+    """
+    if not new_findings or not existing_findings:
+        return new_findings
+
+    existing_list = "\n".join(
+        f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        for i, f in enumerate(existing_findings[:60])
+    )
+    new_list = "\n".join(
+        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] "
+        f"{f.get('title', '?')} — {(f.get('description') or '')[:120]}"
+        for i, f in enumerate(new_findings)
+    )
+
+    prompt = _NORMALIZE_TITLES_PROMPT.format(
+        existing_list=existing_list,
+        new_list=new_list,
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        mappings = _extract_json(raw or "", expect=list)
+        if not isinstance(mappings, list):
+            return new_findings
+        result = [dict(f) for f in new_findings]
+        for entry in mappings:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            title = (entry.get("title") or "").strip()
+            if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                result[idx] = {**result[idx], "title": title}
+        return result
+    except Exception as exc:
+        log.warning("normalize_finding_titles failed: %s", exc)
+        return new_findings
+
+
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
 
 _THINKING_NEXT_ACTION_PROMPT = """\
@@ -1167,6 +1236,7 @@ async def thinking_next_action(
     max_steps: int,
     current_step: int,
     credentials: list[dict] | None = None,
+    emit_fn=None,
 ) -> dict:
     """Ask the LLM for the next action in an agentic (thinking) scan.
 
@@ -1218,14 +1288,42 @@ async def thinking_next_action(
         max_steps=max_steps,
         history_text=history_text,
     )
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_request",
+                "status": "pending",
+                "message": f"Step {current_step}: sending prompt ({len(prompt):,} chars) to LLM…",
+                "data": {"step": current_step, "prompt": prompt},
+            })
+        except Exception:
+            pass
     raw = await _call(config, prompt, None)
+    action: dict
     try:
         action = _extract_json(raw or "", expect=dict)
-        if isinstance(action, dict) and action.get("action") in ("http", "done"):
-            return action
+        if not isinstance(action, dict) or action.get("action") not in ("http", "done"):
+            raise ValueError("unexpected action")
     except Exception as exc:
         log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
-    return {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+        action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_response",
+                "status": "complete",
+                "message": (
+                    f"Step {current_step}: LLM → {action.get('action')}"
+                    + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
+                    + (f": {action.get('note','')}" if action.get('note') else "")
+                ),
+                "data": {"step": current_step, "raw_response": raw, "action": action},
+            })
+        except Exception:
+            pass
+    return action
 
 
 # ── Validation LLM functions ──────────────────────────────────────────────────

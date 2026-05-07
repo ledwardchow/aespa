@@ -96,6 +96,21 @@ def _migrate(engine: Engine) -> None:
             )
         """))
         conn.commit()
+    # scan_log — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scan_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                phase TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                page_url TEXT,
+                data_json TEXT
+            )
+        """))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:

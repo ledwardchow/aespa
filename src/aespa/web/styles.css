@@ -1183,3 +1183,10 @@ legend {
 .phase-ok        { background:rgba(63,207,112,0.12); color:var(--ok); }
 .phase-sweep     { background:rgba(167,139,250,0.15); color:#a78bfa; }
 .phase-other     { background:rgba(107,118,145,0.15); color:var(--muted); }
+.phase-llm-req   { background:rgba(34,211,238,0.12);  color:#22d3ee; }
+.phase-llm-resp  { background:rgba(52,211,153,0.12);  color:#34d399; }
+.activity-entry--expandable { cursor:pointer; }
+.activity-expand-chevron { flex-shrink:0; margin-left:auto; color:var(--muted); font-size:10px; user-select:none; }
+.activity-payload { padding:6px 16px 8px 98px; border-bottom:1px solid var(--border); }
+.activity-payload pre { margin:0; font-size:11px; font-family:monospace; white-space:pre-wrap; word-break:break-all; max-height:380px; overflow-y:auto; color:var(--text-2); background:rgba(0,0,0,0.25); padding:8px 10px; border-radius:5px; border:1px solid var(--border); }
+.activity-payload-label { font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); margin-bottom:3px; letter-spacing:0.4px; }
