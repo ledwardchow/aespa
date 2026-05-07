@@ -83,7 +83,7 @@ class ScannerPolicy(SQLModel, table=True):
     scan_mode: str = Field(default="safe_active")
     max_probes_per_page: int = Field(default=50)
     request_timeout_s: float = Field(default=10.0)
-    min_delay_s: float = Field(default=0.2)
+    min_delay_s: float = Field(default=0.05)
     max_request_body_bytes: int = Field(default=65536)
     response_body_read_limit_bytes: int = Field(default=512 * 1024)
     allowed_schemes: str = Field(default='["http", "https"]')

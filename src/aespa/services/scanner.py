@@ -49,7 +49,7 @@ MAX_PROBES_PER_PAGE = 50
 MAX_FOLLOWUP_PROBES  = 20
 REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
-MIN_DELAY = 0.2               # ~5 req/s
+MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,6 +60,12 @@ _UA = (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def sleep_between_probes(scanner_policy=None) -> None:
+    delay = scanner_policy.min_delay_s if scanner_policy else MIN_DELAY
+    if delay > 0:
+        await asyncio.sleep(delay)
 
 
 def _login_url_for_credential(default_login_url: Optional[str], cred) -> str:
@@ -936,7 +942,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 if success else ""
                             ),
                         })
-                        await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+                        await sleep_between_probes(scanner_policy)
 
                     successes = [a for a in attempts if a["success"]]
                     resp_body = json.dumps({
@@ -1078,7 +1084,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "data": {"step": step, "status": resp_status, "note": note},
                 })
 
-                await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+                await sleep_between_probes(scanner_policy)
 
     # ── Analyse results ───────────────────────────────────────────────────────
     if all_results:
@@ -1562,7 +1568,7 @@ async def _scan_page(
                 results.append(result)
         except Exception as e:
             log.debug("Probe error (%s): %s", probe.get("desc", "?"), e)
-        await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+        await sleep_between_probes(scanner_policy)
 
     # Phase 2b: Iterative reasoning — LLM reviews initial results and generates
     # targeted follow-up probes, mirroring the adaptive approach used by a human
@@ -1609,7 +1615,7 @@ async def _scan_page(
                     results.append(result)
             except Exception as e:
                 log.debug("Follow-up probe error (%s): %s", probe.get("desc", "?"), e)
-            await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+            await sleep_between_probes(scanner_policy)
 
         if followup_probes:
             followup_details = _followup_log_details(followup_probes)
@@ -2815,7 +2821,7 @@ async def _stored_xss_sweep(
         except Exception as e:
             log.debug("Stored XSS sweep error for %s: %s", page_url, e)
 
-        await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+        await sleep_between_probes(scanner_policy)
 
     if findings_to_save:
         with Session(get_engine()) as s:
