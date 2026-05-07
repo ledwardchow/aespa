@@ -32,10 +32,16 @@ log = logging.getLogger("aespa.scanner")
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
+# Regular scan
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
 # Populated while a scan is running so the validator can reuse pre-authenticated sessions.
 _active_sessions: dict[int, dict[int, dict]] = {}  # run_id → cred_id → session
+
+# Thinking scan (independent)
+_thinking_stop_requested: set[int] = set()
+_thinking_tasks: dict[int, asyncio.Task] = {}
+_thinking_scan_status: dict[int, str] = {}  # run_id → idle|running|complete|stopped|failed
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -159,6 +165,27 @@ def get_active_sessions(run_id: int) -> dict[int, dict] | None:
     return _active_sessions.get(run_id)
 
 
+# ── Thinking-scan public API ──────────────────────────────────────────────────
+
+def is_thinking_running(run_id: int) -> bool:
+    return run_id in _thinking_tasks
+
+
+def request_thinking_stop(run_id: int) -> None:
+    _thinking_stop_requested.add(run_id)
+    task = _thinking_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
+
+
+def get_thinking_scan_status(run_id: int) -> dict:
+    if is_thinking_running(run_id):
+        status = "running"
+    else:
+        status = _thinking_scan_status.get(run_id, "idle")
+    return {"status": status}
+
+
 async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     """Start a scan. Pass page_ids to scan only specific pages; omit to scan all in-scope pages."""
     if run_id in _active_tasks:
@@ -169,6 +196,21 @@ async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     )
     _active_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
+
+
+MAX_THINKING_STEPS = 80
+
+
+async def start_thinking_scan(run_id: int) -> None:
+    """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
+    if run_id in _thinking_tasks:
+        return
+    task = asyncio.create_task(
+        _thinking_scan_task(run_id),
+        name=f"thinking-scan-{run_id}",
+    )
+    _thinking_tasks[run_id] = task
+    task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
@@ -187,6 +229,364 @@ async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
     finally:
         _stop_requested.discard(run_id)
         _active_sessions.pop(run_id, None)
+
+
+# ── Thinking-scan task wrapper & core ─────────────────────────────────────────
+
+def _emit_thinking_status(run_id: int) -> None:
+    events_svc.emit(run_id, {"type": "thinking_scan_update", **get_thinking_scan_status(run_id)})
+
+
+async def _thinking_scan_task(run_id: int) -> None:
+    _thinking_scan_status[run_id] = "running"
+    try:
+        await _do_thinking_scan(run_id)
+    except asyncio.CancelledError:
+        log.info("Thinking scan task cancelled for run_id=%s", run_id)
+        _thinking_scan_status[run_id] = "stopped"
+        _emit_thinking_status(run_id)
+        raise
+    except Exception as exc:
+        log.exception("Thinking scan task failed for run_id=%s", run_id)
+        _thinking_scan_status[run_id] = "failed"
+        _emit_thinking_status(run_id)
+    finally:
+        _thinking_stop_requested.discard(run_id)
+
+
+async def _do_thinking_scan(run_id: int) -> None:
+    """LLM-directed scan: the model decides each HTTP request to issue, observes
+    the response, and adaptively chooses what to probe next — exactly like a human
+    tester working through curl."""
+    # ── Load config ───────────────────────────────────────────────────────────
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            raise ValueError(f"TestRun {run_id} not found")
+        site = s.get(Site, run.site_id)
+        llm_cfg = get_llm_config(s)
+        if llm_cfg is None:
+            raise RuntimeError("No LLM configuration. Configure it in Settings first.")
+        scanner_policy = get_run_scanner_policy(s, run)
+        creds = list(site.credentials)
+
+        # Crawled pages — used for context and for resolving page_id on findings.
+        all_pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+        ).all()
+        pages_snapshot = [
+            {
+                "id": p.id,
+                "url": p.url,
+                "title": p.title or "",
+                "context": p.llm_context or "",
+                "page_text": p.page_text or "",
+                "req_auth": p.req_auth,
+                "takes_input": p.takes_input,
+                "has_object_ref": p.has_object_ref,
+                "has_business_logic": p.has_business_logic,
+            }
+            for p in all_pages
+        ]
+        first_page_id = all_pages[0].id if all_pages else None
+
+        # Existing findings from the regular scan — feed as context so the LLM
+        # knows what has already been found and can focus on new attack surface.
+        existing_findings = s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all()
+        findings_snapshot = [
+            {
+                "title":       f.title,
+                "severity":    f.severity,
+                "owasp":       f.owasp_category,
+                "affected_url": f.affected_url,
+                "description": f.description[:200],
+            }
+            for f in existing_findings
+        ]
+
+        for obj in [*creds, site, llm_cfg, run]:
+            s.expunge(obj)
+
+    base_url      = site.base_url.rstrip("/")
+    login_url     = site.login_url
+    requires_auth = site.requires_auth
+
+    log.info("=== Thinking scan start: run_id=%s base_url=%s ===", run_id, base_url)
+    # Status is set to "running" by the task wrapper before calling this function.
+
+    # ── Build crawl-context string for the LLM ────────────────────────────────
+    # API pages get their full request/response transcript; regular pages get a
+    # short LLM summary.  Keep the two groups separate so the LLM can quickly
+    # identify which URLs are API endpoints vs navigable pages.
+    page_lines: list[str] = []
+    api_lines: list[str] = []
+    for p in pages_snapshot[:50]:
+        flags = ", ".join(
+            k for k, v in [
+                ("auth-required", p["req_auth"]),
+                ("takes-input",   p["takes_input"]),
+                ("object-refs",   p["has_object_ref"]),
+                ("business-logic", p["has_business_logic"]),
+            ] if v
+        )
+        header = f"  {p['url']}" + (f" [{flags}]" if flags else "")
+        if p["title"].startswith("API "):
+            # Show the full HTTP exchange (request headers, body, response headers, body)
+            # so the LLM can identify parameters, auth schemes, IDs, and response structure.
+            raw = p["page_text"] or p["context"]
+            indented = "\n".join("    " + line for line in raw[:2000].splitlines())
+            api_lines.append(header + ("\n" + indented if indented.strip() else ""))
+        else:
+            page_lines.append(
+                header + (f"\n    {p['context'][:200]}" if p["context"] else "")
+            )
+    ctx_parts: list[str] = []
+    if page_lines:
+        ctx_parts.append("Application pages:\n" + "\n".join(page_lines))
+    if api_lines:
+        ctx_parts.append(
+            "API endpoints (full HTTP exchange shown):\n" + "\n".join(api_lines)
+        )
+    crawl_context = "\n\n".join(ctx_parts) or "(no crawl data available)"
+
+    # Summarise findings already known from the regular scan.
+    if findings_snapshot:
+        finding_lines = "\n".join(
+            f"  [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}: {f['description']}"
+            for f in findings_snapshot[:30]
+        )
+        crawl_context += f"\n\nFindings already discovered by the regular scan (avoid re-testing these; focus on new areas):\n{finding_lines}"
+
+    creds_for_llm = [{"username": c.username, "password": c.password} for c in creds]
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "thinking_scan",
+        "status": "start",
+        "message": f"LLM-directed scan started — up to {MAX_THINKING_STEPS} adaptive steps.",
+    })
+
+    # ── Bootstrap auth session (Playwright) ───────────────────────────────────
+    cookie_jar: dict[str, str] = {}
+    auth_token: Optional[str] = None
+
+    if requires_auth and creds:
+        from playwright.async_api import async_playwright
+        from aespa.services.crawler import _authenticate
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+            pw_page = await ctx.new_page()
+            try:
+                await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+            except Exception:
+                pass
+            await _authenticate(pw_page, login_url, creds[0])
+            raw_cookies = await ctx.cookies()
+            cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
+            for key in ["access_token", "token", "jwt", "auth_token", "id_token",
+                        "authToken", "accessToken"]:
+                try:
+                    val = await pw_page.evaluate(
+                        f"() => localStorage.getItem('{key}') || sessionStorage.getItem('{key}')"
+                    )
+                    if val:
+                        auth_token = val
+                        break
+                except Exception:
+                    pass
+            await browser.close()
+
+    extra_headers: dict[str, str] = {}
+    if auth_token:
+        extra_headers["Authorization"] = f"Bearer {auth_token}"
+
+    # ── Agentic loop ──────────────────────────────────────────────────────────
+    history:     list[dict] = []
+    all_results: list[dict] = []
+
+    async with httpx.AsyncClient(
+        cookies=cookie_jar,
+        headers={"User-Agent": _UA, **extra_headers},
+        timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+        follow_redirects=True,
+        verify=False,
+        event_hooks=traffic_svc.make_httpx_hooks(
+            run_id, username=creds[0].username if creds else None
+        ),
+    ) as hx:
+        for step in range(1, MAX_THINKING_STEPS + 1):
+            if run_id in _thinking_stop_requested:
+                break
+
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "deciding",
+                "message": f"Step {step}/{MAX_THINKING_STEPS}: LLM deciding next action…",
+                "data": {"step": step, "max_steps": MAX_THINKING_STEPS},
+            })
+
+            # Ask the LLM what to do next.
+            try:
+                action = await llm_svc.thinking_next_action(
+                    llm_cfg,
+                    target_url=base_url,
+                    crawl_context=crawl_context,
+                    history=history,
+                    max_steps=MAX_THINKING_STEPS,
+                    current_step=step,
+                    credentials=creds_for_llm,
+                )
+            except Exception as exc:
+                log.warning("thinking_next_action error at step %d: %s", step, exc)
+                break
+
+            if action.get("action") == "done":
+                log.info("LLM completed thinking scan at step %d: %s", step, action.get("summary", ""))
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_scan",
+                    "status": "complete",
+                    "message": f"LLM finished at step {step}: {action.get('summary', '')}",
+                })
+                break
+
+            # Execute the HTTP request.
+            method  = (action.get("method") or "GET").upper()
+            url     = (action.get("url") or "").strip()
+            headers = action.get("headers") or {}
+            body    = action.get("body")
+            note    = action.get("note") or f"Step {step}"
+
+            if not url:
+                log.warning("Thinking scan step %d: LLM returned empty URL — stopping.", step)
+                break
+
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": f"Step {step}: {method} {url} — {note}",
+                "data": {"step": step, "method": method, "url": url, "note": note},
+            })
+
+            req_body_str = ""
+            try:
+                merged_headers = dict(hx.headers)
+                merged_headers.update(headers)
+                if isinstance(body, dict):
+                    merged_headers.setdefault("Content-Type", "application/json")
+                    resp = await hx.request(method, url, json=body, headers=merged_headers)
+                    req_body_str = json.dumps(body)[:800]
+                elif isinstance(body, str) and body:
+                    resp = await hx.request(method, url, content=body, headers=merged_headers)
+                    req_body_str = body[:800]
+                else:
+                    resp = await hx.request(method, url, headers=merged_headers)
+                resp_body    = resp.text[:BODY_READ_LIMIT]
+                resp_status  = resp.status_code
+                resp_headers = dict(resp.headers)
+            except Exception as exc:
+                log.warning("Thinking scan step %d HTTP error (%s %s): %s", step, method, url, exc)
+                resp_body    = f"Request failed: {exc}"
+                resp_status  = 0
+                resp_headers = {}
+
+            log.info("Thinking scan step %d: %s %s → %d", step, method, url, resp_status)
+
+            step_record = {
+                "step":            step,
+                "note":            note,
+                "method":          method,
+                "url":             url,
+                "request_headers": headers,
+                "request_body":    body,
+                "response_status": resp_status,
+                "response_headers": resp_headers,
+                "response_body":   resp_body,
+            }
+            history.append(step_record)
+
+            all_results.append({
+                "desc":              note,
+                "url":               url,
+                "status":            resp_status,
+                "headers":           resp_headers,
+                "body":              resp_body[:1000],
+                "request_evidence":  f"{method} {url}\n{json.dumps(headers)}\n{req_body_str}",
+                "response_evidence": f"Status: {resp_status}\n{resp_body[:3000]}",
+            })
+
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": f"Step {step}: {method} {url} → {resp_status}",
+                "data": {"step": step, "status": resp_status, "note": note},
+            })
+
+            await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+
+    # ── Analyse results ───────────────────────────────────────────────────────
+    if all_results and run_id not in _thinking_stop_requested:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_analysis",
+            "status": "start",
+            "message": f"Analysing {len(all_results)} probe results for findings…",
+        })
+        try:
+            raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
+            with Session(get_engine()) as s:
+                result_by_url = {r["url"]: r for r in all_results}
+
+                # Build a URL → page_id lookup for best-match page assignment.
+                url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
+
+                def _best_page_id(affected_url: str) -> int:
+                    """Find the closest matching crawled page for a finding URL."""
+                    if affected_url in url_to_page:
+                        return url_to_page[affected_url]
+                    # Partial match — pick the crawled page whose URL is a prefix.
+                    for page_url, page_id in url_to_page.items():
+                        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
+                            return page_id
+                    return first_page_id  # fallback
+
+                for raw in raw_findings:
+                    affected = (raw.get("affected_url") or base_url).strip()
+                    page_id  = _best_page_id(affected)
+                    if page_id is None:
+                        log.warning("Thinking scan: no page_id found for finding %s — skipping", affected)
+                        continue
+                    finding = _finding_from_llm(
+                        run_id=run_id,
+                        page_id=page_id,
+                        page_url=affected,
+                        raw=raw,
+                        result_by_url=result_by_url,
+                    )
+                    s.add(finding)
+                s.commit()
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_analysis",
+                "status": "complete",
+                "message": f"Analysis complete — {len(raw_findings)} potential finding(s) recorded.",
+            })
+        except Exception as exc:
+            log.warning("Thinking scan analysis failed: %s", exc)
+
+    stopped = run_id in _thinking_stop_requested
+    _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
+    _emit_thinking_status(run_id)
+    log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
