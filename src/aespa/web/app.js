@@ -1675,6 +1675,9 @@ function TestRunDetail({ runId }) {
                       ${v.screenshot_b64 && html`
                         <img src=${"data:image/png;base64,"+v.screenshot_b64}
                           className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
+                      ${!v.screenshot_b64 && isApiTranscript(v.page_text) && html`
+                        <div className="api-transcript-label">API Request / Response</div>
+                        <pre className="api-transcript">${v.page_text}</pre>`}
                       <div className="credential-view-context">
                         ${v.llm_context || "No context."}
                       </div>
@@ -1686,6 +1689,9 @@ function TestRunDetail({ runId }) {
                     <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
                     <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
                       style=${{width:"100%",borderRadius:6,border:"1px solid var(--border)"}} alt="screenshot"/>`}
+                  ${!pageDetail.screenshot_b64 && isApiTranscript(pageDetail.page_text) && html`
+                    <div className="graph-panel-section-label" style=${{marginTop:12}}>API Request / Response</div>
+                    <pre className="api-transcript">${pageDetail.page_text}</pre>`}
                 `}
               </div>` : html`<div className="subtle" style=${{padding:12}}>Loading…</div>`}
           </div>`}
@@ -2453,6 +2459,10 @@ function truncUrl(url, maxLen=40) {
     const s = u.hostname + u.pathname + u.hash;
     return s.length > maxLen ? s.slice(0, maxLen-1) + "…" : s;
   } catch { return url.slice(0, maxLen); }
+}
+
+function isApiTranscript(text) {
+  return !!text && text.startsWith("=== HTTP exchange observed during crawl ===");
 }
 
 createRoot(document.getElementById("root")).render(html`<${App}/>`);
