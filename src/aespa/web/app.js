@@ -43,6 +43,7 @@ const api = {
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
+  getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -643,6 +644,10 @@ function TestRunDetail({ runId }) {
   const [editPages, setEditPages] = useState("");
   const [scanStatus, setScanStatus]         = useState(null);
   const [activityLog, setActivityLog]       = useState([]);
+  const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
+  const toggleLogId = (id) => setExpandedLogIds(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
@@ -679,6 +684,24 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Seed activity log from persisted DB entries on mount so it survives navigation.
+  useEffect(() => {
+    api.getScanLog(runId).then(entries => {
+      if (!entries || entries.length === 0) return;
+      setActivityLog(
+        entries.map(e => {
+          const ts = e._persisted_at
+            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
+        })
+      );
+      // Restore site plan data from persisted log.
+      const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
+      if (planComplete) setSitePlanData(planComplete.data);
+    }).catch(() => {});
+  }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
@@ -1847,15 +1870,32 @@ function TestRunDetail({ runId }) {
                 page_followup: { label: "Follow-up", cls: "phase-followup" },
                 page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
                 sweep:         { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
               };
               const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
               const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const isExpanded = expandedLogIds.has(entry._id);
               return html`
-                <div key=${entry._id} className="activity-entry">
-                  <span className="activity-ts">${entry._ts}</span>
-                  <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
-                  ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
-                  <span className="activity-msg">${entry.message}</span>
+                <div key=${entry._id}>
+                  <div className=${"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")}
+                       onClick=${hasPayload ? () => toggleLogId(entry._id) : undefined}>
+                    <span className="activity-ts">${entry._ts}</span>
+                    <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
+                    ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
+                    <span className="activity-msg">${entry.message}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                  </div>
+                  ${isExpanded && html`
+                    <div className="activity-payload">
+                      ${entry.data?.prompt && html`
+                        <div className="activity-payload-label">Prompt</div>
+                        <pre>${entry.data.prompt}</pre>`}
+                      ${entry.data?.raw_response && html`
+                        <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
+                        <pre>${entry.data.raw_response}</pre>`}
+                    </div>`}
                 </div>`;
             })}
           </div>
