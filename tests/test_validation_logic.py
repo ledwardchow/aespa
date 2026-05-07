@@ -266,3 +266,29 @@ def test_input_validation_probes_include_expanded_sqli_and_xss_payloads():
     assert "pg_sleep" in text
     assert "onfocus" in text
     assert "%253Cscript%253Ealert%281%29%253C%2Fscript%253E" in text
+
+
+def test_thinking_action_log_message_describes_investigation_and_payload():
+    action = {
+        "note": "Found something interesting.",
+        "observation": "search reflected the q parameter in HTML",
+        "hypothesis": "reflected XSS in the search endpoint",
+        "payload_purpose": (
+            "inject an event-handler payload to test script execution context"
+        ),
+        "body": {"q": "\" autofocus onfocus=alert(1) x=\""},
+    }
+
+    message = scanner._thinking_action_log_message(
+        4,
+        "POST",
+        "https://target.local/search?debug=true",
+        action,
+    )
+
+    assert "Found something interesting" not in message
+    assert "reflected XSS in the search endpoint" in message
+    assert "search reflected the q parameter" in message
+    assert "event-handler payload" in message
+    assert "query payloads: debug=true" in message
+    assert "body payload:" in message
