@@ -1058,11 +1058,15 @@ Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [
     "headers": {{}},
     "body": null,
     "as_user": null,
+        "interesting_result": "Specific response status/body/header/behavior that made this worth following up",
+        "hypothesis": "Specific vulnerability or enforcement behavior this probe is testing",
+        "payload_purpose": "What the generated URL/body/header payload is intended to confirm or rule out, or null",
     "desc": "Follow-up: what this tests and why"
   }}
 ]
 
-Return [] if no results look promising enough to warrant follow-up investigation."""
+Return [] if no results look promising enough to warrant follow-up investigation.
+Do not use vague wording like "looked interesting" without naming the exact signal and hypothesis."""
 
 
 async def plan_followup_probes(
