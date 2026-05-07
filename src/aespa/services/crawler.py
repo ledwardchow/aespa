@@ -53,6 +53,10 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _login_url_for_credential(default_login_url: str, cred) -> str:
+    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def start_crawl(run_id: int) -> None:
@@ -212,6 +216,7 @@ async def _crawl_as_credential(
 
     username      = cred.username if cred else None
     credential_id = cred.id if cred else None
+    credential_login_url = _login_url_for_credential(login_url, cred)
 
     log.info("=== Phase %d/%d: user=%s ===", phase_idx + 1, total_phases, username or "anonymous")
     events_svc.emit(run_id, {
@@ -277,9 +282,11 @@ async def _crawl_as_credential(
             log.warning("Pre-load failed for user=%s: %s", username, e)
 
         if requires_auth and cred:
-            log.info("Authenticating as %s", cred.username)
-            await _authenticate(page, login_url, cred)
-            auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+            log.info("Authenticating as %s at %s", cred.username, credential_login_url)
+            await _authenticate(page, credential_login_url, cred)
+            auth_check_snapshot = await _capture_auth_check_snapshot(
+                page, credential_login_url
+            )
 
         observed_api_calls.clear()
 
@@ -330,7 +337,7 @@ async def _crawl_as_credential(
                     page, url,
                     requires_auth=requires_auth,
                     credential=cred,
-                    login_url=login_url,
+                    login_url=credential_login_url,
                     username=username,
                     auth_check_snapshot=auth_check_snapshot,
                 )
@@ -368,7 +375,7 @@ async def _crawl_as_credential(
                         shared.crawled_norms[norm_final] = page_id
 
             # ── DOM-based accessibility check (login form = not accessible) ───
-            on_login = await _page_requires_login(page, login_url)
+            on_login = await _page_requires_login(page, credential_login_url)
 
             if on_login:
                 if is_first:
@@ -886,6 +893,7 @@ async def _reconcile_direct_access(
             for cred in creds:
                 if run_id in _stop_requested:
                     break
+                credential_login_url = _login_url_for_credential(login_url, cred)
                 ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
                 traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
                 page = await ctx.new_page()
@@ -894,8 +902,10 @@ async def _reconcile_direct_access(
                         await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
                     except Exception:
                         pass
-                    await _authenticate(page, login_url, cred)
-                    auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+                    await _authenticate(page, credential_login_url, cred)
+                    auth_check_snapshot = await _capture_auth_check_snapshot(
+                        page, credential_login_url
+                    )
 
                     for page_id, page_url, page_title, page_text, accessible_by in page_rows:
                         if run_id in _stop_requested:
@@ -909,7 +919,7 @@ async def _reconcile_direct_access(
                             page_url,
                             requires_auth=requires_auth,
                             credential=cred,
-                            login_url=login_url,
+                            login_url=credential_login_url,
                             username=cred.username,
                             auth_check_snapshot=auth_check_snapshot,
                             recover_api_auth=False,
