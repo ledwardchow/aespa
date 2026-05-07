@@ -13,6 +13,8 @@ from aespa.models import LLMConfig
 log = logging.getLogger("aespa.llm")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+ANALYSE_RESULTS_TEXT_BUDGET = 80_000
+ANALYSE_RESULTS_PER_BATCH = 20
 
 
 def _strip_thinking_blocks(raw: str) -> str:
@@ -825,7 +827,10 @@ A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
 A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
 A09 (Logging/Monitoring), A10 (SSRF)
 
-Be conservative — only report confirmed or highly likely issues, not theoretical ones."""
+Be conservative — only report confirmed or highly likely issues, not theoretical ones.
+If many findings are present, return the most important confirmed findings first. Keep each field
+concise enough for a security report table/detail view; do not include raw full responses when a
+short quoted excerpt proves the issue."""
 
 
 async def plan_probes(
@@ -904,17 +909,57 @@ async def analyse_probes(
     """Ask the LLM to analyse probe results and return a list of findings."""
     if not results:
         return []
-    results_text = "\n\n".join(
-        f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
-        f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
-        f"URL: {r.get('url')}\n"
-        f"Status: {r.get('status')}\n"
-        f"Request evidence:\n{str(r.get('request_evidence') or '')[:2000]}\n\n"
-        f"Response evidence:\n{str(r.get('response_evidence') or '')[:3000]}\n\n"
-        f"Response headers: {json.dumps(r.get('headers', {}))}\n"
-        f"Response body excerpt: {str(r.get('body', ''))[:1000]}"
-        for r in results
+
+    findings: list[dict] = []
+    for batch in _chunk_probe_results(results):
+        findings.extend(await _analyse_probe_batch(config, url, batch))
+    return findings
+
+
+def _format_probe_result(result: dict) -> str:
+    return (
+        f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
+        f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"URL: {result.get('url')}\n"
+        f"Status: {result.get('status')}\n"
+        f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
+        f"Response evidence:\n{str(result.get('response_evidence') or '')[:3000]}\n\n"
+        f"Response headers: {json.dumps(result.get('headers', {}))}\n"
+        f"Response body excerpt: {str(result.get('body', ''))[:1000]}"
     )
+
+
+def _chunk_probe_results(results: list[dict]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_size = 0
+
+    for result in results:
+        formatted = _format_probe_result(result)
+        separator_size = 2 if current_batch else 0
+        next_size = current_size + separator_size + len(formatted)
+        if current_batch and (
+            len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
+            or next_size > ANALYSE_RESULTS_TEXT_BUDGET
+        ):
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+            separator_size = 0
+        current_batch.append(formatted)
+        current_size += separator_size + len(formatted)
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+async def _analyse_probe_batch(
+    config: LLMConfig,
+    url: str,
+    result_texts: list[str],
+) -> list[dict]:
+    results_text = "\n\n".join(result_texts)
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
     raw = await _call(config, prompt, None)
     try:
@@ -933,8 +978,14 @@ async def analyse_probes(
             "affected_url",
             "evidence",
         }
-        return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
-    except Exception:
+        return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+    except Exception as exc:
+        log.warning(
+            "analyse_probes: failed to extract findings from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            exc,
+            (raw or "")[:500],
+        )
         return []
 
 

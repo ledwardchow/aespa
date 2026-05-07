@@ -556,3 +556,50 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert "CVSS v3.1" in captured["prompt"]
     assert "GET /search" in captured["prompt"]
     assert "HTTP/1.1 200" in captured["prompt"]
+
+
+def test_analyse_probes_chunks_large_result_sets(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):
+        prompts.append(prompt)
+        if len(prompts) == 2:
+            return """
+            [{
+              "owasp_category": "A05",
+              "severity": "low",
+              "title": "Verbose error response",
+              "description": "A probe returned a verbose framework error.",
+              "impact": "Attackers can use implementation details to refine attacks.",
+              "likelihood": "Likely when the endpoint is reachable anonymously.",
+              "recommendation": "Return generic errors and log details server-side.",
+              "cvss_score": 3.1,
+              "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "affected_url": "https://target.local/error/2",
+              "evidence": "Stack trace was returned in the response."
+            }]
+            """
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_TEXT_BUDGET", 100_000)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_PER_BATCH", 2)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    results = [
+        {
+            "desc": f"Verbose error probe {index}",
+            "url": f"https://target.local/error/{index}",
+            "status": 500,
+            "headers": {"content-type": "text/plain"},
+            "body": "Traceback " + ("x" * 600),
+            "request_evidence": f"GET /error/{index} HTTP/1.1",
+            "response_evidence": "HTTP/1.1 500\n" + ("stack trace " * 80),
+        }
+        for index in range(6)
+    ]
+
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local", results))
+
+    assert len(prompts) == 3
+    assert findings[0]["title"] == "Verbose error response"
