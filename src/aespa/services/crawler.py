@@ -24,7 +24,7 @@ from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, Tes
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config, get_llm_config_for_run
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -110,7 +110,7 @@ async def _do_crawl(run_id: int) -> None:
             raise ValueError(f"TestRun {run_id} not found")
         from aespa.models import Site
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
         creds = list(site.credentials)

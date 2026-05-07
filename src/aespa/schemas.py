@@ -320,11 +320,13 @@ class TestRunCreate(BaseModel):
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=50, ge=5, le=500)
     scan_mode: ScanModeLiteral = "safe_active"
+    llm_config_id: int | None = None
 
 
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
+    llm_config_id: int | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -357,6 +359,7 @@ class TestRunSummary(BaseModel):
     error_message: str | None
     credentials: list[CredentialSummary] = []
     scanner_policy: dict = Field(default_factory=dict)
+    llm_config_id: int | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
 
