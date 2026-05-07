@@ -52,8 +52,6 @@ const api = {
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
-  getRunScanPolicy:      (id)       => req(`/api/test-runs/${id}/scan/policy`),
-  updateRunScanPolicy:   (id,b)     => req(`/api/test-runs/${id}/scan/policy`, { method:"PATCH", body:b }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
@@ -586,7 +584,7 @@ function SiteForm({ siteId }) {
 // ── Test run form ─────────────────────────────────────────────────────────────
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active", llm_config_id:null });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [profiles, setProfiles] = useState([]);
@@ -595,8 +593,7 @@ function TestRunForm({ siteId }) {
   useEffect(() => {
     (async () => {
       try {
-        const [policy, profs] = await Promise.all([api.getScannerPolicy(), api.listLLMProfiles()]);
-        if (policy?.scan_mode) upd({scan_mode:policy.scan_mode});
+        const profs = await api.listLLMProfiles();
         setProfiles(profs || []);
       } catch(e) { setError(e.message); }
     })();
@@ -609,7 +606,6 @@ function TestRunForm({ siteId }) {
         name: form.name.trim()||null,
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
-        scan_mode: form.scan_mode,
         llm_config_id: form.llm_config_id || null,
       });
       nav(`#/runs/${run.id}`);
@@ -641,15 +637,9 @@ function TestRunForm({ siteId }) {
             <input type="number" required min="5" max="500" value=${form.max_pages} onChange=${e=>upd({max_pages:e.target.value})}/>
           </div>
         </div>
-        <div className="divider"/>
-        <div className="form-section-title">Scan Policy</div>
-        <div className="field">
-          <label>Scan mode</label>
-          <select className="select" value=${form.scan_mode} onChange=${e=>upd({scan_mode:e.target.value})}>
-            ${SCAN_MODE_OPTIONS.map(([value,label])=>html`<option key=${value} value=${value}>${label}</option>`)}
-          </select>
+        <div className="alert" style=${{marginTop:12}}>
+          This run will use the global scan policy from Settings.
         </div>
-        <${ScanModeDefinitions} selected=${form.scan_mode}/>
         <div className="divider"/>
         <div className="form-section-title">LLM Profile</div>
         <div className="field">
@@ -691,14 +681,21 @@ const userColor = (d, credentials) => {
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
   const scanStatus = opts.scanStatus || run.scan_status || "idle";
+  const thinkingStatus = opts.thinkingStatus || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
   if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
+  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping thinking scan" };
   if (run.status === "running") return { key:"running", label:"crawling" };
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
+  if (thinkingStatus === "running") return { key:"running", label:"thinking scan" };
+  if (thinkingStatus === "analysing") return { key:"running", label:"analysing thinking scan" };
+  if (thinkingStatus === "failed") return { key:"danger", label:"thinking scan failed" };
   if (scanStatus === "running") return { key:"running", label:"scanning" };
   if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
+  if (thinkingStatus === "stopped") return { key:"neutral", label:"thinking scan stopped" };
   if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
+  if (thinkingStatus === "complete") return { key:"ok", label:"thinking scan complete" };
   if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
   if (run.status === "complete") return { key:"partial", label:"crawl complete" };
   return { key:"neutral", label:run.status || "pending" };
@@ -770,6 +767,8 @@ function TestRunDetail({ runId }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+      api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
       api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
@@ -901,13 +900,13 @@ function TestRunDetail({ runId }) {
 
   // Poll thinking-scan status independently.
   useEffect(() => {
-    const active = thinkingStatus?.status === "running" || thinkingStopRequested;
+    const active = ["running", "analysing", "stopping"].includes(thinkingStatus?.status) || thinkingStopRequested;
     if (!active) return;
     const iv = setInterval(() => {
       api.getThinkingStatus(runId).then(s => {
         setThinkingStatus(s);
-        if (thinkingStopRequested && s.status !== "running") setThinkingStopReq(false);
-        if (s.status !== "running") api.getFindings(runId).then(setFindings).catch(() => {});
+        if (thinkingStopRequested && !["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
+        if (!["running", "analysing", "stopping"].includes(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
@@ -959,7 +958,7 @@ function TestRunDetail({ runId }) {
       activeTab === "traffic" ||
       run?.status === "running" ||
       scanStatus?.status === "running" ||
-      thinkingStatus?.status === "running" ||
+      ["running", "analysing", "stopping"].includes(thinkingStatus?.status) ||
       crawlStopRequested ||
       scanStopRequested ||
       thinkingStopRequested
@@ -1201,7 +1200,7 @@ function TestRunDetail({ runId }) {
   const onStartScan = async () => {
     try {
       setScanStopRequested(false);
-      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      const policy = await api.getScannerPolicy();
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
         const ok = confirm(
@@ -1224,7 +1223,7 @@ function TestRunDetail({ runId }) {
     setScopeBusy(true);
     try {
       setScanStopRequested(false);
-      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      const policy = await api.getScannerPolicy();
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
         const ok = confirm(
@@ -1303,7 +1302,7 @@ function TestRunDetail({ runId }) {
       setThinkingStopReq(true);
       const s = await api.stopThinkingScan(runId);
       setThinkingStatus(s);
-      if (s.status !== "running") setThinkingStopReq(false);
+      if (!["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -1311,6 +1310,7 @@ function TestRunDetail({ runId }) {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({ status: "running" });
+      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.startThinkingScan(runId);
       setThinkingStatus(s);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
@@ -1392,8 +1392,10 @@ function TestRunDetail({ runId }) {
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
+    thinkingStatus: effectiveThinkingStatus,
     crawlStopping: crawlStopRequested,
     scanStopping: scanStopRequested,
+    thinkingStopping: thinkingStopRequested,
   });
   const STATUS_COLOR = {
     neutral:"var(--muted)",
@@ -1407,8 +1409,10 @@ function TestRunDetail({ runId }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
+  const thinkingActiveStatuses = ["running", "analysing", "stopping"];
   const canStopScan = effectiveScanStatus === "running";
-  const canStopThinking = effectiveThinkingStatus === "running";
+  const canStopThinking = thinkingActiveStatuses.includes(effectiveThinkingStatus);
+  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !thinkingActiveStatuses.includes(effectiveThinkingStatus);
 
   return html`
     <div className="topbar">
@@ -1442,10 +1446,8 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
-          Activity${(scanStatus?.status==="running" || thinkingStatus?.status==="running") && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Activity${(scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
-        <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
-          onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1468,14 +1470,14 @@ function TestRunDetail({ runId }) {
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
             ${scanStopRequested ? "◼ Stopping…" : "◼ Stop scan"}
           </button>`}
-        ${activeTab==="scan" && effectiveThinkingStatus==="running" && html`
+        ${activeTab==="scan" && canStopThinking && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
             ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
           </button>`}
-        ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
+        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start normal scan</button>`}
-        ${activeTab==="scan" && !thinkingStopRequested && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
-          <button className="btn ghost sm" style=${{margin:"auto 4px auto 0"}} title="Run the autonomous Thinking scan only" onClick=${onStartThinkingScan}><${IconPlay}/> Start Thinking scan</button>`}
+        ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the autonomous Thinking scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Thinking scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -1529,7 +1531,11 @@ function TestRunDetail({ runId }) {
         </div>
         ${(()=>{
           if (activeTab === "scan") {
-            const showNormalScan = scanStatus && !(scanStatus.status === "idle" && scanStatus.pages_done === 0);
+            const thinkingActive = ["running", "analysing", "stopping"].includes(thinkingStatus?.status);
+            const showNormalScan = scanStatus &&
+              !thinkingActive &&
+              !(scanStatus.status === "idle" && scanStatus.pages_done === 0) &&
+              !(thinkingStatus?.status === "complete" && scanStatus.status === "complete");
             const showThinkingScan = thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle";
             if (!showNormalScan && !showThinkingScan) return null;
             const total   = scanStatus?.total_pages || 0;
@@ -1557,14 +1563,20 @@ function TestRunDetail({ runId }) {
               </div>` : null;
             const thinkingLabel = thinkingStopRequested ? "stop requested" : (
               thinkingStatus?.status === "running" ? "running" :
+              thinkingStatus?.status === "analysing" ? "analysing probe results" :
+              thinkingStatus?.status === "stopping" ? "stopping after current step, then analysing findings" :
               thinkingStatus?.status === "complete" ? "complete" :
-              thinkingStatus?.status === "stopped" ? "stopped" :
+              thinkingStatus?.status === "stopped" ? "stopped, findings processed" :
               thinkingStatus?.status === "failed" ? "failed" : thinkingStatus?.status
             );
             const thinkingStrip = showThinkingScan ? html`
               <div className="scan-progress-strip">
                 <div className="scan-progress-strip-row">
                   <span className="scan-progress-counts">Thinking scan: ${thinkingLabel}</span>
+                  ${(thinkingStatus?.findings_count || 0) > 0 && html`
+                    <span className="scan-progress-findings">
+                      ${thinkingStatus.findings_count} finding${thinkingStatus.findings_count !== 1 ? "s" : ""}
+                    </span>`}
                   <span className="scan-progress-url">Autonomous request-by-request assessment</span>
                 </div>
               </div>` : null;
@@ -1608,16 +1620,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      ${activeTab==="policy" && html`
-        <${RunScannerPolicyPanel}
-          runId=${runId}
-          run=${run}
-          scanStatus=${scanStatus}
-          validateStatus=${validateStatus}
-          onSaved=${policy=>setRun(r=>r?{...r, scan_mode:policy.scan_mode, scanner_policy:policy}:r)}
-        />`}
-
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy"||activeTab==="activity") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1756,6 +1759,16 @@ function TestRunDetail({ runId }) {
               <span className="subtle" style=${{fontSize:12}}>
                 ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
               </span>`}
+            ${thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && html`
+              <span className=${"scan-status-badge scan-status-"+(thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
+                ${thinkingStopRequested ? "Stopping thinking scan…" :
+                  thinkingStatus.status==="running"   ? "Thinking scan running…" :
+                  thinkingStatus.status==="analysing" ? "Thinking scan analysing…" :
+                  thinkingStatus.status==="stopping"  ? "Thinking scan stopping…" :
+                  thinkingStatus.status==="complete"  ? "Thinking scan complete" :
+                  thinkingStatus.status==="stopped"   ? "Thinking scan stopped" :
+                  thinkingStatus.status==="failed"    ? "Thinking scan failed" : "Thinking scan"}
+              </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
               ? html`<span className="val-status-badge val-running">Validating… ${validateStatus.confirmed+validateStatus.false_positives+(validateStatus.unconfirmed||0)}/${validateStatus.total}</span>`
@@ -1774,7 +1787,9 @@ function TestRunDetail({ runId }) {
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
-                ${scanStatus?.status==="running" ? "Scanning… findings will appear here." : "No findings yet. Start a scan from the Scan Status tab."}
+                ${scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)
+                  ? "Scanning… findings will appear here."
+                  : "No findings yet. Start a scan from the Scan Status tab."}
               </div>`
             : html`
               <div className="findings-table-wrap">${(()=>{
@@ -2079,7 +2094,7 @@ function TestRunDetail({ runId }) {
             </table>
             ${filteredTraffic.length===0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${run?.status==="running"||scanStatus?.status==="running"
+                ${run?.status==="running"||scanStatus?.status==="running"||["running","analysing","stopping"].includes(thinkingStatus?.status)
                   ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>`}
           </div>
@@ -2194,53 +2209,6 @@ function ScannerPolicySettings() {
           <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save policy"}</button>
         </div>
       </form>`}`;
-}
-
-function RunScannerPolicyPanel({ runId, run, scanStatus, validateStatus, onSaved }) {
-  const [form, setForm] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState(null);
-  const disabled = run?.status === "running" || scanStatus?.status === "running" || validateStatus?.status === "running";
-  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-
-  useEffect(() => {
-    (async () => {
-      try { setForm(policyToForm(await api.getRunScanPolicy(runId))); }
-      catch(e) { setError(e.message); }
-    })();
-  }, [runId]);
-
-  const onSubmit = async (e) => {
-    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
-    try {
-      const policy = await api.updateRunScanPolicy(runId, policyPayload(form));
-      setForm(policyToForm(policy));
-      setSaved(true);
-      onSaved?.(policy);
-    } catch(e) { setError(e.message); } finally { setSaving(false); }
-  };
-
-  return html`
-    <div className="policy-panel">
-      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
-      ${error&&html`<div className="alert error">${error}</div>`}
-      ${disabled&&html`<div className="alert" style=${{marginBottom:12}}>Scan policy is locked while crawl, scan, or validation is running.</div>`}
-      ${form&&html`
-        <form className="card" onSubmit=${onSubmit}>
-          <div className="policy-summary-row">
-            <span className=${"scan-mode-badge mode-"+form.scan_mode}>${scanModeLabel(form.scan_mode)}</span>
-            <span className="subtle">${form.max_probes_per_page} probes/page · ${form.request_timeout_s}s timeout · ${form.min_delay_s}s delay</span>
-          </div>
-          <div className="divider"/>
-          <${ScannerPolicyFields} form=${form} upd=${upd} disabled=${disabled}/>
-          <div className="divider"/>
-          <div className="row spread">
-            <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
-            <button type="submit" className="btn" disabled=${saving||disabled}>${saving?"Saving…":"Save run policy"}</button>
-          </div>
-        </form>`}
-    </div>`;
 }
 
 const PROVIDER_LABELS = {
