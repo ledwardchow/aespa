@@ -21,6 +21,15 @@ def get_llm_config(session: Session) -> LLMConfig | None:
     return session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
 
 
+def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
+    """Return the LLM config for a run: per-run override if set, else the active global one."""
+    if run.llm_config_id is not None:
+        cfg = session.get(LLMConfig, run.llm_config_id)
+        if cfg is not None:
+            return cfg
+    return get_llm_config(session)
+
+
 def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
     cfg = get_llm_config(session)
     if cfg is None:
