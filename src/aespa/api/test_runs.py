@@ -101,6 +101,7 @@ def create_test_run(
         max_pages=payload.max_pages,
         scan_mode=policy.scan_mode,
         scanner_policy_json=settings_service.scanner_policy_snapshot(policy),
+        llm_config_id=payload.llm_config_id,
     )
     session.add(run)
     session.commit()
@@ -161,6 +162,12 @@ def update_test_run(
         raise HTTPException(status_code=409, detail="Cannot edit settings while crawl is running")
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    if payload.llm_config_id is not None:
+        # Validate the profile exists
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
+    run.llm_config_id = payload.llm_config_id
     session.add(run)
     session.commit()
     session.refresh(run)
