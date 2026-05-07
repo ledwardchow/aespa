@@ -1202,6 +1202,8 @@ Think like a human tester:
 - Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
 - If step count is getting high, prefer confirming likely findings over exploring new areas.
+- Be explicit about what made the next request worthwhile. Do not use vague phrases like
+    "found something interesting" unless you also name the specific signal and hypothesis.
 
 Return ONLY valid JSON (no markdown, no prose):
 
@@ -1212,7 +1214,10 @@ To make one HTTP request:
   "url": "https://...",
   "headers": {{}},
   "body": null,
-  "note": "One sentence: what this tests and why"
+    "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
+    "hypothesis": "Specific issue or behavior this request is investigating",
+    "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
+    "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
 }}
 
 Body rules:
@@ -1317,7 +1322,11 @@ async def thinking_next_action(
                 "message": (
                     f"Step {current_step}: LLM → {action.get('action')}"
                     + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
-                    + (f": {action.get('note','')}" if action.get('note') else "")
+                    + (
+                        f": {action.get('hypothesis') or action.get('note','')}"
+                        if action.get('hypothesis') or action.get('note')
+                        else ""
+                    )
                 ),
                 "data": {"step": current_step, "raw_response": raw, "action": action},
             })
