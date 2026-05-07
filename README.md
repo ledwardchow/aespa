@@ -64,6 +64,9 @@ OpenRouter can also be configured through **OpenAI-compatible** by setting the b
 Landing page:
 ![Screenshot](docs/images/sites.png)
 
+Site test runs:
+![Screenshot](docs/images/testruns.png)
+
 Site setup:
 ![Screenshot](docs/images/sitesetup.png)
 
@@ -76,8 +79,8 @@ Scan in progress:
 Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
 
-Findings (run against OWASP Juice Shop)
-![Screenshot](docs/images/juiceshop.png)
+Findings
+![Screenshot](docs/images/finding.png)
 
 
 ## Implementation details
