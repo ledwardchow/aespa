@@ -59,7 +59,13 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     elif em.startswith("scan:"):
         parts = em.split(":", 2)
         s.scan_status = parts[1] if len(parts) > 1 else "idle"
-        s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
+        if s.scan_status == "running":
+            s.scan_status = "idle"
+        s.error_message = (
+            f"Scan failed: {parts[2]}"
+            if s.scan_status == "failed" and len(parts) > 2
+            else None
+        )
     elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
         s.scan_status = "complete"
     return s

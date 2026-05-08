@@ -120,6 +120,46 @@ def test_run_summary_prefers_live_scan_status(monkeypatch):
         engine.dispose()
 
 
+def test_run_summary_ignores_non_live_running_scan_marker(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun, TestRunStatus
+    from aespa.services import scanner as scanner_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+                error_message="scan:running",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
+
+            summary = test_runs_api._run_summary(run, session)
+
+        assert summary.scan_status == "idle"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_run_not_found(client: TestClient):
     r = client.get("/api/test-runs/9999")
     assert r.status_code == 404
@@ -294,7 +334,7 @@ def test_scan_modes_block_each_other(client: TestClient, monkeypatch):
     monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
     r = client.post(f"/api/test-runs/{run['id']}/scan/start")
     assert r.status_code == 409
-    assert r.json()["detail"] == "Thinking scan already running"
+    assert r.json()["detail"] == "Dynamic Scan already running"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────

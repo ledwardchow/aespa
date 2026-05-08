@@ -382,6 +382,43 @@ def _finding_from_llm(
     )
 
 
+def _find_or_create_dynamic_page(
+    session: Session,
+    *,
+    run_id: int,
+    url: str,
+    base_url: str,
+) -> int | None:
+    page_url = (url or base_url).strip() or base_url
+    existing = session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run_id)
+        .where(CrawledPage.url == page_url)
+    ).first()
+    if existing:
+        return existing.id
+
+    page = CrawledPage(
+        test_run_id=run_id,
+        url=page_url,
+        title="Dynamic Scan target",
+        page_text="",
+        llm_context="Discovered during Dynamic Scan.",
+        depth=0,
+        status="crawled",
+        in_scope=True,
+        scan_status="complete",
+    )
+    session.add(page)
+    session.flush()
+
+    run = session.get(TestRun, run_id)
+    if run is not None:
+        run.pages_discovered = (run.pages_discovered or 0) + 1
+
+    return page.id
+
+
 # ── Public entry points ───────────────────────────────────────────────────────
 
 def request_stop(run_id: int) -> None:
@@ -1127,8 +1164,10 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 # Build a URL → page_id lookup for best-match page assignment.
                 url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
+                saved_count = 0
+                skipped_count = 0
 
-                def _best_page_id(affected_url: str) -> int:
+                def _best_page_id(affected_url: str) -> int | None:
                     """Find the closest matching crawled page for a finding URL."""
                     if affected_url in url_to_page:
                         return url_to_page[affected_url]
@@ -1136,13 +1175,24 @@ async def _do_thinking_scan(run_id: int) -> None:
                     for page_url, page_id in url_to_page.items():
                         if affected_url.startswith(page_url) or page_url.startswith(affected_url):
                             return page_id
-                    return first_page_id  # fallback
+                    if first_page_id is not None:
+                        return first_page_id
+                    page_id = _find_or_create_dynamic_page(
+                        s,
+                        run_id=run_id,
+                        url=affected_url,
+                        base_url=base_url,
+                    )
+                    if page_id is not None:
+                        url_to_page[affected_url] = page_id
+                    return page_id
 
                 for raw in raw_findings:
                     affected = (raw.get("affected_url") or base_url).strip()
                     page_id  = _best_page_id(affected)
                     if page_id is None:
                         log.warning("Thinking scan: no page_id found for finding %s — skipping", affected)
+                        skipped_count += 1
                         continue
                     finding = _finding_from_llm(
                         run_id=run_id,
@@ -1152,12 +1202,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                         result_by_url=result_by_url,
                     )
                     s.add(finding)
+                    saved_count += 1
                 s.commit()
+            message = f"Analysis complete — {saved_count} finding(s) recorded."
+            if skipped_count:
+                message += f" {skipped_count} skipped because no page could be assigned."
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "thinking_analysis",
                 "status": "complete",
-                "message": f"Analysis complete — {len(raw_findings)} potential finding(s) recorded.",
+                "message": message,
             })
         except Exception as exc:
             log.warning("Thinking scan analysis failed: %s", exc)
@@ -2894,11 +2948,13 @@ def get_scan_status(run_id: int) -> dict:
 
         run = s.get(TestRun, run_id)
         em = (run.error_message or "") if run else ""
-        if em.startswith("scan:"):
+        if is_running(run_id):
+            status = "running"
+        elif em.startswith("scan:"):
             parts = em.split(":", 2)
             status = parts[1] if len(parts) > 1 else "idle"
-        elif is_running(run_id):
-            status = "running"
+            if status == "running":
+                status = "idle"
         else:
             status = "idle"
 
