@@ -668,6 +668,8 @@ const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLO
 
 const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
 const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
+const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
+const isDynamicScanActive = (status) => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
 
 // Per-user palette (index into credentials array)
 const USER_PALETTE = ["#f97316","#06b6d4","#a855f7","#f59e0b","#10b981","#ec4899"];
@@ -686,19 +688,19 @@ function runWorkflowStatus(run, opts = {}) {
   const scanStatus = opts.scanStatus || run.scan_status || "idle";
   const thinkingStatus = opts.thinkingStatus || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
-  if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
-  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping thinking scan" };
+  if (opts.scanStopping) return { key:"stopping", label:"stopping Structured Scan" };
+  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };
   if (run.status === "running") return { key:"running", label:"crawling" };
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
-  if (thinkingStatus === "running") return { key:"running", label:"thinking scan" };
-  if (thinkingStatus === "analysing") return { key:"running", label:"analysing thinking scan" };
-  if (scanStatus === "running") return { key:"running", label:"scanning" };
-  if (thinkingStatus === "failed") return { key:"danger", label:"thinking scan failed" };
-  if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
+  if (thinkingStatus === "running") return { key:"running", label:"Dynamic Scan" };
+  if (thinkingStatus === "analysing") return { key:"running", label:"analysing Dynamic Scan" };
+  if (scanStatus === "running") return { key:"running", label:"Structured Scan" };
+  if (thinkingStatus === "failed") return { key:"danger", label:"Dynamic Scan failed" };
+  if (scanStatus === "failed") return { key:"danger", label:"Structured Scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
-  if (thinkingStatus === "stopped") return { key:"neutral", label:"thinking scan stopped" };
-  if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
-  if (thinkingStatus === "complete") return { key:"ok", label:"thinking scan complete" };
+  if (thinkingStatus === "stopped") return { key:"neutral", label:"Dynamic Scan stopped" };
+  if (scanStatus === "stopped") return { key:"neutral", label:"Structured Scan stopped" };
+  if (thinkingStatus === "complete") return { key:"ok", label:"Dynamic Scan complete" };
   if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
   if (run.status === "complete") return { key:"partial", label:"crawl complete" };
   return { key:"neutral", label:run.status || "pending" };
@@ -844,7 +846,7 @@ function TestRunDetail({ runId }) {
         if (evt.status && evt.status !== "running") setScanStopRequested(false);
       } else if (evt.type === "thinking_scan_update") {
         setThinkingStatus(evt);
-        if (evt.status && evt.status !== "running") setThinkingStopReq(false);
+        if (evt.status && !isDynamicScanActive(evt.status)) setThinkingStopReq(false);
       } else if (evt.type === "scanner_phase") {
         setActivityLog(prev => {
           const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -903,13 +905,13 @@ function TestRunDetail({ runId }) {
 
   // Poll thinking-scan status independently.
   useEffect(() => {
-    const active = ["running", "analysing", "stopping"].includes(thinkingStatus?.status) || thinkingStopRequested;
+    const active = isDynamicScanActive(thinkingStatus?.status) || thinkingStopRequested;
     if (!active) return;
     const iv = setInterval(() => {
       api.getThinkingStatus(runId).then(s => {
         setThinkingStatus(s);
-        if (thinkingStopRequested && !["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
-        if (!["running", "analysing", "stopping"].includes(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
+        if (thinkingStopRequested && !isDynamicScanActive(s.status)) setThinkingStopReq(false);
+        if (!isDynamicScanActive(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
@@ -961,7 +963,7 @@ function TestRunDetail({ runId }) {
       activeTab === "traffic" ||
       run?.status === "running" ||
       scanStatus?.status === "running" ||
-      ["running", "analysing", "stopping"].includes(thinkingStatus?.status) ||
+      isDynamicScanActive(thinkingStatus?.status) ||
       crawlStopRequested ||
       scanStopRequested ||
       thinkingStopRequested
@@ -1305,7 +1307,7 @@ function TestRunDetail({ runId }) {
       setThinkingStopReq(true);
       const s = await api.stopThinkingScan(runId);
       setThinkingStatus(s);
-      if (!["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
+      if (!isDynamicScanActive(s.status)) setThinkingStopReq(false);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -1313,7 +1315,6 @@ function TestRunDetail({ runId }) {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({ status: "running" });
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
       const s = await api.startThinkingScan(runId);
       setThinkingStatus(s);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
@@ -1391,8 +1392,10 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
 
-  const effectiveScanStatus     = scanStatus?.status     || run?.scan_status || "idle";
+  const rawScanStatus           = scanStatus?.status     || run?.scan_status || "idle";
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
+  const dynamicScanActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
+  const effectiveScanStatus = dynamicScanActive && rawScanStatus === "running" ? "idle" : rawScanStatus;
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
     thinkingStatus: effectiveThinkingStatus,
@@ -1412,10 +1415,9 @@ function TestRunDetail({ runId }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
-  const thinkingActiveStatuses = ["running", "analysing", "stopping"];
   const canStopScan = effectiveScanStatus === "running";
-  const canStopThinking = thinkingActiveStatuses.includes(effectiveThinkingStatus);
-  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !thinkingActiveStatuses.includes(effectiveThinkingStatus);
+  const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
+  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !isDynamicScanActive(effectiveThinkingStatus);
 
   return html`
     <div className="topbar">
@@ -1434,8 +1436,8 @@ function TestRunDetail({ runId }) {
       <div className="topbar-actions">
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
-        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop scan"}</button>`}
-        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop thinking scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop Structured Scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
       </div>
     </div>
 
@@ -1449,7 +1451,7 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
-          Activity${(scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Activity${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
@@ -1471,16 +1473,16 @@ function TestRunDetail({ runId }) {
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
         ${activeTab==="scan" && effectiveScanStatus==="running" && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop scan"}
+            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop Structured Scan"}
           </button>`}
         ${activeTab==="scan" && canStopThinking && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
-            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
+            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop Dynamic Scan"}
           </button>`}
         ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start normal scan</button>`}
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the Structured Scan page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start Structured Scan</button>`}
         ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the autonomous Thinking scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Thinking scan</button>`}
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the adaptive Dynamic Scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -1534,7 +1536,7 @@ function TestRunDetail({ runId }) {
         </div>
         ${(()=>{
           if (activeTab === "scan") {
-            const thinkingActive = ["running", "analysing", "stopping"].includes(thinkingStatus?.status);
+            const thinkingActive = isDynamicScanActive(thinkingStatus?.status);
             const showNormalScan = scanStatus &&
               !thinkingActive &&
               !(scanStatus.status === "idle" && scanStatus.pages_done === 0) &&
@@ -1552,7 +1554,7 @@ function TestRunDetail({ runId }) {
                 </div>
                 <div className="scan-progress-strip-row">
                   <span className="scan-progress-counts">
-                    Normal scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
+                    Structured Scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
                   </span>
                   ${(scanStatus?.findings_count || 0) > 0 && html`
                     <span className="scan-progress-findings">
@@ -1575,7 +1577,7 @@ function TestRunDetail({ runId }) {
             const thinkingStrip = showThinkingScan ? html`
               <div className="scan-progress-strip">
                 <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">Thinking scan: ${thinkingLabel}</span>
+                  <span className="scan-progress-counts">Dynamic Scan: ${thinkingLabel}</span>
                   ${(thinkingStatus?.findings_count || 0) > 0 && html`
                     <span className="scan-progress-findings">
                       ${thinkingStatus.findings_count} finding${thinkingStatus.findings_count !== 1 ? "s" : ""}
@@ -1750,27 +1752,27 @@ function TestRunDetail({ runId }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && html`
+            ${scanStatus && !dynamicScanActive && html`
               <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
                 ${scanStopRequested ? "Stopping scan…" :
-                  scanStatus.status==="running" ? "Scanning…" :
-                  scanStatus.status==="complete" ? "Scan complete" :
-                  scanStatus.status==="stopped"  ? "Scan stopped" :
-                  scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
+                  scanStatus.status==="running" ? "Structured Scan running…" :
+                  scanStatus.status==="complete" ? "Structured Scan complete" :
+                  scanStatus.status==="stopped"  ? "Structured Scan stopped" :
+                  scanStatus.status==="failed"   ? "Structured Scan failed"  : "Not scanned"}
               </span>`}
-            ${scanStatus?.status==="running" && html`
+            ${effectiveScanStatus==="running" && html`
               <span className="subtle" style=${{fontSize:12}}>
                 ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
               </span>`}
             ${thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && html`
               <span className=${"scan-status-badge scan-status-"+(thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                ${thinkingStopRequested ? "Stopping thinking scan…" :
-                  thinkingStatus.status==="running"   ? "Thinking scan running…" :
-                  thinkingStatus.status==="analysing" ? "Thinking scan analysing…" :
-                  thinkingStatus.status==="stopping"  ? "Thinking scan stopping…" :
-                  thinkingStatus.status==="complete"  ? "Thinking scan complete" :
-                  thinkingStatus.status==="stopped"   ? "Thinking scan stopped" :
-                  thinkingStatus.status==="failed"    ? "Thinking scan failed" : "Thinking scan"}
+                ${thinkingStopRequested ? "Stopping Dynamic Scan…" :
+                  thinkingStatus.status==="running"   ? "Dynamic Scan running…" :
+                  thinkingStatus.status==="analysing" ? "Dynamic Scan analysing…" :
+                  thinkingStatus.status==="stopping"  ? "Dynamic Scan stopping…" :
+                  thinkingStatus.status==="complete"  ? "Dynamic Scan complete" :
+                  thinkingStatus.status==="stopped"   ? "Dynamic Scan stopped" :
+                  thinkingStatus.status==="failed"    ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
@@ -1790,8 +1792,8 @@ function TestRunDetail({ runId }) {
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
-                ${scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)
-                  ? "Scanning… findings will appear here."
+                ${effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)
+                  ? "Scan running… findings will appear here."
                   : "No findings yet. Start a scan from the Scan Status tab."}
               </div>`
             : html`
@@ -2097,7 +2099,7 @@ function TestRunDetail({ runId }) {
             </table>
             ${filteredTraffic.length===0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${run?.status==="running"||scanStatus?.status==="running"||["running","analysing","stopping"].includes(thinkingStatus?.status)
+                ${run?.status==="running"||effectiveScanStatus==="running"||isDynamicScanActive(thinkingStatus?.status)
                   ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>`}
           </div>
@@ -2134,7 +2136,7 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <div className="two-col">
       <div className="field"><label>Max probes per page</label>
         <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
-      <div className="field"><label>Thinking scan max steps</label>
+      <div className="field"><label>Dynamic Scan max steps</label>
         <input type="number" disabled=${disabled} min="1" max="1000" step="1" value=${form.thinking_max_steps} onChange=${e=>upd({thinking_max_steps:e.target.value})}/></div>
       <div className="field"><label>Request timeout (seconds)</label>
         <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
