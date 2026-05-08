@@ -82,6 +82,7 @@ class ScannerPolicy(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_mode: str = Field(default="safe_active")
     max_probes_per_page: int = Field(default=50)
+    thinking_max_steps: int = Field(default=120)
     request_timeout_s: float = Field(default=10.0)
     min_delay_s: float = Field(default=0.05)
     max_request_body_bytes: int = Field(default=65536)

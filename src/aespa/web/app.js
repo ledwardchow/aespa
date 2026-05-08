@@ -133,6 +133,7 @@ const csv = (value, transform=(x)=>x) => String(value||"")
 const defaultPolicyForm = () => ({
   scan_mode:"safe_active",
   max_probes_per_page:50,
+  thinking_max_steps:120,
   request_timeout_s:10,
   min_delay_s:0.05,
   max_request_body_bytes:65536,
@@ -155,6 +156,7 @@ const policyToForm = (p) => {
     ...f,
     scan_mode:p.scan_mode || f.scan_mode,
     max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
+    thinking_max_steps:p.thinking_max_steps ?? f.thinking_max_steps,
     request_timeout_s:p.request_timeout_s ?? f.request_timeout_s,
     min_delay_s:p.min_delay_s ?? f.min_delay_s,
     max_request_body_bytes:p.max_request_body_bytes ?? f.max_request_body_bytes,
@@ -173,6 +175,7 @@ const policyToForm = (p) => {
 const policyPayload = (form) => ({
   scan_mode:form.scan_mode,
   max_probes_per_page:Number(form.max_probes_per_page),
+  thinking_max_steps:Number(form.thinking_max_steps),
   request_timeout_s:Number(form.request_timeout_s),
   min_delay_s:Number(form.min_delay_s),
   max_request_body_bytes:Number(form.max_request_body_bytes),
@@ -2131,6 +2134,8 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <div className="two-col">
       <div className="field"><label>Max probes per page</label>
         <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
+      <div className="field"><label>Thinking scan max steps</label>
+        <input type="number" disabled=${disabled} min="1" max="1000" step="1" value=${form.thinking_max_steps} onChange=${e=>upd({thinking_max_steps:e.target.value})}/></div>
       <div className="field"><label>Request timeout (seconds)</label>
         <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
       <div className="field"><label>Minimum delay (seconds)</label>
@@ -2225,7 +2230,7 @@ const PROVIDER_PLACEHOLDERS = {
   openai_compatible:"e.g. llama-3.1-8b-instruct",
   openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
-  bedrock:"e.g. anthropic.claude-3-7-sonnet-20250219-v1:0",
+  bedrock:"e.g. global.anthropic.claude-sonnet-4-6",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
 };
@@ -2237,13 +2242,13 @@ const BASE_URL_LABELS = {
 };
 const BASE_URL_PLACEHOLDERS = {
   openai_compatible:"http://localhost:1234/v1",
-  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  bedrock:"https://bedrock-runtime.ap-southeast-2.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com/",
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Use the Bedrock Runtime endpoint for the region where your model is available.",
+  bedrock:"Optional when using AWS SSO/profile credentials. If set, the region is inferred from this endpoint.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
@@ -2262,12 +2267,12 @@ function llmProfileToForm(cfg) {
 }
 
 function llmPayload(form) {
-  const needsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
   return {
     name:form.name.trim(),
     provider:form.provider,
     api_key:form.api_key.trim()||null,
-    base_url:needsBaseUrl?form.base_url.trim():null,
+    base_url:supportsBaseUrl?(form.base_url.trim()||null):null,
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
@@ -2282,7 +2287,17 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => { const ms=dms[p]||[]; setCustomModel(false); upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
+  const changeProv = p => {
+    const ms=dms[p]||[];
+    setCustomModel(false);
+    upd({
+      provider:p,
+      model:ms[0]||"",
+      api_key:"",
+      base_url:p==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
+      max_tokens:p==="bedrock"?64000:4096,
+    });
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
@@ -2298,8 +2313,9 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","openrouter","google","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const optionalBaseUrl = form&&form.provider==="bedrock";
+  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2318,13 +2334,20 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       </div>
       <div className="divider"/>
       <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
-      ${needsBaseUrl&&html`
+      ${(needsBaseUrl||optionalBaseUrl)&&html`
         <div className="field">
-          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
-          <input type="url" required value=${form.base_url}
+          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}${optionalBaseUrl&&html` <span className="field-optional">(optional)</span>`}</label>
+          <input type="url" required=${needsBaseUrl} value=${form.base_url}
             placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
             onChange=${e=>upd({base_url:e.target.value})}/>
           ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
+        </div>`}
+      ${form.provider==="bedrock"&&html`
+        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+          <input type="password" value=${form.api_key}
+            placeholder="Leave blank to use AWS_PROFILE / AWS SSO credentials"
+            onChange=${e=>upd({api_key:e.target.value})}/>
+          <div className="field-hint">For SSO, run aws sso login outside Aespa and set AWS_PROFILE plus AWS_REGION/AWS_DEFAULT_REGION before starting the app.</div>
         </div>`}
       ${needsKey&&html`
         <div className="field"><label>API Key</label>
@@ -2355,7 +2378,7 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="32768" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+          <input type="number" required min="1" max="64000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
         <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
           <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
       </div>

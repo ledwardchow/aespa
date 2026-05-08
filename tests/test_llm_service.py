@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from types import SimpleNamespace
 
 from aespa.models import LLMConfig
@@ -513,6 +514,59 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
             "messages": [{"role": "user", "content": [{"text": "hello"}]}],
             "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
         },
+    }
+
+
+def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {"profile_name": "bedrock-dev"}
+    assert captured["client"] == {
+        "service_name": "bedrock-runtime",
+        "region_name": "us-east-1",
+        "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    }
+    assert captured["converse"] == {
+        "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+        "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
     }
 
 
