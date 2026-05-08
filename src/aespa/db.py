@@ -70,6 +70,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""

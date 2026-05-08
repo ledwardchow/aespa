@@ -37,6 +37,7 @@ def test_create_run_uses_global_scan_policy(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["scan_mode"] = "aggressive"
     policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 140
     client.put("/api/settings/scanner-policy", json=policy)
 
     site = _make_site(client)
@@ -46,6 +47,7 @@ def test_create_run_uses_global_scan_policy(client: TestClient):
     assert data["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["max_probes_per_page"] == 7
+    assert data["scanner_policy"]["thinking_max_steps"] == 140
 
 
 def test_create_run_auto_increments(client: TestClient):
@@ -146,12 +148,14 @@ def test_create_run_invalid_max_pages(client: TestClient):
 def test_run_scan_policy_tracks_global_defaults(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 90
     client.put("/api/settings/scanner-policy", json=policy)
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
     assert run["scanner_policy"]["source"] == "global_default"
     assert run["scanner_policy"]["max_probes_per_page"] == 7
+    assert run["scanner_policy"]["thinking_max_steps"] == 90
 
     policy["max_probes_per_page"] = 30
     policy["scan_mode"] = "passive"

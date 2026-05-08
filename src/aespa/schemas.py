@@ -142,6 +142,8 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-flash",
     ],
     "bedrock": [
+        "global.anthropic.claude-sonnet-4-6",
+        "global.anthropic.claude-opus-4-7",
         "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "anthropic.claude-3-5-sonnet-20241022-v2:0",
         "anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -177,7 +179,7 @@ class LLMConfigIn(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=32768)
+    max_tokens: int = Field(default=4096, ge=1, le=64000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     use_vision: bool = False
 
@@ -188,15 +190,16 @@ class LLMConfigIn(BaseModel):
             "openai",
             "openrouter",
             "google",
-            "bedrock",
             "azure_openai",
             "azure_foundry",
         )
-        _needs_url = ("openai_compatible", "bedrock", "azure_openai", "azure_foundry")
+        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider in _needs_url and not self.base_url:
             raise ValueError(f"base_url is required for provider '{self.provider}'")
+        if self.provider == "bedrock" and self.api_key and not self.base_url:
+            raise ValueError("base_url is required for provider 'bedrock' when api_key is set")
         return self
 
     @field_validator("base_url")
@@ -245,6 +248,7 @@ class ScannerPolicyBase(BaseModel):
 
     scan_mode: ScanModeLiteral = "safe_active"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
+    thinking_max_steps: int = Field(default=120, ge=1, le=1000)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
     min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
