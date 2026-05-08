@@ -842,12 +842,13 @@ legend {
 .graph-empty {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--muted);
   font-size: 14px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .graph-legend {
