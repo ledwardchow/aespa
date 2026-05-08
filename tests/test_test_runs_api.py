@@ -79,6 +79,40 @@ def test_get_run(client: TestClient):
     assert r.json()["id"] == run["id"]
 
 
+def test_import_findings_creates_findings_and_pages(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [{
+        "owasp_category": "A01",
+        "severity": "high",
+        "title": "Imported authorization bypass",
+        "description": "A protected resource is accessible.",
+        "impact": "Unauthorized data access.",
+        "likelihood": "Likely",
+        "recommendation": "Enforce authorization checks.",
+        "cvss_score": 8.1,
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+        "affected_url": "https://target.local/admin",
+        "evidence": "GET /admin returned 200",
+        "request_evidence": "GET /admin",
+        "response_evidence": "Status: 200",
+        "validation_status": "confirmed",
+        "validation_note": "Imported validated issue.",
+    }]
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/import", json=payload)
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["imported"] == 1
+    finding = data["findings"][0]
+    assert finding["title"] == "Imported authorization bypass"
+    assert finding["validation_status"] == "confirmed"
+    assert finding["affected_url"] == "https://target.local/admin"
+    run_after = client.get(f"/api/test-runs/{run['id']}").json()
+    assert run_after["pages_discovered"] == 1
+
+
 def test_run_summary_prefers_live_scan_status(monkeypatch):
     from aespa import models as _models  # noqa: F401
     from aespa.api import test_runs as test_runs_api

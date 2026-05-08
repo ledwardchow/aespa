@@ -545,6 +545,8 @@ def _finding_from_llm(
     page_url: str,
     raw: dict,
     result_by_url: dict[str, dict],
+    validation_status: str = "validating",
+    validation_note: str | None = "Validation queued.",
 ) -> ScanFinding:
     probe_urls = list(result_by_url.keys())
     llm_url = (raw.get("affected_url") or "").strip()
@@ -583,8 +585,8 @@ def _finding_from_llm(
         request_evidence=request_evidence[:4000],
         response_evidence=response_evidence[:4000],
         screenshot_b64=matched.get("screenshot_b64"),
-        validation_status="validating",
-        validation_note="Validation queued.",
+        validation_status=validation_status,
+        validation_note=validation_note,
         created_at=_utcnow(),
     )
 
@@ -743,6 +745,8 @@ async def _persist_dynamic_finding(
             page_url=affected,
             raw=raw,
             result_by_url=result_by_url,
+            validation_status="unvalidated",
+            validation_note=None,
         )
         s.add(finding)
         s.commit()
