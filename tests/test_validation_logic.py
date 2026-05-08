@@ -1,6 +1,9 @@
 import asyncio
 
-from aespa.models import ScanFinding
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from aespa.models import CrawledPage, ScanFinding, Site, TestRun as RunModel
 from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
@@ -51,6 +54,97 @@ def test_scanner_login_url_for_credential_prefers_override():
         "https://target.local/login",
         _ScannerCredWithLogin(),
     ) == "https://target.local/customer/login"
+
+
+def test_dynamic_scan_creates_page_for_findings_without_crawl():
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page_id = scanner._find_or_create_dynamic_page(
+                session,
+                run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                base_url="https://target.local",
+            )
+            session.commit()
+
+            page = session.get(CrawledPage, page_id)
+            refreshed_run = session.get(RunModel, run.id)
+
+        assert page is not None
+        assert page.test_run_id == run.id
+        assert page.url == "https://target.local/api/accounts/1"
+        assert page.title == "Dynamic Scan target"
+        assert refreshed_run.pages_discovered == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_dynamic_scan_page_creation_reuses_existing_page():
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1", pages_discovered=1)
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            existing = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                title="Existing",
+            )
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+
+            page_id = scanner._find_or_create_dynamic_page(
+                session,
+                run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                base_url="https://target.local",
+            )
+            pages = session.exec(select(CrawledPage)).all()
+            refreshed_run = session.get(RunModel, run.id)
+
+        assert page_id == existing.id
+        assert len(pages) == 1
+        assert refreshed_run.pages_discovered == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_followup_log_message_names_signal_and_hypothesis():

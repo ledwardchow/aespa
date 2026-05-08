@@ -30,7 +30,7 @@ async def start_scan(run_id: int, session: Session = Depends(get_session)) -> Sc
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Thinking scan already running")
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     await scanner_svc.start_scan(run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
 
@@ -44,7 +44,7 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Thinking scan already running")
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -74,7 +74,7 @@ async def scan_single_page(
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Thinking scan already running")
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     page = session.get(CrawledPage, page_id)
     if page is None or page.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Page not found")
