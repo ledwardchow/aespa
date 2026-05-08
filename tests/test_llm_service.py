@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from types import SimpleNamespace
 
 from aespa.models import LLMConfig
@@ -120,6 +121,384 @@ The final answer was:
     extracted = llm._extract_message_text(message)
 
     assert llm._extract_json(extracted, expect=list)[0]["title"] == "Reflected XSS in Query Parameter"
+
+
+def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "http",
+          "method": "GET",
+          "url": "https://target.local/search?q=test",
+          "headers": {},
+          "body": null,
+          "observation": "search accepts a q parameter",
+          "hypothesis": "reflected input handling in search",
+          "payload_purpose": "baseline reflection probe",
+          "note": "Probe search reflection before adding XSS payloads."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/search [takes-input]",
+        history=[],
+        max_steps=80,
+        current_step=1,
+    ))
+
+    assert action["observation"] == "search accepts a q parameter"
+    assert "observation" in captured["prompt"]
+    assert "hypothesis" in captured["prompt"]
+    assert "payload_purpose" in captured["prompt"]
+    assert "found something interesting" in captured["prompt"]
+    assert "Raw asset and JavaScript mining" in captured["prompt"]
+    assert "endpoint inventory" in captured["prompt"]
+    assert "admin/admin123" in captured["prompt"]
+    assert "Business-logic gate bypass" in captured["prompt"]
+    assert "actual action endpoint directly without the required field" in captured["prompt"]
+    assert "individual detail endpoints" in captured["prompt"]
+    assert "SQL error disclosure" in captured["prompt"]
+    assert "/api/health" in captured["prompt"]
+    assert "jwt_secret" in captured["prompt"]
+    assert "CORS" in captured["prompt"]
+    assert "loan/account creation rules" in captured["prompt"]
+    assert '"action": "browser"' in captured["prompt"]
+    assert '"action": "jwt"' in captured["prompt"]
+    assert '"action": "credential_check"' in captured["prompt"]
+    assert "Maximum 20 candidates" in captured["prompt"]
+    assert "use_session" in captured["prompt"]
+    assert "Supported ops: goto, fill, type, click, press, wait, snapshot" in captured["prompt"]
+
+
+def test_thinking_next_action_history_includes_response_headers(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "http",
+          "method": "GET",
+          "url": "https://target.local/admin/",
+          "headers": {},
+          "body": null,
+          "observation": "homepage linked an admin panel",
+          "hypothesis": "admin panel may expose auth or asset clues",
+          "payload_purpose": null,
+          "note": "Fetch the admin panel after discovering the public link."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/",
+        history=[{
+            "step": 1,
+            "method": "GET",
+            "url": "https://target.local/",
+            "note": "Initial fingerprinting",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {
+                "content-type": "text/html",
+                "x-frame-options": "DENY",
+            },
+            "response_body": "<a href=\"/admin/\">Admin</a>",
+        }],
+        sessions=[{
+            "label": "found_admin_1",
+            "kind": "bearer",
+            "username": "admin",
+            "source": "credential_check",
+        }],
+        max_steps=120,
+        current_step=2,
+    ))
+
+    assert action["url"] == "https://target.local/admin/"
+    assert "Response headers:" in captured["prompt"]
+    assert "x-frame-options" in captured["prompt"]
+    assert "content-type" in captured["prompt"]
+    assert "found_admin_1" in captured["prompt"]
+    assert "secrets are not shown" in captured["prompt"]
+
+
+def test_thinking_next_action_compacts_large_history(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "history_search",
+          "args": {"query": "password_hash", "limit": 3},
+          "observation": "Earlier responses were summarized.",
+          "hypothesis": "A previous response may contain evidence worth reviewing.",
+          "payload_purpose": "Retrieve targeted history instead of resending all bodies.",
+          "note": "Search history for the sensitive field before writing a finding."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    history = [
+        {
+            "step": i,
+            "method": "GET",
+            "url": f"https://target.local/api/{i}",
+            "note": "Large response",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": "x" * 5000,
+        }
+        for i in range(20)
+    ]
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Target: https://target.local",
+        history=history,
+        max_steps=120,
+        current_step=21,
+    ))
+
+    assert action["action"] == "tool"
+    assert len(captured["prompt"]) < 35_000
+    assert "Earlier history: 15 step(s) summarized" in captured["prompt"]
+    assert "Use history_search to retrieve details" in captured["prompt"]
+
+
+def test_thinking_next_action_accepts_browser_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "browser",
+          "url": "https://target.local/banking/#/login",
+          "steps": [
+            {"op": "goto", "url": "https://target.local/banking/#/login"},
+            {"op": "fill", "selector": "input[name='email']", "value": "test@example.com"},
+            {"op": "fill", "selector": "input[name='password']", "value": "password123"},
+            {"op": "click", "selector": "button[type='submit']"},
+            {"op": "wait", "state": "networkidle"},
+            {"op": "snapshot"}
+          ],
+          "observation": "The login flow is client-side rendered behind a hash route.",
+          "hypothesis": "Browser execution may reveal authenticated API calls or DOM-only routes.",
+          "payload_purpose": "Exercise the JS login form instead of guessing API behavior.",
+          "note": "Use Playwright to execute the SPA login route and capture DOM/network evidence."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/banking/#/login [takes-input]",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "browser"
+    assert action["steps"][0]["op"] == "goto"
+    assert action["steps"][-1]["op"] == "snapshot"
+
+
+def test_thinking_next_action_accepts_jwt_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "jwt",
+          "secret": "test-secret",
+          "claims": {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+          "header": {"typ": "JWT", "alg": "HS256"},
+          "store_as": "customer_sub_1_token",
+          "observation": "/api/health exposed jwt_secret.",
+          "hypothesis": "The API may trust HS256 tokens signed with that secret.",
+          "payload_purpose": "Create a controlled read-only impersonation token.",
+          "note": "Forge a customer token, then use it on /api/profile."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="API endpoints:\n  https://target.local/api/health",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "jwt"
+    assert action["claims"]["sub"] == 1
+    assert action["store_as"] == "customer_sub_1_token"
+
+
+def test_thinking_next_action_accepts_credential_check_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "credential_check",
+          "url": "https://target.local/api/admin/auth/login",
+          "method": "POST",
+          "username_field": "username",
+          "password_field": "password",
+          "candidates": [
+            {"username": "admin", "password": "admin"},
+            {"username": "admin", "password": "admin123"}
+          ],
+          "headers": {"Content-Type": "application/json"},
+          "success_statuses": [200],
+          "observation": "The public admin login uses a default username placeholder.",
+          "hypothesis": "The demo admin account may still use a seeded password.",
+          "payload_purpose": "Try a tiny bounded dictionary, not brute force.",
+          "note": "Check two obvious admin credentials and record any success."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Application pages:\n  https://target.local/admin/",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "credential_check"
+    assert len(action["candidates"]) == 2
+    assert action["candidates"][1]["password"] == "admin123"
+
+
+def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "site_map",
+          "args": {"filter": "api takes-input", "limit": 10},
+          "observation": "Need endpoint inventory before probing.",
+          "hypothesis": "Input-taking APIs are likely high-value targets.",
+          "payload_purpose": "Fetch targeted crawl context.",
+          "note": "Fetch the API site map before choosing a probe."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: 20 pages. Use context tools for details.",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "tool"
+    assert action["tool"] == "site_map"
+    assert action["args"]["limit"] == 10
+    assert "Context tools:" in captured["prompt"]
+    assert "page_detail" in captured["prompt"]
+    assert "history_search" in captured["prompt"]
+
+
+def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "finding_write",
+          "owasp_category": "A05",
+          "title": "Verbose debug configuration disclosure",
+          "description": "The health endpoint exposes debug configuration.",
+          "impact": "Attackers can use leaked implementation details.",
+          "likelihood": "Likely because the endpoint is public.",
+          "recommendation": "Remove debug fields from public responses.",
+          "cvss_score": 5.3,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "severity": "medium",
+          "affected_url": "https://target.local/api/health",
+          "evidence": "Step 2 returned debug=true.",
+          "request_evidence": "GET https://target.local/api/health",
+          "response_evidence": "Status: 200\\n{debug:true}",
+          "observation": "The response exposed debug mode.",
+          "hypothesis": "This is a confirmed info disclosure.",
+          "payload_purpose": "Persist the finding.",
+          "note": "Record the confirmed debug disclosure."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: compact.",
+        history=[],
+        max_steps=120,
+        current_step=3,
+    ))
+
+    assert action["action"] == "finding_write"
+    assert action["title"] == "Verbose debug configuration disclosure"
+    assert action["affected_url"] == "https://target.local/api/health"
+
+
+def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):
+        captured: dict[str, str] = {}
+
+        async def fake_call(config, prompt, screenshot_b64):
+                captured["prompt"] = prompt
+                return """[
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "url": "https://target.local/api/transfers",
+                        "params": {},
+                        "headers": {},
+                        "body": {"amount":100},
+                        "as_user": null,
+                        "interesting_result": "2FA check returned requires_2fa=true",
+                        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+                        "payload_purpose": "omit 2FA token",
+                        "desc": "Follow-up: submit transfer without 2FA."
+                    }
+                ]"""
+
+        monkeypatch.setattr(llm, "_call", fake_call)
+
+        config = LLMConfig(provider="openai_compatible", model="local")
+        probes = asyncio.run(llm.plan_followup_probes(
+                config,
+                "https://target.local/transfer",
+                "Transfer page",
+                [{
+                        "desc": "2FA check",
+                        "url": "https://target.local/api/transfer/check",
+                        "status": 200,
+                        "body": '{"requires_2fa":true}',
+                        "response_evidence": "Status: 200\nrequires_2fa=true",
+                }],
+        ))
+
+        assert probes[0]["interesting_result"].startswith("2FA check")
+        assert "interesting_result" in captured["prompt"]
+        assert "hypothesis" in captured["prompt"]
+        assert "payload_purpose" in captured["prompt"]
+        assert "looked interesting" in captured["prompt"]
 
 
 def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
@@ -260,6 +639,59 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
     }
 
 
+def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {"profile_name": "bedrock-dev"}
+    assert captured["client"] == {
+        "service_name": "bedrock-runtime",
+        "region_name": "us-east-1",
+        "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    }
+    assert captured["converse"] == {
+        "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+        "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
+    }
+
+
 def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     captured: dict[str, str] = {}
 
@@ -300,3 +732,50 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert "CVSS v3.1" in captured["prompt"]
     assert "GET /search" in captured["prompt"]
     assert "HTTP/1.1 200" in captured["prompt"]
+
+
+def test_analyse_probes_chunks_large_result_sets(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):
+        prompts.append(prompt)
+        if len(prompts) == 2:
+            return """
+            [{
+              "owasp_category": "A05",
+              "severity": "low",
+              "title": "Verbose error response",
+              "description": "A probe returned a verbose framework error.",
+              "impact": "Attackers can use implementation details to refine attacks.",
+              "likelihood": "Likely when the endpoint is reachable anonymously.",
+              "recommendation": "Return generic errors and log details server-side.",
+              "cvss_score": 3.1,
+              "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "affected_url": "https://target.local/error/2",
+              "evidence": "Stack trace was returned in the response."
+            }]
+            """
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_TEXT_BUDGET", 100_000)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_PER_BATCH", 2)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    results = [
+        {
+            "desc": f"Verbose error probe {index}",
+            "url": f"https://target.local/error/{index}",
+            "status": 500,
+            "headers": {"content-type": "text/plain"},
+            "body": "Traceback " + ("x" * 600),
+            "request_evidence": f"GET /error/{index} HTTP/1.1",
+            "response_evidence": "HTTP/1.1 500\n" + ("stack trace " * 80),
+        }
+        for index in range(6)
+    ]
+
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local", results))
+
+    assert len(prompts) == 3
+    assert findings[0]["title"] == "Verbose error response"

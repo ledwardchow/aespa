@@ -1,6 +1,10 @@
 import asyncio
 
-from aespa.models import ScanFinding
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from aespa.models import CrawledPage, ScanFinding, Site
+from aespa.models import TestRun as RunModel
 from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
@@ -40,6 +44,252 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
     verdict, reason = result
     assert verdict == "unconfirmed"
     assert "no alternate user sessions" in reason
+
+
+class _ScannerCredWithLogin:
+    login_url = "https://target.local/customer/login"
+
+
+def test_scanner_login_url_for_credential_prefers_override():
+    assert scanner._login_url_for_credential(
+        "https://target.local/login",
+        _ScannerCredWithLogin(),
+    ) == "https://target.local/customer/login"
+
+
+def test_dynamic_scan_creates_page_for_findings_without_crawl():
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page_id = scanner._find_or_create_dynamic_page(
+                session,
+                run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                base_url="https://target.local",
+            )
+            session.commit()
+
+            page = session.get(CrawledPage, page_id)
+            refreshed_run = session.get(RunModel, run.id)
+
+        assert page is not None
+        assert page.test_run_id == run.id
+        assert page.url == "https://target.local/api/accounts/1"
+        assert page.title == "Dynamic Scan target"
+        assert refreshed_run.pages_discovered == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_dynamic_scan_page_creation_reuses_existing_page():
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1", pages_discovered=1)
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            existing = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                title="Existing",
+            )
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+
+            page_id = scanner._find_or_create_dynamic_page(
+                session,
+                run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                base_url="https://target.local",
+            )
+            pages = session.exec(select(CrawledPage)).all()
+            refreshed_run = session.get(RunModel, run.id)
+
+        assert page_id == existing.id
+        assert len(pages) == 1
+        assert refreshed_run.pages_discovered == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_dynamic_finding_write_persists_immediately(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/login",
+                title="API POST /api/login",
+                status="crawled",
+                in_scope=True,
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+
+            raw = {
+                "owasp_category": "A02",
+                "title": "Password hash exposed in login API response",
+                "description": "The login response exposes password_hash.",
+                "impact": "Attackers can use leaked hashes for offline cracking.",
+                "likelihood": "Likely for any user who can call the endpoint.",
+                "recommendation": "Remove password hashes from API responses.",
+                "cvss_score": 7.5,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+                "affected_url": page.url,
+                "evidence": "password_hash was present in the JSON response.",
+                "request_evidence": "POST /api/login",
+                "response_evidence": "Status: 200\n{\"password_hash\":\"...\"}",
+            }
+            result_by_url = {
+                page.url: {
+                    "url": page.url,
+                    "request_evidence": raw["request_evidence"],
+                    "response_evidence": raw["response_evidence"],
+                }
+            }
+
+            saved = asyncio.run(scanner._persist_dynamic_finding(
+                run_id=run.id,
+                llm_cfg=object(),
+                raw=raw,
+                base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
+            ))
+            duplicate = asyncio.run(scanner._persist_dynamic_finding(
+                run_id=run.id,
+                llm_cfg=object(),
+                raw=raw,
+                base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
+            ))
+
+            findings = session.exec(select(ScanFinding)).all()
+
+        assert saved is not None
+        assert saved.title == "Password hash exposed in login API response"
+        assert duplicate is None
+        assert len(findings) == 1
+        assert findings[0].validation_status == "unvalidated"
+        assert findings[0].validation_note is None
+        assert "password_hash" in findings[0].response_evidence
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_followup_log_message_names_signal_and_hypothesis():
+    probes = [{
+        "type": "http",
+        "method": "POST",
+        "url": "https://target.local/api/transfers",
+        "body": {"amount": 100, "toAccount": "10000001"},
+        "interesting_result": "2FA check returned requires_2fa=true",
+        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+        "payload_purpose": "omit the 2FA token from the transfer request",
+        "desc": "Follow-up: submit transfer without 2FA token.",
+    }]
+
+    message = scanner._followup_log_message(probes)
+
+    assert "looked interesting" not in message
+    assert "2FA check returned requires_2fa=true" in message
+    assert "transfer endpoint may not enforce 2FA" in message
+    assert "omit the 2FA token" in message
+
+
+def test_thinking_jwt_helper_signs_hs256_token():
+    token = scanner._sign_hs256_jwt(
+        "test-secret",
+        {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+    )
+
+    header, payload, signature = token.split(".")
+
+    assert header
+    assert payload
+    assert signature
+    assert token == scanner._sign_hs256_jwt(
+        "test-secret",
+        {"iss": "BankOfEd", "sub": 1, "jti": "aespa-test"},
+    )
+
+
+def test_credential_check_redacts_passwords():
+    redacted = scanner._redact_candidate({
+        "username": "admin",
+        "password": "admin123",
+    })
+
+    assert redacted == {"username": "admin", "password": "***"}
+
+
+def test_thinking_session_helpers_extract_and_redact_jwt():
+    token = scanner._sign_hs256_jwt("secret", {"sub": 1})
+    body = f'{{"success":true,"data":{{"token":"{token}"}}}}'
+
+    assert scanner._extract_bearer_token_from_body(body) == token
+    assert token not in scanner._redact_sensitive_text(body)
+    assert "[REDACTED_JWT]" in scanner._redact_sensitive_text(body)
 
 
 def test_spa_shell_is_not_treated_as_protected_content():
@@ -167,6 +417,72 @@ def test_bac_check_uses_llm_generated_finding_text(monkeypatch):
     assert captured["results"][0]["as_user"] == "bob"
 
 
+def test_thinking_context_tools_filter_routes_and_history():
+    pages = [
+        {
+            "id": 1,
+            "url": "https://target.local/",
+            "title": "Home",
+            "context": "landing page",
+            "page_text": "<html>Home</html>",
+            "req_auth": False,
+            "takes_input": False,
+            "has_object_ref": False,
+            "has_business_logic": False,
+        },
+        {
+            "id": 2,
+            "url": "https://target.local/api/search?q=test",
+            "title": "API GET /api/search",
+            "context": "search endpoint",
+            "page_text": "GET /api/search?q=test\nHTTP/1.1 200 OK",
+            "req_auth": True,
+            "takes_input": True,
+            "has_object_ref": False,
+            "has_business_logic": False,
+        },
+    ]
+    history = [{
+        "step": 1,
+        "method": "GET",
+        "url": "https://target.local/api/search?q=test",
+        "note": "Baseline search",
+        "request_body": None,
+        "response_status": 200,
+        "response_headers": {"content-type": "application/json"},
+        "response_body": '{"results":[]}',
+    }]
+
+    site_map = scanner._run_thinking_context_tool(
+        "site_map",
+        {"filter": "api takes-input", "flags": ["takes_input"]},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+    detail = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2, "include": ["context", "page_text"]},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+    history_result = scanner._run_thinking_context_tool(
+        "history_search",
+        {"query": "Baseline"},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+
+    assert site_map["count"] == 1
+    assert site_map["routes"][0]["page_id"] == 2
+    assert detail["context"] == "search endpoint"
+    assert "GET /api/search" in detail["page_text"]
+    assert history_result["count"] == 1
+    assert history_result["matches"][0]["response_status"] == 200
+
+
 def test_request_stop_cancels_running_validation(monkeypatch):
     class FakeTask:
         cancelled = False
@@ -266,3 +582,29 @@ def test_input_validation_probes_include_expanded_sqli_and_xss_payloads():
     assert "pg_sleep" in text
     assert "onfocus" in text
     assert "%253Cscript%253Ealert%281%29%253C%2Fscript%253E" in text
+
+
+def test_thinking_action_log_message_describes_investigation_and_payload():
+    action = {
+        "note": "Found something interesting.",
+        "observation": "search reflected the q parameter in HTML",
+        "hypothesis": "reflected XSS in the search endpoint",
+        "payload_purpose": (
+            "inject an event-handler payload to test script execution context"
+        ),
+        "body": {"q": "\" autofocus onfocus=alert(1) x=\""},
+    }
+
+    message = scanner._thinking_action_log_message(
+        4,
+        "POST",
+        "https://target.local/search?debug=true",
+        action,
+    )
+
+    assert "Found something interesting" not in message
+    assert "reflected XSS in the search endpoint" in message
+    assert "search reflected the q parameter" in message
+    assert "event-handler payload" in message
+    assert "query payloads: debug=true" in message
+    assert "body payload:" in message

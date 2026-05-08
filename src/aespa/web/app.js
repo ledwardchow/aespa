@@ -38,18 +38,21 @@ const api = {
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
+  startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
+  getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
+  getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
+  importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
-  getRunScanPolicy:      (id)       => req(`/api/test-runs/${id}/scan/policy`),
-  updateRunScanPolicy:   (id,b)     => req(`/api/test-runs/${id}/scan/policy`, { method:"PATCH", body:b }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
@@ -131,8 +134,9 @@ const csv = (value, transform=(x)=>x) => String(value||"")
 const defaultPolicyForm = () => ({
   scan_mode:"safe_active",
   max_probes_per_page:50,
+  thinking_max_steps:120,
   request_timeout_s:10,
-  min_delay_s:0.2,
+  min_delay_s:0.05,
   max_request_body_bytes:65536,
   response_body_read_limit_bytes:524288,
   allowed_schemes:"http, https",
@@ -153,6 +157,7 @@ const policyToForm = (p) => {
     ...f,
     scan_mode:p.scan_mode || f.scan_mode,
     max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
+    thinking_max_steps:p.thinking_max_steps ?? f.thinking_max_steps,
     request_timeout_s:p.request_timeout_s ?? f.request_timeout_s,
     min_delay_s:p.min_delay_s ?? f.min_delay_s,
     max_request_body_bytes:p.max_request_body_bytes ?? f.max_request_body_bytes,
@@ -171,6 +176,7 @@ const policyToForm = (p) => {
 const policyPayload = (form) => ({
   scan_mode:form.scan_mode,
   max_probes_per_page:Number(form.max_probes_per_page),
+  thinking_max_steps:Number(form.thinking_max_steps),
   request_timeout_s:Number(form.request_timeout_s),
   min_delay_s:Number(form.min_delay_s),
   max_request_body_bytes:Number(form.max_request_body_bytes),
@@ -340,14 +346,35 @@ function SiteDetail({ siteId }) {
   const [site, setSite]   = useState(null);
   const [runs, setRuns]   = useState(null);
   const [error, setError] = useState(null);
+  const [editingRun, setEditingRun]   = useState(null);   // run object being edited
+  const [editForm, setEditForm]       = useState({});
+  const [editProfiles, setEditProfiles] = useState([]);
+  const [editSaving, setEditSaving]   = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([api.getSite(siteId), api.listRuns(siteId)]);
-      setSite(s); setRuns(r);
+      const [s, r, p] = await Promise.all([api.getSite(siteId), api.listRuns(siteId), api.listLLMProfiles()]);
+      setSite(s); setRuns(r); setEditProfiles(p || []);
     } catch(e) { setError(e.message); }
   }, [siteId]);
   useEffect(() => { load(); }, [load]);
+
+  const openEdit = (run) => {
+    setEditForm({ max_depth: run.max_depth, max_pages: run.max_pages, llm_config_id: run.llm_config_id || "" });
+    setEditingRun(run);
+  };
+  const saveEdit = async () => {
+    setEditSaving(true);
+    try {
+      const updated = await api.updateRun(editingRun.id, {
+        max_depth: Number(editForm.max_depth),
+        max_pages: Number(editForm.max_pages),
+        llm_config_id: editForm.llm_config_id ? Number(editForm.llm_config_id) : null,
+      });
+      setRuns(rs => rs.map(r => r.id === updated.id ? updated : r));
+      setEditingRun(null);
+    } catch(e) { setError(e.message); } finally { setEditSaving(false); }
+  };
 
   const deleteRun = async (run) => {
     if (!confirm(`Delete run "${run.name}"?`)) return;
@@ -370,6 +397,34 @@ function SiteDetail({ siteId }) {
     <div className="content scroll-content stack">
       ${error && html`<div className="alert error">${error}</div>`}
 
+      ${editingRun && html`
+        <div className="card" style=${{padding:"20px 24px", border:"1px solid var(--accent)", marginBottom:8}}>
+          <div style=${{fontWeight:700, marginBottom:14}}>Edit run: ${editingRun.name}</div>
+          <div className="two-col" style=${{gap:12, marginBottom:12}}>
+            <div className="field" style=${{margin:0}}>
+              <label>Max depth</label>
+              <input type="number" min="1" max="10" value=${editForm.max_depth}
+                onInput=${e=>setEditForm(f=>({...f, max_depth:e.target.value}))} style=${{width:80}}/>
+            </div>
+            <div className="field" style=${{margin:0}}>
+              <label>Max pages</label>
+              <input type="number" min="5" max="500" value=${editForm.max_pages}
+                onInput=${e=>setEditForm(f=>({...f, max_pages:e.target.value}))} style=${{width:90}}/>
+            </div>
+          </div>
+          <div className="field" style=${{marginBottom:14}}>
+            <label>LLM profile <span className="field-optional">(leave blank to use the globally active profile)</span></label>
+            <select className="select" value=${editForm.llm_config_id||""} onChange=${e=>setEditForm(f=>({...f, llm_config_id:e.target.value}))}>
+              <option value="">— Use global active profile —</option>
+              ${editProfiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+            </select>
+          </div>
+          <div className="row" style=${{gap:8}}>
+            <button className="btn sm" onClick=${saveEdit} disabled=${editSaving}>${editSaving?"Saving…":"Save"}</button>
+            <button className="btn ghost sm" onClick=${()=>setEditingRun(null)}>Cancel</button>
+          </div>
+        </div>`}
+
       ${site && html`
         <div className="card" style=${{padding:"16px 20px"}}>
           <div className="row spread">
@@ -385,6 +440,19 @@ function SiteDetail({ siteId }) {
             </div>
           </div>
           ${site.notes && html`<div style=${{marginTop:10,fontSize:13,color:"var(--muted)"}}>${site.notes}</div>`}
+          ${site.requires_auth && site.credentials.length > 0 && html`
+            <div className="site-credentials-list">
+              ${site.credentials.map(c => html`
+                <div key=${c.id} className="site-credential-row">
+                  <div>
+                    <div className="site-credential-name">${c.label || c.username}</div>
+                    ${c.label && html`<div className="site-credential-user">${c.username}</div>`}
+                  </div>
+                  <div className="site-credential-login mono">
+                    ${c.login_url || site.login_url || "No login URL"}
+                  </div>
+                </div>`)}
+            </div>`}
         </div>`}
 
       <div>
@@ -404,13 +472,17 @@ function SiteDetail({ siteId }) {
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
-                  <td><strong>${r.name}</strong></td>
+                  <td>
+                    <strong>${r.name}</strong>
+                    ${r.llm_config_id && html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>${(editProfiles.find(p=>p.id===r.llm_config_id)||{name:"LLM #"+r.llm_config_id}).name}</div>`}
+                  </td>
                   <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
                   <td className="subtle">${fmtDate(r.created_at)}</td>
                   <td>
                     <div className="row" style=${{justifyContent:"flex-end"}}>
                       <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${r.id}`)}>Open</button>
+                      <button className="btn secondary sm" onClick=${()=>openEdit(r)}>Edit</button>
                       <button className="btn danger-outline sm" onClick=${()=>deleteRun(r)}>Delete</button>
                     </div>
                   </td>
@@ -439,21 +511,26 @@ function SiteForm({ siteId }) {
         const d = await api.getSite(siteId);
         setForm({ name:d.name, base_url:d.base_url, requires_auth:d.requires_auth,
           login_url:d.login_url||"", notes:d.notes||"",
-          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||""})) });
+          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||""})) });
       } catch(e) { setError(e.message); } finally { setLoading(false); }
     })();
   }, [isEdit, siteId]);
 
   const upd = p => { setForm(f=>({...f,...p})); };
   const updC = (i,p) => setForm(f=>({...f,credentials:f.credentials.map((c,j)=>j===i?{...c,...p}:c)}));
-  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:""}] });
+  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:""}] });
   const rmC  = i  => upd({ credentials:form.credentials.filter((_,j)=>j!==i) });
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true);
     const payload = { name:form.name.trim(), base_url:form.base_url.trim(), requires_auth:form.requires_auth,
-      login_url:form.requires_auth?form.login_url.trim():null, notes:form.notes.trim()||null,
-      credentials:form.requires_auth?form.credentials.map(c=>({username:c.username,password:c.password,label:c.label||null})):[] };
+      login_url:form.requires_auth?(form.login_url.trim()||null):null, notes:form.notes.trim()||null,
+      credentials:form.requires_auth?form.credentials.map(c=>({
+        username:c.username,
+        password:c.password,
+        label:c.label||null,
+        login_url:c.login_url?.trim()||null,
+      })):[] };
     try {
       if (isEdit) { await api.updateSite(siteId,payload); nav(`#/sites/${siteId}`); }
       else        { const s = await api.createSite(payload); nav(`#/sites/${s.id}`); }
@@ -485,16 +562,17 @@ function SiteForm({ siteId }) {
             <span>This site requires authentication</span>
           </label>
           ${form.requires_auth && html`
-            <div className="field"><label>Login page URL</label>
-              <input type="url" required value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
+            <div className="field"><label>Default login page URL</label>
+              <input type="url" value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
             <fieldset><legend>Credentials</legend>
               ${form.credentials.length===0&&html`<div className="subtle">No credentials yet.</div>`}
               ${form.credentials.map((c,i)=>html`
                 <div className="cred-row" key=${i}>
                   <div className="field"><label>Username</label><input type="text" required value=${c.username} onChange=${e=>updC(i,{username:e.target.value})}/></div>
                   <div className="field"><label>Password</label><input type="text" required value=${c.password} onChange=${e=>updC(i,{password:e.target.value})}/></div>
+                  <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value=${c.login_url||""} placeholder=${form.login_url?`Uses default: ${form.login_url}`:"Required if no default login URL"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
                   <div className="field"><label>Label</label><input type="text" value=${c.label} placeholder="admin" onChange=${e=>updC(i,{label:e.target.value})}/></div>
-                  <div style=${{paddingBottom:1}}><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
+                  <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
                 </div>`)}
               <button type="button" className="btn secondary sm" onClick=${addC}><${IconPlus}/> Add credential</button>
             </fieldset>`}
@@ -510,16 +588,17 @@ function SiteForm({ siteId }) {
 // ── Test run form ─────────────────────────────────────────────────────────────
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, scan_mode:"safe_active" });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const upd = p => setForm(f=>({...f,...p}));
 
   useEffect(() => {
     (async () => {
       try {
-        const policy = await api.getScannerPolicy();
-        if (policy?.scan_mode) upd({scan_mode:policy.scan_mode});
+        const profs = await api.listLLMProfiles();
+        setProfiles(profs || []);
       } catch(e) { setError(e.message); }
     })();
   }, []);
@@ -531,7 +610,7 @@ function TestRunForm({ siteId }) {
         name: form.name.trim()||null,
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
-        scan_mode: form.scan_mode,
+        llm_config_id: form.llm_config_id || null,
       });
       nav(`#/runs/${run.id}`);
     } catch(e) { setError(e.message); setSaving(false); }
@@ -562,16 +641,18 @@ function TestRunForm({ siteId }) {
             <input type="number" required min="5" max="500" value=${form.max_pages} onChange=${e=>upd({max_pages:e.target.value})}/>
           </div>
         </div>
+        <div className="alert" style=${{marginTop:12}}>
+          This run will use the global scan policy from Settings.
+        </div>
         <div className="divider"/>
-        <div className="form-section-title">Scan Policy</div>
+        <div className="form-section-title">LLM Profile</div>
         <div className="field">
-          <label>Scan mode</label>
-          <select className="select" value=${form.scan_mode} onChange=${e=>upd({scan_mode:e.target.value})}>
-            ${SCAN_MODE_OPTIONS.map(([value,label])=>html`<option key=${value} value=${value}>${label}</option>`)}
+          <label>LLM profile <span className="field-optional">(optional — uses the globally active profile if not set)</span></label>
+          <select className="select" value=${form.llm_config_id||""} onChange=${e=>upd({llm_config_id:e.target.value?Number(e.target.value):null})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
           </select>
         </div>
-        <${ScanModeDefinitions} selected=${form.scan_mode}/>
-        <div className="divider"/>
         <div className="row spread">
           <button type="button" className="btn ghost" onClick=${()=>nav(`#/sites/${siteId}`)}>Cancel</button>
           <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
@@ -588,6 +669,8 @@ const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLO
 
 const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
 const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
+const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
+const isDynamicScanActive = (status) => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
 
 // Per-user palette (index into credentials array)
 const USER_PALETTE = ["#f97316","#06b6d4","#a855f7","#f59e0b","#10b981","#ec4899"];
@@ -604,14 +687,21 @@ const userColor = (d, credentials) => {
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
   const scanStatus = opts.scanStatus || run.scan_status || "idle";
+  const thinkingStatus = opts.thinkingStatus || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
-  if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
+  if (opts.scanStopping) return { key:"stopping", label:"stopping Structured Scan" };
+  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };
   if (run.status === "running") return { key:"running", label:"crawling" };
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
-  if (scanStatus === "running") return { key:"running", label:"scanning" };
-  if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
+  if (thinkingStatus === "running") return { key:"running", label:"Dynamic Scan" };
+  if (thinkingStatus === "analysing") return { key:"running", label:"analysing Dynamic Scan" };
+  if (scanStatus === "running") return { key:"running", label:"Structured Scan" };
+  if (thinkingStatus === "failed") return { key:"danger", label:"Dynamic Scan failed" };
+  if (scanStatus === "failed") return { key:"danger", label:"Structured Scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
-  if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
+  if (thinkingStatus === "stopped") return { key:"neutral", label:"Dynamic Scan stopped" };
+  if (scanStatus === "stopped") return { key:"neutral", label:"Structured Scan stopped" };
+  if (thinkingStatus === "complete") return { key:"ok", label:"Dynamic Scan complete" };
   if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
   if (run.status === "complete") return { key:"partial", label:"crawl complete" };
   return { key:"neutral", label:run.status || "pending" };
@@ -624,6 +714,7 @@ const workflowBadge = (run, opts = {}) => {
 
 function TestRunDetail({ runId }) {
   const [run, setRun]           = useState(null);
+  const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
   const [selectedNode, setSelNode] = useState(null);
   const [pageDetail, setPageDetail] = useState(null);
@@ -638,9 +729,23 @@ function TestRunDetail({ runId }) {
   const [editingSettings, setEditingSettings] = useState(false);
   const [editDepth, setEditDepth] = useState("");
   const [editPages, setEditPages] = useState("");
+  const [editLlmProfileId, setEditLlmProfileId] = useState(null);
+  const [runProfiles, setRunProfiles] = useState([]);
+
+  // Load LLM profiles once so the read-only display and edit dropdown both work.
+  useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
   const [scanStatus, setScanStatus]         = useState(null);
+  const [activityLog, setActivityLog]       = useState([]);
+  const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
+  const toggleLogId = (id) => setExpandedLogIds(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
+  const [sitePlanData, setSitePlanData]     = useState(null);
+  const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [scanStopRequested, setScanStopRequested]   = useState(false);
+  const [thinkingStatus, setThinkingStatus]         = useState(null);
+  const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [findings, setFindings]             = useState([]);
@@ -658,6 +763,7 @@ function TestRunDetail({ runId }) {
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
+  const issueImportInputRef                 = useRef(null);
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
@@ -668,9 +774,30 @@ function TestRunDetail({ runId }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+      api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
+      api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Seed activity log from persisted DB entries on mount so it survives navigation.
+  useEffect(() => {
+    api.getScanLog(runId).then(entries => {
+      if (!entries || entries.length === 0) return;
+      setActivityLog(
+        entries.map(e => {
+          const ts = e._persisted_at
+            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
+        })
+      );
+      // Restore site plan data from persisted log.
+      const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
+      if (planComplete) setSitePlanData(planComplete.data);
+    }).catch(() => {});
+  }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
@@ -719,6 +846,19 @@ function TestRunDetail({ runId }) {
       } else if (evt.type === "scan_update") {
         setScanStatus(evt);
         if (evt.status && evt.status !== "running") setScanStopRequested(false);
+      } else if (evt.type === "thinking_scan_update") {
+        setThinkingStatus(evt);
+        if (evt.status && !isDynamicScanActive(evt.status)) setThinkingStopReq(false);
+      } else if (evt.type === "scanner_phase") {
+        setActivityLog(prev => {
+          const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          const entry = { ...evt, _ts: ts, _id: Date.now() + Math.random() };
+          const next = [...prev, entry];
+          return next.length > 500 ? next.slice(-500) : next;
+        });
+        if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
+          setSitePlanData(evt.data);
+        }
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -765,6 +905,20 @@ function TestRunDetail({ runId }) {
     return () => clearInterval(iv);
   }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
 
+  // Poll thinking-scan status independently.
+  useEffect(() => {
+    const active = isDynamicScanActive(thinkingStatus?.status) || thinkingStopRequested;
+    if (!active) return;
+    const iv = setInterval(() => {
+      api.getThinkingStatus(runId).then(s => {
+        setThinkingStatus(s);
+        if (thinkingStopRequested && !isDynamicScanActive(s.status)) setThinkingStopReq(false);
+        if (!isDynamicScanActive(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [runId, thinkingStatus?.status, thinkingStopRequested]);
+
   // Poll validation status while validating is running
   useEffect(() => {
     if (validateStatus?.status !== "running" && activeTab !== "findings") return;
@@ -788,6 +942,7 @@ function TestRunDetail({ runId }) {
   useEffect(() => {
     if (activeTab !== "scan") return;
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+    api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
@@ -810,20 +965,28 @@ function TestRunDetail({ runId }) {
       activeTab === "traffic" ||
       run?.status === "running" ||
       scanStatus?.status === "running" ||
+      isDynamicScanActive(thinkingStatus?.status) ||
       crawlStopRequested ||
-      scanStopRequested
+      scanStopRequested ||
+      thinkingStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, runId, crawlStopRequested, scanStopRequested]);
+  }, [activeTab, run?.status, scanStatus?.status, thinkingStatus?.status, runId, crawlStopRequested, scanStopRequested, thinkingStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
     if (!autoScroll || activeTab !== "traffic" || !trafficTableRef.current) return;
     trafficTableRef.current.scrollTop = trafficTableRef.current.scrollHeight;
   }, [traffic.length, activeTab, autoScroll]);
+
+  // Auto-scroll activity feed when new entries arrive
+  useEffect(() => {
+    if (activeTab !== "activity" || !activityFeedRef.current) return;
+    activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
+  }, [activityLog.length, activeTab]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -1044,7 +1207,7 @@ function TestRunDetail({ runId }) {
   const onStartScan = async () => {
     try {
       setScanStopRequested(false);
-      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      const policy = await api.getScannerPolicy();
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
         const ok = confirm(
@@ -1067,7 +1230,7 @@ function TestRunDetail({ runId }) {
     setScopeBusy(true);
     try {
       setScanStopRequested(false);
-      const policy = run?.scanner_policy || await api.getRunScanPolicy(runId);
+      const policy = await api.getScannerPolicy();
       if (["aggressive", "destructive"].includes(policy.scan_mode)) {
         const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
         const ok = confirm(
@@ -1112,6 +1275,37 @@ function TestRunDetail({ runId }) {
     } catch(err) { setError(err.message); setValidateBusy(false); }
   };
 
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        siteName,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, siteName), md, "text/markdown;charset=utf-8");
+    } catch(err) { setError(err.message); }
+  };
+
+  const onImportFindingsClick = () => {
+    issueImportInputRef.current?.click();
+  };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importFindings(runId, imported);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
+      setRun(r); setGraph(g);
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(err) { setError(err.message); }
+  };
+
   const onValidateFinding = async (e, findingId) => {
     e.stopPropagation();
     try {
@@ -1141,9 +1335,28 @@ function TestRunDetail({ runId }) {
     } catch(e) { setScanStopRequested(false); setError(e.message); }
   };
 
+  const onStopThinkingScan = async () => {
+    try {
+      setThinkingStopReq(true);
+      const s = await api.stopThinkingScan(runId);
+      setThinkingStatus(s);
+      if (!isDynamicScanActive(s.status)) setThinkingStopReq(false);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
+  const onStartThinkingScan = async () => {
+    try {
+      setThinkingStopReq(false);
+      setThinkingStatus({ status: "running" });
+      const s = await api.startThinkingScan(runId);
+      setThinkingStatus(s);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
+    setEditLlmProfileId(run.llm_config_id || null);
     setEditingSettings(true);
   };
   const onSaveSettings = async () => {
@@ -1151,7 +1364,7 @@ function TestRunDetail({ runId }) {
     const p = parseInt(editPages, 10);
     if (!d || !p || d < 1 || d > 10 || p < 5 || p > 500) return;
     try {
-      const r = await api.updateRun(runId, { max_depth: d, max_pages: p });
+      const r = await api.updateRun(runId, { max_depth: d, max_pages: p, llm_config_id: editLlmProfileId || null });
       setRun(r);
       setEditingSettings(false);
     } catch(e) { setError(e.message); }
@@ -1212,11 +1425,16 @@ function TestRunDetail({ runId }) {
     } catch(e) { setError(e.message); }
   };
 
-  const effectiveScanStatus = scanStatus?.status || run?.scan_status || "idle";
+  const rawScanStatus           = scanStatus?.status     || run?.scan_status || "idle";
+  const effectiveThinkingStatus = thinkingStatus?.status || "idle";
+  const dynamicScanActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
+  const effectiveScanStatus = dynamicScanActive && rawScanStatus === "running" ? "idle" : rawScanStatus;
   const headerStatus = runWorkflowStatus(run, {
     scanStatus: effectiveScanStatus,
+    thinkingStatus: effectiveThinkingStatus,
     crawlStopping: crawlStopRequested,
     scanStopping: scanStopRequested,
+    thinkingStopping: thinkingStopRequested,
   });
   const STATUS_COLOR = {
     neutral:"var(--muted)",
@@ -1230,18 +1448,29 @@ function TestRunDetail({ runId }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
+  const canStopScan = effectiveScanStatus === "running";
+  const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
+  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !isDynamicScanActive(effectiveThinkingStatus);
 
   return html`
     <div className="topbar">
-      <div className="topbar-title">
-        <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>Site</a>
-        <span className="breadcrumb-sep"> / </span>
-        ${run ? run.name : "…"}
-        ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+      <div className="topbar-title" style=${{flexDirection:"column",alignItems:"flex-start",gap:2}}>
+        <div className="row" style=${{alignItems:"center",gap:0}}>
+          <a href=${run?`#/sites/${run.site_id}`:"#/"} style=${{color:"var(--muted)",fontWeight:400}}>${siteName || "Site"}</a>
+          <span className="breadcrumb-sep"> / </span>
+          ${run ? run.name : "…"}
+          ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
+        </div>
+        ${run && run.llm_config_id && runProfiles.length > 0 && html`
+          <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
+            LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
+          </div>`}
       </div>
       <div className="topbar-actions">
-        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop</button>`}
+        ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
+        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop Structured Scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
       </div>
     </div>
 
@@ -1251,10 +1480,12 @@ function TestRunDetail({ runId }) {
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")}
+        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
           onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
-        <button className=${"tab-btn"+(activeTab==="policy"?" active":"")}
-          onClick=${()=>{ setActiveTab("policy"); setSelNode(null); }}>Scan Policy</button>
+        <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
+          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
+          Activity${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1275,10 +1506,16 @@ function TestRunDetail({ runId }) {
         ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
         ${activeTab==="scan" && effectiveScanStatus==="running" && html`
           <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping scan…" : "◼ Stop scan"}
+            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop Structured Scan"}
           </button>`}
-        ${activeTab==="scan" && !scanStopRequested && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && run?.status!=="running" && !crawlStopRequested && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStartScan}><${IconPlay}/> Start scan</button>`}
+        ${activeTab==="scan" && canStopThinking && html`
+          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
+            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop Dynamic Scan"}
+          </button>`}
+        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title=${!graph||graph.nodes.length===0 ? "No site map yet — crawl first" : "Run the Structured Scan page-by-page scanner"} onClick=${onStartScan} disabled=${!graph||graph.nodes.length===0}><${IconPlay}/> Start Structured Scan</button>`}
+        ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the adaptive Dynamic Scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -1310,6 +1547,11 @@ function TestRunDetail({ runId }) {
               <span className="run-stat-val">${run.max_pages}</span>
               <span className="run-stat-lbl">Max pages</span>
             </div>
+            ${run.llm_config_id && runProfiles.length > 0 && html`
+              <div className="run-stat">
+                <span className="run-stat-val" style=${{fontSize:12}}>${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}</span>
+                <span className="run-stat-lbl">LLM profile</span>
+              </div>`}
             ${run.status !== "running" && html`
               <button className="btn ghost sm" style=${{alignSelf:"center",marginLeft:4}}
                 title="Edit depth / pages" onClick=${onEditSettings}>✎</button>`}
@@ -1327,21 +1569,27 @@ function TestRunDetail({ runId }) {
         </div>
         ${(()=>{
           if (activeTab === "scan") {
-            if (!scanStatus || (scanStatus.status === "idle" && scanStatus.pages_done === 0)) return null;
-            const total   = scanStatus.total_pages || 0;
-            const done    = scanStatus.pages_done  || 0;
+            const thinkingActive = isDynamicScanActive(thinkingStatus?.status);
+            const showNormalScan = scanStatus &&
+              !thinkingActive &&
+              !(scanStatus.status === "idle" && scanStatus.pages_done === 0) &&
+              !(thinkingStatus?.status === "complete" && scanStatus.status === "complete");
+            const showThinkingScan = thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle";
+            if (!showNormalScan && !showThinkingScan) return null;
+            const total   = scanStatus?.total_pages || 0;
+            const done    = scanStatus?.pages_done  || 0;
             const scanPct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
             const currentPage = graph?.nodes.find(n => n.scan_status === "running");
-            return html`
+            const normalScanStrip = showNormalScan ? html`
               <div className="scan-progress-strip">
                 <div className="scan-progress-bar">
                   <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
                 </div>
                 <div className="scan-progress-strip-row">
                   <span className="scan-progress-counts">
-                    ${scanStopRequested ? "Stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
+                    Structured Scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
                   </span>
-                  ${scanStatus.findings_count > 0 && html`
+                  ${(scanStatus?.findings_count || 0) > 0 && html`
                     <span className="scan-progress-findings">
                       ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
                     </span>`}
@@ -1350,6 +1598,30 @@ function TestRunDetail({ runId }) {
                       ${truncUrl(currentPage.url, 48)}
                     </span>`}
                 </div>
+              </div>` : null;
+            const thinkingLabel = thinkingStopRequested ? "stop requested" : (
+              thinkingStatus?.status === "running" ? "running" :
+              thinkingStatus?.status === "analysing" ? "analysing probe results" :
+              thinkingStatus?.status === "stopping" ? "stopping after current step, then analysing findings" :
+              thinkingStatus?.status === "complete" ? "complete" :
+              thinkingStatus?.status === "stopped" ? "stopped, findings processed" :
+              thinkingStatus?.status === "failed" ? "failed" : thinkingStatus?.status
+            );
+            const thinkingStrip = showThinkingScan ? html`
+              <div className="scan-progress-strip">
+                <div className="scan-progress-strip-row">
+                  <span className="scan-progress-counts">Dynamic Scan: ${thinkingLabel}</span>
+                  ${(thinkingStatus?.findings_count || 0) > 0 && html`
+                    <span className="scan-progress-findings">
+                      ${thinkingStatus.findings_count} finding${thinkingStatus.findings_count !== 1 ? "s" : ""}
+                    </span>`}
+                  <span className="scan-progress-url">Autonomous request-by-request assessment</span>
+                </div>
+              </div>` : null;
+            return html`
+              <div className="scan-progress-stack">
+                ${normalScanStrip}
+                ${thinkingStrip}
               </div>`;
           }
           const credList = run.credentials || [];
@@ -1386,16 +1658,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      ${activeTab==="policy" && html`
-        <${RunScannerPolicyPanel}
-          runId=${runId}
-          run=${run}
-          scanStatus=${scanStatus}
-          validateStatus=${validateStatus}
-          onSaved=${policy=>setRun(r=>r?{...r, scan_mode:policy.scan_mode, scanner_policy:policy}:r)}
-        />`}
-
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="policy") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1403,10 +1666,12 @@ function TestRunDetail({ runId }) {
                 ? html`<div style=${{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
                     <span>Ready to crawl.</span>
                     <button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>
+                    <span className="subtle" style=${{fontSize:12}}>or</span>
+                    <button className="btn" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>
                   </div>`
                 : html`<span>No pages discovered yet.</span>`}
             </div>`}
-          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%"></svg>
+          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%" style=${{pointerEvents: (!graph || graph.nodes.length === 0) ? "none" : "all"}}></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
               ${activeTab === "scan" ? html`
@@ -1486,18 +1751,24 @@ function TestRunDetail({ runId }) {
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>
                     Views by User
                   </div>
-                  ${pageViews.map(v => html`
-                    <div key=${v.id} className="credential-view-card">
-                      <div className="credential-view-label">
-                        ${v.username || "Anonymous"}
-                      </div>
-                      ${v.screenshot_b64 && html`
-                        <img src=${"data:image/png;base64,"+v.screenshot_b64}
-                          className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
-                      <div className="credential-view-context">
-                        ${v.llm_context || "No context."}
-                      </div>
-                    </div>`)}
+                  ${pageViews.map(v => {
+                    const apiTranscript = apiTranscriptText(v.page_text || pageDetail.page_text);
+                    return html`
+                      <div key=${v.id} className="credential-view-card">
+                        <div className="credential-view-label">
+                          ${v.username || "Anonymous"}
+                        </div>
+                        ${v.screenshot_b64 && html`
+                          <img src=${"data:image/png;base64,"+v.screenshot_b64}
+                            className="credential-view-screenshot" alt=${"screenshot ("+v.username+")"}/>`}
+                        ${!v.screenshot_b64 && apiTranscript && html`
+                          <div className="api-transcript-label">API Request / Response</div>
+                          <pre className="api-transcript">${apiTranscript}</pre>`}
+                        <div className="credential-view-context">
+                          ${v.llm_context || "No context."}
+                        </div>
+                      </div>`;
+                  })}
                 ` : html`
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>LLM Context</div>
                   <div className="graph-panel-context">${pageDetail.llm_context || "No context available."}</div>
@@ -1505,6 +1776,9 @@ function TestRunDetail({ runId }) {
                     <div className="graph-panel-section-label" style=${{marginTop:12}}>Screenshot</div>
                     <img src=${`data:image/png;base64,${pageDetail.screenshot_b64}`}
                       style=${{width:"100%",borderRadius:6,border:"1px solid var(--border)"}} alt="screenshot"/>`}
+                  ${!pageDetail.screenshot_b64 && apiTranscriptText(pageDetail.page_text) && html`
+                    <div className="graph-panel-section-label" style=${{marginTop:12}}>API Request / Response</div>
+                    <pre className="api-transcript">${apiTranscriptText(pageDetail.page_text)}</pre>`}
                 `}
               </div>` : html`<div className="subtle" style=${{padding:12}}>Loading…</div>`}
           </div>`}
@@ -1513,17 +1787,27 @@ function TestRunDetail({ runId }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && html`
+            ${scanStatus && !dynamicScanActive && html`
               <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
                 ${scanStopRequested ? "Stopping scan…" :
-                  scanStatus.status==="running" ? "Scanning…" :
-                  scanStatus.status==="complete" ? "Scan complete" :
-                  scanStatus.status==="stopped"  ? "Scan stopped" :
-                  scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
+                  scanStatus.status==="running" ? "Structured Scan running…" :
+                  scanStatus.status==="complete" ? "Structured Scan complete" :
+                  scanStatus.status==="stopped"  ? "Structured Scan stopped" :
+                  scanStatus.status==="failed"   ? "Structured Scan failed"  : "Not scanned"}
               </span>`}
-            ${scanStatus?.status==="running" && html`
+            ${effectiveScanStatus==="running" && html`
               <span className="subtle" style=${{fontSize:12}}>
                 ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
+              </span>`}
+            ${thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && html`
+              <span className=${"scan-status-badge scan-status-"+(thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
+                ${thinkingStopRequested ? "Stopping Dynamic Scan…" :
+                  thinkingStatus.status==="running"   ? "Dynamic Scan running…" :
+                  thinkingStatus.status==="analysing" ? "Dynamic Scan analysing…" :
+                  thinkingStatus.status==="stopping"  ? "Dynamic Scan stopping…" :
+                  thinkingStatus.status==="complete"  ? "Dynamic Scan complete" :
+                  thinkingStatus.status==="stopped"   ? "Dynamic Scan stopped" :
+                  thinkingStatus.status==="failed"    ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
@@ -1536,14 +1820,27 @@ function TestRunDetail({ runId }) {
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
                 onClick=${onStopValidation}>Stop validation</button>`}
-            ${findings.length>0 && html`
-              <button className="btn sm" style=${{marginLeft:8}}
-                disabled=${validateBusy||validateStatus?.status==="running"}
-                onClick=${onValidateAll}>✓ Validate Issues</button>`}
+            <div className="row" style=${{gap:8,marginLeft:8}}>
+              ${findings.length>0 && html`
+                <button className="btn sm" onClick=${onExportFindingsMarkdown}>
+                  Export Issues
+                </button>`}
+              <button className="btn sm" onClick=${onImportFindingsClick}>
+                Import Issues
+              </button>
+              <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+                style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${validateBusy||validateStatus?.status==="running"}
+                  onClick=${onValidateAll}>✓ Validate Issues</button>`}
+            </div>
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
-                ${scanStatus?.status==="running" ? "Scanning… findings will appear here." : "No findings yet. Start a scan from the Scan Status tab."}
+                ${effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)
+                  ? "Scan running… findings will appear here."
+                  : "No findings yet. Start a scan from the Scan Status tab."}
               </div>`
             : html`
               <div className="findings-table-wrap">${(()=>{
@@ -1723,6 +2020,86 @@ function TestRunDetail({ runId }) {
               })()}
               </div>`}
         </div>`}
+
+      ${activeTab==="activity" && html`
+        <div className="activity-panel">
+          <div className="activity-feed" ref=${activityFeedRef}>
+            ${sitePlanData && html`
+              <div className="site-plan-card">
+                <div className="site-plan-header">
+                  <span className="site-plan-label">Site Test Plan</span>
+                  <span className="site-plan-badge">LLM Analysis</span>
+                </div>
+                <div className="site-plan-summary">${sitePlanData.app_summary}</div>
+                ${(sitePlanData.hypotheses||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Attack Hypotheses</div>
+                    <div className="hypotheses-list">
+                      ${(sitePlanData.hypotheses||[]).map((h, i) => html`
+                        <div key=${i} className="hypothesis-row">
+                          <span className="owasp-badge">${h.owasp || "?"}</span>
+                          <div className="hypothesis-body">
+                            <div className="hypothesis-label">${h.hypothesis}</div>
+                            <div className="hypothesis-desc">${h.description}</div>
+                          </div>
+                        </div>`)}
+                    </div>
+                  </div>`}
+                ${(sitePlanData.critical_areas||[]).length > 0 && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Critical Areas</div>
+                    <div className="critical-areas-list">
+                      ${(sitePlanData.critical_areas||[]).map((a, i) => html`<span key=${i} className="critical-area-tag">${a}</span>`)}
+                    </div>
+                  </div>`}
+                ${sitePlanData.test_notes && html`
+                  <div className="site-plan-section">
+                    <div className="site-plan-section-title">Test Notes</div>
+                    <div className="site-plan-notes">${sitePlanData.test_notes}</div>
+                  </div>`}
+              </div>`}
+            ${activityLog.length === 0 && html`
+              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
+              </div>`}
+            ${activityLog.map(entry => {
+              const PHASE_META = {
+                site_plan:     { label: "Plan",      cls: "phase-plan" },
+                page_plan:     { label: "Probes",    cls: "phase-probes" },
+                page_followup: { label: "Follow-up", cls: "phase-followup" },
+                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:         { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
+              };
+              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const isExpanded = expandedLogIds.has(entry._id);
+              return html`
+                <div key=${entry._id}>
+                  <div className=${"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")}
+                       onClick=${hasPayload ? () => toggleLogId(entry._id) : undefined}>
+                    <span className="activity-ts">${entry._ts}</span>
+                    <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
+                    ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
+                    <span className="activity-msg">${entry.message}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                  </div>
+                  ${isExpanded && html`
+                    <div className="activity-payload">
+                      ${entry.data?.prompt && html`
+                        <div className="activity-payload-label">Prompt</div>
+                        <pre>${entry.data.prompt}</pre>`}
+                      ${entry.data?.raw_response && html`
+                        <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
+                        <pre>${entry.data.raw_response}</pre>`}
+                    </div>`}
+                </div>`;
+            })}
+          </div>
+        </div>`}
+
       ${activeTab==="traffic" && html`
         <div className="traffic-panel">
           <div className="traffic-toolbar">
@@ -1768,7 +2145,7 @@ function TestRunDetail({ runId }) {
             </table>
             ${filteredTraffic.length===0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${run?.status==="running"||scanStatus?.status==="running"
+                ${run?.status==="running"||effectiveScanStatus==="running"||isDynamicScanActive(thinkingStatus?.status)
                   ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>`}
           </div>
@@ -1805,6 +2182,8 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <div className="two-col">
       <div className="field"><label>Max probes per page</label>
         <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
+      <div className="field"><label>Dynamic Scan max steps</label>
+        <input type="number" disabled=${disabled} min="1" max="1000" step="1" value=${form.thinking_max_steps} onChange=${e=>upd({thinking_max_steps:e.target.value})}/></div>
       <div className="field"><label>Request timeout (seconds)</label>
         <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
       <div className="field"><label>Minimum delay (seconds)</label>
@@ -1885,53 +2264,6 @@ function ScannerPolicySettings() {
       </form>`}`;
 }
 
-function RunScannerPolicyPanel({ runId, run, scanStatus, validateStatus, onSaved }) {
-  const [form, setForm] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState(null);
-  const disabled = run?.status === "running" || scanStatus?.status === "running" || validateStatus?.status === "running";
-  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-
-  useEffect(() => {
-    (async () => {
-      try { setForm(policyToForm(await api.getRunScanPolicy(runId))); }
-      catch(e) { setError(e.message); }
-    })();
-  }, [runId]);
-
-  const onSubmit = async (e) => {
-    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
-    try {
-      const policy = await api.updateRunScanPolicy(runId, policyPayload(form));
-      setForm(policyToForm(policy));
-      setSaved(true);
-      onSaved?.(policy);
-    } catch(e) { setError(e.message); } finally { setSaving(false); }
-  };
-
-  return html`
-    <div className="policy-panel">
-      ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
-      ${error&&html`<div className="alert error">${error}</div>`}
-      ${disabled&&html`<div className="alert" style=${{marginBottom:12}}>Scan policy is locked while crawl, scan, or validation is running.</div>`}
-      ${form&&html`
-        <form className="card" onSubmit=${onSubmit}>
-          <div className="policy-summary-row">
-            <span className=${"scan-mode-badge mode-"+form.scan_mode}>${scanModeLabel(form.scan_mode)}</span>
-            <span className="subtle">${form.max_probes_per_page} probes/page · ${form.request_timeout_s}s timeout · ${form.min_delay_s}s delay</span>
-          </div>
-          <div className="divider"/>
-          <${ScannerPolicyFields} form=${form} upd=${upd} disabled=${disabled}/>
-          <div className="divider"/>
-          <div className="row spread">
-            <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
-            <button type="submit" className="btn" disabled=${saving||disabled}>${saving?"Saving…":"Save run policy"}</button>
-          </div>
-        </form>`}
-    </div>`;
-}
-
 const PROVIDER_LABELS = {
   anthropic:"Anthropic", openai:"OpenAI",
   openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
@@ -1946,7 +2278,7 @@ const PROVIDER_PLACEHOLDERS = {
   openai_compatible:"e.g. llama-3.1-8b-instruct",
   openrouter:"e.g. openrouter/owl-alpha or a :free model id",
   google:"gemini-2.5-flash-preview-04-17",
-  bedrock:"e.g. anthropic.claude-3-7-sonnet-20250219-v1:0",
+  bedrock:"e.g. global.anthropic.claude-sonnet-4-6",
   azure_openai:"Deployment name, e.g. gpt-4o",
   azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
 };
@@ -1958,13 +2290,13 @@ const BASE_URL_LABELS = {
 };
 const BASE_URL_PLACEHOLDERS = {
   openai_compatible:"http://localhost:1234/v1",
-  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  bedrock:"https://bedrock-runtime.ap-southeast-2.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com/",
   azure_foundry:"https://models.inference.ai.azure.com",
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Use the Bedrock Runtime endpoint for the region where your model is available.",
+  bedrock:"Optional when using AWS SSO/profile credentials. If set, the region is inferred from this endpoint.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
 };
@@ -1983,12 +2315,12 @@ function llmProfileToForm(cfg) {
 }
 
 function llmPayload(form) {
-  const needsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
   return {
     name:form.name.trim(),
     provider:form.provider,
     api_key:form.api_key.trim()||null,
-    base_url:needsBaseUrl?form.base_url.trim():null,
+    base_url:supportsBaseUrl?(form.base_url.trim()||null):null,
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
@@ -2003,7 +2335,17 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => { const ms=dms[p]||[]; setCustomModel(false); upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
+  const changeProv = p => {
+    const ms=dms[p]||[];
+    setCustomModel(false);
+    upd({
+      provider:p,
+      model:ms[0]||"",
+      api_key:"",
+      base_url:p==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
+      max_tokens:p==="bedrock"?64000:4096,
+    });
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
@@ -2019,8 +2361,9 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","openrouter","google","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const optionalBaseUrl = form&&form.provider==="bedrock";
+  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2039,13 +2382,20 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       </div>
       <div className="divider"/>
       <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
-      ${needsBaseUrl&&html`
+      ${(needsBaseUrl||optionalBaseUrl)&&html`
         <div className="field">
-          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
-          <input type="url" required value=${form.base_url}
+          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}${optionalBaseUrl&&html` <span className="field-optional">(optional)</span>`}</label>
+          <input type="url" required=${needsBaseUrl} value=${form.base_url}
             placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
             onChange=${e=>upd({base_url:e.target.value})}/>
           ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
+        </div>`}
+      ${form.provider==="bedrock"&&html`
+        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+          <input type="password" value=${form.api_key}
+            placeholder="Leave blank to use AWS_PROFILE / AWS SSO credentials"
+            onChange=${e=>upd({api_key:e.target.value})}/>
+          <div className="field-hint">For SSO, run aws sso login outside Aespa and set AWS_PROFILE plus AWS_REGION/AWS_DEFAULT_REGION before starting the app.</div>
         </div>`}
       ${needsKey&&html`
         <div className="field"><label>API Key</label>
@@ -2076,7 +2426,7 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="32768" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+          <input type="number" required min="1" max="64000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
         <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
           <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
       </div>
@@ -2192,6 +2542,196 @@ function truncUrl(url, maxLen=40) {
     const s = u.hostname + u.pathname + u.hash;
     return s.length > maxLen ? s.slice(0, maxLen-1) + "…" : s;
   } catch { return url.slice(0, maxLen); }
+}
+
+function apiTranscriptText(text) {
+  if (!text) return "";
+  const value = String(text).trim();
+  return value.includes("REQUEST\n") && value.includes("RESPONSE\n") ? value : "";
+}
+
+function markdownText(value) {
+  return String(value ?? "").trim();
+}
+
+function markdownListValue(value) {
+  const text = markdownText(value);
+  return text || "—";
+}
+
+function markdownCodeBlock(value) {
+  const text = markdownText(value);
+  if (!text) return "—";
+  const fence = text.includes("```") ? "````" : "```";
+  return `${fence}\n${text}\n${fence}`;
+}
+
+function slugForFilename(value) {
+  return String(value || "issues")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "issues";
+}
+
+function markdownExportFilename(run, siteName) {
+  const base = slugForFilename(run?.name || siteName || `run-${run?.id || "issues"}`);
+  const date = new Date().toISOString().slice(0, 10);
+  return `${base}-issues-${date}.md`;
+}
+
+function downloadTextFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function findingsToMarkdown(findings, meta = {}) {
+  const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
+  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4};
+  const sorted = [...(findings || [])].sort((a, b) => {
+    const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
+    if (sev !== 0) return sev;
+    const val = (valOrder[a.validation_status] ?? 99) - (valOrder[b.validation_status] ?? 99);
+    if (val !== 0) return val;
+    return String(a.title || "").localeCompare(String(b.title || ""));
+  });
+  const lines = [
+    `# Issue Export${meta.runName ? `: ${meta.runName}` : ""}`,
+    "",
+  ];
+  if (meta.siteName) lines.push(`- Site: ${meta.siteName}`);
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total findings: ${sorted.length}`, "");
+  lines.push(
+    "<!-- aespa-findings-json",
+    encodeURIComponent(JSON.stringify(sorted.map(findingImportPayload))),
+    "-->",
+    "",
+  );
+
+  sorted.forEach((f, idx) => {
+    lines.push(
+      `## ${idx + 1}. ${markdownListValue(f.title)}`,
+      "",
+      `- Severity: ${markdownListValue(f.severity)}`,
+      `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      `- Validation: ${markdownListValue(f.validation_status)}`,
+      `- Affected URL: ${markdownListValue(f.affected_url)}`,
+      `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
+      "",
+      "### Description",
+      markdownListValue(f.description),
+      "",
+      "### Impact",
+      markdownListValue(f.impact),
+      "",
+      "### Likelihood",
+      markdownListValue(f.likelihood),
+      "",
+      "### Recommendation",
+      markdownListValue(f.recommendation),
+      "",
+      "### Evidence",
+      markdownCodeBlock(f.evidence || f.response_evidence || f.request_evidence),
+      "",
+    );
+    if (f.request_evidence) {
+      lines.push("### Request Evidence", markdownCodeBlock(f.request_evidence), "");
+    }
+    if (f.response_evidence) {
+      lines.push("### Response Evidence", markdownCodeBlock(f.response_evidence), "");
+    }
+    if (f.validation_note) {
+      lines.push("### Validation Note", markdownListValue(f.validation_note), "");
+    }
+  });
+
+  return lines.join("\n");
+}
+
+function findingImportPayload(f) {
+  return {
+    owasp_category: f.owasp_category || "A00",
+    severity: f.severity || "info",
+    title: f.title || "Imported finding",
+    description: f.description || "",
+    impact: f.impact || "",
+    likelihood: f.likelihood || "",
+    recommendation: f.recommendation || "",
+    cvss_score: Number(f.cvss_score) || 0,
+    cvss_vector: f.cvss_vector || "",
+    affected_url: f.affected_url || "",
+    evidence: f.evidence || "",
+    request_evidence: f.request_evidence || "",
+    response_evidence: f.response_evidence || "",
+    validation_status: f.validation_status || "unvalidated",
+    validation_note: f.validation_note || null,
+  };
+}
+
+function parseFindingsMarkdown(markdown) {
+  const text = String(markdown || "");
+  const embedded = text.match(/<!--\s*aespa-findings-json\s+([\s\S]*?)\s+-->/);
+  if (embedded) {
+    const parsed = JSON.parse(decodeURIComponent(embedded[1].trim()));
+    if (Array.isArray(parsed)) return parsed.map(findingImportPayload);
+  }
+  return parseFindingsMarkdownSections(text);
+}
+
+function parseFindingsMarkdownSections(markdown) {
+  const matches = [...markdown.matchAll(/^##\s+\d+\.\s+(.+)$/gm)];
+  return matches.map((match, idx) => {
+    const start = match.index + match[0].length;
+    const end = idx + 1 < matches.length ? matches[idx + 1].index : markdown.length;
+    const block = markdown.slice(start, end);
+    const cvss = markdownBullet(block, "CVSS");
+    const cvssMatch = cvss.match(/^([0-9.]+)(?:\s+\((.*)\))?$/);
+    return findingImportPayload({
+      title: match[1],
+      severity: markdownBullet(block, "Severity"),
+      owasp_category: markdownBullet(block, "OWASP"),
+      validation_status: markdownBullet(block, "Validation"),
+      affected_url: markdownBullet(block, "Affected URL"),
+      cvss_score: cvssMatch ? parseFloat(cvssMatch[1]) : 0,
+      cvss_vector: cvssMatch?.[2] || "",
+      description: markdownSection(block, "Description"),
+      impact: markdownSection(block, "Impact"),
+      likelihood: markdownSection(block, "Likelihood"),
+      recommendation: markdownSection(block, "Recommendation"),
+      evidence: stripMarkdownFence(markdownSection(block, "Evidence")),
+      request_evidence: stripMarkdownFence(markdownSection(block, "Request Evidence")),
+      response_evidence: stripMarkdownFence(markdownSection(block, "Response Evidence")),
+      validation_note: markdownSection(block, "Validation Note") || null,
+    });
+  });
+}
+
+function markdownBullet(block, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`^- ${escaped}: (.*)$`, "m"));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function markdownSection(block, title) {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`### ${escaped}\\n([\\s\\S]*?)(?=\\n### |$)`));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function stripMarkdownFence(value) {
+  const text = markdownText(value);
+  const match = text.match(/^(`{3,4})\n([\s\S]*)\n\1$/);
+  return match ? match[2] : text;
 }
 
 createRoot(document.getElementById("root")).render(html`<${App}/>`);

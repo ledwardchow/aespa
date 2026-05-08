@@ -1,14 +1,21 @@
 """Scan API — start/stop/status/findings/validation endpoints."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, ScanFinding, TestRun, TestRunStatus
-from aespa.schemas import RunScannerPolicyOut, ScanFindingOut, ScannerPolicyIn, ScanStatusOut, ValidationStatusOut
+from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
+from aespa.schemas import (
+    ScanFindingImportIn,
+    ScanFindingImportResult,
+    ScanFindingOut,
+    ScanStatusOut,
+    ValidationStatusOut,
+)
 from aespa.services import scanner as scanner_svc
-from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
 
 router = APIRouter(tags=["scan"])
@@ -28,8 +35,37 @@ async def start_scan(run_id: int, session: Session = Depends(get_session)) -> Sc
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     await scanner_svc.start_scan(run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/start")
+async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Start an LLM-directed scan that dynamically chooses what to test next."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+    if scanner_svc.is_running(run_id):
+        raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+    await scanner_svc.start_thinking_scan(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/stop")
+def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    scanner_svc.request_thinking_stop(run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.get("/api/test-runs/{run_id}/thinking-scan/status")
+def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
 
 
 @router.post("/api/test-runs/{run_id}/pages/{page_id}/scan", response_model=ScanStatusOut)
@@ -43,6 +79,8 @@ async def scan_single_page(
         raise HTTPException(status_code=409, detail="Crawl is still running")
     if scanner_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     page = session.get(CrawledPage, page_id)
     if page is None or page.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -63,28 +101,6 @@ def stop_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatu
 def scan_status(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
     _get_run_or_404(session, run_id)
     return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.get("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
-def get_scan_policy(run_id: int, session: Session = Depends(get_session)) -> RunScannerPolicyOut:
-    run = _get_run_or_404(session, run_id)
-    return settings_service.get_run_scanner_policy(session, run)
-
-
-@router.patch("/api/test-runs/{run_id}/scan/policy", response_model=RunScannerPolicyOut)
-def update_scan_policy(
-    run_id: int,
-    payload: ScannerPolicyIn,
-    session: Session = Depends(get_session),
-) -> RunScannerPolicyOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while crawl is running")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while scan is running")
-    if validator_svc.is_validating(run_id):
-        raise HTTPException(status_code=409, detail="Cannot edit scan policy while validation is running")
-    return settings_service.update_run_scanner_policy(session, run, payload)
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
@@ -132,6 +148,104 @@ def get_findings(
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
     return [ScanFindingOut.model_validate(f) for f in findings]
+
+
+def _page_for_imported_finding(
+    session: Session,
+    run: TestRun,
+    affected_url: str,
+) -> CrawledPage:
+    page_url = (affected_url or "").strip() or f"imported-finding://run/{run.id}"
+    page = session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run.id)
+        .where(CrawledPage.url == page_url)
+    ).first()
+    if page:
+        return page
+
+    page = CrawledPage(
+        test_run_id=run.id,
+        url=page_url,
+        title="Imported issue target",
+        llm_context="Created during issue import.",
+        depth=0,
+        status="crawled",
+        in_scope=True,
+        scan_status="complete",
+    )
+    session.add(page)
+    session.flush()
+    run.pages_discovered = (run.pages_discovered or 0) + 1
+    session.add(run)
+    return page
+
+
+@router.post(
+    "/api/test-runs/{run_id}/findings/import",
+    response_model=ScanFindingImportResult,
+)
+def import_findings(
+    run_id: int,
+    payload: list[ScanFindingImportIn],
+    session: Session = Depends(get_session),
+) -> ScanFindingImportResult:
+    run = _get_run_or_404(session, run_id)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No findings to import")
+
+    allowed_severities = {"critical", "high", "medium", "low", "info"}
+    allowed_validation = {
+        "unvalidated",
+        "validating",
+        "confirmed",
+        "unconfirmed",
+        "false_positive",
+    }
+    imported: list[ScanFinding] = []
+    for item in payload:
+        severity = item.severity.lower().strip()
+        validation_status = item.validation_status.lower().strip()
+        keep_validation = (
+            validation_status in allowed_validation
+            and validation_status != "validating"
+        )
+        import_validation_status = (
+            validation_status
+            if keep_validation
+            else "unvalidated"
+        )
+        page = _page_for_imported_finding(session, run, item.affected_url)
+        finding = ScanFinding(
+            test_run_id=run.id,
+            page_id=page.id,
+            owasp_category=(item.owasp_category or "A00").strip()[:32],
+            severity=severity if severity in allowed_severities else "info",
+            title=item.title.strip() or "Imported finding",
+            description=item.description,
+            impact=item.impact,
+            likelihood=item.likelihood,
+            recommendation=item.recommendation,
+            cvss_score=item.cvss_score,
+            cvss_vector=item.cvss_vector,
+            affected_url=item.affected_url,
+            evidence=item.evidence,
+            request_evidence=item.request_evidence,
+            response_evidence=item.response_evidence,
+            validation_status=import_validation_status,
+            validation_note=item.validation_note,
+        )
+        session.add(finding)
+        session.flush()
+        imported.append(finding)
+
+    session.commit()
+    for finding in imported:
+        session.refresh(finding)
+    return ScanFindingImportResult(
+        imported=len(imported),
+        findings=[ScanFindingOut.model_validate(f) for f in imported],
+    )
 
 
 # ── Validation endpoints ──────────────────────────────────────────────────────
@@ -193,3 +307,28 @@ def get_validation_status(
 ) -> ValidationStatusOut:
     _get_run_or_404(session, run_id)
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
+
+
+@router.get("/api/test-runs/{run_id}/scan-log")
+def get_scan_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .order_by(ScanLog.id)
+    ).all()
+    return [
+        {
+            "type": "scanner_phase",
+            "phase": e.phase,
+            "status": e.status,
+            "message": e.message,
+            "page_url": e.page_url,
+            "data": json.loads(e.data_json) if e.data_json else None,
+            "_persisted_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]

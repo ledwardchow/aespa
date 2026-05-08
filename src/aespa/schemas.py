@@ -20,6 +20,7 @@ class CredentialIn(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
     label: str | None = None
+    login_url: HttpUrl | None = None
 
 
 class CredentialOut(BaseModel):
@@ -29,6 +30,7 @@ class CredentialOut(BaseModel):
     username: str
     password: str
     label: str | None = None
+    login_url: str | None = None
 
 
 class SiteBase(BaseModel):
@@ -42,8 +44,6 @@ class SiteBase(BaseModel):
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
-        if self.requires_auth and self.login_url is None:
-            raise ValueError("login_url is required when requires_auth is true")
         if not self.requires_auth and self.login_url is not None:
             raise ValueError("login_url must be omitted when requires_auth is false")
         return self
@@ -56,6 +56,11 @@ class SiteCreate(SiteBase):
     def _check_credentials(self) -> "SiteCreate":
         if self.credentials and not self.requires_auth:
             raise ValueError("credentials are only allowed when requires_auth is true")
+        if self.requires_auth:
+            if self.login_url is None and not self.credentials:
+                raise ValueError("login_url is required when no credential login_url is provided")
+            if self.login_url is None and any(c.login_url is None for c in self.credentials):
+                raise ValueError("each credential must include login_url when site login_url is omitted")
         return self
 
 
@@ -137,6 +142,8 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-flash",
     ],
     "bedrock": [
+        "global.anthropic.claude-sonnet-4-6",
+        "global.anthropic.claude-opus-4-7",
         "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "anthropic.claude-3-5-sonnet-20241022-v2:0",
         "anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -172,7 +179,7 @@ class LLMConfigIn(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=32768)
+    max_tokens: int = Field(default=4096, ge=1, le=64000)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     use_vision: bool = False
 
@@ -183,15 +190,16 @@ class LLMConfigIn(BaseModel):
             "openai",
             "openrouter",
             "google",
-            "bedrock",
             "azure_openai",
             "azure_foundry",
         )
-        _needs_url = ("openai_compatible", "bedrock", "azure_openai", "azure_foundry")
+        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider in _needs_url and not self.base_url:
             raise ValueError(f"base_url is required for provider '{self.provider}'")
+        if self.provider == "bedrock" and self.api_key and not self.base_url:
+            raise ValueError("base_url is required for provider 'bedrock' when api_key is set")
         return self
 
     @field_validator("base_url")
@@ -240,8 +248,9 @@ class ScannerPolicyBase(BaseModel):
 
     scan_mode: ScanModeLiteral = "safe_active"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
+    thinking_max_steps: int = Field(default=120, ge=1, le=1000)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
-    min_delay_s: float = Field(default=0.2, ge=0.0, le=60.0)
+    min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
     response_body_read_limit_bytes: int = Field(default=512 * 1024, ge=1024, le=10 * 1024 * 1024)
     allowed_schemes: list[SchemeLiteral] = Field(default_factory=lambda: ["http", "https"], min_length=1)
@@ -319,12 +328,13 @@ class TestRunCreate(BaseModel):
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=50, ge=5, le=500)
-    scan_mode: ScanModeLiteral = "safe_active"
+    llm_config_id: int | None = None
 
 
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
+    llm_config_id: int | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -357,6 +367,7 @@ class TestRunSummary(BaseModel):
     error_message: str | None
     credentials: list[CredentialSummary] = []
     scanner_policy: dict = Field(default_factory=dict)
+    llm_config_id: int | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
 
@@ -466,6 +477,29 @@ class ScanFindingOut(BaseModel):
     created_at: datetime
 
 
+class ScanFindingImportIn(BaseModel):
+    owasp_category: str = "A00"
+    severity: str = "info"
+    title: str
+    description: str = ""
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
+    affected_url: str = ""
+    evidence: str = ""
+    request_evidence: str = ""
+    response_evidence: str = ""
+    validation_status: str = "unvalidated"
+    validation_note: str | None = None
+
+
+class ScanFindingImportResult(BaseModel):
+    imported: int
+    findings: list[ScanFindingOut]
+
+
 class ValidationStatusOut(BaseModel):
     total: int
     confirmed: int
@@ -484,6 +518,7 @@ class PageCredentialViewOut(BaseModel):
     username: str | None
     screenshot_b64: str | None
     llm_context: str | None
+    page_text: str | None
     req_auth: bool | None
     takes_input: bool | None
     has_object_ref: bool | None
