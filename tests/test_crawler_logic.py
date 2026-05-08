@@ -95,6 +95,24 @@ def test_same_url_without_fragment_ignores_fragment_only():
     ) is True
 
 
+class _CredWithLogin:
+    login_url = "https://target.local/admin/login"
+
+
+def test_login_url_for_credential_prefers_credential_override():
+    assert crawler._login_url_for_credential(
+        "https://target.local/login",
+        _CredWithLogin(),
+    ) == "https://target.local/admin/login"
+
+
+def test_login_url_for_credential_falls_back_to_site_default():
+    assert crawler._login_url_for_credential(
+        "https://target.local/login",
+        object(),
+    ) == "https://target.local/login"
+
+
 def test_page_requires_login_ignores_login_url_without_login_ui():
     page = _FakePage(
         "https://target.local/login",
@@ -369,9 +387,9 @@ def test_analyse_api_call_sends_no_screenshot_to_llm(monkeypatch):
     ))
 
     assert captured["screenshot_b64"] is None
-    assert "Request body excerpt" in captured["text"]
+    assert "REQUEST" in captured["text"]
     assert '"accountId":"10000001"' in captured["text"]
-    assert "Response body excerpt" in captured["text"]
+    assert "RESPONSE" in captured["text"]
     assert title.startswith("API GET 200")
     assert "Returns account data" in context
     assert categories["req_auth"] is True

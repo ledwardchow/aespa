@@ -3,13 +3,19 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import os
 import re
 from typing import Any, Optional
 from urllib.parse import quote
 
 from aespa.models import LLMConfig
 
+log = logging.getLogger("aespa.llm")
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+ANALYSE_RESULTS_TEXT_BUDGET = 80_000
+ANALYSE_RESULTS_PER_BATCH = 20
 
 
 def _strip_thinking_blocks(raw: str) -> str:
@@ -52,7 +58,16 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     close_ch = "]" if expect is list else "}"
     starts = [i for i, ch in enumerate(text) if ch == open_ch]
     if not starts:
-        raise ValueError(f"no '{open_ch}' found in LLM response")
+        # Stripped text has no JSON delimiters — the model may have embedded the answer
+        # inside a thinking block.  Try searching the un-stripped original text so we can
+        # still extract JSON that appears within <think>...</think> tags.
+        raw_no_fence = re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
+        if alt_starts:
+            text = raw_no_fence
+            starts = alt_starts
+        else:
+            raise ValueError(f"no '{open_ch}' found in LLM response")
 
     for start in starts:
         depth = 0
@@ -293,6 +308,14 @@ def _extract_message_text(message: Any) -> str:
 
     if text:
         cleaned = _strip_thinking_blocks(text).strip()
+        if not cleaned:
+            # Stripping removed everything (entire content was a thinking block with no
+            # answer outside).  Prefer a separate reasoning_content / fallback field when
+            # available; otherwise return the original text so _extract_json can still
+            # find JSON that was embedded inside the thinking block.
+            if fallback_texts:
+                return fallback_texts[0]
+            return text
         if fallback_texts and any(ch in cleaned for ch in ("[", "{")):
             try:
                 _extract_json(cleaned, expect=list)
@@ -529,11 +552,14 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
     return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
 
 
+def _bedrock_region_from_url(base_url: str) -> str:
+    match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
+    return match.group(1) if match else "us-east-1"
+
+
 async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     import httpx
 
-    if not config.api_key:
-        raise ValueError("Amazon Bedrock API key is required")
     if not config.base_url:
         raise ValueError("Amazon Bedrock Runtime endpoint is required")
 
@@ -554,6 +580,29 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             "temperature": config.temperature,
         },
     }
+    if not config.api_key:
+        import boto3
+
+        region = (
+            os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or _bedrock_region_from_url(config.base_url)
+        )
+        profile = os.getenv("AWS_PROFILE")
+        session_kwargs = {"profile_name": profile} if profile else {}
+        session = boto3.Session(**session_kwargs)
+        client = session.client(
+            "bedrock-runtime",
+            region_name=region,
+            endpoint_url=config.base_url,
+        )
+        data = client.converse(
+            modelId=config.model,
+            messages=payload["messages"],
+            inferenceConfig=payload["inferenceConfig"],
+        )
+        return _extract_bedrock_text(data)
+
     model_id = quote(config.model, safe="")
     url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
     headers = {
@@ -577,7 +626,7 @@ of HTTP probes to test for OWASP Top 10 vulnerabilities.
 URL: {url}
 Title: {title}
 LLM Context: {context}
-
+{site_context_section}
 Page categories:
 - Authentication Required: {req_auth}
 - Takes User Input: {takes_input}
@@ -588,7 +637,7 @@ Applicable OWASP checks: {applicable}
 
 {users_section}
 {category_guidance}
-
+{xss_canary_section}
 Return ONLY valid JSON — an array of probe objects (no markdown fences):
 [
   {{
@@ -743,6 +792,13 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
             "  • Infer the business operation from the context (e.g. transfer, purchase, withdraw).\n"
             "  • Try negative amounts, zero amounts, and extremely large values.\n"
             "  • Try replay: re-send the same action twice rapidly.\n"
+            "  • GATE BYPASS (high value): Look for pre-flight check or validation endpoints "
+            "    (paths containing /check, /verify, /validate, /preflight, or similar) that the\n"
+            "    client calls before a sensitive action. Generate two probes:\n"
+            "      1. Call the check endpoint to observe what it enforces (e.g. requires_totp, requires_pin).\n"
+            "      2. Call the action endpoint DIRECTLY without completing the check step, omitting any\n"
+            "         field the check said was required (e.g. no totp_code, no pin). If the action\n"
+            "         succeeds anyway, the enforcement is client-side only and the gate is bypassable.\n"
             "  • Try skipping steps: access later steps of a multi-step flow directly.\n"
             "  • Try parameter tampering: change price/amount/quantity fields to 0 or -1."
         )
@@ -798,7 +854,10 @@ A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
 A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
 A09 (Logging/Monitoring), A10 (SSRF)
 
-Be conservative — only report confirmed or highly likely issues, not theoretical ones."""
+Be conservative — only report confirmed or highly likely issues, not theoretical ones.
+If many findings are present, return the most important confirmed findings first. Keep each field
+concise enough for a security report table/detail view; do not include raw full responses when a
+short quoted excerpt proves the issue."""
 
 
 async def plan_probes(
@@ -809,17 +868,39 @@ async def plan_probes(
     categories: dict[str, Any],
     applicable_checks: list[str],
     users: list[dict] | None = None,
+    site_context: str = "",
+    xss_canary: str = "",
 ) -> list[dict]:
     """Ask the LLM to generate a probe plan for a page. Returns list of probe dicts.
 
     users: optional list of {"username": str, "label": str|None} describing the test accounts
     available. When provided, the LLM can set "as_user" on each probe to control which
     authenticated session is used when sending the request.
+
+    site_context: optional string summarising the site-level test plan produced by
+    generate_site_test_plan(). When provided, it primes the LLM with app-wide attack
+    hypotheses so individual page plans are more targeted.
+
+    xss_canary: optional unique run-scoped token. When provided, the LLM is instructed
+    to embed it in XSS payloads instead of alert(1), enabling cross-page stored XSS detection.
     """
+    site_ctx_section = ""
+    if site_context:
+        site_ctx_section = f"\nSite-level test plan context (use to inform probe selection):\n{site_context}\n"
+    xss_canary_section = ""
+    if xss_canary:
+        xss_canary_section = (
+            f"\nStored XSS canary: use '{xss_canary}' as the alert argument in every XSS probe "
+            f"instead of alert(1) — e.g. alert('{xss_canary}'), "
+            f"onerror=alert('{xss_canary}'), onload=alert('{xss_canary}'). "
+            f"Also include a probe that submits the bare token <{xss_canary}> as an input value. "
+            f"This allows cross-page stored XSS to be detected in a post-scan sweep.\n"
+        )
     prompt = _PLAN_PROMPT.format(
         url=url,
         title=title or "(no title)",
         context=context or "(no context)",
+        site_context_section=site_ctx_section,
         req_auth=categories.get("req_auth"),
         takes_input=categories.get("takes_input"),
         has_object_ref=categories.get("has_object_ref"),
@@ -827,6 +908,7 @@ async def plan_probes(
         applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
         users_section=_build_users_section(users),
         category_guidance=_build_category_guidance(categories, users=users),
+        xss_canary_section=xss_canary_section,
     )
     raw = await _call(config, prompt, None)
     try:
@@ -836,7 +918,13 @@ async def plan_probes(
         # Include "idor" probes so that as_user set by the LLM is preserved when the
         # scanner expands them into concrete HTTP requests.
         return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")]
-    except Exception:
+    except Exception as _exc:
+        log.warning(
+            "plan_probes: failed to extract probe list from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            _exc,
+            (raw or "")[:500],
+        )
         return []
 
 
@@ -848,17 +936,57 @@ async def analyse_probes(
     """Ask the LLM to analyse probe results and return a list of findings."""
     if not results:
         return []
-    results_text = "\n\n".join(
-        f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
-        f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
-        f"URL: {r.get('url')}\n"
-        f"Status: {r.get('status')}\n"
-        f"Request evidence:\n{str(r.get('request_evidence') or '')[:2000]}\n\n"
-        f"Response evidence:\n{str(r.get('response_evidence') or '')[:3000]}\n\n"
-        f"Response headers: {json.dumps(r.get('headers', {}))}\n"
-        f"Response body excerpt: {str(r.get('body', ''))[:1000]}"
-        for r in results
+
+    findings: list[dict] = []
+    for batch in _chunk_probe_results(results):
+        findings.extend(await _analyse_probe_batch(config, url, batch))
+    return findings
+
+
+def _format_probe_result(result: dict) -> str:
+    return (
+        f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
+        f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"URL: {result.get('url')}\n"
+        f"Status: {result.get('status')}\n"
+        f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
+        f"Response evidence:\n{str(result.get('response_evidence') or '')[:3000]}\n\n"
+        f"Response headers: {json.dumps(result.get('headers', {}))}\n"
+        f"Response body excerpt: {str(result.get('body', ''))[:1000]}"
     )
+
+
+def _chunk_probe_results(results: list[dict]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_size = 0
+
+    for result in results:
+        formatted = _format_probe_result(result)
+        separator_size = 2 if current_batch else 0
+        next_size = current_size + separator_size + len(formatted)
+        if current_batch and (
+            len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
+            or next_size > ANALYSE_RESULTS_TEXT_BUDGET
+        ):
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+            separator_size = 0
+        current_batch.append(formatted)
+        current_size += separator_size + len(formatted)
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+async def _analyse_probe_batch(
+    config: LLMConfig,
+    url: str,
+    result_texts: list[str],
+) -> list[dict]:
+    results_text = "\n\n".join(result_texts)
     prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
     raw = await _call(config, prompt, None)
     try:
@@ -877,9 +1005,694 @@ async def analyse_probes(
             "affected_url",
             "evidence",
         }
-        return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
+        return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+    except Exception as exc:
+        log.warning(
+            "analyse_probes: failed to extract findings from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            exc,
+            (raw or "")[:500],
+        )
+        return []
+
+
+# ── Site-level test plan ──────────────────────────────────────────────────────
+
+_SITE_PLAN_PROMPT = """\
+You are a senior web application penetration tester preparing a security assessment.
+
+Below is a summary of all pages discovered during crawling of the target web application.
+Analyse the attack surface, reason through the application's architecture, and produce a
+structured test plan with specific, actionable vulnerability hypotheses.
+
+Target base URL: {base_url}
+
+Discovered pages ({page_count} total):
+{pages_summary}
+
+Consider:
+- What kind of application is this? (auth model, user roles, key data objects)
+- What are the highest-value attack targets? (admin panels, financial operations, \
+ID-bearing endpoints, privileged actions)
+- What systemic vulnerabilities are likely based on the observed structure and page categories?
+- What cross-endpoint attack chains deserve testing? For example: auth bypass by calling a \
+final step directly without going through a gated check step; IDOR across resource types; \
+privilege escalation by sending a lower-privilege token to an admin endpoint.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "app_summary": "2-3 sentence description of the application, its key roles, and security-relevant features",
+  "attack_hypotheses": [
+    {{
+      "hypothesis": "Short label for this attack scenario",
+      "description": "What to test, why it may be vulnerable, and which endpoints are involved",
+      "target_pages": ["partial URL or pattern"],
+      "owasp": "A01"
+    }}
+  ],
+  "critical_areas": ["URL pattern or page type that deserves the most thorough testing"],
+  "test_notes": "Specific techniques, IDs, credentials, header patterns, or sequences the scanner should use"
+}}
+
+Limit to the 8 most valuable attack hypotheses. Be specific and actionable."""
+
+
+async def generate_site_test_plan(
+    config: LLMConfig,
+    base_url: str,
+    pages: list[dict],
+) -> dict:
+    """Generate a site-level test plan from crawled page metadata.
+
+    Returns a dict with keys: app_summary, attack_hypotheses, critical_areas, test_notes.
+    Returns {} on failure.
+    """
+    if not pages:
+        return {}
+    pages_summary = "\n".join(
+        f"  - {p['url']} | title={p.get('title') or '(no title)'!r} | "
+        f"auth={p.get('req_auth')}, input={p.get('takes_input')}, "
+        f"obj_ref={p.get('has_object_ref')}, biz_logic={p.get('has_business_logic')} | "
+        f"{(p.get('context') or '')[:180]}"
+        for p in pages[:60]
+    )
+    prompt = _SITE_PLAN_PROMPT.format(
+        base_url=base_url,
+        page_count=len(pages),
+        pages_summary=pages_summary,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        plan = _extract_json(raw or "", expect=dict)
+        if isinstance(plan, dict):
+            return plan
+    except Exception:
+        pass
+    return {}
+
+
+# ── Follow-up probe planning ──────────────────────────────────────────────────
+
+_FOLLOWUP_PROMPT = """\
+You are a senior web application penetration tester reviewing mid-scan probe results.
+
+You have just run an initial set of probes against the page below and received the results.
+Your task is to reason through what you observe, identify any promising leads, and generate
+targeted follow-up probes that would confirm, deepen, or chain from the potential issues.
+
+Page URL: {url}
+Page context: {context}
+
+Site-level test plan context:
+{site_context}
+
+Initial probe results:
+{initial_results}
+
+Think through:
+- Which results look anomalous or potentially vulnerable? (unexpected 200s on restricted pages, \
+error messages that disclose stack traces or internals, reflected or stored payloads, \
+differing responses for different input values, auth bypass indicators)
+- For each interesting result, what follow-up probe would confirm or rule out the issue?
+- Are there attack chains implied by multiple results together? In particular:
+  • If a check/validate/verify endpoint responded saying something is required (e.g. TOTP, pin,
+    2FA code, elevated privilege), probe the corresponding action endpoint DIRECTLY without
+    providing that requirement, to test whether enforcement is server-side or only client-side.
+  • If a response revealed a new endpoint URL, resource ID, token, or parameter — probe it.
+  • If a check returned requires_X: true but the action endpoint is not yet probed — add a probe
+    calling the action endpoint with the required field absent or empty.
+- Did any response reveal new endpoints, IDs, tokens, or parameters worth testing?
+
+Generate targeted follow-up probes. Prefer quality over quantity — a focused probe testing a
+specific hypothesis is more valuable than re-running broad coverage.
+
+Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [] if no leads):
+[
+  {{
+    "type": "http",
+    "method": "GET",
+    "url": "https://...",
+    "params": {{}},
+    "headers": {{}},
+    "body": null,
+    "as_user": null,
+        "interesting_result": "Specific response status/body/header/behavior that made this worth following up",
+        "hypothesis": "Specific vulnerability or enforcement behavior this probe is testing",
+        "payload_purpose": "What the generated URL/body/header payload is intended to confirm or rule out, or null",
+    "desc": "Follow-up: what this tests and why"
+  }}
+]
+
+Return [] if no results look promising enough to warrant follow-up investigation.
+Do not use vague wording like "looked interesting" without naming the exact signal and hypothesis."""
+
+
+async def plan_followup_probes(
+    config: LLMConfig,
+    url: str,
+    context: str,
+    initial_results: list[dict],
+    site_context: str = "",
+) -> list[dict]:
+    """Reason about initial probe results and generate targeted follow-up probes.
+
+    This is the iterative-reasoning step: the LLM observes partial results, forms
+    hypotheses about what looks interesting, and generates deeper targeted probes.
+    Returns [] if nothing warrants follow-up or on failure.
+    """
+    if not initial_results:
+        return []
+    results_text = "\n\n".join(
+        f"--- {r.get('desc', '?')} ---\n"
+        f"URL: {r.get('url')}\n"
+        f"Status: {r.get('status')}\n"
+        f"Response body excerpt:\n{str(r.get('body', ''))[:600]}\n"
+        f"Response evidence excerpt:\n{str(r.get('response_evidence', ''))[:600]}"
+        for r in initial_results[:25]
+    )
+    prompt = _FOLLOWUP_PROMPT.format(
+        url=url,
+        context=context or "(no context)",
+        site_context=site_context or "(no site-level context available)",
+        initial_results=results_text,
+    )
+    raw = await _call(config, prompt, None)
+    try:
+        probes = _extract_json(raw or "", expect=list)
+        if not isinstance(probes, list):
+            return []
+        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
     except Exception:
         return []
+
+
+# ── Finding title normalisation ───────────────────────────────────────────────
+
+_NORMALIZE_TITLES_PROMPT = """\
+You are deduplicating security findings from a web application penetration test report.
+
+EXISTING confirmed findings for this test run:
+{existing_list}
+
+NEW candidate findings just discovered (normalize these):
+{new_list}
+
+Rules:
+- If a new finding is the same vulnerability class as an existing one (same OWASP category \
+and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
+- If two new findings in this batch are the same class, give them the SAME title (pick the \
+clearest one).
+- If a new finding is genuinely different, keep its title as-is.
+- Do NOT merge or drop findings — return one entry per new finding.
+
+Return ONLY a JSON array, one object per new finding in the same order:
+[{{"index": 0, "title": "..."}}, ...]
+"""
+
+
+async def normalize_finding_titles(
+    config: "LLMConfig",
+    existing_findings: list[dict],   # [{"title": ..., "owasp_category": ..., "severity": ...}]
+    new_findings: list[dict],        # raw finding dicts from analyse_probes
+) -> list[dict]:
+    """Return new_findings with titles normalised against existing ones.
+
+    On any failure the original new_findings list is returned unchanged.
+    """
+    if not new_findings or not existing_findings:
+        return new_findings
+
+    existing_list = "\n".join(
+        f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        for i, f in enumerate(existing_findings[:60])
+    )
+    new_list = "\n".join(
+        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] "
+        f"{f.get('title', '?')} — {(f.get('description') or '')[:120]}"
+        for i, f in enumerate(new_findings)
+    )
+
+    prompt = _NORMALIZE_TITLES_PROMPT.format(
+        existing_list=existing_list,
+        new_list=new_list,
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        mappings = _extract_json(raw or "", expect=list)
+        if not isinstance(mappings, list):
+            return new_findings
+        result = [dict(f) for f in new_findings]
+        for entry in mappings:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("index")
+            title = (entry.get("title") or "").strip()
+            if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                result[idx] = {**result[idx], "title": title}
+        return result
+    except Exception as exc:
+        log.warning("normalize_finding_titles failed: %s", exc)
+        return new_findings
+
+
+# ── LLM-directed (thinking) scan ─────────────────────────────────────────────
+
+_THINKING_PENTEST_PLAYBOOK = """\
+Recommended assessment strategy, distilled from effective manual pentest workflow:
+
+1. Passive recon and fingerprinting
+     - Start with the base URL, visible login/app/admin paths, robots.txt, sitemap.xml,
+         and response headers.
+     - Note missing or weak security headers, server/framework hints, public admin areas,
+         exposed account data, comments, forms, and route/link structure.
+
+2. Raw asset and JavaScript mining
+     - Fetch raw HTML for important pages and enumerate every script src and link href.
+     - Fetch JavaScript bundles and look for API base paths, endpoint lists, token storage
+         keys, hardcoded routes, feature flags, role-specific APIs, preflight/check endpoints,
+         and client-side-only enforcement.
+     - Build and maintain an endpoint inventory from the JS and crawl context before
+         spending too many steps on generic payloads.
+
+3. API map and authentication boundary checks
+     - Always check common unauthenticated operational endpoints early when in scope:
+         /api/health, /health, /status, /api/status, /api/config, /api/debug, and
+         /.well-known/security.txt. Treat jwt_secret, app keys, DB settings, phpinfo,
+         environment, server versions, or stack traces as high-priority leads.
+     - Test CORS on representative API endpoints by sending a harmless Origin header
+         such as https://evil.example and inspect Access-Control-Allow-Origin and
+         Access-Control-Allow-Credentials.
+     - Probe discovered API endpoints unauthenticated first, then with available user tokens.
+     - Compare 401/403/404/200 behavior on user, admin, account, profile, transaction,
+         address-book, settings, and system endpoints.
+     - Try lower-privilege tokens against admin endpoints and admin tokens against user
+         endpoints if both token types are available.
+     - If a public admin panel or admin login is discovered, try a very small set of obvious
+         default credentials derived from the app context, such as admin/admin, admin/password,
+         admin/admin123. Use credential_check for these bounded dictionaries. Do not brute-force.
+     - For demo/seeded customer apps, test a tiny bounded set of obvious seeded passwords
+         such as password and Password123! against discovered example users. Use at most a
+         handful of users and passwords.
+
+4. Account bootstrap and session/token analysis
+     - If registration is available, create or use a disposable test account to obtain a
+         legitimate session and inspect registration/login/profile responses for sensitive
+         fields such as password_hash, totp_secret, roles, IDs, balances, account numbers,
+         or JWTs.
+     - Decode JWT payloads client-side when visible, then test only low-impact JWT issues
+         such as alg=none rejection or issuer/role boundary confusion when appropriate.
+     - If a response exposes a JWT signing secret, use the jwt action to create a
+         controlled HS256 token for a small number of candidate customer IDs, then verify
+         access with read-only endpoints such as /api/profile and /api/accounts.
+
+5. Object ownership and IDOR testing
+     - Enumerate IDs from list endpoints, detail endpoints, admin views, account numbers,
+         transaction IDs, address-book IDs, and response bodies.
+     - Test both list endpoints and individual detail endpoints because one may be scoped
+         correctly while the other is vulnerable.
+     - For every object lookup, ask: does the server verify this object belongs to the
+         current user, or is it only fetching by numeric ID?
+
+6. Business-logic gate bypass
+     - Identify two-step flows with /check, /verify, /validate, /preflight, /setup, or
+         client-side UI gating before a sensitive action.
+     - First call the check endpoint to learn what it claims is required. Then call the
+         actual action endpoint directly without the required field (for example no totp_code,
+         pin, approval token, or confirmation) and verify whether the server enforces it.
+     - For money/account flows, use disposable accounts and low-impact amounts where possible.
+     - For banking apps, explicitly check loan/account creation rules, credit limits,
+         redraw/transfer limits, sufficient-funds behavior, and whether action endpoints
+         verify that source accounts belong to the authenticated user.
+
+7. Input validation, stored XSS, and SQL injection
+     - Prefer inputs discovered from actual forms/API bodies: search/filter/sort, name/title/
+         description/comment/message, email/username, IDs, amount/quantity.
+     - For SQLi, compare a baseline nonmatching search to quote-breaking, boolean, ORDER BY,
+         UNION, and low-delay timing probes. Treat SQL error disclosure as valuable evidence.
+     - For XSS, test both reflected and stored paths. If the server accepts raw HTML/JS in a
+         create/update response, follow up by viewing the listing/detail/admin page where the
+         value is rendered.
+
+8. Error disclosure, rate limiting, and configuration checks
+     - Send malformed-but-valid-shape requests to endpoints with typed parameters to look for
+         stack traces, SQL errors, absolute file paths, class names, and debug traces.
+     - Check login error differences for user enumeration, and use only a small bounded set
+         of failed login attempts to detect missing throttling/lockout.
+     - Re-check CSP, HSTS, X-Frame-Options, content sniffing, and referrer-policy headers on
+         representative HTML and API responses.
+
+Work like the transcript: recon → endpoint extraction → auth/session bootstrap → boundary tests →
+business-logic bypass → IDOR/injection/error disclosure → concise confirmation. When a response
+reveals a stronger lead than the current plan, follow that lead immediately.
+"""
+
+_THINKING_NEXT_ACTION_PROMPT = """\
+You are an expert web application penetration tester conducting a hands-on security assessment.
+You are working iteratively: each turn you review everything learned so far and decide on ONE
+specific action to take next, exactly like a human tester switching between curl and a browser.
+
+Target base URL: {target_url}
+
+Application context discovered during crawling:
+{crawl_context}
+
+{credentials_section}
+{sessions_section}
+Step {current_step} of {max_steps}.
+
+{pentest_playbook}
+
+History of previous actions and responses:
+{history_text}
+
+────────────────────────────────────────────────────────────────────────────────
+TASK: What is the single most valuable action to take RIGHT NOW?
+
+Think like a human tester:
+- Use context tools to pull only the specific crawl/history/finding details you need. Do not
+  assume route details are available inline unless they appear in the compact context or history.
+- Start broad with site_map when route coverage is unclear, then use page_detail or
+  history_search before sending a probe that depends on precise parameters or prior evidence.
+- Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
+  API endpoints, error messages, and any other signals.
+- Use discovered tokens in Authorization headers for subsequent requests.
+- Test for IDOR by swapping IDs you found from one response into requests for another resource.
+- Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
+- Mine raw HTML and JavaScript for endpoint discovery before guessing paths blindly.
+- Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
+- Use browser actions when the next probe depends on JavaScript execution, hash routes,
+    form interaction, client-side state, DOM rendering, or screenshot evidence.
+- Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
+    followed by direct action endpoint calls that omit the supposedly required control.
+- When you find something interesting, follow it up immediately — don't move on too quickly.
+- Do not finish until you have covered the endpoint inventory, authentication boundaries,
+    object ownership, business-logic gates, input validation, error disclosure, and headers,
+    unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
+- If step count is getting high, prefer confirming likely findings over exploring new areas.
+- Be explicit about what made the next request worthwhile. Do not use vague phrases like
+    "found something interesting" unless you also name the specific signal and hypothesis.
+
+Return ONLY valid JSON (no markdown, no prose):
+
+To fetch targeted scanner context without issuing a target request:
+{{
+  "action": "tool",
+  "tool": "site_map",
+  "args": {{"filter": "api takes-input", "limit": 20}},
+  "observation": "The compact context does not include enough endpoint detail.",
+  "hypothesis": "Input-taking API routes are the best next attack surface to enumerate.",
+  "payload_purpose": "Retrieve only relevant route inventory instead of resending the full crawl.",
+  "note": "Fetch the API site map before choosing the next probe."
+}}
+
+Context tools:
+- site_map: args may include filter/search/type ("api" or "page"), flags (array of
+  req_auth/takes_input/has_object_ref/has_business_logic), and limit.
+- page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
+- history_search: args may include query and limit to retrieve prior response/request excerpts.
+- finding_list: args may include severity, owasp_category, search, and limit.
+- Cap consecutive context-only tool calls; once you have enough detail, execute a probe or write a finding.
+
+To record a confirmed finding using prior evidence handles or response excerpts:
+{{
+  "action": "finding_write",
+  "owasp_category": "A05",
+  "title": "Verbose debug configuration disclosure",
+  "description": "The health endpoint exposes runtime configuration fields.",
+  "impact": "Attackers can use leaked implementation details to plan targeted attacks.",
+  "likelihood": "Likely because the endpoint is publicly reachable.",
+  "recommendation": "Remove secrets and debug configuration from public responses.",
+  "cvss_score": 5.3,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+  "severity": "medium",
+  "affected_url": "https://.../api/health",
+  "evidence": "Step 3 returned a 200 response containing debug=true.",
+  "request_evidence": "GET https://.../api/health",
+  "response_evidence": "Status: 200\\n{{...short excerpt...}}",
+  "observation": "Specific response evidence that proves the issue",
+  "hypothesis": "Why this is a confirmed security issue",
+  "payload_purpose": "Persist the finding without another redundant probe",
+  "note": "Record the confirmed issue with concise evidence."
+}}
+
+To make one HTTP request:
+{{
+  "action": "http",
+  "method": "GET",
+  "url": "https://...",
+  "use_session": null,
+  "headers": {{}},
+  "body": null,
+    "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
+    "hypothesis": "Specific issue or behavior this request is investigating",
+    "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
+    "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
+}}
+
+HTTP body rules:
+- Omit or set null when there is no body.
+- Use a JSON object for JSON API payloads (Content-Type will be set automatically).
+- Use a plain string for form-encoded or raw bodies.
+- Set use_session to one of the reusable session labels when you want the scanner to
+  attach a discovered token/session automatically.
+
+To use the browser:
+{{
+  "action": "browser",
+  "url": "https://...",
+  "use_session": null,
+  "steps": [
+    {{"op": "goto", "url": "https://..."}},
+    {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
+    {{"op": "click", "selector": "button[type='submit']"}},
+    {{"op": "wait", "state": "networkidle"}},
+    {{"op": "snapshot"}}
+  ],
+  "observation": "Specific signal from prior responses that requires browser/DOM follow-up",
+  "hypothesis": "Specific issue or behavior this browser interaction is investigating",
+  "payload_purpose": "What the typed/clicked payload is meant to test, or null",
+  "note": "One sentence combining the observation, hypothesis, and why this browser action is valuable"
+}}
+
+Browser step rules:
+- Supported ops: goto, fill, type, click, press, wait, snapshot.
+- For press, include selector and key (for example "Enter").
+- For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
+- Keep browser actions short and targeted; do not browse aimlessly.
+- Browser use_session currently applies bearer tokens as extra HTTP headers for navigation
+  and fetches made after the session is selected.
+
+To forge a JWT after discovering an exposed HS256 signing secret:
+{{
+  "action": "jwt",
+  "secret": "secret-from-prior-response",
+  "claims": {{
+    "iss": "BankOfEd",
+    "sub": 1,
+    "jti": "aespa-test",
+    "iat": 1778072559,
+    "exp": 1778158959
+  }},
+  "header": {{"typ": "JWT", "alg": "HS256"}},
+  "store_as": "customer_sub_1_token",
+  "observation": "Specific response field that exposed the signing secret",
+  "hypothesis": "Changing sub may impersonate another customer because the API trusts HS256 JWTs",
+  "payload_purpose": "Create a controlled token for a read-only impersonation check",
+  "note": "Forge an HS256 token from the exposed secret, then use it in a follow-up Authorization header."
+}}
+
+JWT rules:
+- Only use this after a signing secret or equivalent HMAC key was observed in prior responses.
+- Keep claims minimal and use read-only follow-up endpoints first.
+- Do not forge admin tokens unless a distinct admin issuer/secret is observed.
+- The scanner stores successful forged tokens as reusable in-memory sessions under store_as.
+
+To test a tiny explicit login dictionary:
+{{
+  "action": "credential_check",
+  "url": "https://.../api/admin/auth/login",
+  "method": "POST",
+  "username_field": "username",
+  "password_field": "password",
+  "candidates": [
+    {{"username": "admin", "password": "admin"}},
+    {{"username": "admin", "password": "admin123"}}
+  ],
+  "headers": {{"Content-Type": "application/json"}},
+  "success_statuses": [200, 201],
+  "observation": "Specific login endpoint and account naming clue that justify this check",
+  "hypothesis": "The deployed demo/admin account may use default or seeded credentials",
+  "payload_purpose": "Try a tiny bounded dictionary, not a brute-force attack",
+  "note": "Check a small explicit credential list and stop after recording any successes."
+}}
+
+Credential-check rules:
+- Maximum 20 candidates. Use fewer when possible.
+- Only use obvious defaults, seeded/demo credentials, or credentials explicitly found in prior responses.
+- Do not use generated wordlists, mutations, high-rate retries, or password spraying.
+- Successful login responses with bearer tokens are stored as reusable in-memory sessions.
+- Later actions should reference those sessions with use_session rather than copying tokens.
+
+To finish the assessment (all key areas covered, or steps nearly exhausted):
+{{
+  "action": "done",
+  "summary": "2-3 sentence summary of notable findings and tested areas"
+}}
+"""
+
+
+async def thinking_next_action(
+    config: LLMConfig,
+    target_url: str,
+    crawl_context: str,
+    history: list[dict],
+    max_steps: int,
+    current_step: int,
+    credentials: list[dict] | None = None,
+    sessions: list[dict] | None = None,
+    emit_fn=None,
+) -> dict:
+    """Ask the LLM for the next action in an agentic (thinking) scan.
+
+    Returns a dict with either:
+      {"action": "tool", "tool": ..., "args": {...}, "note": ...}
+      {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
+      {"action": "browser", "url": ..., "steps": [...], "note": ...}
+      {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
+      {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+      {"action": "finding_write", ...}
+    or:
+      {"action": "done", "summary": ...}
+    """
+    # Format history compactly. Full crawl/page details remain available via context tools.
+    RECENT = 5
+    MAX_HISTORY_CHARS = 18_000
+    if not history:
+        history_text = "(none — this is the first step)"
+    else:
+        lines: list[str] = []
+        older_count = max(0, len(history) - RECENT)
+        if older_count:
+            older = history[:older_count]
+            lines.append(
+                f"Earlier history: {older_count} step(s) summarized. "
+                f"Use history_search to retrieve details. "
+                f"Recent earlier URLs: "
+                + ", ".join(str(h.get("url") or "") for h in older[-8:] if h.get("url"))[:1000]
+            )
+        for h in history[-RECENT:]:
+            method = str(h.get("method") or "")
+            is_tool = method == "TOOL"
+            body_limit = 2200 if is_tool else 1400
+            resp_excerpt = str(h.get("response_body") or "")[:body_limit]
+            req_body = h.get("request_body")
+            req_body_str = (
+                json.dumps(req_body, separators=(",", ":"), default=str)[:300]
+                if isinstance(req_body, dict)
+                else str(req_body or "")[:300]
+            )
+            response_headers = h.get("response_headers") or {}
+            response_headers_str = (
+                json.dumps(response_headers, separators=(",", ":"), default=str)[:350]
+                if response_headers else "{}"
+            )
+            lines.append(
+                f"Step {h.get('step')}: {method} {h.get('url')}\n"
+                f"  Note: {h.get('note', '')}\n"
+                f"  Request body: {req_body_str or '(none)'}\n"
+                f"  Response status: {h.get('response_status')}\n"
+                f"  Response headers: {response_headers_str}\n"
+                f"  Response body: {resp_excerpt}"
+            )
+        history_text = "\n\n".join(lines)
+        if len(history_text) > MAX_HISTORY_CHARS:
+            history_text = (
+                history_text[:MAX_HISTORY_CHARS]
+                + "\n\n[history truncated; use history_search for older or larger response details]"
+            )
+
+    credentials_section = ""
+    if credentials:
+        cred_lines = [
+            f"  - username={c['username']}  password={c['password']}"
+            + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
+            for c in credentials
+        ]
+        credentials_section = (
+            "Test credentials (use these to authenticate):\n"
+            + "\n".join(cred_lines)
+        )
+
+    sessions_section = ""
+    if sessions:
+        session_lines = [
+            f"  - label={s.get('label')}  kind={s.get('kind', 'bearer')}"
+            + (f"  username={s.get('username')}" if s.get("username") else "")
+            + (f"  source={s.get('source')}" if s.get("source") else "")
+            for s in sessions
+        ]
+        sessions_section = (
+            "Reusable in-memory sessions discovered during this Thinking scan "
+            "(set use_session to one of these labels; secrets are not shown):\n"
+            + "\n".join(session_lines)
+        )
+
+    prompt = _THINKING_NEXT_ACTION_PROMPT.format(
+        target_url=target_url,
+        crawl_context=crawl_context,
+        credentials_section=credentials_section,
+        sessions_section=sessions_section,
+        current_step=current_step,
+        max_steps=max_steps,
+        pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
+        history_text=history_text,
+    )
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_request",
+                "status": "pending",
+                "message": f"Step {current_step}: sending prompt ({len(prompt):,} chars) to LLM…",
+                "data": {"step": current_step, "prompt": prompt},
+            })
+        except Exception:
+            pass
+    raw = await _call(config, prompt, None)
+    action: dict
+    try:
+        action = _extract_json(raw or "", expect=dict)
+        valid_actions = ("tool", "http", "browser", "jwt", "credential_check", "finding_write", "done")
+        if not isinstance(action, dict) or action.get("action") not in valid_actions:
+            raise ValueError("unexpected action")
+    except Exception as exc:
+        log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
+        action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+    if emit_fn:
+        try:
+            emit_fn({
+                "type": "scanner_phase",
+                "phase": "llm_response",
+                "status": "complete",
+                "message": (
+                    f"Step {current_step}: LLM → {action.get('action')}"
+                    + (f" {action.get('tool','')}" if action.get('action') == 'tool' else '')
+                    + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'browser' else '')
+                    + (f" {action.get('store_as','')}" if action.get('action') == 'jwt' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'credential_check' else '')
+                    + (f" {action.get('title','')}" if action.get('action') == 'finding_write' else '')
+                    + (
+                        f": {action.get('hypothesis') or action.get('note','')}"
+                        if action.get('hypothesis') or action.get('note')
+                        else ""
+                    )
+                ),
+                "data": {"step": current_step, "raw_response": raw, "action": action},
+            })
+        except Exception:
+            pass
+    return action
 
 
 # ── Validation LLM functions ──────────────────────────────────────────────────

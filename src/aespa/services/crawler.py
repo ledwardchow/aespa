@@ -24,7 +24,7 @@ from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, Tes
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config, get_llm_config_for_run
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -40,6 +40,9 @@ _UA = (
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
+    task = _active_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def is_running(run_id: int) -> bool:
@@ -48,6 +51,10 @@ def is_running(run_id: int) -> bool:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _login_url_for_credential(default_login_url: str, cred) -> str:
+    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -65,6 +72,17 @@ async def start_crawl(run_id: int) -> None:
 async def _crawl_task(run_id: int) -> None:
     try:
         await _do_crawl(run_id)
+    except asyncio.CancelledError:
+        log.info("Crawl task cancelled (stop requested) for run_id=%s", run_id)
+        with Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run and run.status == TestRunStatus.running:
+                run.status = TestRunStatus.stopped
+                run.completed_at = _utcnow()
+                s.add(run)
+                s.commit()
+        events_svc.emit(run_id, {"type": "run_update", "status": "stopped"})
+        raise
     except Exception as exc:
         with Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
@@ -96,7 +114,7 @@ async def _do_crawl(run_id: int) -> None:
             raise ValueError(f"TestRun {run_id} not found")
         from aespa.models import Site
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
         creds = list(site.credentials)
@@ -198,6 +216,7 @@ async def _crawl_as_credential(
 
     username      = cred.username if cred else None
     credential_id = cred.id if cred else None
+    credential_login_url = _login_url_for_credential(login_url, cred)
 
     log.info("=== Phase %d/%d: user=%s ===", phase_idx + 1, total_phases, username or "anonymous")
     events_svc.emit(run_id, {
@@ -238,6 +257,10 @@ async def _crawl_as_credential(
                     request_headers = await response.request.all_headers()
                 except Exception:
                     request_headers = dict(response.request.headers)
+                try:
+                    response_headers = dict(response.headers)
+                except Exception:
+                    response_headers = {}
                 observed_api_calls.append({
                     "url": response.url,
                     "method": response.request.method,
@@ -245,6 +268,7 @@ async def _crawl_as_credential(
                     "request_body": response.request.post_data,
                     "status": response.status,
                     "content_type": content_type,
+                    "response_headers": response_headers,
                     "body": body,
                 })
             except Exception as exc:
@@ -258,9 +282,11 @@ async def _crawl_as_credential(
             log.warning("Pre-load failed for user=%s: %s", username, e)
 
         if requires_auth and cred:
-            log.info("Authenticating as %s", cred.username)
-            await _authenticate(page, login_url, cred)
-            auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+            log.info("Authenticating as %s at %s", cred.username, credential_login_url)
+            await _authenticate(page, credential_login_url, cred)
+            auth_check_snapshot = await _capture_auth_check_snapshot(
+                page, credential_login_url
+            )
 
         observed_api_calls.clear()
 
@@ -311,7 +337,7 @@ async def _crawl_as_credential(
                     page, url,
                     requires_auth=requires_auth,
                     credential=cred,
-                    login_url=login_url,
+                    login_url=credential_login_url,
                     username=username,
                     auth_check_snapshot=auth_check_snapshot,
                 )
@@ -349,7 +375,7 @@ async def _crawl_as_credential(
                         shared.crawled_norms[norm_final] = page_id
 
             # ── DOM-based accessibility check (login form = not accessible) ───
-            on_login = await _page_requires_login(page, login_url)
+            on_login = await _page_requires_login(page, credential_login_url)
 
             if on_login:
                 if is_first:
@@ -742,22 +768,36 @@ def _api_analysis_text(call: dict) -> str:
 
 def _api_page_text(call: dict) -> str:
     method = str(call.get("method") or "GET").upper()
+    url = call.get("url") or ""
     status = call.get("status")
-    content_type = call.get("content_type") or ""
     request_headers = call.get("request_headers") or {}
-    request_content_type = _header_value(request_headers, "content-type") or "unknown"
+    response_headers = call.get("response_headers") or {}
     request_body = (call.get("request_body") or "")[:8000]
     body = (call.get("body") or "")[:8000]
     return (
-        f"API endpoint observed during crawl.\n"
-        f"Method: {method}\n"
-        f"URL: {call.get('url') or ''}\n"
-        f"Request Content-Type: {request_content_type}\n"
-        f"HTTP status: {status if status is not None else 'unknown'}\n"
-        f"Response Content-Type: {content_type or 'unknown'}\n\n"
-        f"Request body excerpt:\n{request_body or '(none)'}\n\n"
-        f"Response body excerpt:\n{body}"
+        f"=== HTTP exchange observed during crawl ===\n"
+        f"\nREQUEST\n"
+        f"{method} {url}\n"
+        f"Headers:\n{_format_headers(request_headers)}\n"
+        f"\nBody:\n{request_body or '(none)'}\n"
+        f"\nRESPONSE\n"
+        f"Status: {status if status is not None else 'unknown'}\n"
+        f"Headers:\n{_format_headers(response_headers)}\n"
+        f"\nBody:\n{body or '(none)'}"
     )
+
+
+def _format_headers(headers: dict, *, max_value_len: int = 200) -> str:
+    """Format HTTP headers for display, abbreviating long cookie/set-cookie values."""
+    lines = []
+    for k, v in (headers or {}).items():
+        v_str = str(v)
+        if k.lower() in ("cookie", "set-cookie") and len(v_str) > 80:
+            v_str = v_str[:80] + f"… ({len(v_str)} chars total)"
+        elif len(v_str) > max_value_len:
+            v_str = v_str[:max_value_len] + "…"
+        lines.append(f"  {k}: {v_str}")
+    return "\n".join(lines) if lines else "  (none)"
 
 
 def _header_value(headers: dict, name: str) -> str | None:
@@ -853,6 +893,7 @@ async def _reconcile_direct_access(
             for cred in creds:
                 if run_id in _stop_requested:
                     break
+                credential_login_url = _login_url_for_credential(login_url, cred)
                 ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
                 traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
                 page = await ctx.new_page()
@@ -861,8 +902,10 @@ async def _reconcile_direct_access(
                         await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
                     except Exception:
                         pass
-                    await _authenticate(page, login_url, cred)
-                    auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+                    await _authenticate(page, credential_login_url, cred)
+                    auth_check_snapshot = await _capture_auth_check_snapshot(
+                        page, credential_login_url
+                    )
 
                     for page_id, page_url, page_title, page_text, accessible_by in page_rows:
                         if run_id in _stop_requested:
@@ -876,7 +919,7 @@ async def _reconcile_direct_access(
                             page_url,
                             requires_auth=requires_auth,
                             credential=cred,
-                            login_url=login_url,
+                            login_url=credential_login_url,
                             username=cred.username,
                             auth_check_snapshot=auth_check_snapshot,
                             recover_api_auth=False,
