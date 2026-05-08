@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, ScannerPolicy, TestRun
-from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyBase, ScannerPolicyIn, ScannerPolicyOut
+from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyIn, ScannerPolicyOut
 
 _SINGLETON_ID = 1
 
@@ -19,6 +19,15 @@ def _utcnow() -> datetime:
 
 def get_llm_config(session: Session) -> LLMConfig | None:
     return session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
+
+
+def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
+    """Return the LLM config for a run: per-run override if set, else the active global one."""
+    if run.llm_config_id is not None:
+        cfg = session.get(LLMConfig, run.llm_config_id)
+        if cfg is not None:
+            return cfg
+    return get_llm_config(session)
 
 
 def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
@@ -122,6 +131,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
+        thinking_max_steps=cfg.thinking_max_steps,
         request_timeout_s=cfg.request_timeout_s,
         min_delay_s=cfg.min_delay_s,
         max_request_body_bytes=cfg.max_request_body_bytes,
@@ -150,6 +160,7 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
 
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
+    cfg.thinking_max_steps = payload.thinking_max_steps
     cfg.request_timeout_s = payload.request_timeout_s
     cfg.min_delay_s = payload.min_delay_s
     cfg.max_request_body_bytes = payload.max_request_body_bytes
@@ -168,23 +179,6 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
     return _policy_from_model(cfg)
 
 
-def scanner_policy_snapshot(policy: ScannerPolicyBase) -> str:
-    return policy.model_dump_json()
-
-
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
-    snapshot = _json_loads(run.scanner_policy_json, {})
-    if snapshot:
-        policy = ScannerPolicyIn(**snapshot)
-        return RunScannerPolicyOut(**policy.model_dump(), source="run_snapshot", updated_at=None)
     policy = get_scanner_policy(session)
     return RunScannerPolicyOut(**policy.model_dump(exclude={"updated_at"}), source="global_default", updated_at=policy.updated_at)
-
-
-def update_run_scanner_policy(session: Session, run: TestRun, payload: ScannerPolicyIn) -> RunScannerPolicyOut:
-    run.scan_mode = payload.scan_mode
-    run.scanner_policy_json = scanner_policy_snapshot(payload)
-    session.add(run)
-    session.commit()
-    session.refresh(run)
-    return get_run_scanner_policy(session, run)

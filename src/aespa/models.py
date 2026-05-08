@@ -37,6 +37,7 @@ class Credential(SQLModel, table=True):
     username: str
     password: str  # plaintext — local pentesting tool
     label: Optional[str] = Field(default=None)
+    login_url: Optional[str] = Field(default=None)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
@@ -81,8 +82,9 @@ class ScannerPolicy(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     scan_mode: str = Field(default="safe_active")
     max_probes_per_page: int = Field(default=50)
+    thinking_max_steps: int = Field(default=120)
     request_timeout_s: float = Field(default=10.0)
-    min_delay_s: float = Field(default=0.2)
+    min_delay_s: float = Field(default=0.05)
     max_request_body_bytes: int = Field(default=65536)
     response_body_read_limit_bytes: int = Field(default=512 * 1024)
     allowed_schemes: str = Field(default='["http", "https"]')
@@ -127,6 +129,8 @@ class TestRun(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
+    # Optional per-run LLM profile override (null = use the globally active one)
+    llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
 
 
 class CrawledPage(SQLModel, table=True):
@@ -231,3 +235,18 @@ class ScanFinding(SQLModel, table=True):
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanLog(SQLModel, table=True):
+    """Persisted scanner_phase event so the activity log survives page navigation."""
+
+    __tablename__ = "scan_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    phase: str                              # thinking_step | site_plan | page_plan | …
+    status: str = Field(default="")        # start | complete | running | deciding | …
+    message: str = Field(default="")
+    page_url: Optional[str] = Field(default=None)
+    data_json: Optional[str] = Field(default=None)  # JSON blob for extra phase data

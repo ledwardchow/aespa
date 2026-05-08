@@ -48,6 +48,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
     _ensure_column(engine, "test_run", "scanner_policy_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(engine, "credential", "login_url", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")
@@ -66,8 +67,10 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
+    _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
@@ -93,6 +96,21 @@ def _migrate(engine: Engine) -> None:
                 FROM crawled_page
                 WHERE crawled_page.id = page_credential_view.page_id
                   AND crawled_page.test_run_id = page_credential_view.test_run_id
+            )
+        """))
+        conn.commit()
+    # scan_log — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scan_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                phase TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                page_url TEXT,
+                data_json TEXT
             )
         """))
         conn.commit()

@@ -33,13 +33,21 @@ def test_create_run_custom_name(client: TestClient):
     assert r.json()["name"] == "Initial recon"
 
 
-def test_create_run_with_scan_mode(client: TestClient):
+def test_create_run_uses_global_scan_policy(client: TestClient):
+    policy = client.get("/api/settings/scanner-policy").json()
+    policy["scan_mode"] = "aggressive"
+    policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 140
+    client.put("/api/settings/scanner-policy", json=policy)
+
     site = _make_site(client)
-    r = _make_run(client, site["id"], scan_mode="aggressive")
+    r = _make_run(client, site["id"])
     assert r.status_code == 201
     data = r.json()
     assert data["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["scan_mode"] == "aggressive"
+    assert data["scanner_policy"]["max_probes_per_page"] == 7
+    assert data["scanner_policy"]["thinking_max_steps"] == 140
 
 
 def test_create_run_auto_increments(client: TestClient):
@@ -69,6 +77,40 @@ def test_get_run(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}")
     assert r.status_code == 200
     assert r.json()["id"] == run["id"]
+
+
+def test_import_findings_creates_findings_and_pages(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [{
+        "owasp_category": "A01",
+        "severity": "high",
+        "title": "Imported authorization bypass",
+        "description": "A protected resource is accessible.",
+        "impact": "Unauthorized data access.",
+        "likelihood": "Likely",
+        "recommendation": "Enforce authorization checks.",
+        "cvss_score": 8.1,
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+        "affected_url": "https://target.local/admin",
+        "evidence": "GET /admin returned 200",
+        "request_evidence": "GET /admin",
+        "response_evidence": "Status: 200",
+        "validation_status": "confirmed",
+        "validation_note": "Imported validated issue.",
+    }]
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/import", json=payload)
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["imported"] == 1
+    finding = data["findings"][0]
+    assert finding["title"] == "Imported authorization bypass"
+    assert finding["validation_status"] == "confirmed"
+    assert finding["affected_url"] == "https://target.local/admin"
+    run_after = client.get(f"/api/test-runs/{run['id']}").json()
+    assert run_after["pages_discovered"] == 1
 
 
 def test_run_summary_prefers_live_scan_status(monkeypatch):
@@ -112,6 +154,46 @@ def test_run_summary_prefers_live_scan_status(monkeypatch):
         engine.dispose()
 
 
+def test_run_summary_ignores_non_live_running_scan_marker(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun, TestRunStatus
+    from aespa.services import scanner as scanner_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+                error_message="scan:running",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
+
+            summary = test_runs_api._run_summary(run, session)
+
+        assert summary.scan_status == "idle"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_run_not_found(client: TestClient):
     r = client.get("/api/test-runs/9999")
     assert r.status_code == 404
@@ -137,44 +219,32 @@ def test_create_run_invalid_max_pages(client: TestClient):
     assert r.status_code == 422
 
 
-def test_create_run_invalid_scan_mode(client: TestClient):
-    site = _make_site(client)
-    r = _make_run(client, site["id"], scan_mode="reckless")
-    assert r.status_code == 422
-
-
-def test_run_scan_policy_snapshots_global_defaults(client: TestClient):
+def test_run_scan_policy_tracks_global_defaults(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 90
     client.put("/api/settings/scanner-policy", json=policy)
 
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    assert run["scanner_policy"]["source"] == "global_default"
+    assert run["scanner_policy"]["max_probes_per_page"] == 7
+    assert run["scanner_policy"]["thinking_max_steps"] == 90
+
+    policy["max_probes_per_page"] = 30
+    policy["scan_mode"] = "passive"
+    client.put("/api/settings/scanner-policy", json=policy)
+    run2 = client.get(f"/api/test-runs/{run['id']}").json()
+    assert run2["scan_mode"] == "passive"
+    assert run2["scanner_policy"]["source"] == "global_default"
+    assert run2["scanner_policy"]["max_probes_per_page"] == 30
+
+
+def test_run_scan_policy_endpoint_removed(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
     r = client.get(f"/api/test-runs/{run['id']}/scan/policy")
-    assert r.status_code == 200
-    assert r.json()["source"] == "run_snapshot"
-    assert r.json()["max_probes_per_page"] == 7
-
-    policy["max_probes_per_page"] = 30
-    client.put("/api/settings/scanner-policy", json=policy)
-    r2 = client.get(f"/api/test-runs/{run['id']}/scan/policy")
-    assert r2.json()["max_probes_per_page"] == 7
-
-
-def test_update_run_scan_policy(client: TestClient):
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    policy = client.get(f"/api/test-runs/{run['id']}/scan/policy").json()
-    policy["scan_mode"] = "passive"
-    policy["max_probes_per_page"] = 0
-    r = client.patch(f"/api/test-runs/{run['id']}/scan/policy", json=policy)
-    assert r.status_code == 200
-    assert r.json()["scan_mode"] == "passive"
-    assert r.json()["max_probes_per_page"] == 0
-
-    run2 = client.get(f"/api/test-runs/{run['id']}").json()
-    assert run2["scan_mode"] == "passive"
-    assert run2["scanner_policy"]["max_probes_per_page"] == 0
+    assert r.status_code == 404
 
 
 # ── Start without LLM config ──────────────────────────────────────────────────
@@ -219,6 +289,86 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     assert r.status_code == 200
     assert stopped_runs == [run["id"]]
     assert r.json()["status"] == "stopped"
+
+
+def test_normal_scan_start_does_not_start_thinking_scan(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    calls = {"normal": [], "thinking": []}
+
+    async def fake_start_scan(run_id, page_ids=None):
+        calls["normal"].append((run_id, page_ids))
+
+    async def fake_start_thinking_scan(run_id):
+        calls["thinking"].append(run_id)
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "get_scan_status", lambda run_id: {
+        "total_pages": 0,
+        "pages_done": 0,
+        "findings_count": 0,
+        "status": "running",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+
+    assert r.status_code == 200
+    assert calls["normal"] == [(run["id"], None)]
+    assert calls["thinking"] == []
+    assert r.json()["status"] == "running"
+
+
+def test_thinking_scan_start_does_not_start_normal_scan(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    calls = {"normal": [], "thinking": []}
+
+    async def fake_start_scan(run_id, page_ids=None):
+        calls["normal"].append((run_id, page_ids))
+
+    async def fake_start_thinking_scan(run_id):
+        calls["thinking"].append(run_id)
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
+    monkeypatch.setattr(scan_api.scanner_svc, "get_thinking_scan_status", lambda run_id: {
+        "status": "running",
+    })
+
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+
+    assert r.status_code == 200
+    assert calls["normal"] == []
+    assert calls["thinking"] == [run["id"]]
+    assert r.json()["status"] == "running"
+
+
+def test_scan_modes_block_each_other(client: TestClient, monkeypatch):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: True)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Scan already running"
+
+    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
+    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Dynamic Scan already running"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────

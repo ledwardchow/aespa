@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
@@ -26,23 +26,30 @@ from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config, get_run_scanner_policy
+from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
 
 log = logging.getLogger("aespa.scanner")
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
+# Regular scan
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
 # Populated while a scan is running so the validator can reuse pre-authenticated sessions.
 _active_sessions: dict[int, dict[int, dict]] = {}  # run_id → cred_id → session
 
+# Thinking scan (independent)
+_thinking_stop_requested: set[int] = set()
+_thinking_tasks: dict[int, asyncio.Task] = {}
+_thinking_scan_status: dict[int, str] = {}  # run_id → idle|running|complete|stopped|failed
+
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 MAX_PROBES_PER_PAGE = 50
+MAX_FOLLOWUP_PROBES  = 20
 REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
-MIN_DELAY = 0.2               # ~5 req/s
+MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -53,6 +60,16 @@ _UA = (
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def sleep_between_probes(scanner_policy=None) -> None:
+    delay = scanner_policy.min_delay_s if scanner_policy else MIN_DELAY
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _login_url_for_credential(default_login_url: Optional[str], cred) -> str:
+    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
 
 def _severity_from_cvss(score: float | int | str | None) -> str:
@@ -78,6 +95,438 @@ def _cvss_score(value: float | int | str | None) -> float:
         return 0.0
 
 
+def _compact_log_value(value, limit: int = 180) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, separators=(",", ":"))
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _thinking_payload_summary(url: str, body) -> str:
+    parts: list[str] = []
+    query = parse_qs(urlparse(url).query, keep_blank_values=True)
+    if query:
+        preview = ", ".join(
+            f"{key}={_compact_log_value(values[-1], 60)}"
+            for key, values in list(query.items())[:4]
+        )
+        parts.append(f"query payloads: {preview}")
+    body_preview = _compact_log_value(body)
+    if body_preview:
+        parts.append(f"body payload: {body_preview}")
+    return "; ".join(parts)
+
+
+def _thinking_browser_payload_summary(steps) -> str:
+    if not isinstance(steps, list):
+        return ""
+    parts: list[str] = []
+    for step in steps[:6]:
+        if not isinstance(step, dict):
+            continue
+        op = step.get("op")
+        selector = step.get("selector")
+        value = step.get("value") if "value" in step else step.get("key")
+        url = step.get("url")
+        detail = op or "step"
+        if selector:
+            detail += f" {selector}"
+        if value is not None:
+            detail += f"={_compact_log_value(value, 50)}"
+        if url:
+            detail += f" {_compact_log_value(url, 80)}"
+        parts.append(detail)
+    if isinstance(steps, list) and len(steps) > 6:
+        parts.append(f"+{len(steps) - 6} more")
+    return "; ".join(parts)
+
+
+def _sign_hs256_jwt(secret: str, claims: dict, header: dict | None = None) -> str:
+    import base64 as _b64
+    import hashlib
+    import hmac
+
+    def _b64url(raw: bytes) -> str:
+        return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    jwt_header = {"typ": "JWT", "alg": "HS256"}
+    if header:
+        jwt_header.update(header)
+    if jwt_header.get("alg") != "HS256":
+        raise ValueError("only HS256 JWT signing is supported")
+    signing_input = ".".join([
+        _b64url(json.dumps(jwt_header, separators=(",", ":")).encode()),
+        _b64url(json.dumps(claims, separators=(",", ":")).encode()),
+    ])
+    signature = hmac.new(
+        secret.encode(),
+        signing_input.encode(),
+        hashlib.sha256,
+    ).digest()
+    return f"{signing_input}.{_b64url(signature)}"
+
+
+def _redact_candidate(candidate: dict) -> dict:
+    return {
+        "username": candidate.get("username") or candidate.get("email") or "",
+        "password": "***",
+    }
+
+
+def _redact_sensitive_text(text: str) -> str:
+    # Hide JWT-like bearer values in history/evidence. The session vault keeps
+    # usable tokens separately under labels so the LLM does not need raw secrets.
+    return re.sub(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+        "[REDACTED_JWT]",
+        text,
+    )
+
+
+def _extract_bearer_token_from_body(body: str) -> Optional[str]:
+    try:
+        data = json.loads(body)
+    except Exception:
+        data = None
+
+    def _walk(value):
+        if isinstance(value, dict):
+            for key in ("token", "access_token", "jwt", "auth_token", "id_token"):
+                token = value.get(key)
+                if isinstance(token, str) and token.count(".") == 2:
+                    return token
+            for child in value.values():
+                found = _walk(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = _walk(child)
+                if found:
+                    return found
+        return None
+
+    if data is not None:
+        token = _walk(data)
+        if token:
+            return token
+
+    match = re.search(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+        body,
+    )
+    return match.group(0) if match else None
+
+
+def _session_label(raw: str, existing: dict) -> str:
+    base = re.sub(r"[^a-zA-Z0-9_]+", "_", raw.strip().lower()).strip("_")
+    base = base[:40] or "session"
+    label = base
+    counter = 2
+    while label in existing:
+        label = f"{base}_{counter}"
+        counter += 1
+    return label
+
+
+def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
+    note = _compact_log_value(action.get("note"), 240)
+    observation = _compact_log_value(action.get("observation"), 220)
+    hypothesis = _compact_log_value(
+        action.get("hypothesis") or action.get("investigation") or action.get("objective"),
+        220,
+    )
+    payload_purpose = _compact_log_value(action.get("payload_purpose"), 180)
+    if method == "BROWSER":
+        payload_summary = _thinking_browser_payload_summary(action.get("steps") or [])
+    elif method == "CREDENTIAL_CHECK":
+        count = len(action.get("candidates") or [])
+        payload_summary = f"{min(count, 20)} bounded candidate(s)"
+    else:
+        payload_summary = _thinking_payload_summary(url, action.get("body"))
+
+    lead = hypothesis or note or "next target behavior"
+    message = f"Step {step}: investigating {lead}"
+    if observation:
+        message += f" after observing {observation}"
+    if payload_purpose:
+        message += f"; payload purpose: {payload_purpose}"
+    if payload_summary:
+        message += f" ({payload_summary})"
+    return f"{message} — {method} {url}"
+
+
+def _summary_list(values: list[str], limit: int = 3) -> str:
+    unique: list[str] = []
+    for value in values:
+        compact = _compact_log_value(value, 180)
+        if compact and compact not in unique:
+            unique.append(compact)
+    if not unique:
+        return ""
+    shown = unique[:limit]
+    suffix = f"; +{len(unique) - limit} more" if len(unique) > limit else ""
+    return "; ".join(shown) + suffix
+
+
+def _thinking_page_flags(page: dict[str, Any]) -> list[str]:
+    return [
+        label for key, label in [
+            ("req_auth", "req_auth"),
+            ("takes_input", "takes_input"),
+            ("has_object_ref", "has_object_ref"),
+            ("has_business_logic", "has_business_logic"),
+        ] if page.get(key)
+    ]
+
+
+def _thinking_page_kind(page: dict[str, Any]) -> str:
+    return "api" if str(page.get("title") or "").startswith("API ") else "page"
+
+
+def _build_compact_thinking_context(
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    findings_snapshot: list[dict[str, Any]],
+) -> str:
+    total = len(pages_snapshot)
+    api_pages = [p for p in pages_snapshot if _thinking_page_kind(p) == "api"]
+    input_pages = [p for p in pages_snapshot if p.get("takes_input")]
+    object_pages = [p for p in pages_snapshot if p.get("has_object_ref")]
+    business_pages = [p for p in pages_snapshot if p.get("has_business_logic")]
+
+    def _sample(label: str, pages: list[dict[str, Any]], limit: int = 8) -> str:
+        if not pages:
+            return f"{label}: none"
+        lines = [
+            f"  - page_id={p['id']} {_thinking_page_kind(p)} {p['url']}"
+            + (f" [{', '.join(_thinking_page_flags(p))}]" if _thinking_page_flags(p) else "")
+            for p in pages[:limit]
+        ]
+        suffix = f"\n  - +{len(pages) - limit} more" if len(pages) > limit else ""
+        return f"{label}:\n" + "\n".join(lines) + suffix
+
+    sections = [
+        f"Target: {base_url}",
+        (
+            "Crawl summary: "
+            f"{total} in-scope pages/endpoints; {len(api_pages)} API; "
+            f"{len(input_pages)} input-taking; {len(object_pages)} object-reference; "
+            f"{len(business_pages)} business-logic."
+        ),
+        "Use context tools for details instead of assuming full crawl data is inline.",
+        _sample("High-value routes", input_pages + object_pages + business_pages),
+        _sample("API sample", api_pages),
+    ]
+    if findings_snapshot:
+        lines = [
+            f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
+            for f in findings_snapshot[:10]
+        ]
+        if len(findings_snapshot) > 10:
+            lines.append(f"  - +{len(findings_snapshot) - 10} more")
+        sections.append("Existing findings summary:\n" + "\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _thinking_tool_result_record(
+    step: int,
+    tool_name: str,
+    args: dict[str, Any],
+    output: dict[str, Any],
+    note: str,
+) -> dict[str, Any]:
+    text = json.dumps(output, separators=(",", ":"), default=str)
+    return {
+        "step": step,
+        "note": note,
+        "method": "TOOL",
+        "url": f"tool://{tool_name}",
+        "request_headers": {},
+        "request_body": args,
+        "response_status": 200,
+        "response_headers": {"content-type": "application/json"},
+        "response_body": text[:6000],
+    }
+
+
+def _run_thinking_context_tool(
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    findings_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        limit = max(1, min(100, int(args.get("limit") or 20)))
+    except (TypeError, ValueError):
+        limit = 20
+    search = str(args.get("search") or args.get("filter") or "").lower()
+    search_tokens = search.replace("-", "_").split()
+
+    if tool_name == "site_map":
+        route_type = str(args.get("type") or "").lower()
+        flags = args.get("flags") if isinstance(args.get("flags"), list) else []
+        flag_set = {str(flag) for flag in flags}
+        pages: list[dict[str, Any]] = []
+        for page in pages_snapshot:
+            haystack = " ".join([
+                str(page.get("url") or ""),
+                str(page.get("title") or ""),
+                str(page.get("context") or ""),
+                " ".join(_thinking_page_flags(page)),
+                _thinking_page_kind(page),
+            ]).lower()
+            if route_type and _thinking_page_kind(page) != route_type:
+                continue
+            if flag_set and not all(page.get(flag) for flag in flag_set):
+                continue
+            if search_tokens and not all(token in haystack for token in search_tokens):
+                continue
+            pages.append(page)
+        return {
+            "tool": "site_map",
+            "count": len(pages),
+            "routes": [
+                {
+                    "page_id": p["id"],
+                    "kind": _thinking_page_kind(p),
+                    "url": p["url"],
+                    "title": p.get("title") or "",
+                    "flags": _thinking_page_flags(p),
+                    "context_excerpt": _compact_log_value(p.get("context"), 220),
+                }
+                for p in pages[:limit]
+            ],
+            "truncated": len(pages) > limit,
+        }
+
+    if tool_name == "page_detail":
+        page_id = args.get("page_id")
+        url = str(args.get("url") or "")
+        include = args.get("include") if isinstance(args.get("include"), list) else []
+        include_set = {str(item) for item in include} or {"title", "flags", "context", "page_text"}
+        page = None
+        for candidate in pages_snapshot:
+            if page_id is not None and str(candidate.get("id")) == str(page_id):
+                page = candidate
+                break
+            if url and candidate.get("url") == url:
+                page = candidate
+                break
+        if not page:
+            return {"tool": "page_detail", "error": "page not found", "page_id": page_id, "url": url}
+        detail: dict[str, Any] = {
+            "tool": "page_detail",
+            "page_id": page["id"],
+            "url": page["url"],
+            "kind": _thinking_page_kind(page),
+        }
+        if "title" in include_set:
+            detail["title"] = page.get("title") or ""
+        if "flags" in include_set:
+            detail["flags"] = _thinking_page_flags(page)
+        if "context" in include_set:
+            detail["context"] = str(page.get("context") or "")[:3000]
+        if "page_text" in include_set or "transcript" in include_set:
+            detail["page_text"] = str(page.get("page_text") or "")[:5000]
+        return detail
+
+    if tool_name == "history_search":
+        query = str(args.get("query") or search).lower()
+        matches: list[dict[str, Any]] = []
+        for item in history:
+            haystack = json.dumps(item, default=str).lower()
+            if query and query not in haystack:
+                continue
+            matches.append({
+                "step": item.get("step"),
+                "method": item.get("method"),
+                "url": item.get("url"),
+                "note": item.get("note"),
+                "request_body": _compact_log_value(item.get("request_body"), 500),
+                "response_status": item.get("response_status"),
+                "response_headers": item.get("response_headers"),
+                "response_body": str(item.get("response_body") or "")[:2000],
+            })
+        return {"tool": "history_search", "count": len(matches), "matches": matches[-limit:]}
+
+    if tool_name == "finding_list":
+        severity = str(args.get("severity") or "").lower()
+        owasp = str(args.get("owasp_category") or "").lower()
+        matches = []
+        for finding in findings_snapshot:
+            haystack = json.dumps(finding, default=str).lower()
+            if severity and str(finding.get("severity") or "").lower() != severity:
+                continue
+            if owasp and str(finding.get("owasp") or "").lower() != owasp:
+                continue
+            if search_tokens and not all(token in haystack for token in search_tokens):
+                continue
+            matches.append(finding)
+        return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
+
+    return {
+        "tool": tool_name,
+        "error": "unknown tool",
+        "available_tools": ["site_map", "page_detail", "history_search", "finding_list"],
+    }
+
+
+def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
+    interesting = _summary_list([
+        str(
+            probe.get("interesting_result")
+            or probe.get("observation")
+            or probe.get("trigger")
+            or probe.get("reason")
+            or ""
+        )
+        for probe in followup_probes
+    ])
+    hypotheses = _summary_list([
+        str(
+            probe.get("hypothesis")
+            or probe.get("tests")
+            or probe.get("objective")
+            or probe.get("desc")
+            or ""
+        )
+        for probe in followup_probes
+    ])
+    payloads = _summary_list([
+        str(probe.get("payload_purpose") or _thinking_payload_summary(probe.get("url") or "", probe.get("body")))
+        for probe in followup_probes
+    ])
+    return {"interesting": interesting, "hypotheses": hypotheses, "payloads": payloads}
+
+
+def _followup_log_message(followup_probes: list[dict], *, tense: str = "planning") -> str:
+    count = len(followup_probes)
+    plural = "s" if count != 1 else ""
+    details = _followup_log_details(followup_probes)
+    if tense == "complete":
+        message = f"{count} follow-up probe{plural} executed"
+    else:
+        message = f"{count} follow-up probe{plural} planned"
+    if details["interesting"]:
+        message += f" because: {details['interesting']}"
+    if details["hypotheses"]:
+        message += f"; testing: {details['hypotheses']}"
+    if details["payloads"]:
+        message += f"; payload purpose: {details['payloads']}"
+    return message
+
+
 def _combined_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
     parts = []
     if summary:
@@ -96,6 +545,8 @@ def _finding_from_llm(
     page_url: str,
     raw: dict,
     result_by_url: dict[str, dict],
+    validation_status: str = "validating",
+    validation_note: str | None = "Validation queued.",
 ) -> ScanFinding:
     probe_urls = list(result_by_url.keys())
     llm_url = (raw.get("affected_url") or "").strip()
@@ -134,16 +585,182 @@ def _finding_from_llm(
         request_evidence=request_evidence[:4000],
         response_evidence=response_evidence[:4000],
         screenshot_b64=matched.get("screenshot_b64"),
-        validation_status="validating",
-        validation_note="Validation queued.",
+        validation_status=validation_status,
+        validation_note=validation_note,
         created_at=_utcnow(),
     )
+
+
+def _find_or_create_dynamic_page(
+    session: Session,
+    *,
+    run_id: int,
+    url: str,
+    base_url: str,
+) -> int | None:
+    page_url = (url or base_url).strip() or base_url
+    existing = session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run_id)
+        .where(CrawledPage.url == page_url)
+    ).first()
+    if existing:
+        return existing.id
+
+    page = CrawledPage(
+        test_run_id=run_id,
+        url=page_url,
+        title="Dynamic Scan target",
+        page_text="",
+        llm_context="Discovered during Dynamic Scan.",
+        depth=0,
+        status="crawled",
+        in_scope=True,
+        scan_status="complete",
+    )
+    session.add(page)
+    session.flush()
+
+    run = session.get(TestRun, run_id)
+    if run is not None:
+        run.pages_discovered = (run.pages_discovered or 0) + 1
+
+    return page.id
+
+
+def _dynamic_finding_page_id(
+    session: Session,
+    *,
+    run_id: int,
+    affected_url: str,
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    first_page_id: int | None,
+) -> int | None:
+    url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
+    if affected_url in url_to_page:
+        return url_to_page[affected_url]
+    for page_url, page_id in url_to_page.items():
+        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
+            return page_id
+    if first_page_id is not None:
+        return first_page_id
+    return _find_or_create_dynamic_page(
+        session,
+        run_id=run_id,
+        url=affected_url,
+        base_url=base_url,
+    )
+
+
+def _dynamic_finding_exists(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str,
+) -> bool:
+    existing = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.affected_url == affected_url)
+    ).all()
+    normalized_title = title.strip().lower()
+    normalized_owasp = owasp_category.strip().lower()
+    return any(
+        f.title.strip().lower() == normalized_title
+        or (
+            f.owasp_category.strip().lower() == normalized_owasp
+            and f.title.strip().lower() == normalized_title
+        )
+        for f in existing
+    )
+
+
+async def _persist_dynamic_finding(
+    *,
+    run_id: int,
+    llm_cfg,
+    raw: dict,
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    first_page_id: int | None,
+    result_by_url: dict[str, dict],
+) -> ScanFinding | None:
+    """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
+    affected = (raw.get("affected_url") or base_url).strip() or base_url
+    raw = {**raw, "affected_url": affected}
+
+    try:
+        with Session(get_engine()) as s:
+            existing = s.exec(
+                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            ).all()
+            existing_summaries = [
+                {
+                    "title": f.title,
+                    "owasp_category": f.owasp_category,
+                    "severity": f.severity,
+                }
+                for f in existing
+            ]
+        if existing_summaries:
+            normalized = await llm_svc.normalize_finding_titles(
+                llm_cfg,
+                existing_summaries,
+                [raw],
+            )
+            if normalized:
+                raw = normalized[0]
+                affected = (raw.get("affected_url") or affected).strip() or affected
+    except Exception as exc:
+        log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
+
+    with Session(get_engine()) as s:
+        page_id = _dynamic_finding_page_id(
+            s,
+            run_id=run_id,
+            affected_url=affected,
+            base_url=base_url,
+            pages_snapshot=pages_snapshot,
+            first_page_id=first_page_id,
+        )
+        if page_id is None:
+            log.warning("Thinking scan: no page_id found for progressive finding %s", affected)
+            return None
+
+        if _dynamic_finding_exists(
+            s,
+            run_id=run_id,
+            title=str(raw.get("title") or "Untitled finding"),
+            affected_url=affected,
+            owasp_category=str(raw.get("owasp_category") or "A00"),
+        ):
+            return None
+
+        finding = _finding_from_llm(
+            run_id=run_id,
+            page_id=page_id,
+            page_url=affected,
+            raw=raw,
+            result_by_url=result_by_url,
+            validation_status="unvalidated",
+            validation_note=None,
+        )
+        s.add(finding)
+        s.commit()
+        s.refresh(finding)
+        return finding
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
 
 def request_stop(run_id: int) -> None:
     _stop_requested.add(run_id)
+    task = _active_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def is_running(run_id: int) -> bool:
@@ -153,6 +770,31 @@ def is_running(run_id: int) -> bool:
 def get_active_sessions(run_id: int) -> dict[int, dict] | None:
     """Return the pre-authenticated cred_sessions for a currently running scan, or None."""
     return _active_sessions.get(run_id)
+
+
+# ── Thinking-scan public API ──────────────────────────────────────────────────
+
+def is_thinking_running(run_id: int) -> bool:
+    return run_id in _thinking_tasks
+
+
+def request_thinking_stop(run_id: int) -> None:
+    _thinking_stop_requested.add(run_id)
+    if is_thinking_running(run_id):
+        _thinking_scan_status[run_id] = "stopping"
+        _emit_thinking_status(run_id)
+
+
+def get_thinking_scan_status(run_id: int) -> dict:
+    if is_thinking_running(run_id):
+        status = _thinking_scan_status.get(run_id, "running")
+    else:
+        status = _thinking_scan_status.get(run_id, "idle")
+    with Session(get_engine()) as s:
+        findings_count = len(s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all())
+    return {"status": status, "findings_count": findings_count}
 
 
 async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
@@ -167,17 +809,839 @@ async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
 
 
+DEFAULT_THINKING_MAX_STEPS = 120
+
+
+async def start_thinking_scan(run_id: int) -> None:
+    """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
+    if run_id in _thinking_tasks:
+        return
+    task = asyncio.create_task(
+        _thinking_scan_task(run_id),
+        name=f"thinking-scan-{run_id}",
+    )
+    _thinking_tasks[run_id] = task
+    task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
+
+
 # ── Task wrapper ──────────────────────────────────────────────────────────────
 
 async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
     try:
         await _do_scan(run_id, page_ids=page_ids)
+    except asyncio.CancelledError:
+        log.info("Scan task cancelled (stop requested) for run_id=%s", run_id)
+        _mark_run(run_id, scan_status="stopped")
+        _emit_scan_update(run_id)
+        raise
     except Exception as exc:
         log.exception("Scan task failed for run_id=%s", run_id)
         _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
     finally:
         _stop_requested.discard(run_id)
         _active_sessions.pop(run_id, None)
+
+
+# ── Thinking-scan task wrapper & core ─────────────────────────────────────────
+
+def _emit_thinking_status(run_id: int) -> None:
+    events_svc.emit(run_id, {"type": "thinking_scan_update", **get_thinking_scan_status(run_id)})
+
+
+async def _thinking_scan_task(run_id: int) -> None:
+    _thinking_scan_status[run_id] = "running"
+    _mark_run(run_id, scan_status="running")
+    _emit_scan_update(run_id)
+    _emit_thinking_status(run_id)
+    try:
+        await _do_thinking_scan(run_id)
+    except asyncio.CancelledError:
+        log.info("Thinking scan task cancelled for run_id=%s", run_id)
+        _thinking_scan_status[run_id] = "stopped"
+        _mark_run(run_id, scan_status="stopped")
+        _emit_scan_update(run_id)
+        _emit_thinking_status(run_id)
+        raise
+    except Exception as exc:
+        log.exception("Thinking scan task failed for run_id=%s", run_id)
+        _thinking_scan_status[run_id] = "failed"
+        _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
+        _emit_scan_update(run_id)
+        _emit_thinking_status(run_id)
+    finally:
+        _thinking_stop_requested.discard(run_id)
+
+
+async def _do_thinking_scan(run_id: int) -> None:
+    """LLM-directed scan: the model decides each HTTP request to issue, observes
+    the response, and adaptively chooses what to probe next — exactly like a human
+    tester working through curl."""
+    # ── Load config ───────────────────────────────────────────────────────────
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            raise ValueError(f"TestRun {run_id} not found")
+        site = s.get(Site, run.site_id)
+        llm_cfg = get_llm_config_for_run(s, run)
+        if llm_cfg is None:
+            raise RuntimeError("No LLM configuration. Configure it in Settings first.")
+        scanner_policy = get_run_scanner_policy(s, run)
+        creds = list(site.credentials)
+        thinking_max_steps = max(
+            1,
+            int(
+                getattr(scanner_policy, "thinking_max_steps", DEFAULT_THINKING_MAX_STEPS)
+            ),
+        )
+
+        # Crawled pages — used for context and for resolving page_id on findings.
+        all_pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+        ).all()
+        pages_snapshot = [
+            {
+                "id": p.id,
+                "url": p.url,
+                "title": p.title or "",
+                "context": p.llm_context or "",
+                "page_text": p.page_text or "",
+                "req_auth": p.req_auth,
+                "takes_input": p.takes_input,
+                "has_object_ref": p.has_object_ref,
+                "has_business_logic": p.has_business_logic,
+            }
+            for p in all_pages
+        ]
+        first_page_id = all_pages[0].id if all_pages else None
+
+        # Existing findings from the regular scan — feed as context so the LLM
+        # knows what has already been found and can focus on new attack surface.
+        existing_findings = s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all()
+        findings_snapshot = [
+            {
+                "title":       f.title,
+                "severity":    f.severity,
+                "owasp":       f.owasp_category,
+                "affected_url": f.affected_url,
+                "description": f.description[:200],
+            }
+            for f in existing_findings
+        ]
+
+        for obj in [*creds, site, llm_cfg, run]:
+            s.expunge(obj)
+
+    base_url      = site.base_url.rstrip("/")
+    login_url     = site.login_url
+    requires_auth = site.requires_auth
+
+    log.info("=== Thinking scan start: run_id=%s base_url=%s ===", run_id, base_url)
+    # Status is set to "running" by the task wrapper before calling this function.
+
+    # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
+    # are available through context tools so they are only sent when needed.
+    crawl_context = _build_compact_thinking_context(
+        base_url,
+        pages_snapshot,
+        findings_snapshot,
+    )
+
+    creds_for_llm = [
+        {
+            "username": c.username,
+            "password": c.password,
+            "login_url": _login_url_for_credential(login_url, c),
+        }
+        for c in creds
+    ]
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "thinking_scan",
+        "status": "start",
+        "message": f"LLM-directed scan started — up to {thinking_max_steps} adaptive steps.",
+    })
+
+    # ── Bootstrap browser + auth session (Playwright) ─────────────────────────
+    cookie_jar: dict[str, str] = {}
+    auth_token: Optional[str] = None
+
+    # ── Agentic loop ──────────────────────────────────────────────────────────
+    history:     list[dict] = []
+    all_results: list[dict] = []
+    progressive_findings_count = 0
+    session_vault: dict[str, dict] = {}
+    consecutive_context_tools = 0
+
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        traffic_svc.setup_playwright_logging(browser_ctx, run_id)
+        pw_page = await browser_ctx.new_page()
+
+        try:
+            await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+
+        if requires_auth and creds:
+            from aespa.services.crawler import _authenticate
+
+            await _authenticate(
+                pw_page,
+                _login_url_for_credential(login_url, creds[0]),
+                creds[0],
+            )
+
+        raw_cookies = await browser_ctx.cookies()
+        cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
+        for key in ["access_token", "token", "jwt", "auth_token", "id_token",
+                    "authToken", "accessToken"]:
+            try:
+                val = await pw_page.evaluate(
+                    f"() => localStorage.getItem('{key}') || sessionStorage.getItem('{key}')"
+                )
+                if val:
+                    auth_token = val
+                    break
+            except Exception:
+                pass
+
+        extra_headers: dict[str, str] = {}
+        if auth_token:
+            extra_headers["Authorization"] = f"Bearer {auth_token}"
+            session_vault["configured_primary"] = {
+                "label": "configured_primary",
+                "kind": "bearer",
+                "username": creds[0].username if creds else None,
+                "source": "configured credential auth bootstrap",
+                "extra_headers": {"Authorization": f"Bearer {auth_token}"},
+                "cookies": cookie_jar,
+            }
+
+        async with httpx.AsyncClient(
+            cookies=cookie_jar,
+            headers={"User-Agent": _UA, **extra_headers},
+            timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+            follow_redirects=True,
+            verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(
+                run_id, username=creds[0].username if creds else None
+            ),
+        ) as hx:
+            for step in range(1, thinking_max_steps + 1):
+                if run_id in _thinking_stop_requested:
+                    break
+
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "deciding",
+                    "message": f"Step {step}/{thinking_max_steps}: LLM deciding next action…",
+                    "data": {"step": step, "max_steps": thinking_max_steps},
+                })
+
+                # Ask the LLM what to do next.
+                try:
+                    action = await llm_svc.thinking_next_action(
+                        llm_cfg,
+                        target_url=base_url,
+                        crawl_context=crawl_context,
+                        history=history,
+                        max_steps=thinking_max_steps,
+                        current_step=step,
+                        credentials=creds_for_llm,
+                        sessions=[
+                            {
+                                "label": label,
+                                "kind": session.get("kind"),
+                                "username": session.get("username"),
+                                "source": session.get("source"),
+                            }
+                            for label, session in session_vault.items()
+                        ],
+                        emit_fn=lambda evt: events_svc.emit(run_id, evt),
+                    )
+                except Exception as exc:
+                    log.warning("thinking_next_action error at step %d: %s", step, exc)
+                    break
+
+                if action.get("action") == "done":
+                    log.info("LLM completed thinking scan at step %d: %s", step, action.get("summary", ""))
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_scan",
+                        "status": "complete",
+                        "message": f"LLM finished at step {step}: {action.get('summary', '')}",
+                    })
+                    break
+
+                action_type = action.get("action")
+                note = action.get("note") or f"Step {step}"
+
+                if action_type == "tool":
+                    tool_name = str(action.get("tool") or "").strip()
+                    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                    if consecutive_context_tools >= 3:
+                        output = {
+                            "tool": tool_name,
+                            "error": "context tool budget reached; execute a probe or write a finding next",
+                        }
+                    else:
+                        output = _run_thinking_context_tool(
+                            tool_name,
+                            args,
+                            pages_snapshot=pages_snapshot,
+                            findings_snapshot=findings_snapshot,
+                            history=history,
+                        )
+                    consecutive_context_tools += 1
+                    result_text = json.dumps(output, separators=(",", ":"), default=str)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "complete",
+                        "message": f"Step {step}: context tool {tool_name} returned {len(result_text):,} chars",
+                        "data": {
+                            "step": step,
+                            "tool": tool_name,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                        },
+                    })
+                    history.append(_thinking_tool_result_record(step, tool_name, args, output, note))
+                    continue
+
+                consecutive_context_tools = 0
+
+                if action_type == "finding_write":
+                    affected = action.get("affected_url") or base_url
+                    result = {
+                        "source": "finding_write",
+                        "desc": note,
+                        "url": affected,
+                        "status": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": str(action.get("evidence") or "")[:1000],
+                        "request_evidence": str(action.get("request_evidence") or ""),
+                        "response_evidence": str(action.get("response_evidence") or ""),
+                    }
+                    saved = await _persist_dynamic_finding(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        raw=action,
+                        base_url=base_url,
+                        pages_snapshot=pages_snapshot,
+                        first_page_id=first_page_id,
+                        result_by_url={str(affected): result},
+                    )
+                    if saved is not None:
+                        progressive_findings_count += 1
+                        findings_snapshot.append({
+                            "title": saved.title,
+                            "severity": saved.severity,
+                            "owasp": saved.owasp_category,
+                            "affected_url": saved.affected_url,
+                            "description": saved.description[:200],
+                        })
+                    history.append({
+                        "step": step,
+                        "note": note,
+                        "method": "FINDING_WRITE",
+                        "url": affected,
+                        "request_headers": {},
+                        "request_body": {
+                            "title": action.get("title"),
+                            "owasp_category": action.get("owasp_category"),
+                            "cvss_score": action.get("cvss_score"),
+                        },
+                        "response_status": 200,
+                        "response_headers": {"content-type": "application/json"},
+                        "response_body": (
+                            f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                            f"finding: {action.get('title', 'Untitled finding')}. "
+                            f"{str(action.get('evidence') or '')[:1200]}"
+                        ),
+                    })
+                    if saved is not None:
+                        _emit_scan_update(run_id)
+                        _emit_thinking_status(run_id)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "complete",
+                        "message": (
+                            f"Step {step}: "
+                            f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                            f"{action.get('title', 'Untitled finding')}"
+                        ),
+                        "data": {
+                            "step": step,
+                            "affected_url": affected,
+                            "finding_id": saved.id if saved is not None else None,
+                            "note": note,
+                        },
+                    })
+                    continue
+
+                if action_type == "browser":
+                    url = (action.get("url") or base_url).strip()
+                    method = "BROWSER"
+                    steps = action.get("steps") or []
+                    use_session = action.get("use_session") or action.get("as_session")
+                    use_session = use_session if isinstance(use_session, str) else None
+                    selected_session = session_vault.get(use_session) if use_session else None
+                    payload_summary = _thinking_browser_payload_summary(steps)
+                    action_message = _thinking_action_log_message(step, method, url, action)
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": payload_summary,
+                            "use_session": use_session,
+                        },
+                    })
+
+                    try:
+                        await browser_ctx.set_extra_http_headers(
+                            selected_session.get("extra_headers", {})
+                            if selected_session else {}
+                        )
+                    except Exception:
+                        pass
+                    result = await _run_thinking_browser_action(
+                        pw_page,
+                        action,
+                        default_url=base_url,
+                        scanner_policy=scanner_policy,
+                    )
+                    resp_body = str(result.get("body") or "")[:BODY_READ_LIMIT]
+                    resp_status = result.get("status") or 0
+                    resp_headers = result.get("headers") or {}
+                    url = result.get("url") or url
+                    req_body = {"steps": steps}
+                    result["desc"] = note
+                elif action_type == "jwt":
+                    method = "JWT"
+                    url = f"jwt://forge/{action.get('store_as') or 'token'}"
+                    claims = action.get("claims") if isinstance(action.get("claims"), dict) else {}
+                    header = action.get("header") if isinstance(action.get("header"), dict) else None
+                    secret = str(action.get("secret") or "")
+                    action_message = _thinking_action_log_message(step, method, url, action)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": _compact_log_value(claims),
+                        },
+                    })
+                    try:
+                        token = _sign_hs256_jwt(secret, claims, header)
+                        label = action.get("store_as") or _session_label("forged_jwt", session_vault)
+                        session_vault[label] = {
+                            "label": label,
+                            "kind": "bearer",
+                            "username": f"sub:{claims.get('sub')}" if claims.get("sub") is not None else None,
+                            "source": "jwt action",
+                            "extra_headers": {"Authorization": f"Bearer {token}"},
+                            "cookies": {},
+                        }
+                        resp_status = 200
+                        resp_headers = {"content-type": "application/json"}
+                        resp_body = json.dumps({
+                            "store_as": label,
+                            "token_type": "Bearer",
+                            "authorization_header": "Bearer [REDACTED_JWT]",
+                            "claims": claims,
+                        })
+                    except Exception as exc:
+                        resp_status = 0
+                        resp_headers = {}
+                        resp_body = f"JWT signing failed: {exc}"
+                    req_body = {
+                        "claims": claims,
+                        "header": header or {"typ": "JWT", "alg": "HS256"},
+                        "store_as": action.get("store_as"),
+                    }
+                    request_evidence = (
+                        f"JWT FORGE\nClaims:\n{json.dumps(claims, indent=2)[:2000]}"
+                    )
+                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body[:1000],
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                    }
+                elif action_type == "credential_check":
+                    method = "CREDENTIAL_CHECK"
+                    url = (action.get("url") or "").strip()
+                    candidates = action.get("candidates")
+                    if not isinstance(candidates, list):
+                        candidates = []
+                    candidates = [c for c in candidates if isinstance(c, dict)][:20]
+                    username_field = action.get("username_field") or "username"
+                    password_field = action.get("password_field") or "password"
+                    success_statuses = action.get("success_statuses") or [200, 201]
+                    try:
+                        success_statuses = {int(s) for s in success_statuses}
+                    except Exception:
+                        success_statuses = {200, 201}
+                    headers = action.get("headers") or {}
+                    action_message = _thinking_action_log_message(step, method, url, action)
+
+                    if not url:
+                        log.warning("Thinking scan step %d: credential_check missing URL.", step)
+                        break
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": f"{len(candidates)} candidate(s)",
+                        },
+                    })
+
+                    attempts: list[dict] = []
+                    resp_status = 0
+                    resp_headers = {}
+                    for candidate in candidates:
+                        created_label = None
+                        body = {
+                            username_field: candidate.get("username") or candidate.get("email") or "",
+                            password_field: candidate.get("password") or "",
+                        }
+                        try:
+                            merged_headers = dict(hx.headers)
+                            merged_headers.update(headers)
+                            merged_headers.setdefault("Content-Type", "application/json")
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                json=body,
+                                headers=merged_headers,
+                            )
+                            resp_status = resp.status_code
+                            resp_headers = dict(resp.headers)
+                            response_excerpt = resp.text[:800]
+                            success = resp.status_code in success_statuses
+                            token = _extract_bearer_token_from_body(resp.text) if success else None
+                            if token:
+                                username = (
+                                    candidate.get("username")
+                                    or candidate.get("email")
+                                    or "discovered"
+                                )
+                                label = _session_label(str(username), session_vault)
+                                created_label = label
+                                session_vault[label] = {
+                                    "label": label,
+                                    "kind": "bearer",
+                                    "username": username,
+                                    "source": "credential_check",
+                                    "extra_headers": {"Authorization": f"Bearer {token}"},
+                                    "cookies": {},
+                                }
+                        except Exception as exc:
+                            response_excerpt = f"Request failed: {exc}"
+                            success = False
+                        attempts.append({
+                            **_redact_candidate(candidate),
+                            "status": resp_status,
+                            "success": success,
+                            "session_label": created_label,
+                            "response_excerpt": (
+                                _redact_sensitive_text(response_excerpt[:300])
+                                if success else ""
+                            ),
+                        })
+                        await sleep_between_probes(scanner_policy)
+
+                    successes = [a for a in attempts if a["success"]]
+                    resp_body = json.dumps({
+                        "attempts": attempts,
+                        "successes": successes,
+                        "stopped_at_cap": len((action.get("candidates") or [])) > 20,
+                    })
+                    req_body = {
+                        "username_field": username_field,
+                        "password_field": password_field,
+                        "candidates": [_redact_candidate(c) for c in candidates],
+                    }
+                    request_evidence = (
+                        f"CREDENTIAL CHECK {url}\n"
+                        f"Candidates:\n{json.dumps(req_body['candidates'], indent=2)[:2000]}"
+                    )
+                    response_evidence = (
+                        f"Successes: {len(successes)} of {len(attempts)}\n"
+                        f"{json.dumps(attempts, indent=2)[:3000]}"
+                    )
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": 200 if successes else resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body[:1000],
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                    }
+                    resp_status = result["status"]
+                else:
+                    # Execute the HTTP request.
+                    method  = (action.get("method") or "GET").upper()
+                    url     = (action.get("url") or "").strip()
+                    headers = action.get("headers") or {}
+                    body    = action.get("body")
+                    use_session = action.get("use_session") or action.get("as_session")
+                    use_session = use_session if isinstance(use_session, str) else None
+                    selected_session = session_vault.get(use_session) if use_session else None
+                    action_message = _thinking_action_log_message(step, method, url, action)
+                    payload_summary = _thinking_payload_summary(url, body)
+
+                    if not url:
+                        log.warning("Thinking scan step %d: LLM returned empty URL — stopping.", step)
+                        break
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": payload_summary,
+                            "use_session": use_session,
+                        },
+                    })
+
+                    req_body_str = ""
+                    try:
+                        merged_headers = dict(hx.headers)
+                        if selected_session and selected_session.get("extra_headers"):
+                            merged_headers.update(selected_session["extra_headers"])
+                        merged_headers.update(headers)
+                        if isinstance(body, dict):
+                            merged_headers.setdefault("Content-Type", "application/json")
+                            resp = await hx.request(method, url, json=body, headers=merged_headers)
+                            req_body_str = json.dumps(body)[:800]
+                        elif isinstance(body, str) and body:
+                            resp = await hx.request(method, url, content=body, headers=merged_headers)
+                            req_body_str = body[:800]
+                        else:
+                            resp = await hx.request(method, url, headers=merged_headers)
+                        raw_resp_body = resp.text[:BODY_READ_LIMIT]
+                        token = _extract_bearer_token_from_body(raw_resp_body)
+                        if token and resp.status_code < 400:
+                            label = _session_label(
+                                str(action.get("store_as") or "http_token"),
+                                session_vault,
+                            )
+                            session_vault[label] = {
+                                "label": label,
+                                "kind": "bearer",
+                                "username": None,
+                                "source": f"{method} {url}",
+                                "extra_headers": {"Authorization": f"Bearer {token}"},
+                                "cookies": {},
+                            }
+                        resp_body    = _redact_sensitive_text(raw_resp_body)
+                        resp_status  = resp.status_code
+                        resp_headers = dict(resp.headers)
+                    except Exception as exc:
+                        log.warning("Thinking scan step %d HTTP error (%s %s): %s", step, method, url, exc)
+                        resp_body    = f"Request failed: {exc}"
+                        resp_status  = 0
+                        resp_headers = {}
+
+                    req_body = body
+                    request_evidence = f"{method} {url}\n{json.dumps(headers)}\n{req_body_str}"
+                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body[:1000],
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                    }
+
+                log.info("Thinking scan step %d: %s %s → %s", step, method, url, resp_status)
+
+                step_record = {
+                    "step":             step,
+                    "note":             note,
+                    "method":           method,
+                    "url":              url,
+                    "request_headers":  action.get("headers") or {},
+                    "request_body":     req_body,
+                    "response_status":  resp_status,
+                    "response_headers": resp_headers,
+                    "response_body":    resp_body,
+                }
+                history.append(step_record)
+
+                all_results.append(result)
+
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "complete",
+                    "message": f"Step {step}: {method} {url} → {resp_status}",
+                    "data": {"step": step, "status": resp_status, "note": note},
+                })
+
+                await sleep_between_probes(scanner_policy)
+
+    # ── Analyse results ───────────────────────────────────────────────────────
+    if all_results:
+        _thinking_scan_status[run_id] = "analysing"
+        _emit_thinking_status(run_id)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_analysis",
+            "status": "start",
+            "message": (
+                f"Analysing {len(all_results)} probe result(s); "
+                f"{progressive_findings_count} progressive finding(s) already recorded…"
+            ),
+        })
+        try:
+            raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
+            # Normalise titles against existing findings so the same vulnerability
+            # class gets a consistent title regardless of which step found it.
+            if raw_findings:
+                with Session(get_engine()) as _s:
+                    _existing = _s.exec(
+                        select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                    ).all()
+                if _existing:
+                    _summaries = [
+                        {"title": f.title, "owasp_category": f.owasp_category, "severity": f.severity}
+                        for f in _existing
+                    ]
+                    try:
+                        raw_findings = await llm_svc.normalize_finding_titles(
+                            llm_cfg, _summaries, raw_findings
+                        )
+                    except Exception as _ne:
+                        log.warning("normalize_finding_titles failed (thinking scan): %s", _ne)
+            with Session(get_engine()) as s:
+                result_by_url = {r["url"]: r for r in all_results}
+
+                # Build a URL → page_id lookup for best-match page assignment.
+                url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
+                saved_count = 0
+                skipped_count = 0
+
+                def _best_page_id(affected_url: str) -> int | None:
+                    """Find the closest matching crawled page for a finding URL."""
+                    if affected_url in url_to_page:
+                        return url_to_page[affected_url]
+                    # Partial match — pick the crawled page whose URL is a prefix.
+                    for page_url, page_id in url_to_page.items():
+                        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
+                            return page_id
+                    if first_page_id is not None:
+                        return first_page_id
+                    page_id = _find_or_create_dynamic_page(
+                        s,
+                        run_id=run_id,
+                        url=affected_url,
+                        base_url=base_url,
+                    )
+                    if page_id is not None:
+                        url_to_page[affected_url] = page_id
+                    return page_id
+
+                for raw in raw_findings:
+                    affected = (raw.get("affected_url") or base_url).strip()
+                    page_id  = _best_page_id(affected)
+                    if page_id is None:
+                        log.warning("Thinking scan: no page_id found for finding %s — skipping", affected)
+                        skipped_count += 1
+                        continue
+                    if _dynamic_finding_exists(
+                        s,
+                        run_id=run_id,
+                        title=str(raw.get("title") or "Untitled finding"),
+                        affected_url=affected,
+                        owasp_category=str(raw.get("owasp_category") or "A00"),
+                    ):
+                        skipped_count += 1
+                        continue
+                    finding = _finding_from_llm(
+                        run_id=run_id,
+                        page_id=page_id,
+                        page_url=affected,
+                        raw=raw,
+                        result_by_url=result_by_url,
+                    )
+                    s.add(finding)
+                    saved_count += 1
+                s.commit()
+            message = f"Analysis complete — {saved_count} finding(s) recorded."
+            if skipped_count:
+                message += f" {skipped_count} skipped because no page could be assigned."
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_analysis",
+                "status": "complete",
+                "message": message,
+            })
+        except Exception as exc:
+            log.warning("Thinking scan analysis failed: %s", exc)
+
+    stopped = run_id in _thinking_stop_requested
+    _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
+    _mark_run(run_id, scan_status="stopped" if stopped else "complete")
+    _emit_scan_update(run_id)
+    _emit_thinking_status(run_id)
+    log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
@@ -199,8 +1663,9 @@ async def _export_cred_session(
             await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
         except Exception:
             pass
-        if login_url:
-            await _authenticate(page, login_url, cred)
+        credential_login_url = _login_url_for_credential(login_url, cred)
+        if credential_login_url:
+            await _authenticate(page, credential_login_url, cred)
         raw = await ctx.cookies()
         cookies = {c["name"]: c["value"] for c in raw}
         token: Optional[str] = None
@@ -228,7 +1693,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
@@ -242,7 +1707,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
     log.info("=== Scan start: run_id=%s base_url=%s ===", run_id, base_url)
 
-    # Mark target pages as scan_status=pending; clear their existing findings.
+    # Mark target pages as scan_status=pending. Findings are append-only until
+    # the user explicitly deletes them, so scans can be compared across runs.
     with Session(get_engine()) as s:
         q = (
             select(CrawledPage)
@@ -255,20 +1721,11 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         if page_ids:
             q = q.where(CrawledPage.id.in_(page_ids))
         pages = s.exec(q).all()
-        target_ids = [p.id for p in pages]
         for p in pages:
             p.scan_status = "pending"
             s.add(p)
-        # Clear existing findings only for the pages we're about to scan.
-        old = s.exec(
-            select(ScanFinding)
-            .where(ScanFinding.test_run_id == run_id)
-            .where(ScanFinding.page_id.in_(target_ids))
-        ).all()
-        for f in old:
-            s.delete(f)
         s.commit()
-        page_ids = target_ids  # use resolved list from here on
+        page_ids = [p.id for p in pages]  # use resolved list from here on
 
     if not page_ids:
         log.info("No in-scope pages to scan.")
@@ -276,6 +1733,76 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         return
 
     _mark_run(run_id, scan_status="running")
+
+    # ── Site-level test plan ──────────────────────────────────────────────────
+    # Before opening a browser, ask the LLM to reason about the application as a
+    # whole and produce a structured attack plan.  The plan is passed as context
+    # to every per-page scan so individual probe plans are more targeted.
+    site_context: str = ""
+    if page_ids:
+        with Session(get_engine()) as s:
+            all_pages_meta = s.exec(
+                select(CrawledPage)
+                .where(CrawledPage.test_run_id == run_id)
+                .where(CrawledPage.in_scope != False)  # noqa: E712
+            ).all()
+            pages_meta = [
+                {
+                    "url": p.url,
+                    "title": p.title or "",
+                    "context": p.llm_context or "",
+                    "req_auth": p.req_auth,
+                    "takes_input": p.takes_input,
+                    "has_object_ref": p.has_object_ref,
+                    "has_business_logic": p.has_business_logic,
+                }
+                for p in all_pages_meta
+            ]
+        try:
+            log.info("Generating site-level test plan (%d pages)...", len(pages_meta))
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "site_plan",
+                "status": "start",
+                "message": f"Building site-level attack plan from {len(pages_meta)} discovered pages\u2026",
+            })
+            site_plan = await llm_svc.generate_site_test_plan(llm_cfg, base_url, pages_meta)
+            if site_plan:
+                parts: list[str] = []
+                if site_plan.get("app_summary"):
+                    parts.append(site_plan["app_summary"])
+                hypotheses = site_plan.get("attack_hypotheses") or []
+                if hypotheses:
+                    hyp_lines = "\n".join(
+                        f"  - [{h.get('owasp','?')}] {h.get('hypothesis','')}: {h.get('description','')}"
+                        for h in hypotheses[:8]
+                    )
+                    parts.append("Attack hypotheses:\n" + hyp_lines)
+                if site_plan.get("critical_areas"):
+                    parts.append("Critical areas: " + ", ".join(site_plan["critical_areas"]))
+                if site_plan.get("test_notes"):
+                    parts.append("Test notes: " + site_plan["test_notes"])
+                site_context = "\n\n".join(p for p in parts if p)
+                log.info("Site plan ready: %s", site_plan.get("app_summary", "(no summary)"))
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "site_plan",
+                    "status": "complete",
+                    "message": site_plan.get("app_summary", ""),
+                    "data": {
+                        "app_summary": site_plan.get("app_summary"),
+                        "hypotheses": site_plan.get("attack_hypotheses") or [],
+                        "critical_areas": site_plan.get("critical_areas") or [],
+                        "test_notes": site_plan.get("test_notes"),
+                    },
+                })
+        except Exception as e:
+            log.warning("Site test plan generation failed: %s", e)
+
+    # Unique canary for stored XSS detection across pages.
+    # Embedded in XSS probes so any page that stores + reflects it can be caught by the
+    # post-scan sweep even if the injection and sink are on completely different pages.
+    xss_canary = f"aespa{run_id}x"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -299,8 +1826,9 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
         if requires_auth and creds:
             from aespa.services.crawler import _authenticate
-            log.info("Authenticating at %s", login_url)
-            await _authenticate(pw_page, login_url, creds[0])
+            first_login_url = _login_url_for_credential(login_url, creds[0])
+            log.info("Authenticating at %s", first_login_url)
+            await _authenticate(pw_page, first_login_url, creds[0])
             log.info("Auth done. page.url=%s", pw_page.url)
 
         # ── Export auth state for httpx ───────────────────────────────────────
@@ -338,7 +1866,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             for extra_cred in creds[1:]:
                 log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
                 ec_cookies, ec_token = await _export_cred_session(
-                    base_url, login_url, extra_cred
+                    base_url, _login_url_for_credential(login_url, extra_cred), extra_cred
                 )
                 cred_sessions[extra_cred.id] = {
                     "username": extra_cred.username,
@@ -365,7 +1893,19 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     break
                 await _scan_page(run_id, page_id, hx, pw_page, llm_cfg, base_url,
                                  cred_sessions=cred_sessions, browser=browser,
-                                 scanner_policy=scanner_policy)
+                                 scanner_policy=scanner_policy,
+                                 site_context=site_context,
+                                 xss_canary=xss_canary)
+
+            # ── Stored XSS sweep ───────────────────────────────────────────────────
+            # Re-fetch every crawled page and look for the canary appearing unescaped.
+            # This catches stored XSS where the injection and the rendering sink are
+            # on two different pages — a pattern the per-page probe loop cannot see.
+            if run_id not in _stop_requested:
+                await _stored_xss_sweep(
+                    run_id, hx, xss_canary,
+                    scanner_policy=scanner_policy,
+                )
 
     stopped = run_id in _stop_requested
     _mark_run(run_id, scan_status="stopped" if stopped else "complete")
@@ -385,6 +1925,8 @@ async def _scan_page(
     cred_sessions: dict | None = None,
     browser=None,
     scanner_policy=None,
+    site_context: str = "",
+    xss_canary: str = "",
 ) -> None:
     # Load page details.
     with Session(get_engine()) as s:
@@ -426,6 +1968,8 @@ async def _scan_page(
         probes = await llm_svc.plan_probes(
             llm_cfg, page_url, page_title, page_ctx, categories, applicable,
             users=users_list,
+            site_context=site_context,
+            xss_canary=xss_canary,
         )
     except Exception as e:
         log.warning("plan_probes failed for %s: %s", page_url, e)
@@ -434,7 +1978,7 @@ async def _scan_page(
     # Inject hard-coded probe templates before the LLM probes so they always run.
     deterministic: list[dict] = []
     if categories.get("takes_input"):
-        iv = _input_validation_probes(page_url)
+        iv = _input_validation_probes(page_url, xss_canary=xss_canary)
         log.info("  Input-validation probes: %d", len(iv))
         deterministic.extend(iv)
     if categories.get("has_object_ref"):
@@ -466,6 +2010,14 @@ async def _scan_page(
     max_probes = scanner_policy.max_probes_per_page if scanner_policy else MAX_PROBES_PER_PAGE
     all_probes = _prioritize_probes_for_cap(all_probes, max_probes, categories)
     log.info("  %d total probes for %s", len(all_probes), page_url)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "page_plan",
+        "status": "complete",
+        "page_url": page_url,
+        "message": f"Planned {len(all_probes)} probe{'s' if len(all_probes) != 1 else ''}",
+        "data": {"probe_count": len(all_probes)},
+    })
 
     # Phase 2: Execute probes.
     results: list[dict] = []
@@ -496,7 +2048,65 @@ async def _scan_page(
                 results.append(result)
         except Exception as e:
             log.debug("Probe error (%s): %s", probe.get("desc", "?"), e)
-        await asyncio.sleep(scanner_policy.min_delay_s if scanner_policy else MIN_DELAY)
+        await sleep_between_probes(scanner_policy)
+
+    # Phase 2b: Iterative reasoning — LLM reviews initial results and generates
+    # targeted follow-up probes, mirroring the adaptive approach used by a human
+    # tester who observes partial results before deciding what to probe next.
+    if results and run_id not in _stop_requested:
+        try:
+            max_followup = MAX_FOLLOWUP_PROBES
+            followup_probes = await llm_svc.plan_followup_probes(
+                llm_cfg, page_url, page_ctx, results, site_context=site_context,
+            )
+            followup_probes = followup_probes[:max_followup]
+            log.info("  %d follow-up probes generated for %s", len(followup_probes), page_url)
+        except Exception as e:
+            log.warning("plan_followup_probes failed for %s: %s", page_url, e)
+            followup_probes = []
+
+        if followup_probes:
+            followup_details = _followup_log_details(followup_probes)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "page_followup",
+                "status": "start",
+                "page_url": page_url,
+                "message": _followup_log_message(followup_probes),
+                "data": {"followup_count": len(followup_probes), **followup_details},
+            })
+
+        for probe in followup_probes:
+            if run_id in _stop_requested:
+                break
+            try:
+                if scanner_policy and scanner_policy.scan_mode == "passive":
+                    log.info("  Follow-up probe rejected by policy: passive mode (%s)", probe.get("desc", "?"))
+                    continue
+                as_user_name = probe.get("as_user") or None
+                session = user_sessions.get(as_user_name) if as_user_name else None
+                if probe.get("type") == "form":
+                    result = await _run_form_probe(pw_page, probe, page_url,
+                                                   session=session, browser=browser)
+                else:
+                    result = await _run_http_probe(hx, probe, page_url, session=session,
+                                                   scanner_policy=scanner_policy)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                log.debug("Follow-up probe error (%s): %s", probe.get("desc", "?"), e)
+            await sleep_between_probes(scanner_policy)
+
+        if followup_probes:
+            followup_details = _followup_log_details(followup_probes)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "page_followup",
+                "status": "complete",
+                "page_url": page_url,
+                "message": _followup_log_message(followup_probes, tense="complete"),
+                "data": {"followup_count": len(followup_probes), **followup_details},
+            })
 
     # Phase 3: LLM analyses results and produces findings.
     try:
@@ -505,7 +2115,36 @@ async def _scan_page(
         log.warning("analyse_probes failed for %s: %s", page_url, e)
         raw_findings = []
 
+    # Normalise titles against findings already saved for this run so that the
+    # same vulnerability class discovered on multiple pages gets a single
+    # consistent title and groups together in the report.
+    if raw_findings:
+        with Session(get_engine()) as s:
+            existing_saved = s.exec(
+                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            ).all()
+        if existing_saved:
+            existing_summaries = [
+                {"title": f.title, "owasp_category": f.owasp_category, "severity": f.severity}
+                for f in existing_saved
+            ]
+            try:
+                raw_findings = await llm_svc.normalize_finding_titles(
+                    llm_cfg, existing_summaries, raw_findings
+                )
+            except Exception as _ne:
+                log.warning("normalize_finding_titles failed for %s: %s", page_url, _ne)
+
     log.info("  %d findings for %s", len(raw_findings), page_url)
+    if raw_findings:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "page_analysis",
+            "status": "complete",
+            "page_url": page_url,
+            "message": f"{len(raw_findings)} potential issue{'s' if len(raw_findings) != 1 else ''} identified",
+            "data": {"finding_count": len(raw_findings)},
+        })
 
     # Build a URL→result lookup so we can attach evidence + screenshot to each finding.
     result_by_url: dict[str, dict] = {}
@@ -1063,6 +2702,143 @@ def _probe_policy_rejection(probe: dict, page_url: str, scanner_policy) -> str |
 
 # ── Playwright form probe execution ───────────────────────────────────────────
 
+async def _run_thinking_browser_action(
+    pw_page,
+    action: dict,
+    default_url: str,
+    scanner_policy=None,
+) -> dict:
+    """Execute a compact browser action chosen by the Thinking scan LLM."""
+    import base64 as _b64
+
+    url = (action.get("url") or default_url).strip()
+    steps = action.get("steps") if isinstance(action.get("steps"), list) else []
+    if not steps:
+        steps = [{"op": "goto", "url": url}, {"op": "snapshot"}]
+
+    timeout_ms = int((scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT) * 1000)
+    last_status: Optional[int] = None
+    last_headers: dict = {}
+    action_log: list[str] = []
+
+    for raw_step in steps[:20]:
+        if not isinstance(raw_step, dict):
+            continue
+        op = str(raw_step.get("op") or "").lower().strip()
+        try:
+            if op == "goto":
+                step_url = (raw_step.get("url") or url or default_url).strip()
+                action_log.append(f"goto {step_url}")
+                resp = await pw_page.goto(step_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                if resp:
+                    last_status = resp.status
+                    try:
+                        last_headers = await resp.all_headers()
+                    except Exception:
+                        last_headers = {}
+            elif op in {"fill", "type"}:
+                selector = raw_step.get("selector")
+                value = str(raw_step.get("value") or "")
+                if not selector:
+                    action_log.append(f"{op} skipped: missing selector")
+                    continue
+                action_log.append(f"{op} {selector}={_compact_log_value(value, 120)}")
+                loc = pw_page.locator(selector).first
+                await loc.wait_for(state="visible", timeout=5_000)
+                if op == "fill":
+                    await loc.fill(value, timeout=5_000)
+                else:
+                    await loc.type(value, delay=20, timeout=5_000)
+            elif op == "click":
+                selector = raw_step.get("selector")
+                if not selector:
+                    action_log.append("click skipped: missing selector")
+                    continue
+                action_log.append(f"click {selector}")
+                await pw_page.locator(selector).first.click(timeout=5_000)
+            elif op == "press":
+                selector = raw_step.get("selector")
+                key = raw_step.get("key") or "Enter"
+                if not selector:
+                    action_log.append("press skipped: missing selector")
+                    continue
+                action_log.append(f"press {selector} {key}")
+                await pw_page.locator(selector).first.press(str(key), timeout=5_000)
+            elif op == "wait":
+                if raw_step.get("ms") is not None:
+                    ms = max(0, min(int(raw_step.get("ms") or 0), 10_000))
+                    action_log.append(f"wait {ms}ms")
+                    await asyncio.sleep(ms / 1000)
+                else:
+                    state = str(raw_step.get("state") or "networkidle")
+                    if state not in {"domcontentloaded", "load", "networkidle"}:
+                        state = "networkidle"
+                    action_log.append(f"wait {state}")
+                    await pw_page.wait_for_load_state(state, timeout=timeout_ms)
+            elif op == "snapshot":
+                action_log.append("snapshot")
+            else:
+                action_log.append(f"unsupported op: {op or '(missing)'}")
+        except Exception as exc:
+            action_log.append(f"{op or 'step'} failed: {exc}")
+
+    try:
+        await pw_page.wait_for_load_state("networkidle", timeout=2_000)
+    except Exception:
+        pass
+
+    final_url = pw_page.url or url or default_url
+    try:
+        title = await pw_page.title()
+    except Exception:
+        title = ""
+    try:
+        visible_text = await pw_page.locator("body").inner_text(timeout=2_000)
+    except Exception:
+        visible_text = ""
+    try:
+        html = await pw_page.content()
+    except Exception:
+        html = ""
+
+    screenshot_b64: Optional[str] = None
+    try:
+        raw_png = await pw_page.screenshot(full_page=False)
+        screenshot_b64 = _b64.b64encode(raw_png).decode()
+    except Exception:
+        pass
+
+    body = (
+        f"Final URL: {final_url}\n"
+        f"Title: {title}\n"
+        f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
+        f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
+        f"HTML excerpt:\n{html[:3000]}"
+    )
+    request_evidence = (
+        f"BROWSER ACTION\nInitial URL: {url or default_url}\n"
+        f"Steps:\n{json.dumps(steps, indent=2)[:3000]}"
+    )
+    response_evidence = (
+        f"Final URL: {final_url}\n"
+        f"Title: {title}\n"
+        f"Last response status: {last_status}\n\n"
+        f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
+        f"Visible text excerpt:\n{visible_text[:3000]}"
+    )
+    return {
+        "desc": action.get("note") or "Browser action",
+        "url": final_url,
+        "status": last_status,
+        "headers": last_headers,
+        "body": body,
+        "evidence": _combined_evidence(request_evidence, response_evidence),
+        "request_evidence": request_evidence,
+        "response_evidence": response_evidence,
+        "screenshot_b64": screenshot_b64,
+    }
+
+
 async def _run_form_probe(
     pw_page,
     probe: dict,
@@ -1353,7 +3129,7 @@ _SSRF_PAYLOADS = [
 _CMD_PAYLOADS = ["; echo aespa_probe", "| echo aespa_probe", "$(echo aespa_probe)"]
 
 
-def _input_validation_probes(url: str) -> list[dict]:
+def _input_validation_probes(url: str, xss_canary: str = "") -> list[dict]:
     """Generate HTTP-level input validation probes for every query parameter."""
     parsed = urlparse(url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
@@ -1361,9 +3137,19 @@ def _input_validation_probes(url: str) -> list[dict]:
         return []
 
     probes: list[dict] = []
+    xss_payloads = list(_XSS_PAYLOADS)
+    # Canary variants: using <canary> lets the sweep detect unescaped HTML rendering
+    # even if the app blocks known dangerous tags like <script>.
+    if xss_canary:
+        xss_payloads = [
+            f"<{xss_canary}>",                              # tag-context canary
+            f"alert('{xss_canary}')",                       # JS-context canary (no outer script tag)
+            f'"><img src=x onerror=alert("{xss_canary}")>', # attribute breakout
+            f"<script>alert('{xss_canary}')</script>",      # full script canary
+        ] + xss_payloads
     all_payloads = (
         [(p, "SQLi")  for p in _SQLI_PAYLOADS]
-        + [(p, "XSS")   for p in _XSS_PAYLOADS]
+        + [(p, "XSS")   for p in xss_payloads]
         + [(p, "SSTI")  for p in _SSTI_PAYLOADS]
         + [(p, "Path")  for p in _PATH_TRAVERSAL_PAYLOADS]
         + [(p, "SSRF")  for p in _SSRF_PAYLOADS]
@@ -1381,6 +3167,160 @@ def _input_validation_probes(url: str) -> list[dict]:
                 "desc": f"{label} in param '{param}': {payload[:40]}",
             })
     return probes[:30]
+
+
+# ── Stored XSS sweep ──────────────────────────────────────────────────────────
+
+async def _stored_xss_sweep(
+    run_id: int,
+    hx: httpx.AsyncClient,
+    canary: str,
+    scanner_policy=None,
+) -> None:
+    """Re-fetch every crawled page and check for the XSS canary appearing unescaped.
+
+    This detects stored XSS where the injection source (input page A) and the rendering
+    sink (output page B) are on different pages — a pattern the per-page probe loop
+    cannot see because it only checks the response to the same request that injected.
+
+    Detection logic:
+      - Look for <canary> unescaped in the HTML.  If properly encoded it would appear as
+        &lt;canary&gt; and NOT match the raw string, so any raw match is conclusive.
+      - Also look for alert('canary') / alert("canary") to catch LLM-generated probes
+        that used the canary as the alert argument rather than wrapping it in a tag.
+    """
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+
+    with Session(get_engine()) as s:
+        pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)   # noqa: E712
+        ).all()
+        page_list = [(p.id, p.url) for p in pages]
+
+    log.info("Stored XSS sweep: checking %d pages for canary '%s'", len(page_list), canary)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "sweep",
+        "status": "start",
+        "message": f"Stored XSS sweep: re-fetching {len(page_list)} pages for canary\u2026",
+    })
+
+    # Detection patterns: these can only appear unescaped if the app rendered
+    # attacker-controlled input without HTML-encoding it.
+    tag_canary    = f"<{canary}>"           # from <canary> payload
+    alert_canary1 = f"alert('{canary}')"    # JS context, single-quote
+    alert_canary2 = f'alert("{canary}")'    # JS context, double-quote
+    detect_patterns = (tag_canary, alert_canary1, alert_canary2)
+
+    findings_to_save: list[ScanFinding] = []
+    already_reported: set[str] = set()
+
+    for page_id, page_url in page_list:
+        if run_id in _stop_requested:
+            break
+        if page_url in already_reported:
+            continue
+        try:
+            resp = await hx.get(page_url, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            body = resp.text
+            matched = next((p for p in detect_patterns if p in body), None)
+            if matched is None:
+                continue
+
+            already_reported.add(page_url)
+            idx     = body.find(matched)
+            snippet = body[max(0, idx - 150): idx + len(matched) + 150]
+
+            log.info("Stored XSS sweep: canary '%s' found on %s (match: %s)", canary, page_url, matched)
+
+            request_evidence  = f"GET {page_url} HTTP/1.1\n(Post-scan stored XSS sweep, authenticated session)"
+            response_evidence = (
+                f"HTTP/1.1 {resp.status_code}\n\n"
+                f"Matched pattern: {matched!r}\n"
+                f"Context (±150 chars):\n...{snippet}..."
+            )
+            evidence = _combined_evidence(
+                request_evidence, response_evidence,
+                f"XSS canary '{canary}' injected during scanning was found stored and "
+                f"rendered unescaped in this page's HTML response.",
+            )
+
+            findings_to_save.append(ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category="A03",
+                severity="high",
+                title="Stored Cross-Site Scripting (XSS)",
+                description=(
+                    f"A unique XSS canary ('{canary}') injected into an input field during "
+                    f"scanning was found stored and rendered unescaped in the HTML of this page. "
+                    f"The canary was not present before the scan and was injected as part of XSS "
+                    f"probe payloads targeting input fields elsewhere in the application. "
+                    f"It subsequently appeared in this page's response, confirming that "
+                    f"user-supplied input is stored in the database and reflected without "
+                    f"HTML encoding."
+                ),
+                impact=(
+                    "An attacker who can submit a JavaScript payload through any of the "
+                    "application's input fields will have that script executed in every "
+                    "authenticated user's browser that visits this page, enabling session "
+                    "hijacking, credential theft, keylogging, or arbitrary actions on "
+                    "behalf of the victim."
+                ),
+                likelihood=(
+                    "High. The canary was confirmed stored and reflected. A real attacker "
+                    "would substitute a script payload (e.g. a session-stealing cookie "
+                    "exfiltration script) in place of the benign canary used here."
+                ),
+                recommendation=(
+                    "Apply context-aware output encoding to all database-stored user input "
+                    "before rendering it in HTML (HTML entity encoding for HTML contexts, "
+                    "JS escaping for script contexts). Adopt a templating engine that "
+                    "auto-escapes by default. Implement a strict Content-Security-Policy "
+                    "that blocks inline scripts. Audit all fields that accept and display "
+                    "user-supplied content for missing output sanitisation."
+                ),
+                cvss_score=8.0,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
+                affected_url=page_url,
+                evidence=evidence[:4000],
+                request_evidence=request_evidence[:4000],
+                response_evidence=response_evidence[:4000],
+                screenshot_b64=None,
+                validation_status="confirmed",
+                validation_note=(
+                    f"Canary pattern '{matched}' found in page response during post-scan sweep."
+                ),
+                created_at=_utcnow(),
+            ))
+
+        except Exception as e:
+            log.debug("Stored XSS sweep error for %s: %s", page_url, e)
+
+        await sleep_between_probes(scanner_policy)
+
+    if findings_to_save:
+        with Session(get_engine()) as s:
+            for f in findings_to_save:
+                s.add(f)
+            s.commit()
+        log.info("Stored XSS sweep: %d finding(s) saved", len(findings_to_save))
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "sweep",
+        "status": "complete",
+        "message": (
+            f"Stored XSS sweep complete \u2014 {len(findings_to_save)} finding(s)"
+            if findings_to_save else
+            "Stored XSS sweep complete \u2014 canary not found in any page"
+        ),
+        "data": {"findings_count": len(findings_to_save)},
+    })
 
 
 def _applicable_checks(categories: dict) -> list[str]:
@@ -1428,11 +3368,13 @@ def get_scan_status(run_id: int) -> dict:
 
         run = s.get(TestRun, run_id)
         em = (run.error_message or "") if run else ""
-        if em.startswith("scan:"):
+        if is_running(run_id):
+            status = "running"
+        elif em.startswith("scan:"):
             parts = em.split(":", 2)
             status = parts[1] if len(parts) > 1 else "idle"
-        elif is_running(run_id):
-            status = "running"
+            if status == "running":
+                status = "idle"
         else:
             status = "idle"
 

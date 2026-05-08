@@ -43,7 +43,9 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     creds = [CredentialSummary.model_validate(c) for c in (site.credentials if site else [])]
     s = TestRunSummary.model_validate(run)
     s.credentials = creds
-    s.scanner_policy = settings_service.get_run_scanner_policy(session, run).model_dump(mode="json")
+    policy = settings_service.get_run_scanner_policy(session, run)
+    s.scanner_policy = policy.model_dump(mode="json")
+    s.scan_mode = policy.scan_mode
     scan_pages = session.exec(
         select(CrawledPage)
         .where(CrawledPage.test_run_id == run.id)
@@ -57,7 +59,13 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     elif em.startswith("scan:"):
         parts = em.split(":", 2)
         s.scan_status = parts[1] if len(parts) > 1 else "idle"
-        s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
+        if s.scan_status == "running":
+            s.scan_status = "idle"
+        s.error_message = (
+            f"Scan failed: {parts[2]}"
+            if s.scan_status == "failed" and len(parts) > 2
+            else None
+        )
     elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
         s.scan_status = "complete"
     return s
@@ -92,7 +100,7 @@ def create_test_run(
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
     name = payload.name or _auto_name(session, site_id)
-    policy = settings_service.get_scanner_policy(session).model_copy(update={"scan_mode": payload.scan_mode})
+    policy = settings_service.get_scanner_policy(session)
     run = TestRun(
         site_id=site_id,
         name=name,
@@ -100,7 +108,8 @@ def create_test_run(
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
         scan_mode=policy.scan_mode,
-        scanner_policy_json=settings_service.scanner_policy_snapshot(policy),
+        scanner_policy_json="{}",
+        llm_config_id=payload.llm_config_id,
     )
     session.add(run)
     session.commit()
@@ -161,6 +170,12 @@ def update_test_run(
         raise HTTPException(status_code=409, detail="Cannot edit settings while crawl is running")
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    if payload.llm_config_id is not None:
+        # Validate the profile exists
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
+    run.llm_config_id = payload.llm_config_id
     session.add(run)
     session.commit()
     session.refresh(run)
