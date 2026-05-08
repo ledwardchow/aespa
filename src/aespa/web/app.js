@@ -47,6 +47,7 @@ const api = {
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
+  importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
@@ -762,6 +763,7 @@ function TestRunDetail({ runId }) {
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
+  const issueImportInputRef                 = useRef(null);
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
@@ -1271,6 +1273,37 @@ function TestRunDetail({ runId }) {
       const vs = await api.validateAllFindings(runId);
       setValidateStatus(vs);
     } catch(err) { setError(err.message); setValidateBusy(false); }
+  };
+
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        siteName,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, siteName), md, "text/markdown;charset=utf-8");
+    } catch(err) { setError(err.message); }
+  };
+
+  const onImportFindingsClick = () => {
+    issueImportInputRef.current?.click();
+  };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importFindings(runId, imported);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
+      setRun(r); setGraph(g);
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(err) { setError(err.message); }
   };
 
   const onValidateFinding = async (e, findingId) => {
@@ -1787,10 +1820,21 @@ function TestRunDetail({ runId }) {
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
                 onClick=${onStopValidation}>Stop validation</button>`}
-            ${findings.length>0 && html`
-              <button className="btn sm" style=${{marginLeft:8}}
-                disabled=${validateBusy||validateStatus?.status==="running"}
-                onClick=${onValidateAll}>✓ Validate Issues</button>`}
+            <div className="row" style=${{gap:8,marginLeft:8}}>
+              ${findings.length>0 && html`
+                <button className="btn sm" onClick=${onExportFindingsMarkdown}>
+                  Export Issues
+                </button>`}
+              <button className="btn sm" onClick=${onImportFindingsClick}>
+                Import Issues
+              </button>
+              <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+                style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${validateBusy||validateStatus?.status==="running"}
+                  onClick=${onValidateAll}>✓ Validate Issues</button>`}
+            </div>
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
@@ -2504,6 +2548,190 @@ function apiTranscriptText(text) {
   if (!text) return "";
   const value = String(text).trim();
   return value.includes("REQUEST\n") && value.includes("RESPONSE\n") ? value : "";
+}
+
+function markdownText(value) {
+  return String(value ?? "").trim();
+}
+
+function markdownListValue(value) {
+  const text = markdownText(value);
+  return text || "—";
+}
+
+function markdownCodeBlock(value) {
+  const text = markdownText(value);
+  if (!text) return "—";
+  const fence = text.includes("```") ? "````" : "```";
+  return `${fence}\n${text}\n${fence}`;
+}
+
+function slugForFilename(value) {
+  return String(value || "issues")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "issues";
+}
+
+function markdownExportFilename(run, siteName) {
+  const base = slugForFilename(run?.name || siteName || `run-${run?.id || "issues"}`);
+  const date = new Date().toISOString().slice(0, 10);
+  return `${base}-issues-${date}.md`;
+}
+
+function downloadTextFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function findingsToMarkdown(findings, meta = {}) {
+  const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
+  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4};
+  const sorted = [...(findings || [])].sort((a, b) => {
+    const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
+    if (sev !== 0) return sev;
+    const val = (valOrder[a.validation_status] ?? 99) - (valOrder[b.validation_status] ?? 99);
+    if (val !== 0) return val;
+    return String(a.title || "").localeCompare(String(b.title || ""));
+  });
+  const lines = [
+    `# Issue Export${meta.runName ? `: ${meta.runName}` : ""}`,
+    "",
+  ];
+  if (meta.siteName) lines.push(`- Site: ${meta.siteName}`);
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total findings: ${sorted.length}`, "");
+  lines.push(
+    "<!-- aespa-findings-json",
+    encodeURIComponent(JSON.stringify(sorted.map(findingImportPayload))),
+    "-->",
+    "",
+  );
+
+  sorted.forEach((f, idx) => {
+    lines.push(
+      `## ${idx + 1}. ${markdownListValue(f.title)}`,
+      "",
+      `- Severity: ${markdownListValue(f.severity)}`,
+      `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      `- Validation: ${markdownListValue(f.validation_status)}`,
+      `- Affected URL: ${markdownListValue(f.affected_url)}`,
+      `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
+      "",
+      "### Description",
+      markdownListValue(f.description),
+      "",
+      "### Impact",
+      markdownListValue(f.impact),
+      "",
+      "### Likelihood",
+      markdownListValue(f.likelihood),
+      "",
+      "### Recommendation",
+      markdownListValue(f.recommendation),
+      "",
+      "### Evidence",
+      markdownCodeBlock(f.evidence || f.response_evidence || f.request_evidence),
+      "",
+    );
+    if (f.request_evidence) {
+      lines.push("### Request Evidence", markdownCodeBlock(f.request_evidence), "");
+    }
+    if (f.response_evidence) {
+      lines.push("### Response Evidence", markdownCodeBlock(f.response_evidence), "");
+    }
+    if (f.validation_note) {
+      lines.push("### Validation Note", markdownListValue(f.validation_note), "");
+    }
+  });
+
+  return lines.join("\n");
+}
+
+function findingImportPayload(f) {
+  return {
+    owasp_category: f.owasp_category || "A00",
+    severity: f.severity || "info",
+    title: f.title || "Imported finding",
+    description: f.description || "",
+    impact: f.impact || "",
+    likelihood: f.likelihood || "",
+    recommendation: f.recommendation || "",
+    cvss_score: Number(f.cvss_score) || 0,
+    cvss_vector: f.cvss_vector || "",
+    affected_url: f.affected_url || "",
+    evidence: f.evidence || "",
+    request_evidence: f.request_evidence || "",
+    response_evidence: f.response_evidence || "",
+    validation_status: f.validation_status || "unvalidated",
+    validation_note: f.validation_note || null,
+  };
+}
+
+function parseFindingsMarkdown(markdown) {
+  const text = String(markdown || "");
+  const embedded = text.match(/<!--\s*aespa-findings-json\s+([\s\S]*?)\s+-->/);
+  if (embedded) {
+    const parsed = JSON.parse(decodeURIComponent(embedded[1].trim()));
+    if (Array.isArray(parsed)) return parsed.map(findingImportPayload);
+  }
+  return parseFindingsMarkdownSections(text);
+}
+
+function parseFindingsMarkdownSections(markdown) {
+  const matches = [...markdown.matchAll(/^##\s+\d+\.\s+(.+)$/gm)];
+  return matches.map((match, idx) => {
+    const start = match.index + match[0].length;
+    const end = idx + 1 < matches.length ? matches[idx + 1].index : markdown.length;
+    const block = markdown.slice(start, end);
+    const cvss = markdownBullet(block, "CVSS");
+    const cvssMatch = cvss.match(/^([0-9.]+)(?:\s+\((.*)\))?$/);
+    return findingImportPayload({
+      title: match[1],
+      severity: markdownBullet(block, "Severity"),
+      owasp_category: markdownBullet(block, "OWASP"),
+      validation_status: markdownBullet(block, "Validation"),
+      affected_url: markdownBullet(block, "Affected URL"),
+      cvss_score: cvssMatch ? parseFloat(cvssMatch[1]) : 0,
+      cvss_vector: cvssMatch?.[2] || "",
+      description: markdownSection(block, "Description"),
+      impact: markdownSection(block, "Impact"),
+      likelihood: markdownSection(block, "Likelihood"),
+      recommendation: markdownSection(block, "Recommendation"),
+      evidence: stripMarkdownFence(markdownSection(block, "Evidence")),
+      request_evidence: stripMarkdownFence(markdownSection(block, "Request Evidence")),
+      response_evidence: stripMarkdownFence(markdownSection(block, "Response Evidence")),
+      validation_note: markdownSection(block, "Validation Note") || null,
+    });
+  });
+}
+
+function markdownBullet(block, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`^- ${escaped}: (.*)$`, "m"));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function markdownSection(block, title) {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`### ${escaped}\\n([\\s\\S]*?)(?=\\n### |$)`));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function stripMarkdownFence(value) {
+  const text = markdownText(value);
+  const match = text.match(/^(`{3,4})\n([\s\S]*)\n\1$/);
+  return match ? match[2] : text;
 }
 
 createRoot(document.getElementById("root")).render(html`<${App}/>`);

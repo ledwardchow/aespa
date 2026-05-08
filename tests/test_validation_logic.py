@@ -229,7 +229,8 @@ def test_dynamic_finding_write_persists_immediately(monkeypatch):
         assert saved.title == "Password hash exposed in login API response"
         assert duplicate is None
         assert len(findings) == 1
-        assert findings[0].validation_status == "validating"
+        assert findings[0].validation_status == "unvalidated"
+        assert findings[0].validation_note is None
         assert "password_hash" in findings[0].response_evidence
     finally:
         SQLModel.metadata.drop_all(engine)

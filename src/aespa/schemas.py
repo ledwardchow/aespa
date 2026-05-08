@@ -477,6 +477,29 @@ class ScanFindingOut(BaseModel):
     created_at: datetime
 
 
+class ScanFindingImportIn(BaseModel):
+    owasp_category: str = "A00"
+    severity: str = "info"
+    title: str
+    description: str = ""
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
+    affected_url: str = ""
+    evidence: str = ""
+    request_evidence: str = ""
+    response_evidence: str = ""
+    validation_status: str = "unvalidated"
+    validation_note: str | None = None
+
+
+class ScanFindingImportResult(BaseModel):
+    imported: int
+    findings: list[ScanFindingOut]
+
+
 class ValidationStatusOut(BaseModel):
     total: int
     confirmed: int
