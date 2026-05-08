@@ -131,6 +131,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
+        thinking_max_steps=cfg.thinking_max_steps,
         request_timeout_s=cfg.request_timeout_s,
         min_delay_s=cfg.min_delay_s,
         max_request_body_bytes=cfg.max_request_body_bytes,
@@ -159,6 +160,7 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
 
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
+    cfg.thinking_max_steps = payload.thinking_max_steps
     cfg.request_timeout_s = payload.request_timeout_s
     cfg.min_delay_s = payload.min_delay_s
     cfg.max_request_body_bytes = payload.max_request_body_bytes

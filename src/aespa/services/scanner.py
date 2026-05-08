@@ -437,7 +437,7 @@ async def start_scan(run_id: int, page_ids: list[int] | None = None) -> None:
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
 
 
-MAX_THINKING_STEPS = 120
+DEFAULT_THINKING_MAX_STEPS = 120
 
 
 async def start_thinking_scan(run_id: int) -> None:
@@ -515,6 +515,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
+        thinking_max_steps = max(
+            1,
+            int(
+                getattr(scanner_policy, "thinking_max_steps", DEFAULT_THINKING_MAX_STEPS)
+            ),
+        )
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -620,7 +626,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         "type": "scanner_phase",
         "phase": "thinking_scan",
         "status": "start",
-        "message": f"LLM-directed scan started — up to {MAX_THINKING_STEPS} adaptive steps.",
+        "message": f"LLM-directed scan started — up to {thinking_max_steps} adaptive steps.",
     })
 
     # ── Bootstrap browser + auth session (Playwright) ─────────────────────────
@@ -690,7 +696,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 run_id, username=creds[0].username if creds else None
             ),
         ) as hx:
-            for step in range(1, MAX_THINKING_STEPS + 1):
+            for step in range(1, thinking_max_steps + 1):
                 if run_id in _thinking_stop_requested:
                     break
 
@@ -698,8 +704,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "type": "scanner_phase",
                     "phase": "thinking_step",
                     "status": "deciding",
-                    "message": f"Step {step}/{MAX_THINKING_STEPS}: LLM deciding next action…",
-                    "data": {"step": step, "max_steps": MAX_THINKING_STEPS},
+                    "message": f"Step {step}/{thinking_max_steps}: LLM deciding next action…",
+                    "data": {"step": step, "max_steps": thinking_max_steps},
                 })
 
                 # Ask the LLM what to do next.
@@ -709,7 +715,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         target_url=base_url,
                         crawl_context=crawl_context,
                         history=history,
-                        max_steps=MAX_THINKING_STEPS,
+                        max_steps=thinking_max_steps,
                         current_step=step,
                         credentials=creds_for_llm,
                         sessions=[
