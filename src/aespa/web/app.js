@@ -1480,7 +1480,7 @@ function TestRunDetail({ runId }) {
             ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop Dynamic Scan"}
           </button>`}
         ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the Structured Scan page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start Structured Scan</button>`}
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title=${!graph||graph.nodes.length===0 ? "No site map yet — crawl first" : "Run the Structured Scan page-by-page scanner"} onClick=${onStartScan} disabled=${!graph||graph.nodes.length===0}><${IconPlay}/> Start Structured Scan</button>`}
         ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
           <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the adaptive Dynamic Scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>`}
       </div>
@@ -1633,10 +1633,12 @@ function TestRunDetail({ runId }) {
                 ? html`<div style=${{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
                     <span>Ready to crawl.</span>
                     <button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>
+                    <span className="subtle" style=${{fontSize:12}}>or</span>
+                    <button className="btn" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>
                   </div>`
                 : html`<span>No pages discovered yet.</span>`}
             </div>`}
-          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%"></svg>
+          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%" style=${{pointerEvents: (!graph || graph.nodes.length === 0) ? "none" : "all"}}></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
               ${activeTab === "scan" ? html`

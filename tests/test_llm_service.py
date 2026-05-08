@@ -231,6 +231,53 @@ def test_thinking_next_action_history_includes_response_headers(monkeypatch):
     assert "secrets are not shown" in captured["prompt"]
 
 
+def test_thinking_next_action_compacts_large_history(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "history_search",
+          "args": {"query": "password_hash", "limit": 3},
+          "observation": "Earlier responses were summarized.",
+          "hypothesis": "A previous response may contain evidence worth reviewing.",
+          "payload_purpose": "Retrieve targeted history instead of resending all bodies.",
+          "note": "Search history for the sensitive field before writing a finding."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    history = [
+        {
+            "step": i,
+            "method": "GET",
+            "url": f"https://target.local/api/{i}",
+            "note": "Large response",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": "x" * 5000,
+        }
+        for i in range(20)
+    ]
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Target: https://target.local",
+        history=history,
+        max_steps=120,
+        current_step=21,
+    ))
+
+    assert action["action"] == "tool"
+    assert len(captured["prompt"]) < 35_000
+    assert "Earlier history: 15 step(s) summarized" in captured["prompt"]
+    assert "Use history_search to retrieve details" in captured["prompt"]
+
+
 def test_thinking_next_action_accepts_browser_action(monkeypatch):
     async def fake_call(config, prompt, screenshot_b64):
         return """{
@@ -333,6 +380,81 @@ def test_thinking_next_action_accepts_credential_check_action(monkeypatch):
     assert action["action"] == "credential_check"
     assert len(action["candidates"]) == 2
     assert action["candidates"][1]["password"] == "admin123"
+
+
+def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "site_map",
+          "args": {"filter": "api takes-input", "limit": 10},
+          "observation": "Need endpoint inventory before probing.",
+          "hypothesis": "Input-taking APIs are likely high-value targets.",
+          "payload_purpose": "Fetch targeted crawl context.",
+          "note": "Fetch the API site map before choosing a probe."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: 20 pages. Use context tools for details.",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "tool"
+    assert action["tool"] == "site_map"
+    assert action["args"]["limit"] == 10
+    assert "Context tools:" in captured["prompt"]
+    assert "page_detail" in captured["prompt"]
+    assert "history_search" in captured["prompt"]
+
+
+def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "finding_write",
+          "owasp_category": "A05",
+          "title": "Verbose debug configuration disclosure",
+          "description": "The health endpoint exposes debug configuration.",
+          "impact": "Attackers can use leaked implementation details.",
+          "likelihood": "Likely because the endpoint is public.",
+          "recommendation": "Remove debug fields from public responses.",
+          "cvss_score": 5.3,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "severity": "medium",
+          "affected_url": "https://target.local/api/health",
+          "evidence": "Step 2 returned debug=true.",
+          "request_evidence": "GET https://target.local/api/health",
+          "response_evidence": "Status: 200\\n{debug:true}",
+          "observation": "The response exposed debug mode.",
+          "hypothesis": "This is a confirmed info disclosure.",
+          "payload_purpose": "Persist the finding.",
+          "note": "Record the confirmed debug disclosure."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: compact.",
+        history=[],
+        max_steps=120,
+        current_step=3,
+    ))
+
+    assert action["action"] == "finding_write"
+    assert action["title"] == "Verbose debug configuration disclosure"
+    assert action["affected_url"] == "https://target.local/api/health"
 
 
 def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):

@@ -3,7 +3,8 @@ import asyncio
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import CrawledPage, ScanFinding, Site, TestRun as RunModel
+from aespa.models import CrawledPage, ScanFinding, Site
+from aespa.models import TestRun as RunModel
 from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
@@ -142,6 +143,94 @@ def test_dynamic_scan_page_creation_reuses_existing_page():
         assert page_id == existing.id
         assert len(pages) == 1
         assert refreshed_run.pages_discovered == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_dynamic_finding_write_persists_immediately(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/login",
+                title="API POST /api/login",
+                status="crawled",
+                in_scope=True,
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+
+            raw = {
+                "owasp_category": "A02",
+                "title": "Password hash exposed in login API response",
+                "description": "The login response exposes password_hash.",
+                "impact": "Attackers can use leaked hashes for offline cracking.",
+                "likelihood": "Likely for any user who can call the endpoint.",
+                "recommendation": "Remove password hashes from API responses.",
+                "cvss_score": 7.5,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+                "affected_url": page.url,
+                "evidence": "password_hash was present in the JSON response.",
+                "request_evidence": "POST /api/login",
+                "response_evidence": "Status: 200\n{\"password_hash\":\"...\"}",
+            }
+            result_by_url = {
+                page.url: {
+                    "url": page.url,
+                    "request_evidence": raw["request_evidence"],
+                    "response_evidence": raw["response_evidence"],
+                }
+            }
+
+            saved = asyncio.run(scanner._persist_dynamic_finding(
+                run_id=run.id,
+                llm_cfg=object(),
+                raw=raw,
+                base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
+            ))
+            duplicate = asyncio.run(scanner._persist_dynamic_finding(
+                run_id=run.id,
+                llm_cfg=object(),
+                raw=raw,
+                base_url="https://target.local",
+                pages_snapshot=[{"id": page.id, "url": page.url}],
+                first_page_id=page.id,
+                result_by_url=result_by_url,
+            ))
+
+            findings = session.exec(select(ScanFinding)).all()
+
+        assert saved is not None
+        assert saved.title == "Password hash exposed in login API response"
+        assert duplicate is None
+        assert len(findings) == 1
+        assert findings[0].validation_status == "validating"
+        assert "password_hash" in findings[0].response_evidence
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -325,6 +414,72 @@ def test_bac_check_uses_llm_generated_finding_text(monkeypatch):
     assert findings[0].request_evidence.startswith("GET https://target.local/admin")
     assert "Secret invoice data" in findings[0].response_evidence
     assert captured["results"][0]["as_user"] == "bob"
+
+
+def test_thinking_context_tools_filter_routes_and_history():
+    pages = [
+        {
+            "id": 1,
+            "url": "https://target.local/",
+            "title": "Home",
+            "context": "landing page",
+            "page_text": "<html>Home</html>",
+            "req_auth": False,
+            "takes_input": False,
+            "has_object_ref": False,
+            "has_business_logic": False,
+        },
+        {
+            "id": 2,
+            "url": "https://target.local/api/search?q=test",
+            "title": "API GET /api/search",
+            "context": "search endpoint",
+            "page_text": "GET /api/search?q=test\nHTTP/1.1 200 OK",
+            "req_auth": True,
+            "takes_input": True,
+            "has_object_ref": False,
+            "has_business_logic": False,
+        },
+    ]
+    history = [{
+        "step": 1,
+        "method": "GET",
+        "url": "https://target.local/api/search?q=test",
+        "note": "Baseline search",
+        "request_body": None,
+        "response_status": 200,
+        "response_headers": {"content-type": "application/json"},
+        "response_body": '{"results":[]}',
+    }]
+
+    site_map = scanner._run_thinking_context_tool(
+        "site_map",
+        {"filter": "api takes-input", "flags": ["takes_input"]},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+    detail = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2, "include": ["context", "page_text"]},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+    history_result = scanner._run_thinking_context_tool(
+        "history_search",
+        {"query": "Baseline"},
+        pages_snapshot=pages,
+        findings_snapshot=[],
+        history=history,
+    )
+
+    assert site_map["count"] == 1
+    assert site_map["routes"][0]["page_id"] == 2
+    assert detail["context"] == "search endpoint"
+    assert "GET /api/search" in detail["page_text"]
+    assert history_result["count"] == 1
+    assert history_result["matches"][0]["response_status"] == 200
 
 
 def test_request_stop_cancels_running_validation(monkeypatch):

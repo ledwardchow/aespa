@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
@@ -275,6 +275,213 @@ def _summary_list(values: list[str], limit: int = 3) -> str:
     return "; ".join(shown) + suffix
 
 
+def _thinking_page_flags(page: dict[str, Any]) -> list[str]:
+    return [
+        label for key, label in [
+            ("req_auth", "req_auth"),
+            ("takes_input", "takes_input"),
+            ("has_object_ref", "has_object_ref"),
+            ("has_business_logic", "has_business_logic"),
+        ] if page.get(key)
+    ]
+
+
+def _thinking_page_kind(page: dict[str, Any]) -> str:
+    return "api" if str(page.get("title") or "").startswith("API ") else "page"
+
+
+def _build_compact_thinking_context(
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    findings_snapshot: list[dict[str, Any]],
+) -> str:
+    total = len(pages_snapshot)
+    api_pages = [p for p in pages_snapshot if _thinking_page_kind(p) == "api"]
+    input_pages = [p for p in pages_snapshot if p.get("takes_input")]
+    object_pages = [p for p in pages_snapshot if p.get("has_object_ref")]
+    business_pages = [p for p in pages_snapshot if p.get("has_business_logic")]
+
+    def _sample(label: str, pages: list[dict[str, Any]], limit: int = 8) -> str:
+        if not pages:
+            return f"{label}: none"
+        lines = [
+            f"  - page_id={p['id']} {_thinking_page_kind(p)} {p['url']}"
+            + (f" [{', '.join(_thinking_page_flags(p))}]" if _thinking_page_flags(p) else "")
+            for p in pages[:limit]
+        ]
+        suffix = f"\n  - +{len(pages) - limit} more" if len(pages) > limit else ""
+        return f"{label}:\n" + "\n".join(lines) + suffix
+
+    sections = [
+        f"Target: {base_url}",
+        (
+            "Crawl summary: "
+            f"{total} in-scope pages/endpoints; {len(api_pages)} API; "
+            f"{len(input_pages)} input-taking; {len(object_pages)} object-reference; "
+            f"{len(business_pages)} business-logic."
+        ),
+        "Use context tools for details instead of assuming full crawl data is inline.",
+        _sample("High-value routes", input_pages + object_pages + business_pages),
+        _sample("API sample", api_pages),
+    ]
+    if findings_snapshot:
+        lines = [
+            f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
+            for f in findings_snapshot[:10]
+        ]
+        if len(findings_snapshot) > 10:
+            lines.append(f"  - +{len(findings_snapshot) - 10} more")
+        sections.append("Existing findings summary:\n" + "\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _thinking_tool_result_record(
+    step: int,
+    tool_name: str,
+    args: dict[str, Any],
+    output: dict[str, Any],
+    note: str,
+) -> dict[str, Any]:
+    text = json.dumps(output, separators=(",", ":"), default=str)
+    return {
+        "step": step,
+        "note": note,
+        "method": "TOOL",
+        "url": f"tool://{tool_name}",
+        "request_headers": {},
+        "request_body": args,
+        "response_status": 200,
+        "response_headers": {"content-type": "application/json"},
+        "response_body": text[:6000],
+    }
+
+
+def _run_thinking_context_tool(
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    findings_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        limit = max(1, min(100, int(args.get("limit") or 20)))
+    except (TypeError, ValueError):
+        limit = 20
+    search = str(args.get("search") or args.get("filter") or "").lower()
+    search_tokens = search.replace("-", "_").split()
+
+    if tool_name == "site_map":
+        route_type = str(args.get("type") or "").lower()
+        flags = args.get("flags") if isinstance(args.get("flags"), list) else []
+        flag_set = {str(flag) for flag in flags}
+        pages: list[dict[str, Any]] = []
+        for page in pages_snapshot:
+            haystack = " ".join([
+                str(page.get("url") or ""),
+                str(page.get("title") or ""),
+                str(page.get("context") or ""),
+                " ".join(_thinking_page_flags(page)),
+                _thinking_page_kind(page),
+            ]).lower()
+            if route_type and _thinking_page_kind(page) != route_type:
+                continue
+            if flag_set and not all(page.get(flag) for flag in flag_set):
+                continue
+            if search_tokens and not all(token in haystack for token in search_tokens):
+                continue
+            pages.append(page)
+        return {
+            "tool": "site_map",
+            "count": len(pages),
+            "routes": [
+                {
+                    "page_id": p["id"],
+                    "kind": _thinking_page_kind(p),
+                    "url": p["url"],
+                    "title": p.get("title") or "",
+                    "flags": _thinking_page_flags(p),
+                    "context_excerpt": _compact_log_value(p.get("context"), 220),
+                }
+                for p in pages[:limit]
+            ],
+            "truncated": len(pages) > limit,
+        }
+
+    if tool_name == "page_detail":
+        page_id = args.get("page_id")
+        url = str(args.get("url") or "")
+        include = args.get("include") if isinstance(args.get("include"), list) else []
+        include_set = {str(item) for item in include} or {"title", "flags", "context", "page_text"}
+        page = None
+        for candidate in pages_snapshot:
+            if page_id is not None and str(candidate.get("id")) == str(page_id):
+                page = candidate
+                break
+            if url and candidate.get("url") == url:
+                page = candidate
+                break
+        if not page:
+            return {"tool": "page_detail", "error": "page not found", "page_id": page_id, "url": url}
+        detail: dict[str, Any] = {
+            "tool": "page_detail",
+            "page_id": page["id"],
+            "url": page["url"],
+            "kind": _thinking_page_kind(page),
+        }
+        if "title" in include_set:
+            detail["title"] = page.get("title") or ""
+        if "flags" in include_set:
+            detail["flags"] = _thinking_page_flags(page)
+        if "context" in include_set:
+            detail["context"] = str(page.get("context") or "")[:3000]
+        if "page_text" in include_set or "transcript" in include_set:
+            detail["page_text"] = str(page.get("page_text") or "")[:5000]
+        return detail
+
+    if tool_name == "history_search":
+        query = str(args.get("query") or search).lower()
+        matches: list[dict[str, Any]] = []
+        for item in history:
+            haystack = json.dumps(item, default=str).lower()
+            if query and query not in haystack:
+                continue
+            matches.append({
+                "step": item.get("step"),
+                "method": item.get("method"),
+                "url": item.get("url"),
+                "note": item.get("note"),
+                "request_body": _compact_log_value(item.get("request_body"), 500),
+                "response_status": item.get("response_status"),
+                "response_headers": item.get("response_headers"),
+                "response_body": str(item.get("response_body") or "")[:2000],
+            })
+        return {"tool": "history_search", "count": len(matches), "matches": matches[-limit:]}
+
+    if tool_name == "finding_list":
+        severity = str(args.get("severity") or "").lower()
+        owasp = str(args.get("owasp_category") or "").lower()
+        matches = []
+        for finding in findings_snapshot:
+            haystack = json.dumps(finding, default=str).lower()
+            if severity and str(finding.get("severity") or "").lower() != severity:
+                continue
+            if owasp and str(finding.get("owasp") or "").lower() != owasp:
+                continue
+            if search_tokens and not all(token in haystack for token in search_tokens):
+                continue
+            matches.append(finding)
+        return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
+
+    return {
+        "tool": tool_name,
+        "error": "unknown tool",
+        "available_tools": ["site_map", "page_detail", "history_search", "finding_list"],
+    }
+
+
 def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
     interesting = _summary_list([
         str(
@@ -417,6 +624,130 @@ def _find_or_create_dynamic_page(
         run.pages_discovered = (run.pages_discovered or 0) + 1
 
     return page.id
+
+
+def _dynamic_finding_page_id(
+    session: Session,
+    *,
+    run_id: int,
+    affected_url: str,
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    first_page_id: int | None,
+) -> int | None:
+    url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
+    if affected_url in url_to_page:
+        return url_to_page[affected_url]
+    for page_url, page_id in url_to_page.items():
+        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
+            return page_id
+    if first_page_id is not None:
+        return first_page_id
+    return _find_or_create_dynamic_page(
+        session,
+        run_id=run_id,
+        url=affected_url,
+        base_url=base_url,
+    )
+
+
+def _dynamic_finding_exists(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str,
+) -> bool:
+    existing = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.affected_url == affected_url)
+    ).all()
+    normalized_title = title.strip().lower()
+    normalized_owasp = owasp_category.strip().lower()
+    return any(
+        f.title.strip().lower() == normalized_title
+        or (
+            f.owasp_category.strip().lower() == normalized_owasp
+            and f.title.strip().lower() == normalized_title
+        )
+        for f in existing
+    )
+
+
+async def _persist_dynamic_finding(
+    *,
+    run_id: int,
+    llm_cfg,
+    raw: dict,
+    base_url: str,
+    pages_snapshot: list[dict[str, Any]],
+    first_page_id: int | None,
+    result_by_url: dict[str, dict],
+) -> ScanFinding | None:
+    """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
+    affected = (raw.get("affected_url") or base_url).strip() or base_url
+    raw = {**raw, "affected_url": affected}
+
+    try:
+        with Session(get_engine()) as s:
+            existing = s.exec(
+                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            ).all()
+            existing_summaries = [
+                {
+                    "title": f.title,
+                    "owasp_category": f.owasp_category,
+                    "severity": f.severity,
+                }
+                for f in existing
+            ]
+        if existing_summaries:
+            normalized = await llm_svc.normalize_finding_titles(
+                llm_cfg,
+                existing_summaries,
+                [raw],
+            )
+            if normalized:
+                raw = normalized[0]
+                affected = (raw.get("affected_url") or affected).strip() or affected
+    except Exception as exc:
+        log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
+
+    with Session(get_engine()) as s:
+        page_id = _dynamic_finding_page_id(
+            s,
+            run_id=run_id,
+            affected_url=affected,
+            base_url=base_url,
+            pages_snapshot=pages_snapshot,
+            first_page_id=first_page_id,
+        )
+        if page_id is None:
+            log.warning("Thinking scan: no page_id found for progressive finding %s", affected)
+            return None
+
+        if _dynamic_finding_exists(
+            s,
+            run_id=run_id,
+            title=str(raw.get("title") or "Untitled finding"),
+            affected_url=affected,
+            owasp_category=str(raw.get("owasp_category") or "A00"),
+        ):
+            return None
+
+        finding = _finding_from_llm(
+            run_id=run_id,
+            page_id=page_id,
+            page_url=affected,
+            raw=raw,
+            result_by_url=result_by_url,
+        )
+        s.add(finding)
+        s.commit()
+        s.refresh(finding)
+        return finding
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
@@ -607,48 +938,13 @@ async def _do_thinking_scan(run_id: int) -> None:
     log.info("=== Thinking scan start: run_id=%s base_url=%s ===", run_id, base_url)
     # Status is set to "running" by the task wrapper before calling this function.
 
-    # ── Build crawl-context string for the LLM ────────────────────────────────
-    # API pages get their full request/response transcript; regular pages get a
-    # short LLM summary.  Keep the two groups separate so the LLM can quickly
-    # identify which URLs are API endpoints vs navigable pages.
-    page_lines: list[str] = []
-    api_lines: list[str] = []
-    for p in pages_snapshot[:50]:
-        flags = ", ".join(
-            k for k, v in [
-                ("auth-required", p["req_auth"]),
-                ("takes-input",   p["takes_input"]),
-                ("object-refs",   p["has_object_ref"]),
-                ("business-logic", p["has_business_logic"]),
-            ] if v
-        )
-        header = f"  {p['url']}" + (f" [{flags}]" if flags else "")
-        if p["title"].startswith("API "):
-            # Show the full HTTP exchange (request headers, body, response headers, body)
-            # so the LLM can identify parameters, auth schemes, IDs, and response structure.
-            raw = p["page_text"] or p["context"]
-            indented = "\n".join("    " + line for line in raw[:2000].splitlines())
-            api_lines.append(header + ("\n" + indented if indented.strip() else ""))
-        else:
-            page_lines.append(
-                header + (f"\n    {p['context'][:200]}" if p["context"] else "")
-            )
-    ctx_parts: list[str] = []
-    if page_lines:
-        ctx_parts.append("Application pages:\n" + "\n".join(page_lines))
-    if api_lines:
-        ctx_parts.append(
-            "API endpoints (full HTTP exchange shown):\n" + "\n".join(api_lines)
-        )
-    crawl_context = "\n\n".join(ctx_parts) or "(no crawl data available)"
-
-    # Summarise findings already known from the regular scan.
-    if findings_snapshot:
-        finding_lines = "\n".join(
-            f"  [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}: {f['description']}"
-            for f in findings_snapshot[:30]
-        )
-        crawl_context += f"\n\nFindings already discovered by the regular scan (avoid re-testing these; focus on new areas):\n{finding_lines}"
+    # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
+    # are available through context tools so they are only sent when needed.
+    crawl_context = _build_compact_thinking_context(
+        base_url,
+        pages_snapshot,
+        findings_snapshot,
+    )
 
     creds_for_llm = [
         {
@@ -673,7 +969,9 @@ async def _do_thinking_scan(run_id: int) -> None:
     # ── Agentic loop ──────────────────────────────────────────────────────────
     history:     list[dict] = []
     all_results: list[dict] = []
+    progressive_findings_count = 0
     session_vault: dict[str, dict] = {}
+    consecutive_context_tools = 0
 
     from playwright.async_api import async_playwright
 
@@ -782,6 +1080,112 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 action_type = action.get("action")
                 note = action.get("note") or f"Step {step}"
+
+                if action_type == "tool":
+                    tool_name = str(action.get("tool") or "").strip()
+                    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                    if consecutive_context_tools >= 3:
+                        output = {
+                            "tool": tool_name,
+                            "error": "context tool budget reached; execute a probe or write a finding next",
+                        }
+                    else:
+                        output = _run_thinking_context_tool(
+                            tool_name,
+                            args,
+                            pages_snapshot=pages_snapshot,
+                            findings_snapshot=findings_snapshot,
+                            history=history,
+                        )
+                    consecutive_context_tools += 1
+                    result_text = json.dumps(output, separators=(",", ":"), default=str)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "complete",
+                        "message": f"Step {step}: context tool {tool_name} returned {len(result_text):,} chars",
+                        "data": {
+                            "step": step,
+                            "tool": tool_name,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                        },
+                    })
+                    history.append(_thinking_tool_result_record(step, tool_name, args, output, note))
+                    continue
+
+                consecutive_context_tools = 0
+
+                if action_type == "finding_write":
+                    affected = action.get("affected_url") or base_url
+                    result = {
+                        "source": "finding_write",
+                        "desc": note,
+                        "url": affected,
+                        "status": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": str(action.get("evidence") or "")[:1000],
+                        "request_evidence": str(action.get("request_evidence") or ""),
+                        "response_evidence": str(action.get("response_evidence") or ""),
+                    }
+                    saved = await _persist_dynamic_finding(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        raw=action,
+                        base_url=base_url,
+                        pages_snapshot=pages_snapshot,
+                        first_page_id=first_page_id,
+                        result_by_url={str(affected): result},
+                    )
+                    if saved is not None:
+                        progressive_findings_count += 1
+                        findings_snapshot.append({
+                            "title": saved.title,
+                            "severity": saved.severity,
+                            "owasp": saved.owasp_category,
+                            "affected_url": saved.affected_url,
+                            "description": saved.description[:200],
+                        })
+                    history.append({
+                        "step": step,
+                        "note": note,
+                        "method": "FINDING_WRITE",
+                        "url": affected,
+                        "request_headers": {},
+                        "request_body": {
+                            "title": action.get("title"),
+                            "owasp_category": action.get("owasp_category"),
+                            "cvss_score": action.get("cvss_score"),
+                        },
+                        "response_status": 200,
+                        "response_headers": {"content-type": "application/json"},
+                        "response_body": (
+                            f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                            f"finding: {action.get('title', 'Untitled finding')}. "
+                            f"{str(action.get('evidence') or '')[:1200]}"
+                        ),
+                    })
+                    if saved is not None:
+                        _emit_scan_update(run_id)
+                        _emit_thinking_status(run_id)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "complete",
+                        "message": (
+                            f"Step {step}: "
+                            f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                            f"{action.get('title', 'Untitled finding')}"
+                        ),
+                        "data": {
+                            "step": step,
+                            "affected_url": affected,
+                            "finding_id": saved.id if saved is not None else None,
+                            "note": note,
+                        },
+                    })
+                    continue
 
                 if action_type == "browser":
                     url = (action.get("url") or base_url).strip()
@@ -1137,7 +1541,10 @@ async def _do_thinking_scan(run_id: int) -> None:
             "type": "scanner_phase",
             "phase": "thinking_analysis",
             "status": "start",
-            "message": f"Analysing {len(all_results)} probe results for findings…",
+            "message": (
+                f"Analysing {len(all_results)} probe result(s); "
+                f"{progressive_findings_count} progressive finding(s) already recorded…"
+            ),
         })
         try:
             raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
@@ -1192,6 +1599,15 @@ async def _do_thinking_scan(run_id: int) -> None:
                     page_id  = _best_page_id(affected)
                     if page_id is None:
                         log.warning("Thinking scan: no page_id found for finding %s — skipping", affected)
+                        skipped_count += 1
+                        continue
+                    if _dynamic_finding_exists(
+                        s,
+                        run_id=run_id,
+                        title=str(raw.get("title") or "Untitled finding"),
+                        affected_url=affected,
+                        owasp_category=str(raw.get("owasp_category") or "A00"),
+                    ):
                         skipped_count += 1
                         continue
                     finding = _finding_from_llm(

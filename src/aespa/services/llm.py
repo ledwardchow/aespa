@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 from typing import Any, Optional
 from urllib.parse import quote
@@ -551,11 +552,14 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
     return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
 
 
+def _bedrock_region_from_url(base_url: str) -> str:
+    match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
+    return match.group(1) if match else "us-east-1"
+
+
 async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     import httpx
 
-    if not config.api_key:
-        raise ValueError("Amazon Bedrock API key is required")
     if not config.base_url:
         raise ValueError("Amazon Bedrock Runtime endpoint is required")
 
@@ -576,6 +580,29 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             "temperature": config.temperature,
         },
     }
+    if not config.api_key:
+        import boto3
+
+        region = (
+            os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or _bedrock_region_from_url(config.base_url)
+        )
+        profile = os.getenv("AWS_PROFILE")
+        session_kwargs = {"profile_name": profile} if profile else {}
+        session = boto3.Session(**session_kwargs)
+        client = session.client(
+            "bedrock-runtime",
+            region_name=region,
+            endpoint_url=config.base_url,
+        )
+        data = client.converse(
+            modelId=config.model,
+            messages=payload["messages"],
+            inferenceConfig=payload["inferenceConfig"],
+        )
+        return _extract_bedrock_text(data)
+
     model_id = quote(config.model, safe="")
     url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
     headers = {
@@ -1342,6 +1369,10 @@ History of previous actions and responses:
 TASK: What is the single most valuable action to take RIGHT NOW?
 
 Think like a human tester:
+- Use context tools to pull only the specific crawl/history/finding details you need. Do not
+  assume route details are available inline unless they appear in the compact context or history.
+- Start broad with site_map when route coverage is unclear, then use page_detail or
+  history_search before sending a probe that depends on precise parameters or prior evidence.
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
   API endpoints, error messages, and any other signals.
 - Use discovered tokens in Authorization headers for subsequent requests.
@@ -1362,6 +1393,47 @@ Think like a human tester:
     "found something interesting" unless you also name the specific signal and hypothesis.
 
 Return ONLY valid JSON (no markdown, no prose):
+
+To fetch targeted scanner context without issuing a target request:
+{{
+  "action": "tool",
+  "tool": "site_map",
+  "args": {{"filter": "api takes-input", "limit": 20}},
+  "observation": "The compact context does not include enough endpoint detail.",
+  "hypothesis": "Input-taking API routes are the best next attack surface to enumerate.",
+  "payload_purpose": "Retrieve only relevant route inventory instead of resending the full crawl.",
+  "note": "Fetch the API site map before choosing the next probe."
+}}
+
+Context tools:
+- site_map: args may include filter/search/type ("api" or "page"), flags (array of
+  req_auth/takes_input/has_object_ref/has_business_logic), and limit.
+- page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
+- history_search: args may include query and limit to retrieve prior response/request excerpts.
+- finding_list: args may include severity, owasp_category, search, and limit.
+- Cap consecutive context-only tool calls; once you have enough detail, execute a probe or write a finding.
+
+To record a confirmed finding using prior evidence handles or response excerpts:
+{{
+  "action": "finding_write",
+  "owasp_category": "A05",
+  "title": "Verbose debug configuration disclosure",
+  "description": "The health endpoint exposes runtime configuration fields.",
+  "impact": "Attackers can use leaked implementation details to plan targeted attacks.",
+  "likelihood": "Likely because the endpoint is publicly reachable.",
+  "recommendation": "Remove secrets and debug configuration from public responses.",
+  "cvss_score": 5.3,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+  "severity": "medium",
+  "affected_url": "https://.../api/health",
+  "evidence": "Step 3 returned a 200 response containing debug=true.",
+  "request_evidence": "GET https://.../api/health",
+  "response_evidence": "Status: 200\\n{{...short excerpt...}}",
+  "observation": "Specific response evidence that proves the issue",
+  "hypothesis": "Why this is a confirmed security issue",
+  "payload_purpose": "Persist the finding without another redundant probe",
+  "note": "Record the confirmed issue with concise evidence."
+}}
 
 To make one HTTP request:
 {{
@@ -1483,39 +1555,61 @@ async def thinking_next_action(
     """Ask the LLM for the next action in an agentic (thinking) scan.
 
     Returns a dict with either:
+      {"action": "tool", "tool": ..., "args": {...}, "note": ...}
       {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
       {"action": "browser", "url": ..., "steps": [...], "note": ...}
       {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
       {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+      {"action": "finding_write", ...}
     or:
       {"action": "done", "summary": ...}
     """
-    # Format history — give full detail for recent steps, compress older ones.
-    RECENT = 8
+    # Format history compactly. Full crawl/page details remain available via context tools.
+    RECENT = 5
+    MAX_HISTORY_CHARS = 18_000
     if not history:
         history_text = "(none — this is the first step)"
     else:
         lines: list[str] = []
-        for i, h in enumerate(history):
-            is_recent = i >= len(history) - RECENT
-            body_limit = 3000 if is_recent else 400
+        older_count = max(0, len(history) - RECENT)
+        if older_count:
+            older = history[:older_count]
+            lines.append(
+                f"Earlier history: {older_count} step(s) summarized. "
+                f"Use history_search to retrieve details. "
+                f"Recent earlier URLs: "
+                + ", ".join(str(h.get("url") or "") for h in older[-8:] if h.get("url"))[:1000]
+            )
+        for h in history[-RECENT:]:
+            method = str(h.get("method") or "")
+            is_tool = method == "TOOL"
+            body_limit = 2200 if is_tool else 1400
             resp_excerpt = str(h.get("response_body") or "")[:body_limit]
             req_body = h.get("request_body")
             req_body_str = (
-                json.dumps(req_body)[:400] if isinstance(req_body, dict)
-                else str(req_body or "")[:400]
+                json.dumps(req_body, separators=(",", ":"), default=str)[:300]
+                if isinstance(req_body, dict)
+                else str(req_body or "")[:300]
             )
             response_headers = h.get("response_headers") or {}
-            response_headers_str = json.dumps(response_headers)[:800] if response_headers else "{}"
+            response_headers_str = (
+                json.dumps(response_headers, separators=(",", ":"), default=str)[:350]
+                if response_headers else "{}"
+            )
             lines.append(
-                f"Step {h['step']}: {h['method']} {h['url']}\n"
+                f"Step {h.get('step')}: {method} {h.get('url')}\n"
                 f"  Note: {h.get('note', '')}\n"
                 f"  Request body: {req_body_str or '(none)'}\n"
-                f"  Response status: {h['response_status']}\n"
+                f"  Response status: {h.get('response_status')}\n"
                 f"  Response headers: {response_headers_str}\n"
                 f"  Response body: {resp_excerpt}"
             )
         history_text = "\n\n".join(lines)
+        if len(history_text) > MAX_HISTORY_CHARS:
+            history_text = (
+                history_text[:MAX_HISTORY_CHARS]
+                + "\n\n[history truncated; use history_search for older or larger response details]"
+            )
 
     credentials_section = ""
     if credentials:
@@ -1568,7 +1662,7 @@ async def thinking_next_action(
     action: dict
     try:
         action = _extract_json(raw or "", expect=dict)
-        valid_actions = ("http", "browser", "jwt", "credential_check", "done")
+        valid_actions = ("tool", "http", "browser", "jwt", "credential_check", "finding_write", "done")
         if not isinstance(action, dict) or action.get("action") not in valid_actions:
             raise ValueError("unexpected action")
     except Exception as exc:
@@ -1582,10 +1676,12 @@ async def thinking_next_action(
                 "status": "complete",
                 "message": (
                     f"Step {current_step}: LLM → {action.get('action')}"
+                    + (f" {action.get('tool','')}" if action.get('action') == 'tool' else '')
                     + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
                     + (f" {action.get('url','')}" if action.get('action') == 'browser' else '')
                     + (f" {action.get('store_as','')}" if action.get('action') == 'jwt' else '')
                     + (f" {action.get('url','')}" if action.get('action') == 'credential_check' else '')
+                    + (f" {action.get('title','')}" if action.get('action') == 'finding_write' else '')
                     + (
                         f": {action.get('hypothesis') or action.get('note','')}"
                         if action.get('hypothesis') or action.get('note')
