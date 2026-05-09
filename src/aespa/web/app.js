@@ -48,6 +48,7 @@ const api = {
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
+  deduplicateFindings:   (id)       => req(`/api/test-runs/${id}/findings/deduplicate`, { method:"POST" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
@@ -748,6 +749,7 @@ function TestRunDetail({ runId }) {
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
+  const [dedupeBusy, setDedupeBusy]         = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
   const [expandedGroups, setExpandedGroups]   = useState(new Set());
@@ -1273,6 +1275,23 @@ function TestRunDetail({ runId }) {
       const vs = await api.validateAllFindings(runId);
       setValidateStatus(vs);
     } catch(err) { setError(err.message); setValidateBusy(false); }
+  };
+
+  const onDeduplicateFindings = async () => {
+    if (dedupeBusy) return;
+    setDedupeBusy(true);
+    try {
+      const result = await api.deduplicateFindings(runId);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      if (result.removed > 0) {
+        setExpandedFinding(null);
+        setExpandedGroups(new Set());
+      }
+      const mode = result.llm_used ? " with LLM review" : "";
+      alert(`Removed ${result.removed} duplicate issue${result.removed === 1 ? "" : "s"}${mode}.`);
+    } catch(err) { setError(err.message); }
+    finally { setDedupeBusy(false); }
   };
 
   const onExportFindingsMarkdown = () => {
@@ -1820,6 +1839,11 @@ function TestRunDetail({ runId }) {
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
                 onClick=${onStopValidation}>Stop validation</button>`}
+            ${dedupeBusy && html`
+              <span className="val-status-badge val-running dedupe-status">
+                <span className="inline-spinner"></span>
+                De-duplicating with LLM…
+              </span>`}
             <div className="row" style=${{gap:8,marginLeft:8}}>
               ${findings.length>0 && html`
                 <button className="btn sm" onClick=${onExportFindingsMarkdown}>
@@ -1834,6 +1858,13 @@ function TestRunDetail({ runId }) {
                 <button className="btn sm"
                   disabled=${validateBusy||validateStatus?.status==="running"}
                   onClick=${onValidateAll}>✓ Validate Issues</button>`}
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${dedupeBusy||validateBusy||validateStatus?.status==="running"}
+                  onClick=${onDeduplicateFindings}>
+                  ${dedupeBusy && html`<span className="inline-spinner"></span>`}
+                  ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
+                </button>`}
             </div>
           </div>
           ${findings.length === 0

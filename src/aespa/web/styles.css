@@ -236,6 +236,16 @@ a:hover { color: var(--accent-hover); }
 .btn.ghost:hover { color: var(--text); background: var(--panel-2); }
 .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 5px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+.inline-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Utilities ──────────────────────────────────────────────── */
 
@@ -704,6 +714,7 @@ legend {
 .val-status-badge { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 20px; }
 .val-running  { background: rgba(245,166,35,0.12); color: var(--warn); }
 .val-complete { background: rgba(63,207,112,0.12); color: var(--ok); }
+.dedupe-status { display: inline-flex; align-items: center; gap: 6px; }
 
 /* Validation note in evidence panel */
 .finding-validation-note { padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
