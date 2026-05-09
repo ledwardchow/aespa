@@ -113,6 +113,142 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
     assert run_after["pages_discovered"] == 1
 
 
+def test_deduplicate_findings_removes_substantially_same_targets(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    other_run = _make_run(client, site["id"]).json()
+
+    duplicate_payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Broken object level authorization exposes account records",
+            "description": (
+                "The account details endpoint returns private account data "
+                "for object reference 123."
+            ),
+            "impact": "An attacker can read another user's account data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/accounts/123",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "medium",
+            "title": "Broken object-level authorization exposes account records",
+            "description": (
+                "The account details endpoint returns private account data "
+                "for object reference 456."
+            ),
+            "impact": "An attacker can read another user's account data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/accounts/456",
+            "validation_status": "confirmed",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Broken object level authorization exposes order records",
+            "description": (
+                "The order details endpoint returns private order data "
+                "for object reference 123."
+            ),
+            "impact": "An attacker can read another user's order data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/orders/123",
+        },
+    ]
+
+    imported = client.post(
+        f"/api/test-runs/{run['id']}/findings/import",
+        json=duplicate_payload,
+    ).json()["findings"]
+    other_imported = client.post(
+        f"/api/test-runs/{other_run['id']}/findings/import",
+        json=[duplicate_payload[0]],
+    ).json()["findings"][0]
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/deduplicate")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_before"] == 3
+    assert data["total_after"] == 2
+    assert data["removed"] == 1
+    assert data["groups"][0]["kept_id"] == imported[1]["id"]
+    assert data["groups"][0]["removed_ids"] == [imported[0]["id"]]
+
+    findings = client.get(f"/api/test-runs/{run['id']}/findings").json()
+    assert {f["id"] for f in findings} == {imported[1]["id"], imported[2]["id"]}
+    other_findings = client.get(f"/api/test-runs/{other_run['id']}/findings").json()
+    assert other_findings[0]["id"] == other_imported["id"]
+
+
+def test_deduplicate_findings_unknown_run(client: TestClient):
+    r = client.post("/api/test-runs/9999/findings/deduplicate")
+    assert r.status_code == 404
+
+
+def test_deduplicate_findings_uses_llm_for_semantic_matches(
+    client: TestClient,
+    monkeypatch,
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Invoice export exposes arbitrary tenant documents",
+            "description": (
+                "The export workflow returns files for invoice 111 when "
+                "requested by another tenant."
+            ),
+            "impact": "Confidential documents can be disclosed.",
+            "recommendation": "Scope export access to tenant ownership.",
+            "affected_url": "https://target.local/api/invoices/111/export",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Missing authorization check in download workflow",
+            "description": (
+                "A user can fetch document 222 from the download route despite "
+                "not owning it."
+            ),
+            "impact": "Sensitive files from another organization can be retrieved.",
+            "recommendation": "Verify ownership before serving files.",
+            "affected_url": "https://target.local/api/invoices/222/export",
+        },
+    ]
+    imported = client.post(
+        f"/api/test-runs/{run['id']}/findings/import",
+        json=payload,
+    ).json()["findings"]
+    calls = []
+
+    async def fake_llm_dedupe(config, *, target, findings):  # noqa: ARG001
+        calls.append({"target": target, "findings": findings})
+        return [[imported[0]["id"], imported[1]["id"]]]
+
+    monkeypatch.setattr(scan_api, "get_llm_config_for_run", lambda session, run: object())
+    monkeypatch.setattr(
+        scan_api.findings_svc.llm_svc,
+        "deduplicate_finding_groups",
+        fake_llm_dedupe,
+    )
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/deduplicate")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["llm_used"] is True
+    assert data["removed"] == 1
+    assert calls
+    assert len(client.get(f"/api/test-runs/{run['id']}/findings").json()) == 1
+
+
 def test_run_summary_prefers_live_scan_status(monkeypatch):
     from aespa import models as _models  # noqa: F401
     from aespa.api import test_runs as test_runs_api
