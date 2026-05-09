@@ -1255,6 +1255,93 @@ async def normalize_finding_titles(
         return new_findings
 
 
+_DEDUPLICATE_FINDINGS_PROMPT = """\
+You are de-duplicating security findings from a web application penetration test.
+
+Findings below are candidate duplicates because they affect the same normalized target:
+{target}
+
+Candidate findings:
+{findings_json}
+
+Decide which findings are substantially the same issue in substance and target.
+
+Rules:
+- Group findings when a knowledgeable human security reviewer would collapse them into one
+  report finding.
+- Treat differing object IDs, account numbers, UUIDs, record references, or example values as
+  duplicates when the vulnerability/root cause and target functionality are the same.
+- Titles and writeups may differ; judge by vulnerability class, root cause, affected
+  functionality, impact, and recommended fix.
+- Do NOT group findings that are different vulnerability classes, different target
+  functionality, or require meaningfully different remediation.
+- Only include groups with at least two finding ids.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "duplicate_groups": [
+    {{"ids": [1, 2], "reason": "short explanation"}}
+  ]
+}}
+"""
+
+
+async def deduplicate_finding_groups(
+    config: "LLMConfig",
+    *,
+    target: str,
+    findings: list[dict],
+) -> list[list[int]]:
+    """Return LLM-identified duplicate finding id groups for one target bucket."""
+    if len(findings) < 2:
+        return []
+
+    compact = []
+    for finding in findings[:40]:
+        compact.append({
+            "id": finding.get("id"),
+            "owasp_category": finding.get("owasp_category"),
+            "severity": finding.get("severity"),
+            "affected_url": finding.get("affected_url"),
+            "title": finding.get("title"),
+            "description": str(finding.get("description") or "")[:700],
+            "impact": str(finding.get("impact") or "")[:400],
+            "likelihood": str(finding.get("likelihood") or "")[:300],
+            "recommendation": str(finding.get("recommendation") or "")[:400],
+            "evidence": str(finding.get("evidence") or "")[:500],
+        })
+
+    prompt = _DEDUPLICATE_FINDINGS_PROMPT.format(
+        target=target or "(unknown target)",
+        findings_json=json.dumps(compact, indent=2),
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        data = _extract_json(raw or "", expect=dict)
+        groups = data.get("duplicate_groups") if isinstance(data, dict) else None
+        if not isinstance(groups, list):
+            return []
+        allowed_ids = {
+            int(finding["id"])
+            for finding in findings
+            if isinstance(finding.get("id"), int)
+        }
+        result: list[list[int]] = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("ids"), list):
+                continue
+            ids = []
+            for raw_id in group["ids"]:
+                if isinstance(raw_id, int) and raw_id in allowed_ids and raw_id not in ids:
+                    ids.append(raw_id)
+            if len(ids) >= 2:
+                result.append(ids)
+        return result
+    except Exception as exc:
+        log.warning("deduplicate_finding_groups failed: %s", exc)
+        return []
+
+
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
 
 _THINKING_PENTEST_PLAYBOOK = """\
