@@ -71,6 +71,59 @@ def test_list_runs_unknown_site(client: TestClient):
     assert r.status_code == 404
 
 
+def test_list_active_jobs_includes_running_structured_scan(client: TestClient, monkeypatch):
+    from aespa.services import scanner as scanner_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"], name="Live scan").json()
+
+    monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: run_id == run["id"])
+    monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
+    monkeypatch.setattr(scanner_svc, "get_scan_status", lambda run_id: {
+        "total_pages": 4,
+        "pages_done": 2,
+        "findings_count": 3,
+        "status": "running",
+    })
+
+    r = client.get("/api/test-runs/active")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert data[0]["run_id"] == run["id"]
+    assert data[0]["site_name"] == site["name"]
+    assert data[0]["run_name"] == "Live scan"
+    assert data[0]["job_type"] == "Structured Scan"
+    assert data[0]["status"] == "running"
+    assert data[0]["pages_done"] == 2
+    assert data[0]["total_pages"] == 4
+    assert data[0]["findings_count"] == 3
+
+
+def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monkeypatch):
+    from aespa.services import scanner as scanner_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
+    monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"])
+    monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {
+        "status": "analysing",
+        "findings_count": 1,
+    })
+
+    r = client.get("/api/test-runs/active")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert data[0]["job_type"] == "Dynamic Scan"
+    assert data[0]["status"] == "analysing"
+    assert data[0]["findings_count"] == 1
+
+
 def test_get_run(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
