@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
+from sqlalchemy import Column, ForeignKey, Integer
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -216,7 +217,15 @@ class ScanFinding(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    page_id: int = Field(foreign_key="crawled_page.id", index=True)
+    page_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("crawled_page.id"),
+            index=True,
+            nullable=True,
+        ),
+    )
     owasp_category: str = Field(index=True)   # "A01" … "A10"
     severity: str                              # critical | high | medium | low | info
     title: str

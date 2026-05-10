@@ -327,10 +327,8 @@ def _build_compact_thinking_context(
     if findings_snapshot:
         lines = [
             f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
-            for f in findings_snapshot[:10]
+            for f in findings_snapshot
         ]
-        if len(findings_snapshot) > 10:
-            lines.append(f"  - +{len(findings_snapshot) - 10} more")
         sections.append("Existing findings summary:\n" + "\n".join(lines))
     return "\n\n".join(sections)
 
@@ -541,7 +539,7 @@ def _combined_evidence(request_evidence: str, response_evidence: str, summary: s
 def _finding_from_llm(
     *,
     run_id: int,
-    page_id: int,
+    page_id: int | None,
     page_url: str,
     raw: dict,
     result_by_url: dict[str, dict],
@@ -628,6 +626,23 @@ def _find_or_create_dynamic_page(
     return page.id
 
 
+def _dynamic_page_url_for_finding(affected_url: str, base_url: str) -> str | None:
+    affected_url = (affected_url or "").strip()
+    if not affected_url:
+        return None
+
+    parsed = urlparse(affected_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return affected_url
+
+    if affected_url.startswith("/"):
+        base = urlparse(base_url)
+        if base.scheme and base.netloc:
+            return urlunparse((base.scheme, base.netloc, affected_url, "", "", ""))
+
+    return None
+
+
 def _dynamic_finding_page_id(
     session: Session,
     *,
@@ -643,14 +658,17 @@ def _dynamic_finding_page_id(
     for page_url, page_id in url_to_page.items():
         if affected_url.startswith(page_url) or page_url.startswith(affected_url):
             return page_id
-    if first_page_id is not None:
-        return first_page_id
-    return _find_or_create_dynamic_page(
-        session,
-        run_id=run_id,
-        url=affected_url,
-        base_url=base_url,
-    )
+
+    dynamic_page_url = _dynamic_page_url_for_finding(affected_url, base_url)
+    if dynamic_page_url:
+        return _find_or_create_dynamic_page(
+            session,
+            run_id=run_id,
+            url=dynamic_page_url,
+            base_url=base_url,
+        )
+
+    return first_page_id if first_page_id is not None and not affected_url else None
 
 
 def _dynamic_finding_exists(
@@ -726,9 +744,6 @@ async def _persist_dynamic_finding(
             pages_snapshot=pages_snapshot,
             first_page_id=first_page_id,
         )
-        if page_id is None:
-            log.warning("Thinking scan: no page_id found for progressive finding %s", affected)
-            return None
 
         if _dynamic_finding_exists(
             s,
@@ -1572,39 +1587,19 @@ async def _do_thinking_scan(run_id: int) -> None:
                         log.warning("normalize_finding_titles failed (thinking scan): %s", _ne)
             with Session(get_engine()) as s:
                 result_by_url = {r["url"]: r for r in all_results}
-
-                # Build a URL → page_id lookup for best-match page assignment.
-                url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
                 saved_count = 0
-                skipped_count = 0
-
-                def _best_page_id(affected_url: str) -> int | None:
-                    """Find the closest matching crawled page for a finding URL."""
-                    if affected_url in url_to_page:
-                        return url_to_page[affected_url]
-                    # Partial match — pick the crawled page whose URL is a prefix.
-                    for page_url, page_id in url_to_page.items():
-                        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
-                            return page_id
-                    if first_page_id is not None:
-                        return first_page_id
-                    page_id = _find_or_create_dynamic_page(
-                        s,
-                        run_id=run_id,
-                        url=affected_url,
-                        base_url=base_url,
-                    )
-                    if page_id is not None:
-                        url_to_page[affected_url] = page_id
-                    return page_id
+                duplicate_count = 0
 
                 for raw in raw_findings:
                     affected = (raw.get("affected_url") or base_url).strip()
-                    page_id  = _best_page_id(affected)
-                    if page_id is None:
-                        log.warning("Thinking scan: no page_id found for finding %s — skipping", affected)
-                        skipped_count += 1
-                        continue
+                    page_id = _dynamic_finding_page_id(
+                        s,
+                        run_id=run_id,
+                        affected_url=affected,
+                        base_url=base_url,
+                        pages_snapshot=pages_snapshot,
+                        first_page_id=first_page_id,
+                    )
                     if _dynamic_finding_exists(
                         s,
                         run_id=run_id,
@@ -1612,7 +1607,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         affected_url=affected,
                         owasp_category=str(raw.get("owasp_category") or "A00"),
                     ):
-                        skipped_count += 1
+                        duplicate_count += 1
                         continue
                     finding = _finding_from_llm(
                         run_id=run_id,
@@ -1625,8 +1620,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     saved_count += 1
                 s.commit()
             message = f"Analysis complete — {saved_count} finding(s) recorded."
-            if skipped_count:
-                message += f" {skipped_count} skipped because no page could be assigned."
+            if duplicate_count:
+                message += f" {duplicate_count} duplicate finding(s) skipped."
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "thinking_analysis",
