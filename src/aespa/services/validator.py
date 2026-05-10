@@ -14,7 +14,6 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -372,7 +371,11 @@ async def _deterministic_validate_finding(
         return ("unconfirmed", "Access-control validation could not run because no alternate user sessions were available.")
 
     with Session(get_engine()) as s:
-        page = s.get(CrawledPage, finding.page_id)
+        page = (
+            s.get(CrawledPage, finding.page_id)
+            if finding.page_id is not None
+            else None
+        )
         accessible_by = json.loads(page.accessible_by or "[]") if page else []
         page_text = page.page_text or "" if page else ""
         page_title = page.title or "" if page else ""
