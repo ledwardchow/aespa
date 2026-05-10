@@ -23,6 +23,7 @@ const api = {
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
+  listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
   getRun:           (id)          => req(`/api/test-runs/${id}`),
@@ -48,6 +49,7 @@ const api = {
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
+  deduplicateFindings:   (id)       => req(`/api/test-runs/${id}/findings/deduplicate`, { method:"POST" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
@@ -97,6 +99,7 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)\/runs\/new$/)))  return { name: "run-new",     siteId: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
+  if (hash === "#/active-jobs")                          return { name: "active-jobs" };
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
 
@@ -229,38 +232,58 @@ const IconShield = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fi
   <path d="M8 1.5L2 4v4c0 3 2.5 5.5 6 6 3.5-.5 6-3 6-6V4L8 1.5z"
     stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
 </svg>`;
+const IconChevronLeft = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M9 2L4 7l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+const IconChevronRight = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
   const route = useRoute();
   const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
+  const onActiveJobs = route.name === "active-jobs";
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const [appVersion, setAppVersion] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
 
   return html`
-    <div className="shell">
-      <aside className="sidebar">
+    <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
+      <aside className=${"sidebar"+(collapsed?" sidebar--collapsed":"")}>
         <div className="sidebar-brand">
-          <div className="logo"><div className="logo-icon">A</div><span className="logo-text">ESPA</span></div>
-          <div className="logo-sub">AI-Enabled Security Pentesting Agent</div>
+          <div className="logo">
+            ${!collapsed && html`<div className="logo-codename"><span>CODE</span><span>NAME</span></div>`}
+            <div className="logo-icon">A</div>
+            ${!collapsed && html`<span className="logo-text">ESPA</span>`}
+          </div>
+          ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
         </div>
         <nav className="sidebar-nav">
-          <div className="nav-section-label">Targets</div>
-          <a href="#/" className=${"nav-item"+(onSites?" active":"")}>
-            <span className="nav-icon"><${IconSites}/></span> Sites
+          ${!collapsed && html`<div className="nav-section-label">Targets</div>`}
+          <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
+            <span className="nav-icon"><${IconSites}/></span>${!collapsed && " Sites"}
           </a>
-          <div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>
-          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")}>
-            <span className="nav-icon"><${IconSettings}/></span> LLM Settings
+          <a href="#/active-jobs" className=${"nav-item"+(onActiveJobs?" active":"")} title="Active Jobs">
+            <span className="nav-icon"><${IconPlay}/></span>${!collapsed && " Active Jobs"}
           </a>
-          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")}>
-            <span className="nav-icon"><${IconShield}/></span> Scan Policy
+          ${!collapsed && html`<div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>`}
+          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")} title="LLM Settings">
+            <span className="nav-icon"><${IconSettings}/></span>${!collapsed && " LLM Settings"}
+          </a>
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Scan Policy">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Scan Policy"}
           </a>
         </nav>
-        <div className="sidebar-footer">${appVersion ? `v${appVersion}` : ""}</div>
+        <div className="sidebar-footer">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && (appVersion ? `v${appVersion}` : "")}
+        </div>
       </aside>
 
       <div className="main">
@@ -268,6 +291,7 @@ function App() {
         ${route.name==="site-new"    && html`<${SiteForm} key="new"/>`}
         ${route.name==="site-edit"   && html`<${SiteForm} key=${route.id} siteId=${route.id}/>`}
         ${route.name==="site-detail" && html`<${SiteDetail} key=${route.id} siteId=${route.id}/>`}
+        ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id}/>`}
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
@@ -330,6 +354,88 @@ function SitesList() {
                   <div className="row" style=${{justifyContent:"flex-end"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/sites/${s.id}`)}>Open</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(s)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+// ── Active jobs ───────────────────────────────────────────────────────────────
+
+function activeJobBadge(job) {
+  const status = job.status || "running";
+  const key = status === "failed" ? "danger"
+    : status === "stopping" ? "stopping"
+    : status === "complete" ? "ok"
+    : ["running", "analysing"].includes(status) ? "running"
+    : "neutral";
+  return html`<span className=${"badge " + key}>${status}</span>`;
+}
+
+function activeJobProgress(job) {
+  if (job.total_pages !== null && job.total_pages !== undefined) {
+    return `${job.pages_done || 0} / ${job.total_pages}`;
+  }
+  if (job.pages_done !== null && job.pages_done !== undefined) return job.pages_done;
+  return "—";
+}
+
+function ActiveJobsPage() {
+  const [jobs, setJobs] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      setError(null);
+      setJobs(await api.listActiveJobs());
+    } catch(e) {
+      setError(e.message);
+    }
+  }, []);
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Active Jobs</div>
+      <div className="topbar-actions">
+        <button className="btn secondary" onClick=${load}>Refresh</button>
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${jobs===null && html`<div className="subtle">Loading…</div>`}
+      ${jobs!==null&&jobs.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">▶</div>
+          <div className="empty-msg">No active jobs</div>
+          <div className="empty-sub">Running crawls and scans will appear here.</div>
+        </div>`}
+      ${jobs&&jobs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
+            <tbody>${jobs.map(j=>html`
+              <tr key=${`${j.job_type}-${j.run_id}`}>
+                <td>
+                  <a href=${`#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
+                </td>
+                <td><a href=${`#/sites/${j.site_id}`}>${j.site_name}</a></td>
+                <td>${j.job_type}</td>
+                <td>${activeJobBadge(j)}</td>
+                <td>${activeJobProgress(j)}</td>
+                <td>${j.findings_count ?? html`<span className="subtle">—</span>`}</td>
+                <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${j.run_id}`)}>Open</button>
                   </div>
                 </td>
               </tr>`)}
@@ -687,7 +793,7 @@ const userColor = (d, credentials) => {
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
   const scanStatus = opts.scanStatus || run.scan_status || "idle";
-  const thinkingStatus = opts.thinkingStatus || "idle";
+  const thinkingStatus = opts.thinkingStatus || run.thinking_status || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
   if (opts.scanStopping) return { key:"stopping", label:"stopping Structured Scan" };
   if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };
@@ -748,6 +854,7 @@ function TestRunDetail({ runId }) {
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
+  const [dedupeBusy, setDedupeBusy]         = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
   const [expandedGroups, setExpandedGroups]   = useState(new Set());
@@ -1273,6 +1380,23 @@ function TestRunDetail({ runId }) {
       const vs = await api.validateAllFindings(runId);
       setValidateStatus(vs);
     } catch(err) { setError(err.message); setValidateBusy(false); }
+  };
+
+  const onDeduplicateFindings = async () => {
+    if (dedupeBusy) return;
+    setDedupeBusy(true);
+    try {
+      const result = await api.deduplicateFindings(runId);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      if (result.removed > 0) {
+        setExpandedFinding(null);
+        setExpandedGroups(new Set());
+      }
+      const mode = result.llm_used ? " with LLM review" : "";
+      alert(`Removed ${result.removed} duplicate issue${result.removed === 1 ? "" : "s"}${mode}.`);
+    } catch(err) { setError(err.message); }
+    finally { setDedupeBusy(false); }
   };
 
   const onExportFindingsMarkdown = () => {
@@ -1820,6 +1944,11 @@ function TestRunDetail({ runId }) {
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
                 onClick=${onStopValidation}>Stop validation</button>`}
+            ${dedupeBusy && html`
+              <span className="val-status-badge val-running dedupe-status">
+                <span className="inline-spinner"></span>
+                De-duplicating with LLM…
+              </span>`}
             <div className="row" style=${{gap:8,marginLeft:8}}>
               ${findings.length>0 && html`
                 <button className="btn sm" onClick=${onExportFindingsMarkdown}>
@@ -1834,6 +1963,13 @@ function TestRunDetail({ runId }) {
                 <button className="btn sm"
                   disabled=${validateBusy||validateStatus?.status==="running"}
                   onClick=${onValidateAll}>✓ Validate Issues</button>`}
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${dedupeBusy||validateBusy||validateStatus?.status==="running"}
+                  onClick=${onDeduplicateFindings}>
+                  ${dedupeBusy && html`<span className="inline-spinner"></span>`}
+                  ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
+                </button>`}
             </div>
           </div>
           ${findings.length === 0

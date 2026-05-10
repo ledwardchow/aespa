@@ -6,11 +6,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, TestRunStatus
+from aespa.models import (
+    CrawledPage,
+    PageCredentialView,
+    PageLink,
+    TestRun,
+    TestRunStatus,
+)
 from aespa.schemas import (
-    CredentialSummary,
+    ActiveJobSummary,
     CrawledPageDetail,
     CrawledPageOut,
+    CredentialSummary,
     GraphData,
     GraphLink,
     GraphNode,
@@ -68,6 +75,8 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
         )
     elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
         s.scan_status = "complete"
+    thinking = scanner_svc.get_thinking_scan_status(run.id)
+    s.thinking_status = thinking.get("status", "idle")
     return s
 
 
@@ -127,6 +136,71 @@ def list_test_runs(
         select(TestRun).where(TestRun.site_id == site_id).order_by(TestRun.created_at.desc())
     ).all()
     return [_run_summary(r, session) for r in runs]
+
+
+@router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])
+def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
+    from aespa.models import Site
+    from aespa.services import scanner as scanner_svc
+
+    runs = session.exec(select(TestRun).order_by(TestRun.created_at.desc())).all()
+    jobs: list[ActiveJobSummary] = []
+    for run in runs:
+        site = session.get(Site, run.site_id)
+        site_name = site.name if site else f"Site #{run.site_id}"
+
+        if run.status == TestRunStatus.running:
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Crawl",
+                    status="running",
+                    pages_done=run.pages_discovered,
+                    total_pages=run.max_pages,
+                    current_url=run.current_url,
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        if scanner_svc.is_running(run.id):
+            scan = scanner_svc.get_scan_status(run.id)
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Structured Scan",
+                    status=scan.get("status", "running"),
+                    pages_done=scan.get("pages_done"),
+                    total_pages=scan.get("total_pages"),
+                    findings_count=scan.get("findings_count"),
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        if scanner_svc.is_thinking_running(run.id):
+            thinking = scanner_svc.get_thinking_scan_status(run.id)
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Dynamic Scan",
+                    status=thinking.get("status", "running"),
+                    findings_count=thinking.get("findings_count"),
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+    return jobs
 
 
 # ── Single run ────────────────────────────────────────────────────────────────
