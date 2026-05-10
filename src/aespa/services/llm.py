@@ -16,6 +16,13 @@ log = logging.getLogger("aespa.llm")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 ANALYSE_RESULTS_TEXT_BUDGET = 80_000
 ANALYSE_RESULTS_PER_BATCH = 20
+_THINKING_CONTEXT_TOOL_ARG_KEYS = {
+    "site_map": ("filter", "search", "type", "flags", "limit"),
+    "page_detail": ("page_id", "url", "include"),
+    "history_search": ("query", "search", "limit"),
+    "finding_list": ("severity", "owasp_category", "search", "limit"),
+}
+_THINKING_CONTEXT_TOOLS = frozenset(_THINKING_CONTEXT_TOOL_ARG_KEYS)
 
 
 def _strip_thinking_blocks(raw: str) -> str:
@@ -96,6 +103,30 @@ def _extract_json(raw: str, expect: type = list) -> Any:
                         break
 
     raise ValueError("could not extract balanced JSON from LLM response")
+
+
+def _normalize_thinking_action(action: Any) -> Any:
+    if not isinstance(action, dict):
+        return action
+
+    action_name = str(action.get("action") or "").strip()
+    if action_name not in _THINKING_CONTEXT_TOOLS:
+        return action
+
+    arg_keys = _THINKING_CONTEXT_TOOL_ARG_KEYS[action_name]
+    args = {}
+    nested_args = action.get("args")
+    if isinstance(nested_args, dict):
+        args.update(nested_args)
+    for key in arg_keys:
+        if key in action and key not in args:
+            args[key] = action[key]
+
+    normalized = {key: value for key, value in action.items() if key not in arg_keys}
+    normalized["action"] = "tool"
+    normalized["tool"] = action_name
+    normalized["args"] = args
+    return normalized
 
 _ANALYSIS_PROMPT = """\
 You are a web application security analyst performing reconnaissance on a target web application.
@@ -1748,7 +1779,7 @@ async def thinking_next_action(
     raw = await _call(config, prompt, None)
     action: dict
     try:
-        action = _extract_json(raw or "", expect=dict)
+        action = _normalize_thinking_action(_extract_json(raw or "", expect=dict))
         valid_actions = ("tool", "http", "browser", "jwt", "credential_check", "finding_write", "done")
         if not isinstance(action, dict) or action.get("action") not in valid_actions:
             raise ValueError("unexpected action")
