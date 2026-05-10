@@ -67,6 +67,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
+    _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
@@ -130,6 +131,90 @@ def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> Non
                 )
             )
             conn.commit()
+
+
+def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
+    """Allow findings to be saved when no specific crawled page applies."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    columns = [
+        "id",
+        "test_run_id",
+        "page_id",
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "cvss_vector",
+        "affected_url",
+        "evidence",
+        "request_evidence",
+        "response_evidence",
+        "screenshot_b64",
+        "validation_status",
+        "validation_note",
+        "created_at",
+    ]
+    column_list = ", ".join(columns)
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(scan_finding)")))
+        page_id_row = next((row for row in rows if row[1] == "page_id"), None)
+        if page_id_row is None or int(page_id_row[3] or 0) == 0:
+            return
+
+        conn.execute(sql("DROP TABLE IF EXISTS scan_finding_nullable_migration"))
+        conn.execute(sql("""
+            CREATE TABLE scan_finding_nullable_migration (
+                id INTEGER PRIMARY KEY,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                page_id INTEGER REFERENCES crawled_page(id),
+                owasp_category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                impact TEXT NOT NULL DEFAULT '',
+                likelihood TEXT NOT NULL DEFAULT '',
+                recommendation TEXT NOT NULL DEFAULT '',
+                cvss_score REAL NOT NULL DEFAULT 0.0,
+                cvss_vector TEXT NOT NULL DEFAULT '',
+                affected_url TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL,
+                request_evidence TEXT NOT NULL DEFAULT '',
+                response_evidence TEXT NOT NULL DEFAULT '',
+                screenshot_b64 TEXT,
+                validation_status TEXT NOT NULL DEFAULT 'unvalidated',
+                validation_note TEXT,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(sql(f"""
+            INSERT INTO scan_finding_nullable_migration ({column_list})
+            SELECT {column_list}
+            FROM scan_finding
+        """))
+        conn.execute(sql("DROP TABLE scan_finding"))
+        conn.execute(sql(
+            "ALTER TABLE scan_finding_nullable_migration RENAME TO scan_finding"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_test_run_id "
+            "ON scan_finding (test_run_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_page_id "
+            "ON scan_finding (page_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_owasp_category "
+            "ON scan_finding (owasp_category)"
+        ))
+        conn.commit()
 
 
 def get_session() -> Iterator[Session]:

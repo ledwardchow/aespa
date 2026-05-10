@@ -417,6 +417,42 @@ def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
     assert "history_search" in captured["prompt"]
 
 
+def test_thinking_next_action_normalizes_context_tool_alias(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """
+Looking at the history, I need to search prior responses.
+
+```json
+{
+  "action": "history_search",
+  "query": "jwt secret signing key",
+  "limit": 5,
+  "observation": "The previous response was truncated.",
+  "hypothesis": "A JWT secret may have appeared in prior response history.",
+  "payload_purpose": "Search prior response history before making another request.",
+  "note": "Search history for a JWT secret."
+}
+```
+"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: compact.",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "tool"
+    assert action["tool"] == "history_search"
+    assert action["args"] == {"query": "jwt secret signing key", "limit": 5}
+    assert action["note"] == "Search history for a JWT secret."
+
+
 def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
     async def fake_call(config, prompt, screenshot_b64):
         return """{

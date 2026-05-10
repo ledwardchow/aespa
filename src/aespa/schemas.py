@@ -359,6 +359,7 @@ class TestRunSummary(BaseModel):
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
+    thinking_status: str = "idle"
     pages_discovered: int
     current_url: str | None
     created_at: datetime
@@ -380,6 +381,21 @@ class TestRunSummary(BaseModel):
         if isinstance(v, str):
             return _json.loads(v)
         return v
+
+
+class ActiveJobSummary(BaseModel):
+    run_id: int
+    site_id: int
+    site_name: str
+    run_name: str
+    job_type: str
+    status: str
+    pages_done: int | None = None
+    total_pages: int | None = None
+    findings_count: int | None = None
+    current_url: str | None = None
+    started_at: datetime | None = None
+    created_at: datetime
 
 
 class ScopeUpdate(BaseModel):
@@ -457,7 +473,7 @@ class ScanFindingOut(BaseModel):
 
     id: int
     test_run_id: int
-    page_id: int
+    page_id: int | None
     owasp_category: str
     severity: str
     title: str
@@ -498,6 +514,21 @@ class ScanFindingImportIn(BaseModel):
 class ScanFindingImportResult(BaseModel):
     imported: int
     findings: list[ScanFindingOut]
+
+
+class ScanFindingDeduplicationGroup(BaseModel):
+    kept_id: int
+    removed_ids: list[int]
+    target: str
+    title: str
+
+
+class ScanFindingDeduplicationResult(BaseModel):
+    total_before: int
+    total_after: int
+    removed: int
+    llm_used: bool = False
+    groups: list[ScanFindingDeduplicationGroup]
 
 
 class ValidationStatusOut(BaseModel):

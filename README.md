@@ -4,7 +4,7 @@
 
 An **exploration** into whether a fully LLM-driven, automated web application "penetration test" could work. 
 
-Here's a [comparison](docs/results-comparison.md) of this scanner:
+Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner:
 * AESPA + Sonnet 4.6 (AWS Bedrock - account NOT in Cyber Verification Program)
 * Claude Code + Sonnet 4.6 (account in Cyber Verification Program)
 * Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
