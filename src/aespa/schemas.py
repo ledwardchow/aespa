@@ -382,6 +382,21 @@ class TestRunSummary(BaseModel):
         return v
 
 
+class ActiveJobSummary(BaseModel):
+    run_id: int
+    site_id: int
+    site_name: str
+    run_name: str
+    job_type: str
+    status: str
+    pages_done: int | None = None
+    total_pages: int | None = None
+    findings_count: int | None = None
+    current_url: str | None = None
+    started_at: datetime | None = None
+    created_at: datetime
+
+
 class ScopeUpdate(BaseModel):
     in_scope: bool
     cascade: bool = False
@@ -457,7 +472,7 @@ class ScanFindingOut(BaseModel):
 
     id: int
     test_run_id: int
-    page_id: int
+    page_id: int | None
     owasp_category: str
     severity: str
     title: str
