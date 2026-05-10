@@ -793,7 +793,7 @@ const userColor = (d, credentials) => {
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
   const scanStatus = opts.scanStatus || run.scan_status || "idle";
-  const thinkingStatus = opts.thinkingStatus || "idle";
+  const thinkingStatus = opts.thinkingStatus || run.thinking_status || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
   if (opts.scanStopping) return { key:"stopping", label:"stopping Structured Scan" };
   if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };

@@ -359,6 +359,7 @@ class TestRunSummary(BaseModel):
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
+    thinking_status: str = "idle"
     pages_discovered: int
     current_url: str | None
     created_at: datetime
