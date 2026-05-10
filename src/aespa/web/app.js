@@ -230,6 +230,12 @@ const IconShield = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fi
   <path d="M8 1.5L2 4v4c0 3 2.5 5.5 6 6 3.5-.5 6-3 6-6V4L8 1.5z"
     stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
 </svg>`;
+const IconChevronLeft = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M9 2L4 7l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+const IconChevronRight = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -239,29 +245,39 @@ function App() {
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const [appVersion, setAppVersion] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
 
   return html`
-    <div className="shell">
-      <aside className="sidebar">
+    <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
+      <aside className=${"sidebar"+(collapsed?" sidebar--collapsed":"")}>
         <div className="sidebar-brand">
-          <div className="logo"><div className="logo-icon">A</div><span className="logo-text">ESPA</span></div>
-          <div className="logo-sub">AI-Enabled Security Pentesting Agent</div>
+          <div className="logo">
+            ${!collapsed && html`<div className="logo-codename"><span>CODE</span><span>NAME</span></div>`}
+            <div className="logo-icon">A</div>
+            ${!collapsed && html`<span className="logo-text">ESPA</span>`}
+          </div>
+          ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
         </div>
         <nav className="sidebar-nav">
-          <div className="nav-section-label">Targets</div>
-          <a href="#/" className=${"nav-item"+(onSites?" active":"")}>
-            <span className="nav-icon"><${IconSites}/></span> Sites
+          ${!collapsed && html`<div className="nav-section-label">Targets</div>`}
+          <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
+            <span className="nav-icon"><${IconSites}/></span>${!collapsed && " Sites"}
           </a>
-          <div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>
-          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")}>
-            <span className="nav-icon"><${IconSettings}/></span> LLM Settings
+          ${!collapsed && html`<div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>`}
+          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")} title="LLM Settings">
+            <span className="nav-icon"><${IconSettings}/></span>${!collapsed && " LLM Settings"}
           </a>
-          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")}>
-            <span className="nav-icon"><${IconShield}/></span> Scan Policy
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Scan Policy">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Scan Policy"}
           </a>
         </nav>
-        <div className="sidebar-footer">${appVersion ? `v${appVersion}` : ""}</div>
+        <div className="sidebar-footer">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && (appVersion ? `v${appVersion}` : "")}
+        </div>
       </aside>
 
       <div className="main">
