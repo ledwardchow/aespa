@@ -457,7 +457,7 @@ class ScanFindingOut(BaseModel):
 
     id: int
     test_run_id: int
-    page_id: int
+    page_id: int | None
     owasp_category: str
     severity: str
     title: str
