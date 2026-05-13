@@ -4,7 +4,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session
-from aespa.models import TargetIntelItem
+from aespa.models import ScannerSession, TargetIntelItem
 
 
 def _make_site(client: TestClient, **kw):
@@ -533,6 +533,58 @@ def test_run_summary_does_not_infer_structured_complete_from_dynamic_page(monkey
         assert summary.scan_pages_done == 1
         assert summary.scan_status == "idle"
         assert summary.thinking_status == "complete"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_get_scanner_sessions_redacts_auth_material():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            session.add(ScannerSession(
+                test_run_id=run.id,
+                label="configured_primary",
+                kind="mixed",
+                username="alice",
+                credential_id=3,
+                source="test",
+                cookies_json='{"sid":"secret-cookie"}',
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+                session_metadata='{"login_url":"https://target.local/login"}',
+                token_hint="secret...token",
+            ))
+            session.commit()
+
+            summary = test_runs_api.get_scanner_sessions(run.id, session=session)
+
+        assert summary.counts["total"] == 1
+        item = summary.sessions[0]
+        assert item.label == "configured_primary"
+        assert item.cookie_names == ["sid"]
+        assert item.header_names == ["Authorization"]
+        assert item.session_metadata["login_url"] == "https://target.local/login"
+        assert "secret-cookie" not in item.model_dump_json()
+        assert "secret-token" not in item.model_dump_json()
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

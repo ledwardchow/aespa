@@ -161,3 +161,36 @@ def test_migrate_creates_target_intelligence_table():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_migrate_creates_scanner_session_table():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(scanner_session)"))
+            }
+            indexes = {
+                row[1]
+                for row in conn.execute(text("PRAGMA index_list(scanner_session)"))
+            }
+
+        assert {
+            "test_run_id", "label", "kind", "username", "credential_id",
+            "cookies_json", "extra_headers_json", "session_metadata", "token_hint", "is_active",
+        } <= columns
+        assert "ix_scanner_session_test_run_id" in indexes
+        assert "ix_scanner_session_label" in indexes
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
