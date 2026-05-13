@@ -35,6 +35,7 @@ const api = {
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
+  getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
@@ -829,6 +830,8 @@ function TestRunDetail({ runId }) {
   const [scopeBusy, setScopeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState("sitemap");
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
+  const [targetIntel, setTargetIntel]       = useState(null);
+  const [targetIntelKind, setTargetIntelKind] = useState("");
   const [crawlUsername, setCrawlUsername]   = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
@@ -1051,6 +1054,15 @@ function TestRunDetail({ runId }) {
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
     api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
+
+  useEffect(() => {
+    if (activeTab !== "intelligence" && run?.status !== "running") return;
+    const loadIntel = () => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{});
+    loadIntel();
+    if (run?.status !== "running") return;
+    const iv = setInterval(loadIntel, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, targetIntelKind, run?.status]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
@@ -1610,6 +1622,10 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
           Activity${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
+          onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); }}>
+          Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1782,7 +1798,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -2157,6 +2173,14 @@ function TestRunDetail({ runId }) {
               </div>`}
         </div>`}
 
+      ${activeTab==="intelligence" && html`
+        <${TargetIntelligencePanel}
+          data=${targetIntel}
+          selectedKind=${targetIntelKind}
+          onKind=${setTargetIntelKind}
+          refresh=${()=>api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{})}
+        />`}
+
       ${activeTab==="activity" && html`
         <div className="activity-panel">
           <div className="activity-feed" ref=${activityFeedRef}>
@@ -2298,6 +2322,91 @@ function TestRunDetail({ runId }) {
               </div>
             </div>`}
         </div>`}
+    </div>`;
+}
+
+function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
+  const counts = data?.counts || {};
+  const items = data?.items || [];
+  const kinds = ["", ...Object.keys(counts).sort()];
+  const total = Object.values(counts).reduce((a,b)=>a+b,0);
+  const KIND_LABELS = {
+    endpoint:"Endpoints",
+    form:"Forms",
+    input:"Inputs",
+    script:"Scripts",
+    storage_key:"Storage Keys",
+    id:"IDs",
+    response_field:"Response Fields",
+  };
+  const kindLabel = (k) => k ? (KIND_LABELS[k] || k.replace(/_/g, " ")) : "All";
+  const compactMeta = (meta) => {
+    if (!meta || Object.keys(meta).length === 0) return "";
+    const shown = Object.entries(meta)
+      .filter(([k]) => !["fields"].includes(k))
+      .slice(0, 5)
+      .map(([k,v]) => `${k}: ${Array.isArray(v) ? v.length+" item(s)" : String(v).slice(0,80)}`);
+    return shown.join(" · ");
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Target Intelligence</span>
+          <span className="subtle">${total} item${total===1?"":"s"} discovered during crawl</span>
+        </div>
+        <div className="intel-filter">
+          <label>Kind</label>
+          <select className="select" value=${selectedKind} onChange=${e=>onKind(e.target.value)}>
+            ${kinds.map(k => html`<option key=${k||"all"} value=${k}>${kindLabel(k)}${k ? ` (${counts[k]||0})` : ""}</option>`)}
+          </select>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        ${Object.entries(counts).sort(([a],[b])=>a.localeCompare(b)).map(([kind,count]) => html`
+          <button key=${kind} className=${"intel-count-card"+(selectedKind===kind?" active":"")} onClick=${()=>onKind(selectedKind===kind?"":kind)}>
+            <span className="intel-count-value">${count}</span>
+            <span className="intel-count-label">${kindLabel(kind)}</span>
+          </button>`)}
+        ${total===0 && html`<div className="subtle">No target intelligence has been collected yet. Start or restart a crawl to populate the inventory.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table">
+          <thead>
+            <tr>
+              <th style=${{width:116}}>Kind</th>
+              <th style=${{width:86}}>Method</th>
+              <th>Key</th>
+              <th>Value</th>
+              <th style=${{width:130}}>Source</th>
+              <th style=${{width:82}}>Conf.</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(item => html`
+              <tr key=${item.id}>
+                <td><span className="intel-kind">${kindLabel(item.kind)}</span></td>
+                <td><span className="mono">${item.method || "-"}</span></td>
+                <td>
+                  <div className="intel-primary" title=${item.key}>${item.key || "—"}</div>
+                  ${item.url && html`<div className="intel-url mono" title=${item.url}>${truncUrl(item.url, 72)}</div>`}
+                </td>
+                <td>
+                  <div className="intel-value" title=${item.value}>${item.value || "—"}</div>
+                  ${item.evidence && html`<div className="intel-evidence">${item.evidence}</div>`}
+                  ${compactMeta(item.item_metadata) && html`<div className="intel-meta">${compactMeta(item.item_metadata)}</div>`}
+                </td>
+                <td>${item.source}</td>
+                <td>${Math.round((item.confidence ?? 0) * 100)}%</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${items.length===0 && total>0 && html`
+          <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No items match this filter.</div>`}
+      </div>
     </div>`;
 }
 

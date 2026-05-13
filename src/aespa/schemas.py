@@ -481,6 +481,41 @@ class GraphData(BaseModel):
     links: list[GraphLink]
 
 
+class TargetIntelItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    kind: str
+    key: str
+    value: str
+    url: str | None
+    method: str | None
+    source: str
+    confidence: float
+    evidence: str
+    item_metadata: dict = Field(default_factory=dict)
+    discovered_at: datetime
+
+    @field_validator("item_metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                return _json.loads(v)
+            except Exception:
+                return {}
+        return v
+
+
+class TargetIntelSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    items: list[TargetIntelItemOut] = Field(default_factory=list)
+
+
 class TrafficEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

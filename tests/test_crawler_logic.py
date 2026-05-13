@@ -76,6 +76,22 @@ class _FakeRecoveryPage:
         return None
 
 
+class _TimeoutAfterNavigationPage:
+    def __init__(self, url):
+        self.url = url
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = url
+        raise TimeoutError("Page.goto: Timeout 20000ms exceeded.")
+
+
+class _HardTimeoutPage:
+    url = "about:blank"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        raise TimeoutError("Page.goto: Timeout 20000ms exceeded.")
+
+
 def test_session_ending_url_detection_matches_logout_variants():
     assert crawler._is_session_ending_url("https://target.local/logout") is True
     assert crawler._is_session_ending_url("https://target.local/account/log-out") is True
@@ -111,6 +127,68 @@ def test_login_url_for_credential_falls_back_to_site_default():
         "https://target.local/login",
         object(),
     ) == "https://target.local/login"
+
+
+def test_site_base_url_preserves_mounted_app_trailing_slash():
+    assert crawler._site_base_url("https://target.local/banking/") == "https://target.local/banking/"
+
+
+def test_goto_lenient_continues_when_timeout_reached_target():
+    page = _TimeoutAfterNavigationPage("about:blank")
+
+    response = asyncio.run(crawler._goto_lenient(page, "https://target.local/banking/"))
+
+    assert response is None
+    assert page.url == "https://target.local/banking/"
+
+
+def test_goto_lenient_raises_when_timeout_did_not_reach_target():
+    page = _HardTimeoutPage()
+
+    try:
+        asyncio.run(crawler._goto_lenient(page, "https://target.local/banking/"))
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("Expected timeout to be re-raised")
+
+
+def test_public_asset_candidates_include_origin_and_app_prefix():
+    urls = crawler._public_asset_candidates("https://target.local/banking/")
+
+    assert "https://target.local/robots.txt" in urls
+    assert "https://target.local/banking/robots.txt" in urls
+    assert "https://target.local/openapi.json" in urls
+    assert "https://target.local/banking/openapi.json" in urls
+
+
+def test_extract_sitemap_locations():
+    xml = "<urlset><url><loc>https://target.local/admin</loc></url></urlset>"
+
+    assert crawler._extract_sitemap_locations(xml) == ["https://target.local/admin"]
+
+
+def test_extract_robots_paths_resolves_directives():
+    body = """
+    User-agent: *
+    Disallow: /admin
+    Allow: /api/status
+    Sitemap: https://target.local/sitemap.xml
+    """
+
+    assert crawler._extract_robots_paths("https://target.local/robots.txt", body) == [
+        "https://target.local/admin",
+        "https://target.local/api/status",
+        "https://target.local/sitemap.xml",
+    ]
+
+
+def test_extract_sourcemap_urls_resolves_relative_reference():
+    body = "//# sourceMappingURL=app.js.map"
+
+    assert crawler._extract_sourcemap_urls("https://target.local/static/app.js", body) == [
+        "https://target.local/static/app.js.map"
+    ]
 
 
 def test_page_requires_login_ignores_login_url_without_login_ui():

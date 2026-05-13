@@ -115,6 +115,41 @@ def _migrate(engine: Engine) -> None:
             )
         """))
         conn.commit()
+    # target_intel_item — normalized crawl/recon inventory used by the UI and scanners.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS target_intel_item (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                kind TEXT NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                value TEXT NOT NULL DEFAULT '',
+                url TEXT,
+                method TEXT,
+                source TEXT NOT NULL DEFAULT 'crawler',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                evidence TEXT NOT NULL DEFAULT '',
+                item_metadata TEXT NOT NULL DEFAULT '{}',
+                discovered_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_test_run_id "
+            "ON target_intel_item (test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_kind "
+            "ON target_intel_item (kind)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_key "
+            "ON target_intel_item (key)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_url "
+            "ON target_intel_item (url)"
+        ))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
