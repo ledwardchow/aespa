@@ -64,6 +64,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "cvss_vector", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "request_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
@@ -220,6 +221,32 @@ def _migrate(engine: Engine) -> None:
         conn.execute(__import__("sqlalchemy").text(
             "CREATE INDEX IF NOT EXISTS ix_pentest_task_task_type ON pentest_task (task_type)"
         ))
+        conn.commit()
+    # scanner_session — durable scanner auth/session material with stable labels.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scanner_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'cookie',
+                username TEXT,
+                credential_id INTEGER REFERENCES credential(id),
+                source TEXT NOT NULL DEFAULT 'scanner',
+                cookies_json TEXT NOT NULL DEFAULT '{}',
+                extra_headers_json TEXT NOT NULL DEFAULT '{}',
+                session_metadata TEXT NOT NULL DEFAULT '{}',
+                token_hint TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for column in ("test_run_id", "label", "kind", "username", "credential_id", "is_active"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
+                f"ON scanner_session ({column})"
+            ))
         conn.commit()
 
 

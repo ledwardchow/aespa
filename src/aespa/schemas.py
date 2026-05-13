@@ -516,6 +516,35 @@ class TargetIntelSummary(BaseModel):
     items: list[TargetIntelItemOut] = Field(default_factory=list)
 
 
+class ScannerSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    label: str
+    kind: str
+    username: str | None
+    credential_id: int | None
+    source: str
+    cookie_names: list[str] = Field(default_factory=list)
+    header_names: list[str] = Field(default_factory=list)
+    token_hint: str | None
+    session_metadata: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScannerSessionSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    sessions: list[ScannerSessionOut] = Field(default_factory=list)
+
+
+class ScannerSessionUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    is_active: bool | None = None
+
+
 class PentestHypothesisOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -611,6 +640,8 @@ class ScanFindingOut(BaseModel):
     evidence: str
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_json: str = "[]"
+    evidence_items: list[dict] = Field(default_factory=list)
     screenshot_b64: str | None
     validation_status: str
     validation_note: str | None
@@ -631,6 +662,7 @@ class ScanFindingImportIn(BaseModel):
     evidence: str = ""
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
     validation_status: str = "unvalidated"
     validation_note: str | None = None
 

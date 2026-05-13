@@ -1470,6 +1470,14 @@ Recommended assessment strategy, distilled from effective manual pentest workflo
      - Fetch JavaScript bundles and look for API base paths, endpoint lists, token storage
          keys, hardcoded routes, feature flags, role-specific APIs, preflight/check endpoints,
          and client-side-only enforcement.
+     - After fetching a JS file, search its content using history_search with short code
+         patterns like "fetch(", "axios.post(", "/api/", "baseUrl" — NOT English descriptions.
+     - For single-page applications using hash routing (#/route), API endpoints used by a
+         feature are ONLY discoverable by: (a) using the browser action to navigate to the
+         SPA route, interact with its form (fill + submit), and capture the real API call in
+         traffic logs, or (b) finding the path in a fetched JS source with history_search
+         using code patterns. If /api/transfers or similar returns 404, do NOT keep guessing
+         variations — use a browser action to navigate to #/transfers and submit the form.
      - Build and maintain an endpoint inventory from the JS and crawl context before
          spending too many steps on generic payloads.
 
@@ -1583,6 +1591,8 @@ Think like a human tester:
 - Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
 - Use browser actions when the next probe depends on JavaScript execution, hash routes,
     form interaction, client-side state, DOM rendering, or screenshot evidence.
+- Use register_account when a registration endpoint/form is discovered and a disposable
+    low-impact account would improve auth, IDOR, or business-logic coverage.
 - Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
     followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
@@ -1610,7 +1620,9 @@ Context tools:
 - site_map: args may include filter/search/type ("api" or "page"), flags (array of
   req_auth/takes_input/has_object_ref/has_business_logic), and limit.
 - page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
-- history_search: args may include query and limit to retrieve prior response/request excerpts.
+- history_search: args may include query and limit. Uses EXACT substring matching — use short
+  code patterns ("fetch(", "/api/", "axios.post", a URL fragment, or a field name), NOT English
+  descriptions. The query must appear verbatim in the stored request/response text.
 - finding_list: args may include severity, owasp_category, search, and limit.
 - target_inventory: args may include kind, source, search/filter, and limit; returns normalized
   endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
@@ -1748,6 +1760,34 @@ Credential-check rules:
 - Successful login responses with bearer tokens are stored as reusable in-memory sessions.
 - Later actions should reference those sessions with use_session rather than copying tokens.
 
+To create one disposable account through a discovered registration endpoint:
+{{
+    "action": "register_account",
+    "url": "https://.../api/users/register",
+    "method": "POST",
+    "body_format": "json",
+    "username_field": "username",
+    "email_field": "email",
+    "password_field": "password",
+    "include_username": true,
+    "include_email": true,
+    "extra_fields": {{"role": "user"}},
+    "headers": {{"Content-Type": "application/json"}},
+    "success_statuses": [200, 201, 204],
+    "store_as": "disposable_user_a",
+    "observation": "The target exposes a public registration endpoint.",
+    "hypothesis": "A fresh user account will allow authenticated boundary and IDOR checks.",
+    "payload_purpose": "Create one low-impact disposable account for controlled testing.",
+    "note": "Register a disposable user and store any returned cookies or bearer token as a reusable session."
+}}
+
+Register-account rules:
+- Only use this for explicit signup/registration endpoints or forms found in crawl/intelligence/history.
+- Create at most one account per distinct testing role unless a later IDOR/business-logic check needs a second user.
+- Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
+- Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
+- Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
+
 To finish the assessment (all key areas covered, or steps nearly exhausted):
 {{
   "action": "done",
@@ -1775,6 +1815,7 @@ async def thinking_next_action(
       {"action": "browser", "url": ..., "steps": [...], "note": ...}
       {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
       {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+    {"action": "register_account", "url": ..., "store_as": ..., "note": ...}
       {"action": "finding_write", ...}
     or:
       {"action": "done", "summary": ...}
@@ -1798,7 +1839,8 @@ async def thinking_next_action(
         for h in history[-RECENT:]:
             method = str(h.get("method") or "")
             is_tool = method == "TOOL"
-            body_limit = 2200 if is_tool else 1400
+            _is_js_step = str(h.get("url") or "").split("?")[0].lower().endswith(".js")
+            body_limit = 2200 if is_tool else (6000 if _is_js_step else 1400)
             resp_excerpt = str(h.get("response_body") or "")[:body_limit]
             req_body = h.get("request_body")
             req_body_str = (
