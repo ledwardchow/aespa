@@ -3,6 +3,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from aespa.db import get_session
+from aespa.models import TargetIntelItem
+
 
 def _make_site(client: TestClient, **kw):
     defaults = {"name": "Target", "base_url": "https://target.local", "requires_auth": False}
@@ -130,6 +133,53 @@ def test_get_run(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}")
     assert r.status_code == 200
     assert r.json()["id"] == run["id"]
+
+
+def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/accounts",
+            value="https://target.local/api/accounts",
+            url="https://target.local/dashboard",
+            method="GET",
+            source="dom_link",
+            confidence=0.8,
+            evidence="Accounts",
+            item_metadata='{"page_url":"https://target.local/dashboard"}',
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="input",
+            key="account_id",
+            value="request_body",
+            url="https://target.local/api/transfers",
+            method="POST",
+            source="api_request",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.get(f"/api/test-runs/{run['id']}/target-intelligence")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"] == {"endpoint": 1, "input": 1}
+    assert {item["kind"] for item in data["items"]} == {"endpoint", "input"}
+    endpoint = next(item for item in data["items"] if item["kind"] == "endpoint")
+    assert endpoint["item_metadata"]["page_url"] == "https://target.local/dashboard"
 
 
 def test_import_findings_creates_findings_and_pages(client: TestClient):

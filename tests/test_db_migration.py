@@ -132,3 +132,32 @@ def test_migrate_makes_scan_finding_page_id_nullable():
         assert int(columns["page_id"][3]) == 0
     finally:
         engine.dispose()
+
+
+def test_migrate_creates_target_intelligence_table():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(target_intel_item)"))
+            }
+            indexes = {
+                row[1]
+                for row in conn.execute(text("PRAGMA index_list(target_intel_item)"))
+            }
+
+        assert {"test_run_id", "kind", "key", "value", "url", "source", "item_metadata"} <= columns
+        assert "ix_target_intel_item_test_run_id" in indexes
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()

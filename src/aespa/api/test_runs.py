@@ -10,6 +10,7 @@ from aespa.models import (
     CrawledPage,
     PageCredentialView,
     PageLink,
+    TargetIntelItem,
     TestRun,
     TestRunStatus,
 )
@@ -23,6 +24,8 @@ from aespa.schemas import (
     GraphNode,
     PageCredentialViewOut,
     ScopeUpdate,
+    TargetIntelItemOut,
+    TargetIntelSummary,
     TestRunCreate,
     TestRunSummary,
     TestRunUpdate,
@@ -224,6 +227,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all()
     for v in views:
         session.delete(v)
+    intel = session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all()
+    for item in intel:
+        session.delete(item)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
@@ -309,6 +315,8 @@ async def restart_test_run(
         session.delete(lnk)
     for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
         session.delete(view)
+    for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
+        session.delete(item)
     for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
         session.delete(pg)
     # Reset run state
@@ -410,6 +418,34 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
         and l.target_page_id in page_ids
     ]
     return GraphData(nodes=nodes, links=edges)
+
+
+@router.get("/api/test-runs/{run_id}/target-intelligence", response_model=TargetIntelSummary)
+def get_target_intelligence(
+    run_id: int,
+    kind: str | None = None,
+    limit: int = 500,
+    session: Session = Depends(get_session),
+) -> TargetIntelSummary:
+    _get_run_or_404(session, run_id)
+    limit = max(1, min(limit, 2000))
+    all_items = session.exec(
+        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    ).all()
+    counts: dict[str, int] = {}
+    for item in all_items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+
+    query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    if kind:
+        query = query.where(TargetIntelItem.kind == kind)
+    items = session.exec(
+        query.order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()).limit(limit)
+    ).all()
+    return TargetIntelSummary(
+        counts=counts,
+        items=[TargetIntelItemOut.model_validate(item) for item in items],
+    )
 
 
 # ── Scope management ──────────────────────────────────────────────────────────
