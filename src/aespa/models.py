@@ -231,6 +231,49 @@ class TargetIntelItem(SQLModel, table=True):
     discovered_at: datetime = Field(default_factory=_utcnow)
 
 
+class PentestHypothesis(SQLModel, table=True):
+    """Durable attack hypothesis derived from crawl intelligence and scan progress."""
+
+    __tablename__ = "pentest_hypothesis"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    title: str = Field(index=True)
+    description: str = Field(default="")
+    attack_area: str = Field(default="", index=True)
+    owasp_category: str = Field(default="")
+    status: str = Field(default="open", index=True)  # open | testing | confirmed | rejected | deferred
+    priority: int = Field(default=50, index=True)
+    confidence: float = Field(default=0.5)
+    rationale: str = Field(default="")
+    created_from: str = Field(default="")
+    related_intel_ids: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class PentestTask(SQLModel, table=True):
+    """Concrete work item in the LLM-directed pentest plan."""
+
+    __tablename__ = "pentest_task"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    hypothesis_id: Optional[int] = Field(default=None, foreign_key="pentest_hypothesis.id", index=True)
+    title: str = Field(index=True)
+    description: str = Field(default="")
+    target_url: str = Field(default="", index=True)
+    method: str = Field(default="GET")
+    task_type: str = Field(default="recon", index=True)
+    status: str = Field(default="queued", index=True)  # queued | running | blocked | done | skipped
+    priority: int = Field(default=50, index=True)
+    evidence: str = Field(default="")
+    result_summary: str = Field(default="")
+    last_action_step: Optional[int] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class ScanFinding(SQLModel, table=True):
     """A security vulnerability found during an active scan."""
 
