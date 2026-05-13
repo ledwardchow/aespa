@@ -25,6 +25,7 @@ from aespa.db import get_engine
 from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
 
@@ -996,6 +997,13 @@ async def _do_thinking_scan(run_id: int) -> None:
     intel_context = _build_target_intelligence_context(run_id)
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
+    if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
+        events_svc.emit(run_id, {
+            "type": "task_graph_update",
+            "reason": "seeded",
+            "data": seeded_task_graph,
+        })
 
     creds_for_llm = [
         {
@@ -1096,10 +1104,15 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 # Ask the LLM what to do next.
                 try:
+                    task_context = task_graph_svc.build_task_graph_context(run_id)
+                    step_context = (
+                        f"{crawl_context}\n\n{task_context}"
+                        if task_context else crawl_context
+                    )
                     action = await llm_svc.thinking_next_action(
                         llm_cfg,
                         target_url=base_url,
-                        crawl_context=crawl_context,
+                        crawl_context=step_context,
                         history=history,
                         max_steps=thinking_max_steps,
                         current_step=step,
@@ -1167,6 +1180,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     continue
 
                 consecutive_context_tools = 0
+                active_task_id = task_graph_svc.mark_task_running_for_action(run_id, action, step)
 
                 if action_type == "finding_write":
                     affected = action.get("affected_url") or base_url
@@ -1217,7 +1231,19 @@ async def _do_thinking_scan(run_id: int) -> None:
                             f"{str(action.get('evidence') or '')[:1200]}"
                         ),
                     })
+                    task_graph_svc.complete_task_after_result(
+                        run_id,
+                        active_task_id,
+                        step=step,
+                        method="FINDING_WRITE",
+                        url=str(affected),
+                        status=200,
+                        note=note,
+                        response_excerpt=str(action.get("evidence") or "")[:2000],
+                        finding_written=saved is not None,
+                    )
                     if saved is not None:
+                        task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
                     events_svc.emit(run_id, {
@@ -1573,6 +1599,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                 history.append(step_record)
 
                 all_results.append(result)
+                task_graph_svc.complete_task_after_result(
+                    run_id,
+                    active_task_id,
+                    step=step,
+                    method=method,
+                    url=url,
+                    status=resp_status,
+                    note=note,
+                    response_excerpt=resp_body[:2000],
+                )
 
                 events_svc.emit(run_id, {
                     "type": "scanner_phase",
