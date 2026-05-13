@@ -516,6 +516,30 @@ class TargetIntelSummary(BaseModel):
     items: list[TargetIntelItemOut] = Field(default_factory=list)
 
 
+class ScannerSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    label: str
+    kind: str
+    username: str | None
+    credential_id: int | None
+    source: str
+    cookie_names: list[str] = Field(default_factory=list)
+    header_names: list[str] = Field(default_factory=list)
+    token_hint: str | None
+    session_metadata: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScannerSessionSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    sessions: list[ScannerSessionOut] = Field(default_factory=list)
+
+
 class PentestHypothesisOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

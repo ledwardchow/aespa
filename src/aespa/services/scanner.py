@@ -25,6 +25,7 @@ from aespa.db import get_engine
 from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
@@ -50,6 +51,9 @@ MAX_PROBES_PER_PAGE = 50
 MAX_FOLLOWUP_PROBES  = 20
 REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
+EVIDENCE_TEXT_LIMIT = 128 * 1024
+REQUEST_EVIDENCE_LIMIT = 64 * 1024
+RESPONSE_EVIDENCE_LIMIT = 128 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
@@ -234,6 +238,43 @@ def _session_label(raw: str, existing: dict) -> str:
         label = f"{base}_{counter}"
         counter += 1
     return label
+
+
+def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
+    has_cookies = bool(cookies)
+    has_bearer = any(str(k).lower() == "authorization" for k in (extra_headers or {}))
+    if has_cookies and has_bearer:
+        return "mixed"
+    if has_bearer:
+        return "bearer"
+    if has_cookies:
+        return "cookie"
+    return "anonymous"
+
+
+def _record_session(
+    run_id: int,
+    *,
+    label: str,
+    session_data: dict,
+    source: str,
+    credential_id: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    session_svc.upsert_session(
+        run_id,
+        label=label,
+        kind=session_data.get("kind") or _session_kind(
+            session_data.get("cookies"),
+            session_data.get("extra_headers"),
+        ),
+        username=session_data.get("username"),
+        credential_id=credential_id or session_data.get("credential_id"),
+        source=source,
+        cookies=session_data.get("cookies") or {},
+        extra_headers=session_data.get("extra_headers") or {},
+        metadata=metadata or session_data.get("metadata") or {},
+    )
 
 
 def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
@@ -1085,6 +1126,28 @@ def _combined_evidence(request_evidence: str, response_evidence: str, summary: s
     return "\n\n".join(parts)
 
 
+def _clip_evidence(value: str, limit: int) -> str:
+    text = _redact_sensitive_text(str(value or ""))
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n[truncated {len(text) - limit} characters]"
+
+
+def _full_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
+    return _clip_evidence(
+        _combined_evidence(request_evidence, response_evidence, summary),
+        EVIDENCE_TEXT_LIMIT,
+    )
+
+
+def _request_evidence(value: str) -> str:
+    return _clip_evidence(value, REQUEST_EVIDENCE_LIMIT)
+
+
+def _response_evidence(value: str) -> str:
+    return _clip_evidence(value, RESPONSE_EVIDENCE_LIMIT)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1128,9 +1191,9 @@ def _finding_from_llm(
         cvss_score=cvss_score,
         cvss_vector=raw.get("cvss_vector", ""),
         affected_url=affected_url,
-        evidence=evidence[:4000],
-        request_evidence=request_evidence[:4000],
-        response_evidence=response_evidence[:4000],
+        evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+        request_evidence=_request_evidence(request_evidence),
+        response_evidence=_response_evidence(response_evidence),
         screenshot_b64=matched.get("screenshot_b64"),
         validation_status=validation_status,
         validation_note=validation_note,
@@ -1588,7 +1651,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     history:     list[dict] = []
     all_results: list[dict] = []
     progressive_findings_count = 0
-    session_vault: dict[str, dict] = {}
+    session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
+    session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     consecutive_context_tools = 0
 
     from playwright.async_api import async_playwright
@@ -1630,14 +1694,25 @@ async def _do_thinking_scan(run_id: int) -> None:
         extra_headers: dict[str, str] = {}
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
-            session_vault["configured_primary"] = {
+        if requires_auth and creds and (cookie_jar or extra_headers):
+            configured_primary = {
                 "label": "configured_primary",
-                "kind": "bearer",
-                "username": creds[0].username if creds else None,
+                "kind": _session_kind(cookie_jar, extra_headers),
+                "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "source": "configured credential auth bootstrap",
-                "extra_headers": {"Authorization": f"Bearer {auth_token}"},
+                "extra_headers": extra_headers,
                 "cookies": cookie_jar,
             }
+            session_vault["configured_primary"] = configured_primary
+            _record_session(
+                run_id,
+                label="configured_primary",
+                session_data=configured_primary,
+                source="dynamic_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
 
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -1854,6 +1929,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     try:
+                        if selected_session and selected_session.get("cookies"):
+                            cookie_list = [
+                                {"name": k, "value": v, "url": url}
+                                for k, v in selected_session.get("cookies", {}).items()
+                            ]
+                            if cookie_list:
+                                await browser_ctx.add_cookies(cookie_list)
                         await browser_ctx.set_extra_http_headers(
                             selected_session.get("extra_headers", {})
                             if selected_session else {}
@@ -1906,6 +1988,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "extra_headers": {"Authorization": f"Bearer {token}"},
                             "cookies": {},
                         }
+                        _record_session(
+                            run_id,
+                            label=label,
+                            session_data=session_vault[label],
+                            source="dynamic_scan_jwt_action",
+                            metadata={"claims": claims, "header": header or {"typ": "JWT", "alg": "HS256"}},
+                        )
                         resp_status = 200
                         resp_headers = {"content-type": "application/json"}
                         resp_body = json.dumps({
@@ -2014,6 +2103,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "extra_headers": {"Authorization": f"Bearer {token}"},
                                     "cookies": {},
                                 }
+                                _record_session(
+                                    run_id,
+                                    label=label,
+                                    session_data=session_vault[label],
+                                    source="dynamic_scan_credential_check",
+                                    metadata={"login_url": url},
+                                )
                         except Exception as exc:
                             response_excerpt = f"Request failed: {exc}"
                             success = False
@@ -2098,15 +2194,20 @@ async def _do_thinking_scan(run_id: int) -> None:
                         if selected_session and selected_session.get("extra_headers"):
                             merged_headers.update(selected_session["extra_headers"])
                         merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
                         if isinstance(body, dict):
                             merged_headers.setdefault("Content-Type", "application/json")
-                            resp = await hx.request(method, url, json=body, headers=merged_headers)
+                            resp = await hx.request(method, url, json=body, headers=merged_headers, cookies=selected_cookies)
                             req_body_str = json.dumps(body)[:800]
                         elif isinstance(body, str) and body:
-                            resp = await hx.request(method, url, content=body, headers=merged_headers)
+                            resp = await hx.request(method, url, content=body, headers=merged_headers, cookies=selected_cookies)
                             req_body_str = body[:800]
                         else:
-                            resp = await hx.request(method, url, headers=merged_headers)
+                            resp = await hx.request(method, url, headers=merged_headers, cookies=selected_cookies)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
@@ -2122,6 +2223,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 "extra_headers": {"Authorization": f"Bearer {token}"},
                                 "cookies": {},
                             }
+                            _record_session(
+                                run_id,
+                                label=label,
+                                session_data=session_vault[label],
+                                source="dynamic_scan_http_response",
+                                metadata={"method": method, "url": url},
+                            )
                         resp_body    = _redact_sensitive_text(raw_resp_body)
                         resp_status  = resp.status_code
                         resp_headers = dict(resp.headers)
@@ -2132,14 +2240,21 @@ async def _do_thinking_scan(run_id: int) -> None:
                         resp_headers = {}
 
                     req_body = body
-                    request_evidence = f"{method} {url}\n{json.dumps(headers)}\n{req_body_str}"
-                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    request_evidence = _request_evidence(
+                        f"{method} {url}\n{json.dumps(headers, sort_keys=True)}\n{req_body_str}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\n{resp_body}"
+                    )
                     result = {
                         "desc": note,
                         "url": url,
                         "status": resp_status,
                         "headers": resp_headers,
-                        "body": resp_body[:1000],
+                        "body": resp_body,
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
                     }
@@ -2444,6 +2559,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         pw_page = await ctx.new_page()
 
         # ── Auth bootstrap ────────────────────────────────────────────────────
+        session_svc.ensure_anonymous_session(run_id, source="structured_scan")
         # Pre-load base URL, then authenticate to get a live session.
         try:
             await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -2484,21 +2600,43 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         # cred_sessions maps credential_id → {username, cookies, extra_headers}
         cred_sessions: dict[int, dict] = {}
         if requires_auth and creds:
+            primary_label = session_svc.credential_label(creds[0].username, primary=True)
             cred_sessions[creds[0].id] = {
+                "label": primary_label,
                 "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "cookies": cookie_jar,
                 "extra_headers": extra_headers,
             }
+            _record_session(
+                run_id,
+                label=primary_label,
+                session_data=cred_sessions[creds[0].id],
+                source="structured_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
             for extra_cred in creds[1:]:
                 log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
                 ec_cookies, ec_token = await _export_cred_session(
                     base_url, _login_url_for_credential(login_url, extra_cred), extra_cred
                 )
+                label = session_svc.credential_label(extra_cred.username)
                 cred_sessions[extra_cred.id] = {
+                    "label": label,
                     "username": extra_cred.username,
+                    "credential_id": extra_cred.id,
                     "cookies": ec_cookies,
                     "extra_headers": {"Authorization": f"Bearer {ec_token}"} if ec_token else {},
                 }
+                _record_session(
+                    run_id,
+                    label=label,
+                    session_data=cred_sessions[extra_cred.id],
+                    source="structured_scan_auth_export",
+                    credential_id=extra_cred.id,
+                    metadata={"login_url": _login_url_for_credential(login_url, extra_cred)},
+                )
 
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions
@@ -2858,13 +2996,13 @@ def _auth_matrix_finding(
         cvss_score=cvss_score,
         cvss_vector="",
         affected_url=result.get("url") or target["url"],
-        evidence=_combined_evidence(
+        evidence=_full_evidence(
             result["request_evidence"],
             result["response_evidence"],
             f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
-        )[:4000],
-        request_evidence=result["request_evidence"][:4000],
-        response_evidence=result["response_evidence"][:4000],
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic auth matrix module.",
         created_at=_utcnow(),
@@ -2900,13 +3038,13 @@ def _idor_matrix_finding(
         cvss_score=8.1,
         cvss_vector="",
         affected_url=page.url,
-        evidence=_combined_evidence(
+        evidence=_full_evidence(
             result["request_evidence"],
             result["response_evidence"],
             f"Actor `{actor}` received content matching the protected object page.",
-        )[:4000],
-        request_evidence=result["request_evidence"][:4000],
-        response_evidence=result["response_evidence"][:4000],
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic IDOR matrix module.",
         created_at=_utcnow(),
@@ -3526,12 +3664,12 @@ def _deterministic_findings_from_results(
                 cvss_score=score,
                 cvss_vector="",
                 affected_url=url,
-                evidence=str(result.get("evidence") or _combined_evidence(
+                evidence=_clip_evidence(str(result.get("evidence") or _combined_evidence(
                     str(result.get("request_evidence") or ""),
-                    str(result.get("response_evidence") or body[:2000]),
-                ))[:4000],
-                request_evidence=str(result.get("request_evidence") or "")[:4000],
-                response_evidence=str(result.get("response_evidence") or body[:4000])[:4000],
+                    str(result.get("response_evidence") or body),
+                )), EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(str(result.get("request_evidence") or "")),
+                response_evidence=_response_evidence(str(result.get("response_evidence") or body)),
                 screenshot_b64=result.get("screenshot_b64"),
                 validation_status="confirmed",
                 validation_note="Confirmed by deterministic module.",
@@ -3767,7 +3905,7 @@ async def _run_http_probe(
             headers=request_headers,
         )
         resp = await client.send(req, follow_redirects=True)
-        response_text = resp.text[:2000]
+        response_text = resp.text[:RESPONSE_EVIDENCE_LIMIT]
 
         req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
                                      if k.lower() not in ("cookie",))
@@ -3775,12 +3913,14 @@ async def _run_http_probe(
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
         request_evidence = (
             f"{user_note}{method} {req.url} HTTP/1.1\n{req_headers_text}"
-            + (f"\n\n{body_preview[:2000]}" if body_preview else "")
+            + (f"\n\n{body_preview[:REQUEST_EVIDENCE_LIMIT]}" if body_preview else "")
         )
         response_evidence = (
             f"HTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{response_text}"
         )
-        evidence = _combined_evidence(request_evidence, response_evidence)
+        request_evidence = _request_evidence(request_evidence)
+        response_evidence = _response_evidence(response_evidence)
+        evidence = _full_evidence(request_evidence, response_evidence)
         return {
             "desc": desc,
             "url": str(resp.url),
@@ -4524,9 +4664,9 @@ async def _stored_xss_sweep(
                 cvss_score=8.0,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
                 affected_url=page_url,
-                evidence=evidence[:4000],
-                request_evidence=request_evidence[:4000],
-                response_evidence=response_evidence[:4000],
+                evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(request_evidence),
+                response_evidence=_response_evidence(response_evidence),
                 screenshot_b64=None,
                 validation_status="confirmed",
                 validation_note=(
