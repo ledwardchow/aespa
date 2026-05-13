@@ -65,6 +65,35 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
         engine.dispose()
 
 
+def test_finding_from_llm_preserves_large_request_response_evidence():
+    long_request = "POST /api/search HTTP/1.1\nContent-Type: application/json\n\n" + ("A" * 9000)
+    long_response = "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + ("B" * 12000)
+
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=2,
+        page_url="https://target.local/search",
+        raw={
+            "owasp_category": "A03",
+            "title": "Verbose response evidence",
+            "affected_url": "https://target.local/search",
+            "cvss_score": 5.3,
+        },
+        result_by_url={
+            "https://target.local/search": {
+                "request_evidence": long_request,
+                "response_evidence": long_response,
+            }
+        },
+    )
+
+    assert len(finding.request_evidence) > 8000
+    assert len(finding.response_evidence) > 11000
+    assert len(finding.evidence) > 19000
+    assert "REQUEST:" in finding.evidence
+    assert "RESPONSE:" in finding.evidence
+
+
 def test_dynamic_page_assignment_returns_none_for_non_page_finding():
     engine = create_engine(
         "sqlite:///:memory:",

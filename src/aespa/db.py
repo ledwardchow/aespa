@@ -221,6 +221,32 @@ def _migrate(engine: Engine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_pentest_task_task_type ON pentest_task (task_type)"
         ))
         conn.commit()
+    # scanner_session — durable scanner auth/session material with stable labels.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scanner_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'cookie',
+                username TEXT,
+                credential_id INTEGER REFERENCES credential(id),
+                source TEXT NOT NULL DEFAULT 'scanner',
+                cookies_json TEXT NOT NULL DEFAULT '{}',
+                extra_headers_json TEXT NOT NULL DEFAULT '{}',
+                session_metadata TEXT NOT NULL DEFAULT '{}',
+                token_hint TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for column in ("test_run_id", "label", "kind", "username", "credential_id", "is_active"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
+                f"ON scanner_session ({column})"
+            ))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:

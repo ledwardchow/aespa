@@ -193,6 +193,27 @@ class TrafficEntry(SQLModel, table=True):
     username: Optional[str] = Field(default=None)      # credential username that made the request
 
 
+class ScannerSession(SQLModel, table=True):
+    """Reusable scanner session material discovered or configured during a run."""
+
+    __tablename__ = "scanner_session"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    label: str = Field(index=True)                 # anonymous | configured_primary | forged_admin | ...
+    kind: str = Field(default="cookie", index=True)  # anonymous | cookie | bearer | mixed
+    username: Optional[str] = Field(default=None, index=True)
+    credential_id: Optional[int] = Field(default=None, foreign_key="credential.id", index=True)
+    source: str = Field(default="scanner")
+    cookies_json: str = Field(default="{}")
+    extra_headers_json: str = Field(default="{}")
+    session_metadata: str = Field(default="{}")
+    token_hint: Optional[str] = Field(default=None)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class PageCredentialView(SQLModel, table=True):
     """Per-credential snapshot of a crawled page: screenshot, LLM context, and raw categories."""
 

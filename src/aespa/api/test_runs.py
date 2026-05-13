@@ -10,6 +10,7 @@ from aespa.models import (
     CrawledPage,
     PageCredentialView,
     PageLink,
+    ScannerSession,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
@@ -25,6 +26,8 @@ from aespa.schemas import (
     PageCredentialViewOut,
     PentestTaskGraphOut,
     ScopeUpdate,
+    ScannerSessionOut,
+    ScannerSessionSummary,
     TargetIntelItemOut,
     TargetIntelSummary,
     TestRunCreate,
@@ -89,6 +92,36 @@ def _get_site_or_404(session: Session, site_id: int):
     if site is None:
         raise HTTPException(status_code=404, detail=f"Site {site_id} not found")
     return site
+
+
+def _json_dict(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
+    cookies = _json_dict(record.cookies_json)
+    headers = _json_dict(record.extra_headers_json)
+    metadata = _json_dict(record.session_metadata)
+    return ScannerSessionOut(
+        id=record.id,
+        test_run_id=record.test_run_id,
+        label=record.label,
+        kind=record.kind,
+        username=record.username,
+        credential_id=record.credential_id,
+        source=record.source,
+        cookie_names=sorted(str(k) for k in cookies.keys()),
+        header_names=sorted(str(k) for k in headers.keys()),
+        token_hint=record.token_hint,
+        session_metadata=metadata,
+        is_active=record.is_active,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
 
 def _auto_name(session: Session, site_id: int) -> str:
@@ -445,6 +478,30 @@ def get_target_intelligence(
     return TargetIntelSummary(
         counts=counts,
         items=[TargetIntelItemOut.model_validate(item) for item in items],
+    )
+
+
+@router.get("/api/test-runs/{run_id}/scanner-sessions", response_model=ScannerSessionSummary)
+def get_scanner_sessions(
+    run_id: int,
+    include_inactive: bool = False,
+    session: Session = Depends(get_session),
+) -> ScannerSessionSummary:
+    _get_run_or_404(session, run_id)
+    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    if not include_inactive:
+        query = query.where(ScannerSession.is_active == True)  # noqa: E712
+    records = session.exec(query.order_by(ScannerSession.label)).all()
+    counts: dict[str, int] = {"total": len(records)}
+    for record in records:
+        counts[record.kind] = counts.get(record.kind, 0) + 1
+        if record.is_active:
+            counts["active"] = counts.get("active", 0) + 1
+        else:
+            counts["inactive"] = counts.get("inactive", 0) + 1
+    return ScannerSessionSummary(
+        counts=counts,
+        sessions=[_scanner_session_out(record) for record in records],
     )
 
 

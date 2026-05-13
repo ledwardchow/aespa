@@ -36,6 +36,7 @@ const api = {
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
+  getScannerSessions: (id)       => req(`/api/test-runs/${id}/scanner-sessions`),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
@@ -835,6 +836,7 @@ function TestRunDetail({ runId }) {
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
   const [taskGraph, setTaskGraph]           = useState(null);
+  const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
@@ -1078,6 +1080,17 @@ function TestRunDetail({ runId }) {
     const iv = setInterval(loadTasks, 4000);
     return () => clearInterval(iv);
   }, [activeTab, runId, thinkingStatus?.status]);
+
+  useEffect(() => {
+    const scanRunning = (scanStatus?.status || run?.scan_status) === "running";
+    const active = activeTab === "sessions" || isDynamicScanActive(thinkingStatus?.status) || scanRunning;
+    if (!active) return;
+    const loadSessions = () => api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{});
+    loadSessions();
+    if (activeTab === "sessions" && !isDynamicScanActive(thinkingStatus?.status) && !scanRunning) return;
+    const iv = setInterval(loadSessions, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
@@ -1645,6 +1658,10 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); }}>
           Task Graph${taskGraph?.counts?.tasks>0 ? html` <span className="traffic-count">${taskGraph.counts.tasks}</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="sessions"?" active":"")}
+          onClick=${()=>{ setActiveTab("sessions"); setSelNode(null); }}>
+          Sessions${scannerSessions?.counts?.total>0 ? html` <span className="traffic-count">${scannerSessions.counts.total}</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1817,7 +1834,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -2207,6 +2224,12 @@ function TestRunDetail({ runId }) {
           seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
         />`}
 
+      ${activeTab==="sessions" && html`
+        <${ScannerSessionsPanel}
+          data=${scannerSessions}
+          refresh=${()=>api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{})}
+        />`}
+
       ${activeTab==="activity" && html`
         <div className="activity-panel">
           <div className="activity-feed" ref=${activityFeedRef}>
@@ -2432,6 +2455,77 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
         </table>
         ${items.length===0 && total>0 && html`
           <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No items match this filter.</div>`}
+      </div>
+    </div>`;
+}
+
+function ScannerSessionsPanel({ data, refresh }) {
+  const sessions = data?.sessions || [];
+  const counts = data?.counts || {};
+  const kinds = Object.entries(counts)
+    .filter(([kind]) => !["total", "active", "inactive"].includes(kind))
+    .sort(([a],[b]) => a.localeCompare(b));
+  const fmtAge = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Scanner Sessions</span>
+          <span className="subtle">${counts.total || 0} durable label${(counts.total || 0)===1?"":"s"}; auth material is redacted</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        <div className="task-summary-card"><span className="task-summary-value">${counts.total || 0}</span><span className="task-summary-label">Total</span></div>
+        <div className="task-summary-card"><span className="task-summary-value">${counts.active || 0}</span><span className="task-summary-label">Active</span></div>
+        ${kinds.map(([kind,count]) => html`
+          <div key=${kind} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${kind.replace(/_/g," ")}</span>
+          </div>`)}
+        ${sessions.length===0 && html`<div className="subtle">No scanner sessions have been recorded yet. Start a Structured or Dynamic Scan to populate durable session labels.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table scanner-session-table">
+          <thead>
+            <tr>
+              <th style=${{width:150}}>Label</th>
+              <th style=${{width:100}}>Kind</th>
+              <th style=${{width:130}}>User</th>
+              <th>Auth material</th>
+              <th style=${{width:180}}>Source</th>
+              <th style=${{width:170}}>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sessions.map(s => html`
+              <tr key=${s.id}>
+                <td><div className="intel-primary mono">${s.label}</div>${!s.is_active && html`<span className="task-status status-skipped">inactive</span>`}</td>
+                <td><span className=${"task-status status-"+(s.kind === "anonymous" ? "skipped" : "confirmed")}>${s.kind}</span></td>
+                <td>${s.username || "—"}${s.credential_id ? html`<div className="intel-meta">credential #${s.credential_id}</div>` : ""}</td>
+                <td>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Cookies</span>
+                    <span>${(s.cookie_names||[]).length ? s.cookie_names.join(", ") : "none"}</span>
+                  </div>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Headers</span>
+                    <span>${(s.header_names||[]).length ? s.header_names.join(", ") : "none"}</span>
+                  </div>
+                  ${s.token_hint && html`<div className="intel-meta">token: ${s.token_hint}</div>`}
+                </td>
+                <td>${s.source || "scanner"}</td>
+                <td>${fmtAge(s.updated_at)}</td>
+              </tr>`)}
+          </tbody>
+        </table>
       </div>
     </div>`;
 }
