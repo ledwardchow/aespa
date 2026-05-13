@@ -527,6 +527,60 @@ def test_thinking_context_tools_filter_routes_and_history():
     assert history_result["matches"][0]["response_status"] == 200
 
 
+def test_thinking_context_tools_compare_mutate_and_extract():
+    history = [
+        {
+            "step": 1,
+            "method": "GET",
+            "url": "https://target.local/api/accounts/1?user_id=1",
+            "note": "Baseline account",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"account_id":1,"owner":"amelia"}',
+        },
+        {
+            "step": 2,
+            "method": "GET",
+            "url": "https://target.local/api/accounts/2?user_id=2",
+            "note": "Mutated account",
+            "request_body": None,
+            "response_status": 403,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"error":"forbidden"}',
+        },
+    ]
+
+    compare = scanner._run_thinking_context_tool(
+        "compare_responses",
+        {"left_step": 1, "right_step": 2},
+        pages_snapshot=[],
+        findings_snapshot=[],
+        history=history,
+    )
+    mutate = scanner._run_thinking_context_tool(
+        "mutate_request",
+        {"step": 1, "mutation": "idor", "limit": 5},
+        pages_snapshot=[],
+        findings_snapshot=[],
+        history=history,
+        base_url="https://target.local",
+    )
+    entities = scanner._run_thinking_context_tool(
+        "extract_entities",
+        {"step": 1},
+        pages_snapshot=[],
+        findings_snapshot=[],
+        history=history,
+    )
+
+    assert compare["status_changed"] is True
+    assert compare["right"]["status"] == 403
+    assert mutate["count"] > 0
+    assert any("IDOR" in probe["desc"] for probe in mutate["probes"])
+    assert "1" in entities["entities"]["ids"]
+
+
 def test_request_stop_cancels_running_validation(monkeypatch):
     class FakeTask:
         cancelled = False

@@ -22,7 +22,7 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun
+from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import task_graph as task_graph_svc
@@ -391,6 +391,8 @@ def _run_thinking_context_tool(
     pages_snapshot: list[dict[str, Any]],
     findings_snapshot: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    run_id: int | None = None,
+    base_url: str = "",
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -398,6 +400,7 @@ def _run_thinking_context_tool(
         limit = max(1, min(100, int(args.get("limit") or 20)))
     except (TypeError, ValueError):
         limit = 20
+    tool_name = (tool_name or "").strip()
     search = str(args.get("search") or args.get("filter") or "").lower()
     search_tokens = search.replace("-", "_").split()
 
@@ -503,11 +506,527 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name in {"target_inventory", "search_assets"}:
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_target_inventory(run_id, args, limit, search_tokens)
+
+    if tool_name == "traffic_search":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_traffic_search(run_id, args, limit, search_tokens)
+
+    if tool_name == "endpoint_detail":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_endpoint_detail(
+            run_id,
+            args,
+            pages_snapshot=pages_snapshot,
+            history=history,
+            limit=limit,
+        )
+
+    if tool_name == "compare_responses":
+        return _thinking_tool_compare_responses(args, history=history)
+
+    if tool_name == "mutate_request":
+        return _thinking_tool_mutate_request(args, history=history, base_url=base_url)
+
+    if tool_name == "auth_matrix":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_auth_matrix(run_id, base_url, args, limit)
+
+    if tool_name == "extract_entities":
+        return _thinking_tool_extract_entities(args, pages_snapshot=pages_snapshot, history=history, limit=limit)
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
-        "available_tools": ["site_map", "page_detail", "history_search", "finding_list"],
+        "available_tools": [
+            "site_map", "page_detail", "history_search", "finding_list",
+            "target_inventory", "search_assets", "traffic_search", "endpoint_detail",
+            "compare_responses", "mutate_request", "auth_matrix", "extract_entities",
+        ],
     }
+
+
+def _thinking_tool_target_inventory(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    kind = str(args.get("kind") or "").strip()
+    source = str(args.get("source") or "").strip()
+    with Session(get_engine()) as s:
+        query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+        if kind:
+            query = query.where(TargetIntelItem.kind == kind)
+        if source:
+            query = query.where(TargetIntelItem.source == source)
+        items = list(s.exec(
+            query.order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()).limit(1000)
+        ))
+    matches = []
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+        haystack = _target_intel_text(item).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 300),
+            "url": item.url,
+            "method": item.method,
+            "source": item.source,
+            "confidence": item.confidence,
+            "evidence": _compact_log_value(item.evidence, 300),
+            "metadata": _loads_json_dict(item.item_metadata),
+        })
+    return {
+        "tool": "target_inventory",
+        "counts": counts,
+        "count": len(matches),
+        "items": matches[:limit],
+        "truncated": len(matches) > limit,
+    }
+
+
+def _thinking_tool_traffic_search(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    method = str(args.get("method") or "").upper()
+    status = args.get("status")
+    try:
+        status_int = int(status) if status not in (None, "") else None
+    except (TypeError, ValueError):
+        status_int = None
+    with Session(get_engine()) as s:
+        query = select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        if method:
+            query = query.where(TrafficEntry.method == method)
+        if status_int is not None:
+            query = query.where(TrafficEntry.status == status_int)
+        entries = list(s.exec(query.order_by(TrafficEntry.id.desc()).limit(1000)))
+    matches = []
+    for entry in entries:
+        haystack = " ".join(str(part or "") for part in (
+            entry.method, entry.url, entry.request_body, entry.response_body,
+            entry.status, entry.username, entry.source,
+        )).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": entry.id,
+            "source": entry.source,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "duration_ms": entry.duration_ms,
+            "username": entry.username,
+            "request_headers": _safe_json_excerpt(entry.request_headers, 800),
+            "request_body": _compact_log_value(entry.request_body, 1000),
+            "response_headers": _safe_json_excerpt(entry.response_headers, 800),
+            "response_body": _compact_log_value(entry.response_body, 1800),
+        })
+    matches = list(reversed(matches[:limit]))
+    return {"tool": "traffic_search", "count": len(matches), "entries": matches}
+
+
+def _thinking_tool_endpoint_detail(
+    run_id: int,
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    url = str(args.get("url") or "")
+    page_id = args.get("page_id")
+    if not url and page_id is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(page_id):
+                url = str(page.get("url") or "")
+                break
+    if not url:
+        return {"tool": "endpoint_detail", "error": "url or page_id required"}
+
+    detail: dict[str, Any] = {"tool": "endpoint_detail", "url": url}
+    for page in pages_snapshot:
+        if page.get("url") == url or str(page.get("id")) == str(page_id):
+            detail["page"] = {
+                "page_id": page.get("id"),
+                "kind": _thinking_page_kind(page),
+                "title": page.get("title") or "",
+                "flags": _thinking_page_flags(page),
+                "context": str(page.get("context") or "")[:2500],
+                "page_text": str(page.get("page_text") or "")[:3000],
+            }
+            break
+
+    with Session(get_engine()) as s:
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .limit(1000)
+        ))
+        traffic = list(s.exec(
+            select(TrafficEntry)
+            .where(TrafficEntry.test_run_id == run_id)
+            .order_by(TrafficEntry.id.desc())
+            .limit(1000)
+        ))
+
+    detail["intel"] = [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 240),
+            "method": item.method,
+            "source": item.source,
+            "evidence": _compact_log_value(item.evidence, 240),
+        }
+        for item in intel
+        if _urls_related(url, item.url or item.value or item.key)
+    ][:limit]
+    detail["traffic"] = [
+        {
+            "id": entry.id,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "username": entry.username,
+            "request_body": _compact_log_value(entry.request_body, 600),
+            "response_body": _compact_log_value(entry.response_body, 1200),
+        }
+        for entry in traffic
+        if _urls_related(url, entry.url)
+    ][:limit]
+    detail["history"] = [
+        {
+            "step": item.get("step"),
+            "method": item.get("method"),
+            "url": item.get("url"),
+            "status": item.get("response_status"),
+            "note": item.get("note"),
+            "response_body": str(item.get("response_body") or "")[:1200],
+        }
+        for item in history
+        if _urls_related(url, str(item.get("url") or ""))
+    ][-limit:]
+    detail["entities"] = _extract_entities_from_text(json.dumps(detail, default=str), limit=limit)
+    return detail
+
+
+def _thinking_tool_compare_responses(args: dict[str, Any], *, history: list[dict[str, Any]]) -> dict[str, Any]:
+    left = _resolve_history_record(args.get("left_step") or args.get("baseline_step"), history)
+    right = _resolve_history_record(args.get("right_step") or args.get("variant_step"), history)
+    if left is None or right is None:
+        return {"tool": "compare_responses", "error": "left_step/baseline_step and right_step/variant_step must match history steps"}
+    left_body = str(left.get("response_body") or "")
+    right_body = str(right.get("response_body") or "")
+    left_status = left.get("response_status")
+    right_status = right.get("response_status")
+    added, removed = _word_diff_summary(left_body, right_body)
+    return {
+        "tool": "compare_responses",
+        "left": {"step": left.get("step"), "url": left.get("url"), "status": left_status, "length": len(left_body)},
+        "right": {"step": right.get("step"), "url": right.get("url"), "status": right_status, "length": len(right_body)},
+        "status_changed": left_status != right_status,
+        "length_delta": len(right_body) - len(left_body),
+        "similarity": _text_similarity(left_body, right_body),
+        "added_terms": added[:30],
+        "removed_terms": removed[:30],
+        "left_excerpt": left_body[:1200],
+        "right_excerpt": right_body[:1200],
+    }
+
+
+def _thinking_tool_mutate_request(args: dict[str, Any], *, history: list[dict[str, Any]], base_url: str) -> dict[str, Any]:
+    source = _resolve_history_record(args.get("step"), history)
+    url = str(args.get("url") or (source or {}).get("url") or base_url)
+    method = str(args.get("method") or (source or {}).get("method") or "GET").upper()
+    body = args.get("body")
+    if body is None and source is not None:
+        body = source.get("request_body")
+    mutation = str(args.get("mutation") or args.get("kind") or "input_validation")
+    probes = _mutated_probe_variants(method, url, body, mutation)
+    return {
+        "tool": "mutate_request",
+        "source_step": source.get("step") if source else None,
+        "mutation": mutation,
+        "count": len(probes),
+        "probes": probes[: max(1, min(20, int(args.get("limit") or 10)))],
+        "note": "These are proposed probe objects. Execute one with an http action when appropriate.",
+    }
+
+
+def _thinking_tool_auth_matrix(run_id: int, base_url: str, args: dict[str, Any], limit: int) -> dict[str, Any]:
+    targets = _auth_matrix_targets(run_id, base_url)
+    search = str(args.get("search") or args.get("filter") or "").lower()
+    if search:
+        tokens = search.split()
+        targets = [t for t in targets if all(token in json.dumps(t, default=str).lower() for token in tokens)]
+    return {
+        "tool": "auth_matrix",
+        "count": len(targets),
+        "targets": [
+            {
+                "url": t["url"],
+                "method": t.get("method", "GET"),
+                "requires_auth_or_sensitive": _target_requires_auth_or_sensitive(t),
+                "accessible_by": t.get("accessible_by") or [],
+                "page_id": t.get("page_id"),
+                "source": t.get("source"),
+                "has_object_ref": t.get("has_object_ref"),
+                "has_business_logic": t.get("has_business_logic"),
+            }
+            for t in targets[:limit]
+        ],
+        "truncated": len(targets) > limit,
+    }
+
+
+def _thinking_tool_extract_entities(
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    text = str(args.get("text") or "")
+    if not text and args.get("step") is not None:
+        record = _resolve_history_record(args.get("step"), history)
+        if record:
+            text = json.dumps(record, default=str)
+    if not text and args.get("page_id") is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(args.get("page_id")):
+                text = " ".join(str(page.get(k) or "") for k in ("url", "title", "context", "page_text"))
+                break
+    if not text:
+        text = "\n".join(str(item.get("response_body") or "") for item in history[-5:])
+    return {
+        "tool": "extract_entities",
+        "entities": _extract_entities_from_text(text, limit=limit),
+    }
+
+
+def _target_intel_text(item: TargetIntelItem) -> str:
+    return " ".join(str(part or "") for part in (
+        item.kind, item.key, item.value, item.url, item.method, item.source,
+        item.evidence, item.item_metadata,
+    ))
+
+
+def _loads_json_dict(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_json_excerpt(value: str | None, limit: int) -> dict | str:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return {
+                str(k): _compact_log_value(v, 180)
+                for k, v in list(parsed.items())[:20]
+            }
+        return _compact_log_value(parsed, limit)
+    except Exception:
+        return _compact_log_value(value, limit)
+
+
+def _urls_related(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    ap = urlparse(a)
+    bp = urlparse(b)
+    if ap.netloc and bp.netloc and ap.netloc != bp.netloc:
+        return False
+    return bool(ap.path and bp.path and (ap.path == bp.path or ap.path in bp.path or bp.path in ap.path))
+
+
+def _resolve_history_record(step, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if step is None:
+        return history[-1] if history else None
+    for item in history:
+        if str(item.get("step")) == str(step):
+            return item
+    return None
+
+
+def _word_diff_summary(left: str, right: str) -> tuple[list[str], list[str]]:
+    token_re = re.compile(r"[A-Za-z0-9_./:-]{3,}")
+    left_tokens = set(token_re.findall(left or ""))
+    right_tokens = set(token_re.findall(right or ""))
+    added = sorted(right_tokens - left_tokens, key=lambda x: (len(x), x), reverse=True)
+    removed = sorted(left_tokens - right_tokens, key=lambda x: (len(x), x), reverse=True)
+    return added, removed
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left_words = set(re.findall(r"[a-z0-9_]{3,}", (left or "").lower()))
+    right_words = set(re.findall(r"[a-z0-9_]{3,}", (right or "").lower()))
+    if not left_words and not right_words:
+        return 1.0
+    if not left_words or not right_words:
+        return 0.0
+    return round(len(left_words & right_words) / len(left_words | right_words), 3)
+
+
+def _mutated_probe_variants(method: str, url: str, body, mutation: str) -> list[dict]:
+    mutation_l = mutation.lower()
+    probes: list[dict] = []
+    if "idor" in mutation_l or "object" in mutation_l:
+        probes.extend(_mutate_url_numeric_values(method, url, "IDOR object-reference mutation"))
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:8]:
+                if _looks_id_key(key) or re.fullmatch(r"\d+", str(value or "")):
+                    for candidate in _numeric_mutations(value):
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"IDOR body mutation {key}={candidate}",
+                        })
+    elif "business" in mutation_l or "amount" in mutation_l:
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:10]:
+                if _looks_business_value_key(key):
+                    for candidate in ["0", "-1", "1", "999999999", str(value)]:
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"Business logic boundary mutation {key}={candidate}",
+                        })
+    else:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        if qs:
+            for param in list(qs.keys())[:3]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    base_params = {k: v[0] for k, v in qs.items()}
+                    base_params[param] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(base_params))),
+                        "headers": {}, "body": None,
+                        "desc": f"{label} mutation in query param {param}",
+                    })
+        if isinstance(body, dict):
+            for key in list(body.keys())[:5]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    mutated = dict(body)
+                    mutated[key] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": url,
+                        "headers": {}, "body": mutated,
+                        "desc": f"{label} mutation in body field {key}",
+                    })
+    return probes[:40]
+
+
+def _mutate_url_numeric_values(method: str, url: str, desc: str) -> list[dict]:
+    parsed = urlparse(url)
+    probes: list[dict] = []
+    parts = parsed.path.split("/")
+    for idx, part in enumerate(parts):
+        if re.fullmatch(r"\d+", part or ""):
+            for candidate in _numeric_mutations(part):
+                mutated = parts.copy()
+                mutated[idx] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(path="/".join(mutated))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: path {part}->{candidate}",
+                })
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for key, values in list(qs.items())[:8]:
+        if values and (re.fullmatch(r"\d+", values[0]) or _looks_id_key(key)):
+            for candidate in _numeric_mutations(values[0]):
+                params = {k: v[0] for k, v in qs.items()}
+                params[key] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(params))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: query {key}={candidate}",
+                })
+    return probes
+
+
+def _numeric_mutations(value) -> list[str]:
+    try:
+        base = int(value)
+    except (TypeError, ValueError):
+        base = 1
+    candidates = [base - 1, base + 1, 1, 2, 999999]
+    return [str(c) for c in candidates if c > 0 and c != base]
+
+
+def _looks_id_key(key: str) -> bool:
+    return bool(re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction|tenant)(?:_|$)", str(key), re.I))
+
+
+def _looks_business_value_key(key: str) -> bool:
+    return bool(re.search(r"(amount|price|total|quantity|qty|balance|limit|role|status|state)", str(key), re.I))
+
+
+def _extract_entities_from_text(text: str, limit: int = 20) -> dict[str, list[str]]:
+    text = text or ""
+    urls = _unique_limited(re.findall(r"https?://[^\s\"'<>)}]+", text), limit)
+    paths = _unique_limited(re.findall(r"(?<![A-Za-z0-9])/(?:api/)?[A-Za-z0-9_./{}:-]{2,}", text), limit)
+    emails = _unique_limited(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", text), limit)
+    uuids = _unique_limited(re.findall(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", text, re.I), limit)
+    jwt_like = _unique_limited(re.findall(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", text), limit)
+    ids = _unique_limited(re.findall(r"\b(?:id|user_id|account_id|order_id|invoice_id|transaction_id|tenant_id)[\"'=:\s]+([A-Za-z0-9_-]{1,80})", text, re.I), limit)
+    errors = _unique_limited([
+        line.strip() for line in text.splitlines()
+        if any(marker in line.lower() for marker in (
+            "error", "exception", "traceback", "stack trace", "sql syntax",
+            "unauthorized", "forbidden", "debug",
+        ))
+    ], limit)
+    return {
+        "urls": urls,
+        "paths": paths,
+        "emails": emails,
+        "uuids": uuids,
+        "ids": ids,
+        "jwt_like": ["[REDACTED_JWT]" for _ in jwt_like],
+        "errors": errors,
+    }
+
+
+def _unique_limited(values: list[str], limit: int) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        value = str(value).strip().rstrip(".,;")
+        if value and value not in out:
+            out.append(value)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
@@ -1200,6 +1719,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                             pages_snapshot=pages_snapshot,
                             findings_snapshot=findings_snapshot,
                             history=history,
+                            run_id=run_id,
+                            base_url=base_url,
                         )
                     consecutive_context_tools += 1
                     result_text = json.dumps(output, separators=(",", ":"), default=str)
