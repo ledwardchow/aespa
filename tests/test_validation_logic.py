@@ -46,6 +46,71 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
     assert "no alternate user sessions" in reason
 
 
+def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        monkeypatch.setattr(validator, "get_engine", lambda: engine)
+        emitted = []
+        monkeypatch.setattr(validator.events_svc, "emit", lambda run_id, event: emitted.append(event))
+
+        with Session(engine) as session:
+            finding = ScanFinding(
+                test_run_id=1,
+                page_id=None,
+                owasp_category="A01",
+                severity="high",
+                title="Authorization bypass",
+                description="Protected resource accessible.",
+                affected_url="https://target.local/admin",
+                evidence="original evidence",
+            )
+            session.add(finding)
+            session.commit()
+            session.refresh(finding)
+            finding_id = finding.id
+
+        asyncio.run(validator._persist_verdict(
+            1,
+            finding_id,
+            "confirmed",
+            "Replay returned protected content.",
+            validation_results=[{
+                "desc": "Replay protected resource",
+                "url": "https://target.local/admin",
+                "status": 200,
+                "as_user": "alice",
+                "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
+                "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
+                "duration_ms": 35,
+                "timing_delta_ms": 900,
+                "body_diff": {"added_terms": ["admin", "panel"]},
+                "action_outcome": "Replay returned protected content.",
+            }],
+            source="test_validation",
+        ))
+
+        with Session(engine) as session:
+            saved = session.get(ScanFinding, finding_id)
+
+        item_types = {item["type"] for item in saved.evidence_items}
+        assert {"validation_verdict", "validation_reasoning", "validation_probe", "validation_request", "validation_response", "timing", "timing_delta", "body_diff", "action_outcome"} <= item_types
+        assert saved.validation_status == "confirmed"
+        assert saved.validation_note == "Replay returned protected content."
+        assert "secret-token" not in saved.evidence_json
+        assert emitted[-1]["evidence_items"]
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 class _ScannerCredWithLogin:
     login_url = "https://target.local/customer/login"
 

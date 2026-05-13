@@ -14,7 +14,8 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import httpx
 from sqlmodel import Session, select
@@ -141,7 +142,14 @@ async def validate_finding_inline(
     })
 
     if llm_cfg is None:
-        await _persist_verdict(run_id, finding_id, "false_positive", "No LLM configuration was available for validation.")
+        await _persist_verdict(
+            run_id,
+            finding_id,
+            "false_positive",
+            "No LLM configuration was available for validation.",
+            validation_results=[],
+            source="validation_config",
+        )
         return
 
     if cred_sessions is None:
@@ -261,7 +269,14 @@ async def _validate_one(
     deterministic = await _deterministic_validate_finding(finding, cred_sessions or {}, scanner_policy)
     if deterministic:
         verdict, reasoning = deterministic
-        await _persist_verdict(run_id, finding.id, verdict, reasoning)
+        await _persist_verdict(
+            run_id,
+            finding.id,
+            verdict,
+            reasoning,
+            validation_results=[],
+            source="deterministic_validation",
+        )
         return
 
     # Phase 1: LLM generates targeted validation probes.
@@ -318,15 +333,137 @@ async def _validate_one(
     reasoning = verdict_data.get("reasoning", "")
     log.info("  Finding %s verdict: %s", finding.id, verdict)
 
-    await _persist_verdict(run_id, finding.id, verdict, reasoning)
+    await _persist_verdict(
+        run_id,
+        finding.id,
+        verdict,
+        reasoning,
+        validation_results=results,
+        source="llm_validation",
+    )
 
 
-async def _persist_verdict(run_id: int, finding_id: int, verdict: str, reasoning: str) -> None:
+def _evidence_items_from_json(value: str | None) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _validation_evidence_items(
+    *,
+    verdict: str,
+    reasoning: str,
+    validation_results: list[dict] | None = None,
+    source: str = "validation",
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = [
+        {
+            "type": "validation_verdict",
+            "label": "Validation verdict",
+            "value": verdict,
+            "confidence": verdict,
+            "source": source,
+        },
+        {
+            "type": "validation_reasoning",
+            "label": "Validation reasoning",
+            "value": reasoning or "No reasoning provided.",
+            "confidence": verdict,
+            "source": source,
+        },
+    ]
+    for idx, result in enumerate((validation_results or [])[:3], start=1):
+        summary = str(result.get("desc") or f"Validation probe {idx}")
+        status = result.get("status")
+        items.append({
+            "type": "validation_probe",
+            "label": f"Validation probe {idx}",
+            "value": f"{summary}\nURL: {result.get('url') or ''}\nStatus: {status}",
+            "confidence": verdict,
+            "source": source,
+            "metadata": {"url": result.get("url"), "status": status, "as_user": result.get("as_user")},
+        })
+        if result.get("duration_ms") is not None:
+            items.append({
+                "type": "timing",
+                "label": f"Validation timing {idx}",
+                "value": f"{round(float(result.get('duration_ms') or 0), 1)} ms",
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("timing_delta_ms") is not None:
+            items.append({
+                "type": "timing_delta",
+                "label": f"Validation timing delta {idx}",
+                "value": f"{round(float(result.get('timing_delta_ms') or 0), 1)} ms",
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("body_diff"):
+            diff = result.get("body_diff")
+            items.append({
+                "type": "body_diff",
+                "label": f"Validation body diff {idx}",
+                "value": json.dumps(diff, indent=2, sort_keys=True) if isinstance(diff, dict) else str(diff),
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("action_outcome"):
+            items.append({
+                "type": "action_outcome",
+                "label": f"Validation action outcome {idx}",
+                "value": str(result.get("action_outcome") or ""),
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("request_evidence"):
+            items.append({
+                "type": "validation_request",
+                "label": f"Validation request {idx}",
+                "value": str(result.get("request_evidence") or ""),
+                "format": "http",
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("response_evidence"):
+            items.append({
+                "type": "validation_response",
+                "label": f"Validation response {idx}",
+                "value": str(result.get("response_evidence") or ""),
+                "format": "http",
+                "confidence": verdict,
+                "source": source,
+            })
+    return items
+
+
+async def _persist_verdict(
+    run_id: int,
+    finding_id: int,
+    verdict: str,
+    reasoning: str,
+    *,
+    validation_results: list[dict] | None = None,
+    source: str = "validation",
+) -> None:
+    evidence_json = "[]"
+    evidence_items: list[dict[str, Any]] = []
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding_id)
         if row:
+            existing_items = _evidence_items_from_json(row.evidence_json)
+            evidence_items = existing_items + _validation_evidence_items(
+                verdict=verdict,
+                reasoning=reasoning,
+                validation_results=validation_results,
+                source=source,
+            )
+            evidence_json = scanner_svc._evidence_items_json(*evidence_items)
             row.validation_status = verdict
             row.validation_note = reasoning
+            row.evidence_json = evidence_json
             s.add(row)
         s.commit()
 
@@ -335,6 +472,8 @@ async def _persist_verdict(run_id: int, finding_id: int, verdict: str, reasoning
         "finding_id": finding_id,
         "validation_status": verdict,
         "validation_note": reasoning,
+        "evidence_json": evidence_json,
+        "evidence_items": _evidence_items_from_json(evidence_json),
     })
 
 
@@ -522,32 +661,48 @@ async def _run_validation_probe(
                 content=content,
                 headers=request_headers,
             )
+            started = time.perf_counter()
             resp = await client.send(req, follow_redirects=scanner_policy.follow_redirects)
+            duration_ms = int((time.perf_counter() - started) * 1000)
             resp_body = resp.text[:min(800, scanner_policy.response_body_read_limit_bytes)]
             req_hdrs_text = "\n".join(
                 f"{k}: {v}" for k, v in req.headers.items() if k.lower() != "cookie"
             )
             resp_hdrs_text = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
             user_note = f"Sent as user: {as_user}\n" if as_user else ""
+            request_evidence = scanner_svc._request_evidence(
+                f"{user_note}{method} {req.url} HTTP/1.1\n{req_hdrs_text}"
+                + (f"\n\n{body_preview}" if body_preview else "")
+            )
+            response_evidence = scanner_svc._response_evidence(
+                f"HTTP/1.1 {resp.status_code}\n{resp_hdrs_text}\n\n{resp_body}"
+            )
             evidence = (
-                f"{user_note}REQUEST:\n{method} {req.url} HTTP/1.1\n{req_hdrs_text}\n"
-                + (f"\n{body_preview[:200]}" if body_preview else "")
-                + f"\n\nRESPONSE:\nHTTP/1.1 {resp.status_code}\n{resp_hdrs_text}\n\n{resp_body}"
+                f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}"
             )
             return {
                 "desc": desc,
                 "url": str(resp.url),
                 "status": resp.status_code,
+                "duration_ms": duration_ms,
                 "headers": dict(resp.headers),
                 "body": resp_body,
+                "action_outcome": "Validation probe completed.",
                 "evidence": evidence,
+                "request_evidence": request_evidence,
+                "response_evidence": response_evidence,
                 "as_user": as_user,
             }
     except Exception as e:
+        request_evidence = scanner_svc._request_evidence(f"{method} {url} HTTP/1.1")
+        response_evidence = scanner_svc._response_evidence(f"REQUEST ERROR: {e}")
         return {
             "desc": desc, "url": url, "status": None,
             "headers": {}, "body": str(e),
-            "evidence": f"REQUEST ERROR: {e}",
+            "action_outcome": "Validation probe failed before receiving a response.",
+            "evidence": f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}",
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
             "as_user": as_user,
         }
 

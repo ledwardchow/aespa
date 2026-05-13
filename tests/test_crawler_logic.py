@@ -191,6 +191,69 @@ def test_extract_sourcemap_urls_resolves_relative_reference():
     ]
 
 
+def test_extract_js_api_calls_captures_fetch_and_axios_methods():
+    js = """
+    fetch('/api/users', { method: 'POST', body: JSON.stringify({email, password}) })
+    axios.delete('/api/admin/users/7')
+    axios({ url: '/api/orders/42/verify', method: 'PATCH', data: { otpCode: code } })
+    """
+
+    calls = crawler._extract_js_api_calls(js)
+    by_url = {call["url"]: call for call in calls}
+
+    assert by_url["/api/users"]["method"] == "POST"
+    assert {"email", "password"} <= set(by_url["/api/users"]["body_fields"])
+    assert by_url["/api/admin/users/7"]["method"] == "DELETE"
+    assert by_url["/api/orders/42/verify"]["method"] == "PATCH"
+
+
+def test_extract_js_routes_storage_and_feature_flags():
+    js = """
+    const routes = [{ path: '/admin/audit' }, { path: '/account/:id/verify' }];
+    localStorage.getItem('accessToken');
+    sessionStorage.setItem('csrfToken', token);
+    window.flags = { 'featurePaymentsV2': true, 'adminDebugPanel': false };
+    """
+
+    routes = crawler._extract_js_route_paths(js)
+    flags = crawler._extract_feature_flags(js)
+
+    assert {route["path"] for route in routes} == {"/admin/audit", "/account/:id/verify"}
+    assert {route["category"] for route in routes} == {"admin", "validation"}
+    assert crawler._extract_storage_keys_from_js(js) == ["accessToken", "csrfToken"]
+    assert {flag["key"] for flag in flags} == {"featurePaymentsV2", "adminDebugPanel"}
+
+
+def test_mine_asset_text_promotes_typed_js_leads(monkeypatch):
+    saved = []
+    monkeypatch.setattr(crawler, "_save_intel_item", lambda **kwargs: saved.append(kwargs))
+    js = """
+    fetch('/api/users/register', { method: 'POST', body: JSON.stringify({email, password}) })
+    const route = { path: '/admin/reports' };
+    localStorage.getItem('auth_token');
+    const flags = { 'featureExports': true };
+    """
+
+    crawler._mine_asset_text(
+        run_id=1,
+        asset_url="https://target.local/static/app.js",
+        body=js,
+        source="js_asset",
+        page_url="https://target.local/",
+    )
+
+    endpoints = [item for item in saved if item["kind"] == "endpoint"]
+    inputs = [item for item in saved if item["kind"] == "input"]
+    storage_keys = [item for item in saved if item["kind"] == "storage_key"]
+    feature_flags = [item for item in saved if item["kind"] == "feature_flag"]
+
+    assert any(item["value"] == "https://target.local/api/users/register" and item.get("method") == "POST" for item in endpoints)
+    assert any(item["value"] == "https://target.local/admin/reports" and item.get("metadata", {}).get("category") == "admin" for item in endpoints)
+    assert {item["key"] for item in inputs} >= {"email", "password"}
+    assert any(item["key"] == "auth_token" for item in storage_keys)
+    assert any(item["key"] == "featureExports" for item in feature_flags)
+
+
 def test_page_requires_login_ignores_login_url_without_login_ui():
     page = _FakePage(
         "https://target.local/login",
