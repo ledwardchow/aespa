@@ -36,6 +36,8 @@ const api = {
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
+  getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
+  seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
@@ -832,6 +834,7 @@ function TestRunDetail({ runId }) {
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
+  const [taskGraph, setTaskGraph]           = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
@@ -969,6 +972,8 @@ function TestRunDetail({ runId }) {
         if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
           setSitePlanData(evt.data);
         }
+      } else if (evt.type === "task_graph_update") {
+        api.getTaskGraph(runId).then(setTaskGraph).catch(() => {});
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
@@ -1063,6 +1068,16 @@ function TestRunDetail({ runId }) {
     const iv = setInterval(loadIntel, 4000);
     return () => clearInterval(iv);
   }, [activeTab, runId, targetIntelKind, run?.status]);
+
+  useEffect(() => {
+    const active = activeTab === "tasks" || isDynamicScanActive(thinkingStatus?.status);
+    if (!active) return;
+    const loadTasks = () => api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{});
+    loadTasks();
+    if (!isDynamicScanActive(thinkingStatus?.status)) return;
+    const iv = setInterval(loadTasks, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
@@ -1626,6 +1641,10 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); }}>
           Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="tasks"?" active":"")}
+          onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); }}>
+          Task Graph${taskGraph?.counts?.tasks>0 ? html` <span className="traffic-count">${taskGraph.counts.tasks}</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1798,7 +1817,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -2181,6 +2200,13 @@ function TestRunDetail({ runId }) {
           refresh=${()=>api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{})}
         />`}
 
+      ${activeTab==="tasks" && html`
+        <${TaskGraphPanel}
+          data=${taskGraph}
+          refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
+          seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
+        />`}
+
       ${activeTab==="activity" && html`
         <div className="activity-panel">
           <div className="activity-feed" ref=${activityFeedRef}>
@@ -2406,6 +2432,120 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
         </table>
         ${items.length===0 && total>0 && html`
           <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No items match this filter.</div>`}
+      </div>
+    </div>`;
+}
+
+function TaskGraphPanel({ data, refresh, seed }) {
+  const hypotheses = data?.hypotheses || [];
+  const tasks = data?.tasks || [];
+  const counts = data?.counts || {};
+  const tasksByHypothesis = tasks.reduce((acc, task) => {
+    const key = task.hypothesis_id || "none";
+    (acc[key] = acc[key] || []).push(task);
+    return acc;
+  }, {});
+  const statusLabel = (status) => (status || "queued").replace(/_/g, " ");
+  const taskStatusCounts = ["queued", "running", "blocked", "done", "skipped"]
+    .map(status => [status, counts["task_"+status] || 0])
+    .filter(([, count]) => count > 0);
+  const orphanTasks = tasksByHypothesis.none || [];
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+  return html`
+    <div className="task-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Hypothesis & Task Graph</span>
+          <span className="subtle">${hypotheses.length} hypotheses · ${tasks.length} tasks</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${seed}>Seed from intelligence</button>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="task-summary">
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.hypotheses || 0}</span>
+          <span className="task-summary-label">Hypotheses</span>
+        </div>
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.tasks || 0}</span>
+          <span className="task-summary-label">Tasks</span>
+        </div>
+        ${taskStatusCounts.map(([status, count]) => html`
+          <div key=${status} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${statusLabel(status)}</span>
+          </div>`)}
+        ${tasks.length===0 && html`<div className="subtle">No task graph yet. Seed it from collected target intelligence, or start a Dynamic Scan.</div>`}
+      </div>
+
+      <div className="task-list">
+        ${hypotheses.map(h => {
+          const groupedTasks = tasksByHypothesis[h.id] || [];
+          return html`
+            <div key=${h.id} className="hypothesis-card">
+              <div className="hypothesis-card-head">
+                <div>
+                  <div className="hypothesis-card-title">${h.title}</div>
+                  <div className="hypothesis-card-meta">
+                    <span className=${"task-priority "+priorityTone(h.priority)}>P${h.priority}</span>
+                    <span className=${"task-status status-"+h.status}>${statusLabel(h.status)}</span>
+                    ${h.owasp_category && html`<span className="owasp-badge">${h.owasp_category}</span>`}
+                    ${h.attack_area && html`<span>${h.attack_area}</span>`}
+                    <span>${Math.round((h.confidence || 0) * 100)}% confidence</span>
+                  </div>
+                </div>
+                <span className="task-count-pill">${groupedTasks.length} task${groupedTasks.length===1?"":"s"}</span>
+              </div>
+              <div className="hypothesis-rationale">${h.rationale || h.description}</div>
+              ${groupedTasks.length > 0 && html`
+                <div className="task-table-wrap">
+                  <table className="task-table">
+                    <thead>
+                      <tr>
+                        <th style=${{width:88}}>Status</th>
+                        <th style=${{width:84}}>Type</th>
+                        <th>Task</th>
+                        <th style=${{width:86}}>Method</th>
+                        <th>Target</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${groupedTasks.map(task => html`
+                        <tr key=${task.id}>
+                          <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                          <td><span className="intel-kind">${task.task_type}</span></td>
+                          <td>
+                            <div className="intel-primary">${task.title}</div>
+                            <div className="intel-evidence">${task.result_summary || task.description}</div>
+                            ${task.evidence && html`<div className="task-evidence">${task.evidence}</div>`}
+                          </td>
+                          <td><span className="mono">${task.method || "-"}</span></td>
+                          <td><span className="mono task-target" title=${task.target_url}>${task.target_url ? truncUrl(task.target_url, 86) : "—"}</span></td>
+                        </tr>`)}
+                    </tbody>
+                  </table>
+                </div>`}
+            </div>`;
+        })}
+        ${orphanTasks.length > 0 && html`
+          <div className="hypothesis-card">
+            <div className="hypothesis-card-title">Unlinked Tasks</div>
+            <div className="task-table-wrap">
+              <table className="task-table">
+                <tbody>
+                  ${orphanTasks.map(task => html`
+                    <tr key=${task.id}>
+                      <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                      <td>${task.title}</td>
+                      <td><span className="mono">${task.target_url}</span></td>
+                    </tr>`)}
+                </tbody>
+              </table>
+            </div>
+          </div>`}
       </div>
     </div>`;
 }

@@ -182,6 +182,56 @@ def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
     assert endpoint["item_metadata"]["page_url"] == "https://target.local/dashboard"
 
 
+def test_seed_task_graph_from_target_intelligence(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/health",
+            value="https://target.local/api/health",
+            url="https://target.local/api/health",
+            method="GET",
+            source="js_asset",
+            evidence="public asset referenced /api/health",
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="response_field",
+            key="password_hash",
+            value="string",
+            url="https://target.local/api/me",
+            method="GET",
+            source="response_body",
+            evidence="profile response contained password_hash",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.post(f"/api/test-runs/{run['id']}/task-graph/seed")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"]["hypotheses"] >= 2
+    assert data["counts"]["tasks"] >= 2
+    titles = {h["title"] for h in data["hypotheses"]}
+    assert "Public operational/config endpoint exposure" in titles
+    assert "Sensitive field exposure" in titles
+    task_targets = {t["target_url"] for t in data["tasks"]}
+    assert "https://target.local/api/health" in task_targets
+    assert "https://target.local/api/me" in task_targets
+
+
 def test_import_findings_creates_findings_and_pages(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()

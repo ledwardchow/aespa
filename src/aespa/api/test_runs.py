@@ -23,6 +23,7 @@ from aespa.schemas import (
     GraphLink,
     GraphNode,
     PageCredentialViewOut,
+    PentestTaskGraphOut,
     ScopeUpdate,
     TargetIntelItemOut,
     TargetIntelSummary,
@@ -32,6 +33,7 @@ from aespa.schemas import (
 )
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
+from aespa.services import task_graph as task_graph_svc
 from aespa.services.settings import get_llm_config
 
 router = APIRouter(tags=["test_runs"])
@@ -446,6 +448,32 @@ def get_target_intelligence(
         counts=counts,
         items=[TargetIntelItemOut.model_validate(item) for item in items],
     )
+
+
+@router.get("/api/test-runs/{run_id}/task-graph", response_model=PentestTaskGraphOut)
+def get_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> PentestTaskGraphOut:
+    _get_run_or_404(session, run_id)
+    return task_graph_svc.get_task_graph(run_id, session=session)
+
+
+@router.post("/api/test-runs/{run_id}/task-graph/seed", response_model=PentestTaskGraphOut)
+def seed_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> PentestTaskGraphOut:
+    _get_run_or_404(session, run_id)
+    result = task_graph_svc.seed_task_graph(run_id, session=session)
+    if result.get("hypotheses_created") or result.get("tasks_created"):
+        from aespa.services import events as events_svc
+        events_svc.emit(run_id, {
+            "type": "task_graph_update",
+            "reason": "seeded",
+            "data": result,
+        })
+    return task_graph_svc.get_task_graph(run_id, session=session)
 
 
 # ── Scope management ──────────────────────────────────────────────────────────
