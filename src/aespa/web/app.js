@@ -979,7 +979,13 @@ function TestRunDetail({ runId }) {
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
-            ? { ...f, validation_status: evt.validation_status, validation_note: evt.validation_note ?? f.validation_note }
+            ? {
+                ...f,
+                validation_status: evt.validation_status,
+                validation_note: evt.validation_note ?? f.validation_note,
+                evidence_json: evt.evidence_json ?? f.evidence_json,
+                evidence_items: evt.evidence_items ?? f.evidence_items,
+              }
             : f
         ));
         // Refresh validation status summary when an individual finding resolves.
