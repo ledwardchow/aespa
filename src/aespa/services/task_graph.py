@@ -231,7 +231,7 @@ def complete_task_after_result(
                         .where(PentestTask.status.in_(["queued", "running", "blocked"]))
                     ).first()
                     if remaining is None:
-                        hypothesis.status = "deferred"
+                        hypothesis.status = "unconfirmed"
                 hypothesis.updated_at = now
 
         s.add(task)
