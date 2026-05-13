@@ -1858,6 +1858,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
     session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     consecutive_context_tools = 0
+    failed_url_counts: dict[str, int] = {}  # "METHOD:url" → count of 404/error responses
+    blocked_urls: set[str] = set()          # URLs tried 3+ times and still failing
 
     from playwright.async_api import async_playwright
 
@@ -1947,6 +1949,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                         f"{crawl_context}\n\n{task_context}"
                         if task_context else crawl_context
                     )
+                    if blocked_urls:
+                        blocked_list = ", ".join(sorted(blocked_urls)[:12])
+                        step_context = (
+                            f"{step_context}\n\n"
+                            f"BLOCKED PATHS — already failed 3+ times, do NOT probe these again: "
+                            f"{blocked_list}. Switch to a completely different attack surface."
+                        )
                     action = await llm_svc.thinking_next_action(
                         llm_cfg,
                         target_url=base_url,
@@ -2068,7 +2077,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_body": (
                             f"{'Saved' if saved is not None else 'Skipped duplicate'} "
                             f"finding: {action.get('title', 'Untitled finding')}. "
-                            f"{str(action.get('evidence') or '')[:1200]}"
+                            + (
+                                "This finding already exists (recorded by structured scan or "
+                                "a prior step). Do NOT write it again. Your next action MUST "
+                                "probe a completely different endpoint or attack category. "
+                                if saved is None else ""
+                            )
+                            + f"{str(action.get('evidence') or '')[:1200]}"
                         ),
                     })
                     task_graph_svc.complete_task_after_result(
@@ -2537,6 +2552,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                     req_body_str = ""
                     duration_ms: int | None = None
+                    _js_paths: list[str] = []
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
@@ -2587,6 +2603,26 @@ async def _do_thinking_scan(run_id: int) -> None:
                         resp_body    = _redact_sensitive_text(raw_resp_body)
                         resp_status  = resp.status_code
                         resp_headers = dict(resp.headers)
+                        # Auto-extract API endpoint paths from JavaScript responses so the
+                        # LLM can find them without needing to parse JS bodies manually.
+                        _ct = resp_headers.get("content-type", "").lower()
+                        _is_js = "javascript" in _ct or url.split("?")[0].lower().endswith(".js")
+                        if _is_js and resp_status == 200:
+                            _js_paths = list(dict.fromkeys(
+                                re.findall(r'["\'](/api/[a-zA-Z0-9_/{}.-]+)["\']', raw_resp_body)
+                            ))[:30]
+                            if _js_paths:
+                                try:
+                                    from aespa.services.crawler import _save_intel_item as _si
+                                    for _p in _js_paths:
+                                        _si(
+                                            run_id=run_id, kind="endpoint", key=_p, value=_p,
+                                            url=url, method="GET", source="js_mining_dynamic",
+                                            confidence=0.8,
+                                            evidence=f"Extracted from {url} at step {step}",
+                                        )
+                                except Exception as _exc:
+                                    log.debug("Dynamic JS path extraction failed: %s", _exc)
                     except Exception as exc:
                         log.warning("Thinking scan step %d HTTP error (%s %s): %s", step, method, url, exc)
                         resp_body    = f"Request failed: {exc}"
@@ -2626,6 +2662,14 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 log.info("Thinking scan step %d: %s %s → %s", step, method, url, resp_status)
 
+                _resp_body_for_history = resp_body
+                if _js_paths:
+                    _paths_note = (
+                        f"[{len(_js_paths)} API path(s) auto-extracted from JS and added to "
+                        f"target intelligence: {', '.join(_js_paths[:15])}]\n\n"
+                    )
+                    _resp_body_for_history = _paths_note + resp_body
+
                 step_record = {
                     "step":             step,
                     "note":             note,
@@ -2635,9 +2679,23 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "request_body":     req_body,
                     "response_status":  resp_status,
                     "response_headers": resp_headers,
-                    "response_body":    resp_body,
+                    "response_body":    _resp_body_for_history,
                 }
                 history.append(step_record)
+
+                # Track failed probes and surface persistent failures as blocked URLs.
+                _probe_key = f"{method}:{url}"
+                if resp_status in (0, 404, 405) or resp_status >= 500:
+                    failed_url_counts[_probe_key] = failed_url_counts.get(_probe_key, 0) + 1
+                    if failed_url_counts[_probe_key] >= 3:
+                        blocked_urls.add(url)
+                        log.debug(
+                            "Thinking scan: URL blocked after 3 failures: %s %s", method, url
+                        )
+                # For repeated failures push the tool budget up so the LLM must think
+                # (pick tools or a different approach) rather than blindly retrying.
+                if failed_url_counts.get(_probe_key, 0) >= 2:
+                    consecutive_context_tools = max(consecutive_context_tools - 1, 0)
 
                 all_results.append(result)
                 task_graph_svc.complete_task_after_result(
