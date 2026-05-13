@@ -1583,6 +1583,8 @@ Think like a human tester:
 - Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
 - Use browser actions when the next probe depends on JavaScript execution, hash routes,
     form interaction, client-side state, DOM rendering, or screenshot evidence.
+- Use register_account when a registration endpoint/form is discovered and a disposable
+    low-impact account would improve auth, IDOR, or business-logic coverage.
 - Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
     followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
@@ -1748,6 +1750,34 @@ Credential-check rules:
 - Successful login responses with bearer tokens are stored as reusable in-memory sessions.
 - Later actions should reference those sessions with use_session rather than copying tokens.
 
+To create one disposable account through a discovered registration endpoint:
+{{
+    "action": "register_account",
+    "url": "https://.../api/users/register",
+    "method": "POST",
+    "body_format": "json",
+    "username_field": "username",
+    "email_field": "email",
+    "password_field": "password",
+    "include_username": true,
+    "include_email": true,
+    "extra_fields": {{"role": "user"}},
+    "headers": {{"Content-Type": "application/json"}},
+    "success_statuses": [200, 201, 204],
+    "store_as": "disposable_user_a",
+    "observation": "The target exposes a public registration endpoint.",
+    "hypothesis": "A fresh user account will allow authenticated boundary and IDOR checks.",
+    "payload_purpose": "Create one low-impact disposable account for controlled testing.",
+    "note": "Register a disposable user and store any returned cookies or bearer token as a reusable session."
+}}
+
+Register-account rules:
+- Only use this for explicit signup/registration endpoints or forms found in crawl/intelligence/history.
+- Create at most one account per distinct testing role unless a later IDOR/business-logic check needs a second user.
+- Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
+- Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
+- Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
+
 To finish the assessment (all key areas covered, or steps nearly exhausted):
 {{
   "action": "done",
@@ -1775,6 +1805,7 @@ async def thinking_next_action(
       {"action": "browser", "url": ..., "steps": [...], "note": ...}
       {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
       {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+    {"action": "register_account", "url": ..., "store_as": ..., "note": ...}
       {"action": "finding_write", ...}
     or:
       {"action": "done", "summary": ...}
