@@ -255,6 +255,7 @@ def import_findings(
             evidence=item.evidence,
             request_evidence=item.request_evidence,
             response_evidence=item.response_evidence,
+            evidence_json=json.dumps(item.evidence_items),
             validation_status=import_validation_status,
             validation_note=item.validation_note,
         )

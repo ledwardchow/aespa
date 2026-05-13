@@ -249,6 +249,7 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
         "evidence": "GET /admin returned 200",
         "request_evidence": "GET /admin",
         "response_evidence": "Status: 200",
+        "evidence_items": [{"type": "status", "label": "HTTP status", "value": "200"}],
         "validation_status": "confirmed",
         "validation_note": "Imported validated issue.",
     }]
@@ -262,6 +263,7 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
     assert finding["title"] == "Imported authorization bypass"
     assert finding["validation_status"] == "confirmed"
     assert finding["affected_url"] == "https://target.local/admin"
+    assert finding["evidence_items"][0]["type"] == "status"
     run_after = client.get(f"/api/test-runs/{run['id']}").json()
     assert run_after["pages_discovered"] == 1
 
