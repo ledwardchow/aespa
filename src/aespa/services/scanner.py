@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -282,6 +283,86 @@ def _record_session(
         extra_headers=session_data.get("extra_headers") or {},
         metadata=metadata or session_data.get("metadata") or {},
     )
+
+
+def _disposable_account_fields(action: dict, *, base_url: str) -> dict[str, Any]:
+    suffix = secrets.token_hex(4)
+    username = str(action.get("username") or f"aespa_{suffix}").strip()
+    email = str(action.get("email") or f"aespa_{suffix}@example.invalid").strip()
+    password = str(action.get("password") or f"Aespa-{suffix}-Test!23")
+    username_field = str(action.get("username_field") or "username")
+    email_field = str(action.get("email_field") or "email")
+    password_field = str(action.get("password_field") or "password")
+    include_username = action.get("include_username", True) is not False
+    include_email = action.get("include_email", True) is not False
+    extra_fields = action.get("extra_fields") if isinstance(action.get("extra_fields"), dict) else {}
+    body = dict(extra_fields)
+    if include_username:
+        body[username_field] = username
+    if include_email:
+        body[email_field] = email
+    body[password_field] = password
+    return {
+        "username": username,
+        "email": email,
+        "password": password,
+        "body": body,
+        "username_field": username_field,
+        "email_field": email_field,
+        "password_field": password_field,
+        "metadata": {
+            "registration_url": str(action.get("url") or base_url),
+            "username": username,
+            "email": email,
+            "password": password,
+            "generated": not any(action.get(k) for k in ("username", "email", "password")),
+            "fields": {
+                "username": username_field if include_username else None,
+                "email": email_field if include_email else None,
+                "password": password_field,
+            },
+        },
+    }
+
+
+def _redacted_account_body(body: dict[str, Any], password_field: str) -> dict[str, Any]:
+    redacted = dict(body)
+    for key in list(redacted):
+        if str(key).lower() in {str(password_field).lower(), "password", "passwd", "pwd"}:
+            redacted[key] = "***"
+    return redacted
+
+
+def _merge_persisted_sessions(run_id: int, cred_sessions: dict[int, dict]) -> dict[int, dict]:
+    merged = dict(cred_sessions or {})
+    existing_labels = {str(s.get("label") or "") for s in merged.values()}
+    existing_credential_ids = {int(k) for k in merged if isinstance(k, int) and k > 0}
+    synthetic_id = -1
+    for label, stored in session_svc.load_session_vault(run_id).items():
+        if label in existing_labels or stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            if credential_id in existing_credential_ids:
+                continue
+            key = credential_id
+            existing_credential_ids.add(credential_id)
+        else:
+            while synthetic_id in merged:
+                synthetic_id -= 1
+            key = synthetic_id
+            synthetic_id -= 1
+        merged[key] = {
+            "label": label,
+            "username": stored.get("username") or label,
+            "credential_id": credential_id,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+            "source": stored.get("source") or "scanner_session",
+            "metadata": stored.get("metadata") or {},
+        }
+        existing_labels.add(label)
+    return merged
 
 
 def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
@@ -2225,6 +2306,140 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_evidence": response_evidence,
                     }
                     resp_status = result["status"]
+                elif action_type == "register_account":
+                    method = "REGISTER_ACCOUNT"
+                    url = (action.get("url") or "").strip()
+                    if not url:
+                        log.warning("Thinking scan step %d: register_account missing URL.", step)
+                        break
+                    headers = action.get("headers") if isinstance(action.get("headers"), dict) else {}
+                    success_statuses = action.get("success_statuses") or [200, 201, 204]
+                    try:
+                        success_statuses = {int(s) for s in success_statuses}
+                    except Exception:
+                        success_statuses = {200, 201, 204}
+                    account = _disposable_account_fields(action, base_url=base_url)
+                    body = account["body"]
+                    redacted_body = _redacted_account_body(body, account["password_field"])
+                    store_as = str(action.get("store_as") or f"disposable_{account['username']}")
+                    use_session = action.get("use_session") or action.get("as_session")
+                    use_session = use_session if isinstance(use_session, str) else None
+                    selected_session = session_vault.get(use_session) if use_session else None
+                    body_format = str(action.get("body_format") or "json").lower()
+                    action_message = _thinking_action_log_message(step, method, url, action)
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": f"register {account['username']} / {account['email']}",
+                            "use_session": use_session,
+                        },
+                    })
+
+                    resp_status = 0
+                    resp_headers = {}
+                    resp_body = ""
+                    created_label = None
+                    try:
+                        merged_headers = dict(hx.headers)
+                        if selected_session and selected_session.get("extra_headers"):
+                            merged_headers.update(selected_session["extra_headers"])
+                        merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
+                        if body_format == "form":
+                            merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                data=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        else:
+                            merged_headers.setdefault("Content-Type", "application/json")
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                json=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        resp_status = resp.status_code
+                        resp_headers = dict(resp.headers)
+                        raw_resp_body = resp.text[:BODY_READ_LIMIT]
+                        resp_body = _redact_sensitive_text(raw_resp_body)
+                        success = resp.status_code in success_statuses
+                        token = _extract_bearer_token_from_body(raw_resp_body) if success else None
+                        response_cookies = {k: v for k, v in resp.cookies.items()} if success else {}
+                        extra_headers = {"Authorization": f"Bearer {token}"} if token else {}
+                        if success:
+                            created_label = _session_label(store_as, session_vault)
+                            session_vault[created_label] = {
+                                "label": created_label,
+                                "kind": _session_kind(response_cookies, extra_headers),
+                                "username": account["username"],
+                                "source": "register_account",
+                                "extra_headers": extra_headers,
+                                "cookies": response_cookies,
+                                "metadata": account["metadata"],
+                            }
+                            _record_session(
+                                run_id,
+                                label=created_label,
+                                session_data=session_vault[created_label],
+                                source="dynamic_scan_register_account",
+                                metadata={
+                                    **account["metadata"],
+                                    "method": str(action.get("method") or "POST").upper(),
+                                    "status": resp.status_code,
+                                    "body_format": body_format,
+                                },
+                            )
+                    except Exception as exc:
+                        log.warning("Thinking scan step %d register_account error (%s): %s", step, url, exc)
+                        resp_body = f"Registration request failed: {exc}"
+
+                    req_body = redacted_body
+                    request_evidence = _request_evidence(
+                        f"REGISTER_ACCOUNT {url}\n{json.dumps(redacted_body, sort_keys=True)}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\nCreated session label: {created_label or 'none'}\n{resp_body}"
+                    )
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body,
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=f"Disposable account registration attempted for {account['username']}.",
+                            status=resp_status,
+                            marker=created_label or "no reusable auth material captured",
+                            confidence="observed",
+                        ),
+                    }
                 else:
                     # Execute the HTTP request.
                     method  = (action.get("method") or "GET").upper()
@@ -2708,6 +2923,8 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                     credential_id=extra_cred.id,
                     metadata={"login_url": _login_url_for_credential(login_url, extra_cred)},
                 )
+
+        cred_sessions = _merge_persisted_sessions(run_id, cred_sessions)
 
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions

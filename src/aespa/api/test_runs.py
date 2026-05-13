@@ -102,10 +102,23 @@ def _json_dict(value: str | None) -> dict:
         return {}
 
 
+def _redacted_metadata(value: dict) -> dict:
+    sensitive_terms = ("password", "secret", "token", "cookie", "authorization")
+    redacted: dict = {}
+    for key, raw in value.items():
+        if any(term in str(key).lower() for term in sensitive_terms):
+            redacted[key] = "[REDACTED]"
+        elif isinstance(raw, dict):
+            redacted[key] = _redacted_metadata(raw)
+        else:
+            redacted[key] = raw
+    return redacted
+
+
 def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
     cookies = _json_dict(record.cookies_json)
     headers = _json_dict(record.extra_headers_json)
-    metadata = _json_dict(record.session_metadata)
+    metadata = _redacted_metadata(_json_dict(record.session_metadata))
     return ScannerSessionOut(
         id=record.id,
         test_run_id=record.test_run_id,

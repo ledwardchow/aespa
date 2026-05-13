@@ -572,7 +572,7 @@ def test_get_scanner_sessions_redacts_auth_material():
                 source="test",
                 cookies_json='{"sid":"secret-cookie"}',
                 extra_headers_json='{"Authorization":"Bearer secret-token"}',
-                session_metadata='{"login_url":"https://target.local/login"}',
+                session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
                 token_hint="secret...token",
             ))
             session.commit()
@@ -585,8 +585,10 @@ def test_get_scanner_sessions_redacts_auth_material():
         assert item.cookie_names == ["sid"]
         assert item.header_names == ["Authorization"]
         assert item.session_metadata["login_url"] == "https://target.local/login"
+        assert item.session_metadata["password"] == "[REDACTED]"
         assert "secret-cookie" not in item.model_dump_json()
         assert "secret-token" not in item.model_dump_json()
+        assert "generated-secret" not in item.model_dump_json()
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
