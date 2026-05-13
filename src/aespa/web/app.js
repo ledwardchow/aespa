@@ -2301,13 +2301,14 @@ function TestRunDetail({ runId }) {
               </div>`}
             ${activityLog.map(entry => {
               const PHASE_META = {
-                site_plan:     { label: "Plan",      cls: "phase-plan" },
-                page_plan:     { label: "Probes",    cls: "phase-probes" },
-                page_followup: { label: "Follow-up", cls: "phase-followup" },
-                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
-                sweep:         { label: "Sweep",     cls: "phase-sweep" },
-                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
-                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
+                site_plan:          { label: "Plan",      cls: "phase-plan" },
+                page_plan:          { label: "Probes",    cls: "phase-probes" },
+                page_followup:      { label: "Follow-up", cls: "phase-followup" },
+                page_analysis:      { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:              { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
+                credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
               };
               const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
               const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
