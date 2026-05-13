@@ -107,6 +107,8 @@ LLMProviderLiteral = Literal[
     "bedrock",
     "azure_openai",
     "azure_foundry",
+    "azure_foundry_openai",
+    "azure_foundry_anthropic",
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
@@ -160,13 +162,33 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "o4-mini",
     ],
     "azure_foundry": [
+        "gpt-4o",
+        "gpt-4.1",
+        "o3-mini",
+        "DeepSeek-R1",
         "Meta-Llama-3.3-70B-Instruct",
         "Meta-Llama-3.1-70B-Instruct",
         "Mistral-large-2411",
         "Phi-4",
-        "DeepSeek-R1",
+    ],
+    "azure_foundry_openai": [
         "gpt-4o",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "o3",
         "o3-mini",
+        "o4-mini",
+        "DeepSeek-R1",
+        "Meta-Llama-3.3-70B-Instruct",
+        "Mistral-large-2411",
+        "Phi-4",
+    ],
+    "azure_foundry_anthropic": [
+        "claude-sonnet-4-5",
+        "claude-opus-4-1",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
     ],
 }
 
@@ -192,8 +214,16 @@ class LLMConfigIn(BaseModel):
             "google",
             "azure_openai",
             "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
         )
-        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
+        _needs_url = (
+            "openai_compatible",
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
+        )
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider in _needs_url and not self.base_url:
