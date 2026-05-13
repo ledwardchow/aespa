@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.2.20260513.3"
+version = "0.2.20260513.7"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
