@@ -36,7 +36,8 @@ const api = {
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
-  getScannerSessions: (id)       => req(`/api/test-runs/${id}/scanner-sessions`),
+  getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
@@ -2252,6 +2253,7 @@ function TestRunDetail({ runId }) {
 
       ${activeTab==="sessions" && html`
         <${ScannerSessionsPanel}
+          runId=${runId}
           data=${scannerSessions}
           refresh=${()=>api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{})}
         />`}
@@ -2485,7 +2487,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
     </div>`;
 }
 
-function ScannerSessionsPanel({ data, refresh }) {
+function ScannerSessionsPanel({ runId, data, refresh }) {
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
   const kinds = Object.entries(counts)
@@ -2494,6 +2496,22 @@ function ScannerSessionsPanel({ data, refresh }) {
   const fmtAge = (iso) => {
     if (!iso) return "—";
     try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  };
+  const renameSession = async (session) => {
+    const next = prompt("Session label", session.label);
+    if (next === null) return;
+    try {
+      await api.updateScannerSession(runId, session.id, { label: next });
+      await refresh();
+    } catch(e) { alert(e.message); }
+  };
+  const setSessionActive = async (session, isActive) => {
+    const verb = isActive ? "Reactivate" : "Deactivate";
+    if (!confirm(`${verb} session "${session.label}"?`)) return;
+    try {
+      await api.updateScannerSession(runId, session.id, { is_active: isActive });
+      await refresh();
+    } catch(e) { alert(e.message); }
   };
   return html`
     <div className="intel-panel">
@@ -2528,6 +2546,7 @@ function ScannerSessionsPanel({ data, refresh }) {
               <th>Auth material</th>
               <th style=${{width:180}}>Source</th>
               <th style=${{width:170}}>Updated</th>
+              <th style=${{width:150}}></th>
             </tr>
           </thead>
           <tbody>
@@ -2549,6 +2568,14 @@ function ScannerSessionsPanel({ data, refresh }) {
                 </td>
                 <td>${s.source || "scanner"}</td>
                 <td>${fmtAge(s.updated_at)}</td>
+                <td>
+                  <div className="row session-actions">
+                    <button className="btn secondary sm" onClick=${()=>renameSession(s)}>Rename</button>
+                    ${s.is_active
+                      ? html`<button className="btn danger-outline sm" onClick=${()=>setSessionActive(s, false)}>Deactivate</button>`
+                      : html`<button className="btn secondary sm" onClick=${()=>setSessionActive(s, true)}>Reactivate</button>`}
+                  </div>
+                </td>
               </tr>`)}
           </tbody>
         </table>

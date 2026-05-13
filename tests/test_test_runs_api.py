@@ -594,6 +594,59 @@ def test_get_scanner_sessions_redacts_auth_material():
         engine.dispose()
 
 
+def test_update_scanner_session_renames_and_deactivates():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun
+    from aespa.schemas import ScannerSessionUpdate
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            record = ScannerSession(
+                test_run_id=run.id,
+                label="discovered_token",
+                kind="bearer",
+                source="test",
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+
+            updated = test_runs_api.update_scanner_session(
+                run.id,
+                record.id,
+                ScannerSessionUpdate(label="Forged Admin", is_active=False),
+                session=session,
+            )
+
+            summary = test_runs_api.get_scanner_sessions(run.id, include_inactive=True, session=session)
+
+        assert updated.label == "forged_admin"
+        assert updated.is_active is False
+        assert summary.counts["inactive"] == 1
+        assert summary.sessions[0].label == "forged_admin"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_run_not_found(client: TestClient):
     r = client.get("/api/test-runs/9999")
     assert r.status_code == 404

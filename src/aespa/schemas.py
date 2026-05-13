@@ -540,6 +540,11 @@ class ScannerSessionSummary(BaseModel):
     sessions: list[ScannerSessionOut] = Field(default_factory=list)
 
 
+class ScannerSessionUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    is_active: bool | None = None
+
+
 class PentestHypothesisOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
