@@ -1946,7 +1946,7 @@ function TestRunDetail({ runId }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && !dynamicScanActive && html`
+            ${scanStatus && !dynamicScanActive && !(thinkingStatus?.status === "complete" && scanStatus.status === "complete") && html`
               <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
                 ${scanStopRequested ? "Stopping scan…" :
                   scanStatus.status==="running" ? "Structured Scan running…" :
