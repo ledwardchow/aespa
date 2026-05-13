@@ -16,6 +16,8 @@ def test_get_default_models(client: TestClient):
     assert "openai_compatible" in data
     assert "openrouter" in data
     assert "bedrock" in data
+    assert "azure_foundry_openai" in data
+    assert "azure_foundry_anthropic" in data
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
@@ -130,6 +132,36 @@ def test_upsert_bedrock_sso_profile(client: TestClient):
     assert data["base_url"] is None
 
 
+def test_upsert_azure_foundry_openai(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "azure_foundry_openai",
+        "api_key": "foundry-key",
+        "base_url": "https://myresource.services.ai.azure.com/",
+        "model": "gpt-4o",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "azure_foundry_openai"
+    assert data["base_url"] == "https://myresource.services.ai.azure.com"
+
+
+def test_upsert_azure_foundry_anthropic(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "azure_foundry_anthropic",
+        "api_key": "foundry-key",
+        "base_url": "https://myresource.services.ai.azure.com/anthropic/v1",
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 4096,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "azure_foundry_anthropic"
+    assert data["base_url"] == "https://myresource.services.ai.azure.com/anthropic/v1"
+
+
 def test_upsert_is_idempotent(client: TestClient):
     payload = {
         "provider": "anthropic",
@@ -195,6 +227,17 @@ def test_upsert_openai_compatible_missing_base_url(client: TestClient):
         "provider": "openai_compatible",
         "model": "llama-3",
         "max_tokens": 1024,
+        "temperature": 0.0,
+    })
+    assert r.status_code == 422
+
+
+def test_upsert_azure_foundry_anthropic_missing_base_url(client: TestClient):
+    r = client.put("/api/settings/llm", json={
+        "provider": "azure_foundry_anthropic",
+        "api_key": "foundry-key",
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 4096,
         "temperature": 0.0,
     })
     assert r.status_code == 422
