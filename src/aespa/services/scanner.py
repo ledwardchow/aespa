@@ -14,6 +14,8 @@ import asyncio
 import json
 import logging
 import re
+import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -25,6 +27,7 @@ from aespa.db import get_engine
 from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
@@ -50,6 +53,11 @@ MAX_PROBES_PER_PAGE = 50
 MAX_FOLLOWUP_PROBES  = 20
 REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
+EVIDENCE_TEXT_LIMIT = 128 * 1024
+REQUEST_EVIDENCE_LIMIT = 64 * 1024
+RESPONSE_EVIDENCE_LIMIT = 128 * 1024
+EVIDENCE_ITEM_TEXT_LIMIT = 16 * 1024
+EVIDENCE_JSON_LIMIT = 64 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
@@ -183,10 +191,15 @@ def _redact_candidate(candidate: dict) -> dict:
 def _redact_sensitive_text(text: str) -> str:
     # Hide JWT-like bearer values in history/evidence. The session vault keeps
     # usable tokens separately under labels so the LLM does not need raw secrets.
-    return re.sub(
+    redacted = re.sub(
         r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
         "[REDACTED_JWT]",
         text,
+    )
+    return re.sub(
+        r"(?im)^(\s*authorization\s*:\s*bearer\s+)[^\s\r\n]+",
+        r"\1[REDACTED_BEARER]",
+        redacted,
     )
 
 
@@ -234,6 +247,123 @@ def _session_label(raw: str, existing: dict) -> str:
         label = f"{base}_{counter}"
         counter += 1
     return label
+
+
+def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
+    has_cookies = bool(cookies)
+    has_bearer = any(str(k).lower() == "authorization" for k in (extra_headers or {}))
+    if has_cookies and has_bearer:
+        return "mixed"
+    if has_bearer:
+        return "bearer"
+    if has_cookies:
+        return "cookie"
+    return "anonymous"
+
+
+def _record_session(
+    run_id: int,
+    *,
+    label: str,
+    session_data: dict,
+    source: str,
+    credential_id: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    session_svc.upsert_session(
+        run_id,
+        label=label,
+        kind=session_data.get("kind") or _session_kind(
+            session_data.get("cookies"),
+            session_data.get("extra_headers"),
+        ),
+        username=session_data.get("username"),
+        credential_id=credential_id or session_data.get("credential_id"),
+        source=source,
+        cookies=session_data.get("cookies") or {},
+        extra_headers=session_data.get("extra_headers") or {},
+        metadata=metadata or session_data.get("metadata") or {},
+    )
+
+
+def _disposable_account_fields(action: dict, *, base_url: str) -> dict[str, Any]:
+    suffix = secrets.token_hex(4)
+    username = str(action.get("username") or f"aespa_{suffix}").strip()
+    email = str(action.get("email") or f"aespa_{suffix}@example.invalid").strip()
+    password = str(action.get("password") or f"Aespa-{suffix}-Test!23")
+    username_field = str(action.get("username_field") or "username")
+    email_field = str(action.get("email_field") or "email")
+    password_field = str(action.get("password_field") or "password")
+    include_username = action.get("include_username", True) is not False
+    include_email = action.get("include_email", True) is not False
+    extra_fields = action.get("extra_fields") if isinstance(action.get("extra_fields"), dict) else {}
+    body = dict(extra_fields)
+    if include_username:
+        body[username_field] = username
+    if include_email:
+        body[email_field] = email
+    body[password_field] = password
+    return {
+        "username": username,
+        "email": email,
+        "password": password,
+        "body": body,
+        "username_field": username_field,
+        "email_field": email_field,
+        "password_field": password_field,
+        "metadata": {
+            "registration_url": str(action.get("url") or base_url),
+            "username": username,
+            "email": email,
+            "password": password,
+            "generated": not any(action.get(k) for k in ("username", "email", "password")),
+            "fields": {
+                "username": username_field if include_username else None,
+                "email": email_field if include_email else None,
+                "password": password_field,
+            },
+        },
+    }
+
+
+def _redacted_account_body(body: dict[str, Any], password_field: str) -> dict[str, Any]:
+    redacted = dict(body)
+    for key in list(redacted):
+        if str(key).lower() in {str(password_field).lower(), "password", "passwd", "pwd"}:
+            redacted[key] = "***"
+    return redacted
+
+
+def _merge_persisted_sessions(run_id: int, cred_sessions: dict[int, dict]) -> dict[int, dict]:
+    merged = dict(cred_sessions or {})
+    existing_labels = {str(s.get("label") or "") for s in merged.values()}
+    existing_credential_ids = {int(k) for k in merged if isinstance(k, int) and k > 0}
+    synthetic_id = -1
+    for label, stored in session_svc.load_session_vault(run_id).items():
+        if label in existing_labels or stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            if credential_id in existing_credential_ids:
+                continue
+            key = credential_id
+            existing_credential_ids.add(credential_id)
+        else:
+            while synthetic_id in merged:
+                synthetic_id -= 1
+            key = synthetic_id
+            synthetic_id -= 1
+        merged[key] = {
+            "label": label,
+            "username": stored.get("username") or label,
+            "credential_id": credential_id,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+            "source": stored.get("source") or "scanner_session",
+            "metadata": stored.get("metadata") or {},
+        }
+        existing_labels.add(label)
+    return merged
 
 
 def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
@@ -1085,6 +1215,121 @@ def _combined_evidence(request_evidence: str, response_evidence: str, summary: s
     return "\n\n".join(parts)
 
 
+def _clip_evidence(value: str, limit: int) -> str:
+    text = _redact_sensitive_text(str(value or ""))
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n[truncated {len(text) - limit} characters]"
+
+
+def _full_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
+    return _clip_evidence(
+        _combined_evidence(request_evidence, response_evidence, summary),
+        EVIDENCE_TEXT_LIMIT,
+    )
+
+
+def _request_evidence(value: str) -> str:
+    return _clip_evidence(value, REQUEST_EVIDENCE_LIMIT)
+
+
+def _response_evidence(value: str) -> str:
+    return _clip_evidence(value, RESPONSE_EVIDENCE_LIMIT)
+
+
+def _evidence_items_json(*items: dict) -> str:
+    cleaned: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        evidence_type = str(item.get("type") or "note").strip()[:80]
+        label = str(item.get("label") or evidence_type.replace("_", " ").title()).strip()[:160]
+        value = item.get("value")
+        if value is None or value == "":
+            continue
+        cleaned_item: dict[str, object] = {
+            "type": evidence_type,
+            "label": label,
+            "value": _clip_evidence(str(value), EVIDENCE_ITEM_TEXT_LIMIT),
+        }
+        for key in ("format", "source", "confidence"):
+            if item.get(key):
+                cleaned_item[key] = str(item[key])[:120]
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            cleaned_item["metadata"] = {
+                str(k)[:80]: _clip_evidence(str(v), 1000)
+                for k, v in metadata.items()
+                if v is not None
+            }
+        cleaned.append(cleaned_item)
+
+    text = json.dumps(cleaned, ensure_ascii=False)
+    if len(text) <= EVIDENCE_JSON_LIMIT:
+        return text
+    return json.dumps(cleaned[: max(1, len(cleaned) // 2)], ensure_ascii=False)[:EVIDENCE_JSON_LIMIT]
+
+
+def _evidence_items_from_json(value: str | None) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _http_evidence_items_json(
+    request_evidence: str,
+    response_evidence: str,
+    *,
+    summary: str = "",
+    status: int | str | None = None,
+    status_delta: str | None = None,
+    duration_ms: int | float | None = None,
+    timing_delta_ms: int | float | None = None,
+    body_diff: str | dict | None = None,
+    action_outcome: str | None = None,
+    action_log: str | list | None = None,
+    screenshot_b64: str | None = None,
+    marker: str = "",
+    confidence: str = "confirmed",
+) -> str:
+    items = []
+    if summary:
+        items.append({"type": "summary", "label": "Proof summary", "value": summary, "confidence": confidence})
+    if status is not None:
+        items.append({"type": "status", "label": "HTTP status", "value": status, "confidence": confidence})
+    if status_delta:
+        items.append({"type": "status_delta", "label": "Status delta", "value": status_delta, "confidence": confidence})
+    if duration_ms is not None:
+        items.append({"type": "timing", "label": "Response timing", "value": f"{round(float(duration_ms), 1)} ms", "confidence": confidence})
+    if timing_delta_ms is not None:
+        items.append({"type": "timing_delta", "label": "Timing delta", "value": f"{round(float(timing_delta_ms), 1)} ms", "confidence": confidence})
+    if body_diff:
+        diff_value = json.dumps(body_diff, indent=2, sort_keys=True) if isinstance(body_diff, dict) else str(body_diff)
+        items.append({"type": "body_diff", "label": "Body diff", "value": diff_value, "confidence": confidence})
+    if action_outcome:
+        items.append({"type": "action_outcome", "label": "Action outcome", "value": action_outcome, "confidence": confidence})
+    if action_log:
+        log_value = "\n".join(str(line) for line in action_log) if isinstance(action_log, list) else str(action_log)
+        items.append({"type": "action_log", "label": "Action log", "value": log_value, "confidence": confidence})
+    if screenshot_b64:
+        items.append({
+            "type": "screenshot",
+            "label": "Screenshot",
+            "value": "Screenshot captured and attached to the finding.",
+            "confidence": confidence,
+            "metadata": {"bytes_base64": len(screenshot_b64)},
+        })
+    if marker:
+        items.append({"type": "marker", "label": "Matched marker", "value": marker, "confidence": confidence})
+    items.extend([
+        {"type": "http_request", "label": "Request", "value": request_evidence, "format": "http", "confidence": confidence},
+        {"type": "http_response", "label": "Response", "value": response_evidence, "format": "http", "confidence": confidence},
+    ])
+    return _evidence_items_json(*items)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1108,12 +1353,33 @@ def _finding_from_llm(
     matched = result_by_url.get(affected_url, {})
     request_evidence = str(matched.get("request_evidence") or raw.get("request_evidence") or "")
     response_evidence = str(matched.get("response_evidence") or raw.get("response_evidence") or "")
+    summary_evidence = str(raw.get("evidence") or matched.get("evidence") or "")
     evidence = _combined_evidence(
         request_evidence,
         response_evidence,
-        str(raw.get("evidence") or matched.get("evidence") or ""),
+        summary_evidence,
     )
     cvss_score = _cvss_score(raw.get("cvss_score"))
+    prebuilt_items = _evidence_items_from_json(str(matched.get("evidence_json") or ""))
+    if prebuilt_items:
+        evidence_json = _evidence_items_json(
+            {"type": "summary", "label": "Proof summary", "value": summary_evidence, "confidence": "validating" if validation_status == "validating" else validation_status},
+            *prebuilt_items,
+        )
+    else:
+        evidence_json = _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=summary_evidence,
+            status=matched.get("status"),
+            duration_ms=matched.get("duration_ms"),
+            timing_delta_ms=matched.get("timing_delta_ms"),
+            body_diff=matched.get("body_diff"),
+            action_outcome=matched.get("action_outcome"),
+            action_log=matched.get("action_log"),
+            screenshot_b64=matched.get("screenshot_b64"),
+            confidence="validating" if validation_status == "validating" else validation_status,
+        )
 
     return ScanFinding(
         test_run_id=run_id,
@@ -1128,9 +1394,10 @@ def _finding_from_llm(
         cvss_score=cvss_score,
         cvss_vector=raw.get("cvss_vector", ""),
         affected_url=affected_url,
-        evidence=evidence[:4000],
-        request_evidence=request_evidence[:4000],
-        response_evidence=response_evidence[:4000],
+        evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+        request_evidence=_request_evidence(request_evidence),
+        response_evidence=_response_evidence(response_evidence),
+        evidence_json=evidence_json,
         screenshot_b64=matched.get("screenshot_b64"),
         validation_status=validation_status,
         validation_note=validation_note,
@@ -1588,8 +1855,11 @@ async def _do_thinking_scan(run_id: int) -> None:
     history:     list[dict] = []
     all_results: list[dict] = []
     progressive_findings_count = 0
-    session_vault: dict[str, dict] = {}
+    session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
+    session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     consecutive_context_tools = 0
+    failed_url_counts: dict[str, int] = {}  # "METHOD:url" → count of 404/error responses
+    blocked_urls: set[str] = set()          # URLs tried 3+ times and still failing
 
     from playwright.async_api import async_playwright
 
@@ -1630,14 +1900,25 @@ async def _do_thinking_scan(run_id: int) -> None:
         extra_headers: dict[str, str] = {}
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
-            session_vault["configured_primary"] = {
+        if requires_auth and creds and (cookie_jar or extra_headers):
+            configured_primary = {
                 "label": "configured_primary",
-                "kind": "bearer",
-                "username": creds[0].username if creds else None,
+                "kind": _session_kind(cookie_jar, extra_headers),
+                "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "source": "configured credential auth bootstrap",
-                "extra_headers": {"Authorization": f"Bearer {auth_token}"},
+                "extra_headers": extra_headers,
                 "cookies": cookie_jar,
             }
+            session_vault["configured_primary"] = configured_primary
+            _record_session(
+                run_id,
+                label="configured_primary",
+                session_data=configured_primary,
+                source="dynamic_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
 
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -1668,6 +1949,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                         f"{crawl_context}\n\n{task_context}"
                         if task_context else crawl_context
                     )
+                    if blocked_urls:
+                        blocked_list = ", ".join(sorted(blocked_urls)[:12])
+                        step_context = (
+                            f"{step_context}\n\n"
+                            f"BLOCKED PATHS — already failed 3+ times, do NOT probe these again: "
+                            f"{blocked_list}. Switch to a completely different attack surface."
+                        )
                     action = await llm_svc.thinking_next_action(
                         llm_cfg,
                         target_url=base_url,
@@ -1789,7 +2077,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_body": (
                             f"{'Saved' if saved is not None else 'Skipped duplicate'} "
                             f"finding: {action.get('title', 'Untitled finding')}. "
-                            f"{str(action.get('evidence') or '')[:1200]}"
+                            + (
+                                "This finding already exists (recorded by structured scan or "
+                                "a prior step). Do NOT write it again. Your next action MUST "
+                                "probe a completely different endpoint or attack category. "
+                                if saved is None else ""
+                            )
+                            + f"{str(action.get('evidence') or '')[:1200]}"
                         ),
                     })
                     task_graph_svc.complete_task_after_result(
@@ -1854,6 +2148,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     try:
+                        if selected_session and selected_session.get("cookies"):
+                            cookie_list = [
+                                {"name": k, "value": v, "url": url}
+                                for k, v in selected_session.get("cookies", {}).items()
+                            ]
+                            if cookie_list:
+                                await browser_ctx.add_cookies(cookie_list)
                         await browser_ctx.set_extra_http_headers(
                             selected_session.get("extra_headers", {})
                             if selected_session else {}
@@ -1906,6 +2207,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "extra_headers": {"Authorization": f"Bearer {token}"},
                             "cookies": {},
                         }
+                        _record_session(
+                            run_id,
+                            label=label,
+                            session_data=session_vault[label],
+                            source="dynamic_scan_jwt_action",
+                            metadata={"claims": claims, "header": header or {"typ": "JWT", "alg": "HS256"}},
+                        )
                         resp_status = 200
                         resp_headers = {"content-type": "application/json"}
                         resp_body = json.dumps({
@@ -2014,6 +2322,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "extra_headers": {"Authorization": f"Bearer {token}"},
                                     "cookies": {},
                                 }
+                                _record_session(
+                                    run_id,
+                                    label=label,
+                                    session_data=session_vault[label],
+                                    source="dynamic_scan_credential_check",
+                                    metadata={"login_url": url},
+                                )
                         except Exception as exc:
                             response_excerpt = f"Request failed: {exc}"
                             success = False
@@ -2058,6 +2373,149 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_evidence": response_evidence,
                     }
                     resp_status = result["status"]
+                elif action_type == "register_account":
+                    method = "REGISTER_ACCOUNT"
+                    url = (action.get("url") or "").strip()
+                    if not url:
+                        log.warning("Thinking scan step %d: register_account missing URL.", step)
+                        break
+                    headers = action.get("headers") if isinstance(action.get("headers"), dict) else {}
+                    success_statuses = action.get("success_statuses") or [200, 201, 204]
+                    try:
+                        success_statuses = {int(s) for s in success_statuses}
+                    except Exception:
+                        success_statuses = {200, 201, 204}
+                    account = _disposable_account_fields(action, base_url=base_url)
+                    body = account["body"]
+                    redacted_body = _redacted_account_body(body, account["password_field"])
+                    store_as = str(action.get("store_as") or f"disposable_{account['username']}")
+                    use_session = action.get("use_session") or action.get("as_session")
+                    use_session = use_session if isinstance(use_session, str) else None
+                    selected_session = session_vault.get(use_session) if use_session else None
+                    body_format = str(action.get("body_format") or "json").lower()
+                    action_message = _thinking_action_log_message(step, method, url, action)
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": f"register {account['username']} / {account['email']}",
+                            "use_session": use_session,
+                        },
+                    })
+
+                    resp_status = 0
+                    resp_headers = {}
+                    resp_body = ""
+                    created_label = None
+                    duration_ms: int | None = None
+                    try:
+                        merged_headers = dict(hx.headers)
+                        if selected_session and selected_session.get("extra_headers"):
+                            merged_headers.update(selected_session["extra_headers"])
+                        merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
+                        if body_format == "form":
+                            merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                            started = time.perf_counter()
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                data=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        else:
+                            merged_headers.setdefault("Content-Type", "application/json")
+                            started = time.perf_counter()
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                json=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        duration_ms = int((time.perf_counter() - started) * 1000)
+                        resp_status = resp.status_code
+                        resp_headers = dict(resp.headers)
+                        raw_resp_body = resp.text[:BODY_READ_LIMIT]
+                        resp_body = _redact_sensitive_text(raw_resp_body)
+                        success = resp.status_code in success_statuses
+                        token = _extract_bearer_token_from_body(raw_resp_body) if success else None
+                        response_cookies = {k: v for k, v in resp.cookies.items()} if success else {}
+                        extra_headers = {"Authorization": f"Bearer {token}"} if token else {}
+                        if success:
+                            created_label = _session_label(store_as, session_vault)
+                            session_vault[created_label] = {
+                                "label": created_label,
+                                "kind": _session_kind(response_cookies, extra_headers),
+                                "username": account["username"],
+                                "source": "register_account",
+                                "extra_headers": extra_headers,
+                                "cookies": response_cookies,
+                                "metadata": account["metadata"],
+                            }
+                            _record_session(
+                                run_id,
+                                label=created_label,
+                                session_data=session_vault[created_label],
+                                source="dynamic_scan_register_account",
+                                metadata={
+                                    **account["metadata"],
+                                    "method": str(action.get("method") or "POST").upper(),
+                                    "status": resp.status_code,
+                                    "body_format": body_format,
+                                },
+                            )
+                    except Exception as exc:
+                        log.warning("Thinking scan step %d register_account error (%s): %s", step, url, exc)
+                        resp_body = f"Registration request failed: {exc}"
+
+                    req_body = redacted_body
+                    request_evidence = _request_evidence(
+                        f"REGISTER_ACCOUNT {url}\n{json.dumps(redacted_body, sort_keys=True)}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\nCreated session label: {created_label or 'none'}\n{resp_body}"
+                    )
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body,
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=f"Disposable account registration attempted for {account['username']}.",
+                            status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome=(
+                                f"Registration succeeded; stored reusable session label '{created_label}'."
+                                if created_label else "Registration did not produce reusable auth material."
+                            ),
+                            marker=created_label or "no reusable auth material captured",
+                            confidence="observed",
+                        ),
+                    }
                 else:
                     # Execute the HTTP request.
                     method  = (action.get("method") or "GET").upper()
@@ -2093,20 +2551,33 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     req_body_str = ""
+                    duration_ms: int | None = None
+                    _js_paths: list[str] = []
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
                             merged_headers.update(selected_session["extra_headers"])
                         merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
                         if isinstance(body, dict):
                             merged_headers.setdefault("Content-Type", "application/json")
-                            resp = await hx.request(method, url, json=body, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, json=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = json.dumps(body)[:800]
                         elif isinstance(body, str) and body:
-                            resp = await hx.request(method, url, content=body, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, content=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = body[:800]
                         else:
-                            resp = await hx.request(method, url, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
@@ -2122,9 +2593,36 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 "extra_headers": {"Authorization": f"Bearer {token}"},
                                 "cookies": {},
                             }
+                            _record_session(
+                                run_id,
+                                label=label,
+                                session_data=session_vault[label],
+                                source="dynamic_scan_http_response",
+                                metadata={"method": method, "url": url},
+                            )
                         resp_body    = _redact_sensitive_text(raw_resp_body)
                         resp_status  = resp.status_code
                         resp_headers = dict(resp.headers)
+                        # Auto-extract API endpoint paths from JavaScript responses so the
+                        # LLM can find them without needing to parse JS bodies manually.
+                        _ct = resp_headers.get("content-type", "").lower()
+                        _is_js = "javascript" in _ct or url.split("?")[0].lower().endswith(".js")
+                        if _is_js and resp_status == 200:
+                            _js_paths = list(dict.fromkeys(
+                                re.findall(r'["\'](/api/[a-zA-Z0-9_/{}.-]+)["\']', raw_resp_body)
+                            ))[:30]
+                            if _js_paths:
+                                try:
+                                    from aespa.services.crawler import _save_intel_item as _si
+                                    for _p in _js_paths:
+                                        _si(
+                                            run_id=run_id, kind="endpoint", key=_p, value=_p,
+                                            url=url, method="GET", source="js_mining_dynamic",
+                                            confidence=0.8,
+                                            evidence=f"Extracted from {url} at step {step}",
+                                        )
+                                except Exception as _exc:
+                                    log.debug("Dynamic JS path extraction failed: %s", _exc)
                     except Exception as exc:
                         log.warning("Thinking scan step %d HTTP error (%s %s): %s", step, method, url, exc)
                         resp_body    = f"Request failed: {exc}"
@@ -2132,19 +2630,45 @@ async def _do_thinking_scan(run_id: int) -> None:
                         resp_headers = {}
 
                     req_body = body
-                    request_evidence = f"{method} {url}\n{json.dumps(headers)}\n{req_body_str}"
-                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    request_evidence = _request_evidence(
+                        f"{method} {url}\n{json.dumps(headers, sort_keys=True)}\n{req_body_str}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\n{resp_body}"
+                    )
                     result = {
                         "desc": note,
                         "url": url,
                         "status": resp_status,
+                        "duration_ms": duration_ms,
                         "headers": resp_headers,
-                        "body": resp_body[:1000],
+                        "body": resp_body,
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
+                        "action_outcome": "HTTP request completed." if resp_status else "HTTP request failed.",
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=note,
+                            status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome="HTTP request completed." if resp_status else "HTTP request failed.",
+                            confidence="observed",
+                        ),
                     }
 
                 log.info("Thinking scan step %d: %s %s → %s", step, method, url, resp_status)
+
+                _resp_body_for_history = resp_body
+                if _js_paths:
+                    _paths_note = (
+                        f"[{len(_js_paths)} API path(s) auto-extracted from JS and added to "
+                        f"target intelligence: {', '.join(_js_paths[:15])}]\n\n"
+                    )
+                    _resp_body_for_history = _paths_note + resp_body
 
                 step_record = {
                     "step":             step,
@@ -2155,9 +2679,23 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "request_body":     req_body,
                     "response_status":  resp_status,
                     "response_headers": resp_headers,
-                    "response_body":    resp_body,
+                    "response_body":    _resp_body_for_history,
                 }
                 history.append(step_record)
+
+                # Track failed probes and surface persistent failures as blocked URLs.
+                _probe_key = f"{method}:{url}"
+                if resp_status in (0, 404, 405) or resp_status >= 500:
+                    failed_url_counts[_probe_key] = failed_url_counts.get(_probe_key, 0) + 1
+                    if failed_url_counts[_probe_key] >= 3:
+                        blocked_urls.add(url)
+                        log.debug(
+                            "Thinking scan: URL blocked after 3 failures: %s %s", method, url
+                        )
+                # For repeated failures push the tool budget up so the LLM must think
+                # (pick tools or a different approach) rather than blindly retrying.
+                if failed_url_counts.get(_probe_key, 0) >= 2:
+                    consecutive_context_tools = max(consecutive_context_tools - 1, 0)
 
                 all_results.append(result)
                 task_graph_svc.complete_task_after_result(
@@ -2444,6 +2982,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         pw_page = await ctx.new_page()
 
         # ── Auth bootstrap ────────────────────────────────────────────────────
+        session_svc.ensure_anonymous_session(run_id, source="structured_scan")
         # Pre-load base URL, then authenticate to get a live session.
         try:
             await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -2484,21 +3023,45 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         # cred_sessions maps credential_id → {username, cookies, extra_headers}
         cred_sessions: dict[int, dict] = {}
         if requires_auth and creds:
+            primary_label = session_svc.credential_label(creds[0].username, primary=True)
             cred_sessions[creds[0].id] = {
+                "label": primary_label,
                 "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "cookies": cookie_jar,
                 "extra_headers": extra_headers,
             }
+            _record_session(
+                run_id,
+                label=primary_label,
+                session_data=cred_sessions[creds[0].id],
+                source="structured_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
             for extra_cred in creds[1:]:
                 log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
                 ec_cookies, ec_token = await _export_cred_session(
                     base_url, _login_url_for_credential(login_url, extra_cred), extra_cred
                 )
+                label = session_svc.credential_label(extra_cred.username)
                 cred_sessions[extra_cred.id] = {
+                    "label": label,
                     "username": extra_cred.username,
+                    "credential_id": extra_cred.id,
                     "cookies": ec_cookies,
                     "extra_headers": {"Authorization": f"Bearer {ec_token}"} if ec_token else {},
                 }
+                _record_session(
+                    run_id,
+                    label=label,
+                    session_data=cred_sessions[extra_cred.id],
+                    source="structured_scan_auth_export",
+                    credential_id=extra_cred.id,
+                    metadata={"login_url": _login_url_for_credential(login_url, extra_cred)},
+                )
+
+        cred_sessions = _merge_persisted_sessions(run_id, cred_sessions)
 
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions
@@ -2858,13 +3421,19 @@ def _auth_matrix_finding(
         cvss_score=cvss_score,
         cvss_vector="",
         affected_url=result.get("url") or target["url"],
-        evidence=_combined_evidence(
+        evidence=_full_evidence(
             result["request_evidence"],
             result["response_evidence"],
             f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
-        )[:4000],
-        request_evidence=result["request_evidence"][:4000],
-        response_evidence=result["response_evidence"][:4000],
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+            status=result.get("status"),
+        ),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic auth matrix module.",
         created_at=_utcnow(),
@@ -2900,13 +3469,20 @@ def _idor_matrix_finding(
         cvss_score=8.1,
         cvss_vector="",
         affected_url=page.url,
-        evidence=_combined_evidence(
+        evidence=_full_evidence(
             result["request_evidence"],
             result["response_evidence"],
             f"Actor `{actor}` received content matching the protected object page.",
-        )[:4000],
-        request_evidence=result["request_evidence"][:4000],
-        response_evidence=result["response_evidence"][:4000],
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received content matching the protected object page.",
+            status=result.get("status"),
+            marker="protected object page content matched",
+        ),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic IDOR matrix module.",
         created_at=_utcnow(),
@@ -3526,12 +4102,19 @@ def _deterministic_findings_from_results(
                 cvss_score=score,
                 cvss_vector="",
                 affected_url=url,
-                evidence=str(result.get("evidence") or _combined_evidence(
+                evidence=_clip_evidence(str(result.get("evidence") or _combined_evidence(
                     str(result.get("request_evidence") or ""),
-                    str(result.get("response_evidence") or body[:2000]),
-                ))[:4000],
-                request_evidence=str(result.get("request_evidence") or "")[:4000],
-                response_evidence=str(result.get("response_evidence") or body[:4000])[:4000],
+                    str(result.get("response_evidence") or body),
+                )), EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(str(result.get("request_evidence") or "")),
+                response_evidence=_response_evidence(str(result.get("response_evidence") or body)),
+                evidence_json=_http_evidence_items_json(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body),
+                    summary="Confirmed by deterministic response analysis.",
+                    status=status,
+                    marker=title,
+                ),
                 screenshot_b64=result.get("screenshot_b64"),
                 validation_status="confirmed",
                 validation_note="Confirmed by deterministic module.",
@@ -3692,6 +4275,13 @@ async def _passive_checks(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary="Passive header and anonymous access check.",
+                status=status,
+                marker=", ".join(missing),
+            ),
             "screenshot_b64": None,
             "missing_security_headers": missing,
             "auth_bypass_status": auth_bypass_status,
@@ -3726,6 +4316,13 @@ async def _passive_checks(
                     ),
                     "request_evidence": f"GET {url} HTTP/1.1",
                     "response_evidence": f"Cookie issues:\n{issue_text}",
+                    "evidence_json": _http_evidence_items_json(
+                        f"GET {url} HTTP/1.1",
+                        f"Cookie issues:\n{issue_text}",
+                        summary="Cookie security attributes were missing.",
+                        status=status,
+                        marker=issue_text,
+                    ),
                     "screenshot_b64": None,
                 })
 
@@ -3767,7 +4364,7 @@ async def _run_http_probe(
             headers=request_headers,
         )
         resp = await client.send(req, follow_redirects=True)
-        response_text = resp.text[:2000]
+        response_text = resp.text[:RESPONSE_EVIDENCE_LIMIT]
 
         req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
                                      if k.lower() not in ("cookie",))
@@ -3775,12 +4372,14 @@ async def _run_http_probe(
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
         request_evidence = (
             f"{user_note}{method} {req.url} HTTP/1.1\n{req_headers_text}"
-            + (f"\n\n{body_preview[:2000]}" if body_preview else "")
+            + (f"\n\n{body_preview[:REQUEST_EVIDENCE_LIMIT]}" if body_preview else "")
         )
         response_evidence = (
             f"HTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{response_text}"
         )
-        evidence = _combined_evidence(request_evidence, response_evidence)
+        request_evidence = _request_evidence(request_evidence)
+        response_evidence = _response_evidence(response_evidence)
+        evidence = _full_evidence(request_evidence, response_evidence)
         return {
             "desc": desc,
             "url": str(resp.url),
@@ -3790,6 +4389,13 @@ async def _run_http_probe(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=resp.status_code,
+                confidence="observed",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -3814,6 +4420,12 @@ async def _run_http_probe(
             "evidence": _combined_evidence(request_evidence, response_evidence),
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                confidence="error",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -3957,6 +4569,7 @@ async def _run_thinking_browser_action(
     last_status: Optional[int] = None
     last_headers: dict = {}
     action_log: list[str] = []
+    started = time.perf_counter()
 
     for raw_step in steps[:20]:
         if not isinstance(raw_step, dict):
@@ -4063,15 +4676,33 @@ async def _run_thinking_browser_action(
         f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
         f"Visible text excerpt:\n{visible_text[:3000]}"
     )
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    outcome = "Browser action completed."
+    if any(" failed:" in line for line in action_log):
+        outcome = "Browser action completed with failed steps."
     return {
         "desc": action.get("note") or "Browser action",
         "url": final_url,
         "status": last_status,
         "headers": last_headers,
         "body": body,
+        "duration_ms": duration_ms,
+        "action_log": action_log,
+        "action_outcome": outcome,
         "evidence": _combined_evidence(request_evidence, response_evidence),
         "request_evidence": request_evidence,
         "response_evidence": response_evidence,
+        "evidence_json": _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=action.get("note") or "Browser action",
+            status=last_status,
+            duration_ms=duration_ms,
+            action_outcome=outcome,
+            action_log=action_log,
+            screenshot_b64=screenshot_b64,
+            confidence="observed",
+        ),
         "screenshot_b64": screenshot_b64,
     }
 
@@ -4110,6 +4741,7 @@ async def _run_form_probe(
             target_page = pw_page
 
     try:
+        started = time.perf_counter()
         await target_page.goto(url, wait_until="domcontentloaded", timeout=15_000)
         await target_page.wait_for_selector(selector, state="visible", timeout=5_000)
 
@@ -4161,17 +4793,32 @@ async def _run_form_probe(
             f"Response body excerpt:\n{response_body}"
         )
         evidence = _combined_evidence(request_evidence, response_evidence)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        outcome = "Form probe submitted and response evidence captured." if response_status else "Form probe submitted; no matching network response was captured."
 
         return {
             "desc": desc,
             "url": url,
             "payload": payload,
             "status": response_status,
+            "duration_ms": duration_ms,
             "headers": {},
             "body": response_body,
+            "action_outcome": outcome,
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=response_status,
+                duration_ms=duration_ms,
+                action_outcome=outcome,
+                action_log=[f"goto {url}", f"fill {selector}", f"submit {submit}"],
+                screenshot_b64=screenshot_b64,
+                confidence="observed",
+            ),
             "screenshot_b64": screenshot_b64,
             "as_user": as_user,
         }
@@ -4524,9 +5171,19 @@ async def _stored_xss_sweep(
                 cvss_score=8.0,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
                 affected_url=page_url,
-                evidence=evidence[:4000],
-                request_evidence=request_evidence[:4000],
-                response_evidence=response_evidence[:4000],
+                evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(request_evidence),
+                response_evidence=_response_evidence(response_evidence),
+                evidence_json=_http_evidence_items_json(
+                    request_evidence,
+                    response_evidence,
+                    summary=(
+                        f"XSS canary '{canary}' injected during scanning was found stored "
+                        "and rendered unescaped in this page's HTML response."
+                    ),
+                    status=resp.status_code,
+                    marker=matched,
+                ),
                 screenshot_b64=None,
                 validation_status="confirmed",
                 validation_note=(

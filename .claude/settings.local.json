@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from aespa.services.scanner import _do_thinking_scan; from aespa.services.llm import thinking_next_action; print\\('imports ok'\\)\")",
+      "Bash(.venv/bin/python -m pytest tests/ -x -q)"
+    ]
+  }
+}
