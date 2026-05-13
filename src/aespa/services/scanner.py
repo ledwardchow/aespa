@@ -1866,6 +1866,9 @@ async def _do_thinking_scan(run_id: int) -> None:
     consecutive_context_tools = 0
     failed_url_counts: dict[str, int] = {}  # "METHOD:url" → count of 404/error responses
     blocked_urls: set[str] = set()          # URLs tried 3+ times and still failing
+    browser_url_counts: dict[str, int] = {}  # url → count of browser visits with failed steps
+    login_failure_counts: dict[str, int] = {}  # url → count of 401/403 on login endpoints
+    auth_bootstrap_warned = False           # prevent duplicate bootstrap warning events
 
     from playwright.async_api import async_playwright
 
@@ -1906,6 +1909,28 @@ async def _do_thinking_scan(run_id: int) -> None:
         extra_headers: dict[str, str] = {}
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
+
+        if requires_auth and creds and not cookie_jar and not auth_token:
+            _cred_username = creds[0].username
+            _warn_msg = (
+                f"Configured credentials for '{_cred_username}' did not produce a session "
+                f"after the login attempt — the password may be incorrect. "
+                f"Check the username and password in site settings."
+            )
+            log.warning("Dynamic scan auth bootstrap: %s", _warn_msg)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "credential_warning",
+                "status": "warning",
+                "message": _warn_msg,
+            })
+            auth_bootstrap_warned = True
+            crawl_context = (
+                f"WARNING: Configured credentials for '{_cred_username}' did not authenticate "
+                f"successfully. The password may be wrong. Test unauthenticated attack surface "
+                f"and do not spend steps retrying this credential.\n\n{crawl_context}"
+            )
+
         if requires_auth and creds and (cookie_jar or extra_headers):
             configured_primary = {
                 "label": "configured_primary",
@@ -2125,6 +2150,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
                     continue
 
+                # Initialise per-action state that the step_record block always reads.
+                _js_paths: list[str] = []
+
                 if action_type == "browser":
                     url = (action.get("url") or base_url).strip()
                     method = "BROWSER"
@@ -2173,12 +2201,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                         default_url=base_url,
                         scanner_policy=scanner_policy,
                     )
+                    # Traffic is captured in-function and already formatted into body.
                     resp_body = str(result.get("body") or "")[:BODY_READ_LIMIT]
                     resp_status = result.get("status") or 0
                     resp_headers = result.get("headers") or {}
                     url = result.get("url") or url
                     req_body = {"steps": steps}
                     result["desc"] = note
+
+                    # Track repeated failed browser interactions on the same URL.
+                    _action_log = result.get("action_log") or []
+                    _had_failures = any(" failed:" in line for line in _action_log)
+                    if _had_failures:
+                        _browser_url = action.get("url") or base_url
+                        browser_url_counts[_browser_url] = (
+                            browser_url_counts.get(_browser_url, 0) + 1
+                        )
+                        if browser_url_counts[_browser_url] >= 3:
+                            blocked_urls.add(_browser_url)
+                            log.debug(
+                                "Thinking scan: browser URL blocked after 3 failed attempts: %s",
+                                _browser_url,
+                            )
                 elif action_type == "jwt":
                     method = "JWT"
                     url = f"jwt://forge/{action.get('store_as') or 'token'}"
@@ -2558,7 +2602,6 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                     req_body_str = ""
                     duration_ms: int | None = None
-                    _js_paths: list[str] = []
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
@@ -2614,9 +2657,19 @@ async def _do_thinking_scan(run_id: int) -> None:
                         _ct = resp_headers.get("content-type", "").lower()
                         _is_js = "javascript" in _ct or url.split("?")[0].lower().endswith(".js")
                         if _is_js and resp_status == 200:
+                            # Capture /api/... paths and also bare paths that look like
+                            # API routes (e.g. '/transfers', '/own-transfers', '/payments').
+                            _raw_paths = re.findall(
+                                r'["\']((?:/api)?/[a-zA-Z0-9_-][a-zA-Z0-9_/{}.-]*)["\']',
+                                raw_resp_body,
+                            )
+                            # Filter out obvious static assets and keep meaningful paths.
                             _js_paths = list(dict.fromkeys(
-                                re.findall(r'["\'](/api/[a-zA-Z0-9_/{}.-]+)["\']', raw_resp_body)
-                            ))[:30]
+                                p for p in _raw_paths
+                                if len(p) >= 4
+                                and not p.endswith((".js", ".css", ".html", ".png", ".ico"))
+                                and not p.startswith("//")
+                            ))[:40]
                             if _js_paths:
                                 try:
                                     from aespa.services.crawler import _save_intel_item as _si
@@ -2702,6 +2755,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                 # (pick tools or a different approach) rather than blindly retrying.
                 if failed_url_counts.get(_probe_key, 0) >= 2:
                     consecutive_context_tools = max(consecutive_context_tools - 1, 0)
+
+                # Detect repeated 401/403 on login-like endpoints — likely a bad password.
+                _is_login_endpoint = method == "POST" and any(
+                    term in url.lower()
+                    for term in ("/login", "/auth/", "/signin", "/authenticate", "/token")
+                )
+                if _is_login_endpoint and resp_status in (401, 403):
+                    login_failure_counts[url] = login_failure_counts.get(url, 0) + 1
+                    if login_failure_counts[url] == 2 and not auth_bootstrap_warned:
+                        _cred_username = creds[0].username if creds else "configured user"
+                        _lf_msg = (
+                            f"Repeated {resp_status} from {url} — the configured credentials "
+                            f"for '{_cred_username}' are likely incorrect. "
+                            f"Check the password in site settings and do not retry this login."
+                        )
+                        log.warning("Thinking scan: %s", _lf_msg)
+                        events_svc.emit(run_id, {
+                            "type": "scanner_phase",
+                            "phase": "credential_warning",
+                            "status": "warning",
+                            "message": _lf_msg,
+                        })
 
                 all_results.append(result)
                 task_graph_svc.complete_task_after_result(
@@ -4557,13 +4632,23 @@ def _probe_policy_rejection(probe: dict, page_url: str, scanner_policy) -> str |
 
 # ── Playwright form probe execution ───────────────────────────────────────────
 
+_BROWSER_TRAFFIC_BODY_LIMIT = 32 * 1024   # 32 KB per captured response body
+_BROWSER_SKIP_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".ico", ".woff2", ".svg", ".ttf", ".gif", ".webp"}
+_BROWSER_SKIP_RESOURCE_TYPES = {"image", "font", "media", "stylesheet"}
+
+
 async def _run_thinking_browser_action(
     pw_page,
     action: dict,
     default_url: str,
     scanner_policy=None,
 ) -> dict:
-    """Execute a compact browser action chosen by the Thinking scan LLM."""
+    """Execute a compact browser action chosen by the Thinking scan LLM.
+
+    Captures all HTTP traffic made during the action via local page-level listeners
+    and includes a formatted summary directly in the response body so the LLM sees
+    it immediately without needing a traffic_search call.
+    """
     import base64 as _b64
 
     url = (action.get("url") or default_url).strip()
@@ -4577,71 +4662,160 @@ async def _run_thinking_browser_action(
     action_log: list[str] = []
     started = time.perf_counter()
 
-    for raw_step in steps[:20]:
-        if not isinstance(raw_step, dict):
-            continue
-        op = str(raw_step.get("op") or "").lower().strip()
+    # ── Local traffic capture ─────────────────────────────────────────────────
+    # Register page-level listeners that collect traffic in-memory.  These fire
+    # in addition to the context-level handler that writes to the DB, so the DB
+    # record is unchanged.  Reading body() bytes here (rather than text()) is
+    # the most reliable approach: body() reads the raw buffer that Playwright
+    # already has, whereas text() can fail if encoding detection breaks.
+    _pending_reqs: dict[int, dict] = {}
+    _captured: list[dict] = []
+
+    async def _cap_request(req) -> None:
+        # Store timing and body only; full headers read in _cap_response.
+        rid = id(req)
+        post_data = req.post_data
+        if post_data is None:
+            try:
+                pd_json = req.post_data_json
+                if pd_json is not None:
+                    post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+        _pending_reqs[rid] = {
+            "method": req.method,
+            "url":    req.url,
+            "post_data": post_data,
+            "t0":    time.monotonic(),
+        }
+
+    async def _cap_response(resp) -> None:
+        if resp.request.resource_type in _BROWSER_SKIP_RESOURCE_TYPES:
+            return
+        rid = id(resp.request)
+        req_info = _pending_reqs.pop(rid, {})
+        dur = int((time.monotonic() - req_info.get("t0", time.monotonic())) * 1000)
+
+        # Full request headers — only reliable after the request has been sent.
         try:
-            if op == "goto":
-                step_url = (raw_step.get("url") or url or default_url).strip()
-                action_log.append(f"goto {step_url}")
-                resp = await pw_page.goto(step_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                if resp:
-                    last_status = resp.status
-                    try:
-                        last_headers = await resp.all_headers()
-                    except Exception:
-                        last_headers = {}
-            elif op in {"fill", "type"}:
-                selector = raw_step.get("selector")
-                value = str(raw_step.get("value") or "")
-                if not selector:
-                    action_log.append(f"{op} skipped: missing selector")
-                    continue
-                action_log.append(f"{op} {selector}={_compact_log_value(value, 120)}")
-                loc = pw_page.locator(selector).first
-                await loc.wait_for(state="visible", timeout=5_000)
-                if op == "fill":
-                    await loc.fill(value, timeout=5_000)
-                else:
-                    await loc.type(value, delay=20, timeout=5_000)
-            elif op == "click":
-                selector = raw_step.get("selector")
-                if not selector:
-                    action_log.append("click skipped: missing selector")
-                    continue
-                action_log.append(f"click {selector}")
-                await pw_page.locator(selector).first.click(timeout=5_000)
-            elif op == "press":
-                selector = raw_step.get("selector")
-                key = raw_step.get("key") or "Enter"
-                if not selector:
-                    action_log.append("press skipped: missing selector")
-                    continue
-                action_log.append(f"press {selector} {key}")
-                await pw_page.locator(selector).first.press(str(key), timeout=5_000)
-            elif op == "wait":
-                if raw_step.get("ms") is not None:
-                    ms = max(0, min(int(raw_step.get("ms") or 0), 10_000))
-                    action_log.append(f"wait {ms}ms")
-                    await asyncio.sleep(ms / 1000)
-                else:
-                    state = str(raw_step.get("state") or "networkidle")
-                    if state not in {"domcontentloaded", "load", "networkidle"}:
-                        state = "networkidle"
-                    action_log.append(f"wait {state}")
-                    await pw_page.wait_for_load_state(state, timeout=timeout_ms)
-            elif op == "snapshot":
-                action_log.append("snapshot")
+            req_headers = await resp.request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(resp.request.headers)
+            except Exception:
+                req_headers = {}
+
+        # Prefer body captured at request time; fall back to resp.request.
+        post_data = req_info.get("post_data")
+        if post_data is None:
+            try:
+                post_data = resp.request.post_data
+                if post_data is None:
+                    pd_json = resp.request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        try:
+            body_bytes = await resp.body()
+            ct = resp.headers.get("content-type", "")
+            if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
+                resp_text: Optional[str] = body_bytes.decode(errors="replace")[:_BROWSER_TRAFFIC_BODY_LIMIT]
             else:
-                action_log.append(f"unsupported op: {op or '(missing)'}")
-        except Exception as exc:
-            action_log.append(f"{op or 'step'} failed: {exc}")
+                resp_text = f"[binary, {len(body_bytes)} bytes]"
+        except Exception:
+            resp_text = None
+
+        _captured.append({
+            "method":          req_info.get("method", resp.request.method),
+            "url":             resp.url,
+            "status":          resp.status,
+            "request_headers": req_headers,
+            "request_body":    post_data,
+            "response_body":   resp_text,
+            "content_type":    resp.headers.get("content-type", ""),
+            "duration_ms":     dur,
+        })
+
+    pw_page.on("request", _cap_request)
+    pw_page.on("response", _cap_response)
+    # ─────────────────────────────────────────────────────────────────────────
 
     try:
-        await pw_page.wait_for_load_state("networkidle", timeout=2_000)
-    except Exception:
-        pass
+        for raw_step in steps[:20]:
+            if not isinstance(raw_step, dict):
+                continue
+            op = str(raw_step.get("op") or "").lower().strip()
+            try:
+                if op == "goto":
+                    step_url = (raw_step.get("url") or url or default_url).strip()
+                    action_log.append(f"goto {step_url}")
+                    resp = await pw_page.goto(step_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    if resp:
+                        last_status = resp.status
+                        try:
+                            last_headers = await resp.all_headers()
+                        except Exception:
+                            last_headers = {}
+                elif op in {"fill", "type"}:
+                    selector = raw_step.get("selector")
+                    value = str(raw_step.get("value") or "")
+                    if not selector:
+                        action_log.append(f"{op} skipped: missing selector")
+                        continue
+                    action_log.append(f"{op} {selector}={_compact_log_value(value, 120)}")
+                    loc = pw_page.locator(selector).first
+                    await loc.wait_for(state="visible", timeout=5_000)
+                    if op == "fill":
+                        await loc.fill(value, timeout=5_000)
+                    else:
+                        await loc.type(value, delay=20, timeout=5_000)
+                elif op == "click":
+                    selector = raw_step.get("selector")
+                    if not selector:
+                        action_log.append("click skipped: missing selector")
+                        continue
+                    action_log.append(f"click {selector}")
+                    await pw_page.locator(selector).first.click(timeout=5_000)
+                elif op == "press":
+                    selector = raw_step.get("selector")
+                    key = raw_step.get("key") or "Enter"
+                    if not selector:
+                        action_log.append("press skipped: missing selector")
+                        continue
+                    action_log.append(f"press {selector} {key}")
+                    await pw_page.locator(selector).first.press(str(key), timeout=5_000)
+                elif op == "wait":
+                    if raw_step.get("ms") is not None:
+                        ms = max(0, min(int(raw_step.get("ms") or 0), 10_000))
+                        action_log.append(f"wait {ms}ms")
+                        await asyncio.sleep(ms / 1000)
+                    else:
+                        state = str(raw_step.get("state") or "networkidle")
+                        if state not in {"domcontentloaded", "load", "networkidle"}:
+                            state = "networkidle"
+                        action_log.append(f"wait {state}")
+                        await pw_page.wait_for_load_state(state, timeout=timeout_ms)
+                elif op == "snapshot":
+                    action_log.append("snapshot")
+                else:
+                    action_log.append(f"unsupported op: {op or '(missing)'}")
+            except Exception as exc:
+                action_log.append(f"{op or 'step'} failed: {exc}")
+
+        try:
+            await pw_page.wait_for_load_state("networkidle", timeout=2_000)
+        except Exception:
+            pass
+
+    finally:
+        # Always deregister local listeners regardless of whether steps succeeded.
+        try:
+            pw_page.remove_listener("request", _cap_request)
+            pw_page.remove_listener("response", _cap_response)
+        except Exception:
+            pass
 
     final_url = pw_page.url or url or default_url
     try:
@@ -4664,12 +4838,40 @@ async def _run_thinking_browser_action(
     except Exception:
         pass
 
+    # ── Build traffic summary ─────────────────────────────────────────────────
+    # Filter to API / same-origin non-asset requests and format them for the LLM.
+    _api_entries = [
+        t for t in _captured
+        if "/api/" in t["url"]
+        or (
+            not any(t["url"].split("?")[0].endswith(ext) for ext in _BROWSER_SKIP_EXTENSIONS)
+            and not t["url"].startswith("data:")
+            and not t["url"].startswith("blob:")
+        )
+    ]
+    _traffic_section = ""
+    if _api_entries:
+        _lines: list[str] = []
+        for t in _api_entries[:15]:
+            _lines.append(f"  {t['method']} {t['url']} → {t['status']}")
+            if t.get("request_body"):
+                _lines.append(f"    Request body: {t['request_body'][:400]}")
+            if t.get("response_body"):
+                _lines.append(f"    Response: {t['response_body'][:600]}")
+        _traffic_section = (
+            "[Traffic captured during browser interaction:]\n"
+            + "\n".join(_lines)
+            + "\n\n"
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
     body = (
-        f"Final URL: {final_url}\n"
-        f"Title: {title}\n"
-        f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
-        f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
-        f"HTML excerpt:\n{html[:3000]}"
+        _traffic_section
+        + f"Final URL: {final_url}\n"
+        + f"Title: {title}\n"
+        + f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
+        + f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
+        + f"HTML excerpt:\n{html[:3000]}"
     )
     request_evidence = (
         f"BROWSER ACTION\nInitial URL: {url or default_url}\n"
@@ -4680,7 +4882,8 @@ async def _run_thinking_browser_action(
         f"Title: {title}\n"
         f"Last response status: {last_status}\n\n"
         f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
-        f"Visible text excerpt:\n{visible_text[:3000]}"
+        + (_traffic_section if _traffic_section else "")
+        + f"Visible text excerpt:\n{visible_text[:3000]}"
     )
     duration_ms = int((time.perf_counter() - started) * 1000)
     outcome = "Browser action completed."
@@ -4692,6 +4895,7 @@ async def _run_thinking_browser_action(
         "status": last_status,
         "headers": last_headers,
         "body": body,
+        "captured_traffic": _captured,
         "duration_ms": duration_ms,
         "action_log": action_log,
         "action_outcome": outcome,
