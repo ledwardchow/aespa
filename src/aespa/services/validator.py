@@ -146,7 +146,7 @@ async def validate_finding_inline(
 
     if cred_sessions is None:
         cred_sessions = await _get_or_create_sessions(
-            run_id, site.base_url.rstrip("/"), site.login_url,
+            run_id, str(site.base_url or "").strip(), site.login_url,
             creds, site.requires_auth,
         ) if site else {}
 
@@ -226,7 +226,7 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
 
     # Bootstrap sessions (reuse from active scan if possible).
     cred_sessions = await _get_or_create_sessions(
-        run_id, site.base_url.rstrip("/"), site.login_url,
+        run_id, str(site.base_url or "").strip(), site.login_url,
         creds, site.requires_auth,
     )
 
