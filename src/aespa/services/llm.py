@@ -1570,6 +1570,8 @@ TASK: What is the single most valuable action to take RIGHT NOW?
 Think like a human tester:
 - Use context tools to pull only the specific crawl/history/finding details you need. Do not
   assume route details are available inline unless they appear in the compact context or history.
+- If a target-driven task graph is present in the crawl context, prefer high-priority queued
+  or running tasks and reference the matching hypothesis in your observation/note.
 - Start broad with site_map when route coverage is unclear, then use page_detail or
   history_search before sending a probe that depends on precise parameters or prior evidence.
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
