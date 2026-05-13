@@ -1565,6 +1565,11 @@ Application context discovered during crawling:
 
 {credentials_section}
 {sessions_section}
+RULE: Any vulnerability listed under CONFIRMED VULNERABILITIES is CLOSED — do not probe
+it again or attempt to re-prove it. If you need an authenticated session to reach a NEW
+endpoint, pick an existing session label from the list above; do not re-fetch secrets or
+re-forge tokens for issues that are already confirmed.
+
 Step {current_step} of {max_steps}.
 
 {pentest_playbook}
@@ -1599,7 +1604,7 @@ Think like a human tester:
 - Do not finish until you have covered the endpoint inventory, authentication boundaries,
     object ownership, business-logic gates, input validation, error disclosure, and headers,
     unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
-- If step count is getting high, prefer confirming likely findings over exploring new areas.
+- If step count is getting high, prefer discovering new attack surfaces over re-testing already-confirmed findings.
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
 
@@ -1889,8 +1894,8 @@ async def thinking_next_action(
             for s in sessions
         ]
         sessions_section = (
-            "Reusable in-memory sessions discovered during this Thinking scan "
-            "(set use_session to one of these labels; secrets are not shown):\n"
+            "Reusable authenticated sessions (includes sessions from prior scans) — "
+            "use these labels instead of re-authenticating or re-forging tokens:\n"
             + "\n".join(session_lines)
         )
 
