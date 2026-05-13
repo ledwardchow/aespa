@@ -64,6 +64,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "cvss_vector", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "request_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")

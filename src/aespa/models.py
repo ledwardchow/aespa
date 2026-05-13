@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
@@ -324,11 +325,20 @@ class ScanFinding(SQLModel, table=True):
     evidence: str = Field(default="")          # formatted request + response excerpt
     request_evidence: str = Field(default="")
     response_evidence: str = Field(default="")
+    evidence_json: str = Field(default="[]")
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     # Validation fields
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)
+
+    @property
+    def evidence_items(self) -> list[dict]:
+        try:
+            parsed = json.loads(self.evidence_json or "[]")
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
 
 
 class ScanLog(SQLModel, table=True):
