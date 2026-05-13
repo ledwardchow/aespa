@@ -1358,7 +1358,7 @@ legend {
 .task-status.status-running, .task-status.status-testing { background:rgba(91,141,239,0.18); color:#93c5fd; }
 .task-status.status-done, .task-status.status-confirmed { background:rgba(34,197,94,0.16); color:#86efac; }
 .task-status.status-blocked, .task-status.status-rejected { background:rgba(239,68,68,0.16); color:#fca5a5; }
-.task-status.status-deferred, .task-status.status-skipped { background:rgba(245,158,11,0.16); color:#fcd34d; }
+.task-status.status-unconfirmed, .task-status.status-skipped { background:rgba(245,158,11,0.16); color:#fcd34d; }
 .task-table-wrap { overflow:auto; }
 .task-table { width:100%; min-width:920px; border-collapse:collapse; font-size:12px; }
 .task-table th { text-align:left; padding:8px 12px; font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); border-bottom:1px solid var(--border); background:var(--panel); }

@@ -242,7 +242,7 @@ class PentestHypothesis(SQLModel, table=True):
     description: str = Field(default="")
     attack_area: str = Field(default="", index=True)
     owasp_category: str = Field(default="")
-    status: str = Field(default="open", index=True)  # open | testing | confirmed | rejected | deferred
+    status: str = Field(default="open", index=True)  # open | testing | confirmed | rejected | unconfirmed
     priority: int = Field(default=50, index=True)
     confidence: float = Field(default=0.5)
     rationale: str = Field(default="")
