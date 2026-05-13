@@ -460,7 +460,13 @@ def _build_compact_thinking_context(
             f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
             for f in findings_snapshot
         ]
-        sections.append("Existing findings summary:\n" + "\n".join(lines))
+        sections.append(
+            "CONFIRMED VULNERABILITIES — already proven, do NOT re-test:\n"
+            "You may USE a confirmed exploit capability (e.g. a known JWT secret or admin "
+            "password) only as a stepping stone to reach NEW endpoints. Do not spend steps "
+            "re-proving issues already in this list.\n"
+            + "\n".join(lines)
+        )
     return "\n\n".join(sections)
 
 
