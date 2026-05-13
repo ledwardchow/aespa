@@ -619,6 +619,26 @@ def _finding_from_llm(
     )
 
 
+def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> int:
+    saved = 0
+    if not findings:
+        return saved
+    with Session(get_engine()) as s:
+        for finding in findings:
+            if _finding_exists(
+                s,
+                run_id=run_id,
+                title=finding.title,
+                affected_url=finding.affected_url,
+                owasp_category=finding.owasp_category,
+            ):
+                continue
+            s.add(finding)
+            saved += 1
+        s.commit()
+    return saved
+
+
 def _find_or_create_dynamic_page(
     session: Session,
     *,
@@ -720,6 +740,32 @@ def _dynamic_finding_exists(
         f.title.strip().lower() == normalized_title
         or (
             f.owasp_category.strip().lower() == normalized_owasp
+            and f.title.strip().lower() == normalized_title
+        )
+        for f in existing
+    )
+
+
+def _finding_exists(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str = "",
+) -> bool:
+    existing = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.affected_url == affected_url)
+    ).all()
+    normalized_title = (title or "").strip().lower()
+    normalized_owasp = (owasp_category or "").strip().lower()
+    return any(
+        f.title.strip().lower() == normalized_title
+        or (
+            normalized_owasp
+            and f.owasp_category.strip().lower() == normalized_owasp
             and f.title.strip().lower() == normalized_title
         )
         for f in existing
@@ -895,23 +941,17 @@ def _emit_thinking_status(run_id: int) -> None:
 
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
-    _mark_run(run_id, scan_status="running")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
-        _mark_run(run_id, scan_status="stopped")
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
         raise
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
-        _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
     finally:
         _thinking_stop_requested.discard(run_id)
@@ -1701,8 +1741,6 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     stopped = run_id in _thinking_stop_requested
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
-    _mark_run(run_id, scan_status="stopped" if stopped else "complete")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
@@ -1944,6 +1982,14 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions
 
+        if run_id not in _stop_requested:
+            await _run_deterministic_site_modules(
+                run_id=run_id,
+                base_url=base_url,
+                cred_sessions=cred_sessions,
+                scanner_policy=scanner_policy,
+            )
+
         # Build httpx client with exported auth state.
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -1981,6 +2027,433 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
 
 # ── Per-page scan ─────────────────────────────────────────────────────────────
+
+async def _run_deterministic_site_modules(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> None:
+    """Run deterministic site-level modules that do not require LLM reasoning."""
+    if scanner_policy and scanner_policy.scan_mode == "passive":
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "start",
+        "message": "Running deterministic auth and IDOR modules…",
+    })
+    findings: list[ScanFinding] = []
+    findings.extend(await _run_auth_matrix_module(
+        run_id=run_id,
+        base_url=base_url,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    findings.extend(await _run_idor_matrix_module(
+        run_id=run_id,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    saved = _save_deterministic_findings(run_id, findings)
+    if saved:
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "complete",
+        "message": f"Deterministic modules complete — {saved} finding(s) recorded.",
+        "data": {"finding_count": saved},
+    })
+
+
+async def _run_auth_matrix_module(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Check high-value endpoints anonymously and across available sessions."""
+    targets = _auth_matrix_targets(run_id, base_url)
+    if not targets:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    findings: list[ScanFinding] = []
+
+    for target in targets[:80]:
+        if run_id in _stop_requested:
+            break
+        url = target["url"]
+        method = target.get("method") or "GET"
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            method = "GET"
+        if not _same_origin_or_relative(base_url, url):
+            continue
+
+        anon_result = await _fetch_matrix_url(
+            url,
+            method=method,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
+        if not anon_result:
+            continue
+        if _is_successful_access(anon_result) and _target_requires_auth_or_sensitive(target):
+            findings.append(_auth_matrix_finding(
+                run_id=run_id,
+                target=target,
+                result=anon_result,
+                title="Unauthenticated access to protected endpoint",
+                description=(
+                    "The deterministic auth matrix requested a protected or sensitive-looking "
+                    "endpoint without cookies or Authorization and received a successful response."
+                ),
+                actor="anonymous",
+                cvss_score=6.5,
+            ))
+
+        if not cred_sessions or "/admin" not in url.lower():
+            await sleep_between_probes(scanner_policy)
+            continue
+
+        for cred_id, session in cred_sessions.items():
+            if cred_id in set(target.get("accessible_by") or []):
+                continue
+            result = await _fetch_matrix_url(
+                url,
+                method=method,
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if result and _is_successful_access(result) and not _looks_like_denial(result["body"]):
+                findings.append(_auth_matrix_finding(
+                    run_id=run_id,
+                    target=target,
+                    result=result,
+                    title="Unauthorized role access to admin endpoint",
+                    description=(
+                        "A credential that was not observed with access to this admin-looking "
+                        "endpoint received a successful direct response."
+                    ),
+                    actor=session.get("username") or f"credential {cred_id}",
+                    cvss_score=8.1,
+                ))
+            await sleep_between_probes(scanner_policy)
+
+    return findings
+
+
+async def _run_idor_matrix_module(
+    *,
+    run_id: int,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Compare object-reference pages across users using crawled ground truth."""
+    if not cred_sessions or len(cred_sessions) < 2:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+            .where(CrawledPage.status == "crawled")
+        ))
+
+    findings: list[ScanFinding] = []
+    id_pages = [
+        page for page in pages
+        if _url_has_object_reference(page.url) and json.loads(page.accessible_by or "[]")
+    ]
+    for page in id_pages[:80]:
+        if run_id in _stop_requested:
+            break
+        accessible = set(json.loads(page.accessible_by or "[]"))
+        unauthorized = [
+            (cred_id, session)
+            for cred_id, session in cred_sessions.items()
+            if cred_id not in accessible
+        ]
+        if not unauthorized:
+            continue
+        for cred_id, session in unauthorized[:3]:
+            result = await _fetch_matrix_url(
+                page.url,
+                method="GET",
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if not result or not _is_successful_access(result):
+                continue
+            if _looks_like_denial(result["body"]) or _looks_like_spa_shell(
+                result["body"], result["headers"].get("content-type", "")
+            ):
+                continue
+            if not _body_contains_original_page_evidence(result["body"], page.title or "", page.page_text or ""):
+                continue
+            findings.append(_idor_matrix_finding(
+                run_id=run_id,
+                page=page,
+                result=result,
+                actor=session.get("username") or f"credential {cred_id}",
+            ))
+            break
+        await sleep_between_probes(scanner_policy)
+    return findings
+
+
+def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
+    targets: dict[str, dict] = {}
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+        ))
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind.in_(["endpoint", "script"]))
+        ))
+
+    for page in pages:
+        targets[page.url] = {
+            "url": page.url,
+            "method": "GET",
+            "source": "crawled_page",
+            "req_auth": page.req_auth,
+            "has_object_ref": page.has_object_ref,
+            "has_business_logic": page.has_business_logic,
+            "accessible_by": json.loads(page.accessible_by or "[]"),
+            "page_id": page.id,
+        }
+    for item in intel:
+        raw_url = item.value or item.url or item.key
+        url = _absolute_target_url(base_url, raw_url)
+        if not url:
+            continue
+        targets.setdefault(url, {
+            "url": url,
+            "method": (item.method or "GET").upper(),
+            "source": item.source,
+            "req_auth": None,
+            "has_object_ref": _url_has_object_reference(url),
+            "has_business_logic": False,
+            "accessible_by": [],
+            "page_id": None,
+            "intel_key": item.key,
+        })
+    return sorted(
+        targets.values(),
+        key=lambda t: (
+            0 if _target_requires_auth_or_sensitive(t) else 1,
+            t["url"],
+        ),
+    )
+
+
+async def _fetch_matrix_url(
+    url: str,
+    *,
+    method: str = "GET",
+    session: dict | None = None,
+    timeout: float = REQUEST_TIMEOUT,
+    follow_redirects: bool = True,
+) -> dict | None:
+    headers = {"User-Agent": _UA}
+    cookies = None
+    actor = "anonymous"
+    if session:
+        headers.update(session.get("extra_headers", {}))
+        cookies = session.get("cookies", {})
+        actor = session.get("username") or "credential"
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            verify=False,
+            timeout=timeout,
+        ) as client:
+            resp = await client.request(method, url)
+        request_evidence = (
+            f"{method} {url} HTTP/1.1\n"
+            f"Actor: {actor}\n"
+            f"Authorization: {'present' if session and session.get('extra_headers') else 'none'}"
+        )
+        response_evidence = (
+            f"HTTP/1.1 {resp.status_code}\n"
+            + "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+            + "\n\n"
+            + resp.text[:2000]
+        )
+        return {
+            "url": str(resp.url),
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text[:BODY_READ_LIMIT],
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
+        }
+    except Exception as exc:
+        log.debug("Deterministic matrix request failed for %s: %s", url, exc)
+        return None
+
+
+def _auth_matrix_finding(
+    *,
+    run_id: int,
+    target: dict,
+    result: dict,
+    title: str,
+    description: str,
+    actor: str,
+    cvss_score: float,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=target.get("page_id"),
+        owasp_category="A01",
+        severity=_severity_from_cvss(cvss_score),
+        title=title,
+        description=description,
+        impact=(
+            "Attackers may be able to access protected application functionality or "
+            "sensitive operational data without the intended authentication or role checks."
+        ),
+        likelihood="Confirmed by deterministic auth matrix request.",
+        recommendation=(
+            "Enforce server-side authentication and authorization on the endpoint. "
+            "Do not rely on client-side route hiding or UI controls."
+        ),
+        cvss_score=cvss_score,
+        cvss_vector="",
+        affected_url=result.get("url") or target["url"],
+        evidence=_combined_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+        )[:4000],
+        request_evidence=result["request_evidence"][:4000],
+        response_evidence=result["response_evidence"][:4000],
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic auth matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _idor_matrix_finding(
+    *,
+    run_id: int,
+    page: CrawledPage,
+    result: dict,
+    actor: str,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=page.id,
+        owasp_category="A01",
+        severity="high",
+        title="Insecure direct object reference",
+        description=(
+            "A credential that was not observed with access to this object-reference URL "
+            "could request it directly and received recognizable protected content."
+        ),
+        impact=(
+            "A user may be able to access another user's records or tenant data by "
+            "guessing or reusing object identifiers."
+        ),
+        likelihood="Confirmed by deterministic IDOR matrix comparison.",
+        recommendation=(
+            "Enforce object ownership checks on every request using server-side authorization "
+            "logic. Avoid exposing predictable object identifiers where possible."
+        ),
+        cvss_score=8.1,
+        cvss_vector="",
+        affected_url=page.url,
+        evidence=_combined_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received content matching the protected object page.",
+        )[:4000],
+        request_evidence=result["request_evidence"][:4000],
+        response_evidence=result["response_evidence"][:4000],
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic IDOR matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _target_requires_auth_or_sensitive(target: dict) -> bool:
+    url = str(target.get("url") or "").lower()
+    if target.get("req_auth") is True:
+        return True
+    if target.get("has_business_logic") or target.get("has_object_ref"):
+        return True
+    return any(marker in url for marker in (
+        "/admin", "/account", "/accounts", "/user", "/users", "/profile",
+        "/transfer", "/transaction", "/invoice", "/order", "/config", "/debug",
+        "/metrics", "/openapi", "/swagger",
+    ))
+
+
+def _is_successful_access(result: dict) -> bool:
+    status = result.get("status")
+    if status not in (200, 201, 202, 204, 206):
+        return False
+    body = result.get("body") or ""
+    return not _looks_like_denial(body)
+
+
+def _looks_like_denial(body: str) -> bool:
+    text = (body or "")[:5000].lower()
+    return any(marker in text for marker in (
+        "unauthorized", "forbidden", "access denied", "permission denied",
+        "not authorized", "login required", "please log in", "sign in",
+        "authentication required", "invalid token",
+    ))
+
+
+def _url_has_object_reference(url: str) -> bool:
+    parsed = urlparse(url)
+    if re.search(r"/(?:[0-9]+|[0-9a-f]{8,}(?:-[0-9a-f]{4,}){2,})(?:[/?.#]|$)", parsed.path, re.I):
+        return True
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return any(
+        re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction)(?:_|$)", key, re.I)
+        and values
+        for key, values in qs.items()
+    )
+
+
+def _absolute_target_url(base_url: str, raw_url: str) -> str:
+    raw_url = (raw_url or "").strip()
+    if not raw_url or raw_url.startswith(("javascript:", "mailto:", "#")):
+        return ""
+    parsed = urlparse(raw_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw_url
+    if raw_url.startswith("/"):
+        base = urlparse(base_url)
+        return urlunparse((base.scheme, base.netloc, raw_url, "", "", ""))
+    return ""
+
+
+def _same_origin_or_relative(base_url: str, url: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return True
+    base = urlparse(base_url)
+    return parsed.scheme in {"http", "https"} and parsed.netloc == base.netloc
+
 
 async def _scan_page(
     run_id: int,
@@ -2174,6 +2647,24 @@ async def _scan_page(
                 "message": _followup_log_message(followup_probes, tense="complete"),
                 "data": {"followup_count": len(followup_probes), **followup_details},
             })
+
+    deterministic_findings = _deterministic_findings_from_results(
+        run_id=run_id,
+        page_id=page_id,
+        page_url=page_url,
+        results=results,
+    )
+    deterministic_saved = _save_deterministic_findings(run_id, deterministic_findings)
+    if deterministic_saved:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "deterministic_analysis",
+            "status": "complete",
+            "page_url": page_url,
+            "message": f"{deterministic_saved} deterministic finding(s) recorded",
+            "data": {"finding_count": deterministic_saved},
+        })
+        _emit_scan_update(run_id)
 
     # Phase 3: LLM analyses results and produces findings.
     try:
@@ -2464,6 +2955,164 @@ def _protected_content_candidates(page_title: str, page_text: str) -> list[str]:
         if title.lower() not in generic_words:
             candidates.append(title)
     return candidates
+
+
+# ── Deterministic result analysis ─────────────────────────────────────────────
+
+_SQL_ERROR_PATTERNS = (
+    "sql syntax", "mysql", "postgresql", "sqlite", "ora-", "odbc",
+    "unterminated quoted string", "you have an error in your sql syntax",
+    "syntax error at or near", "unclosed quotation mark", "sqlstate",
+)
+_SENSITIVE_FIELD_PATTERNS = (
+    "password_hash", "passwordhash", "passwd", "jwt_secret", "api_key",
+    "apikey", "secret_key", "private_key", "totp_secret", "mfa_secret",
+    "access_token", "refresh_token", "debug", "stack_trace",
+)
+
+
+def _deterministic_findings_from_results(
+    *,
+    run_id: int,
+    page_id: int,
+    page_url: str,
+    results: list[dict],
+) -> list[ScanFinding]:
+    findings: list[ScanFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        desc = str(result.get("desc") or "")
+        url = str(result.get("url") or page_url)
+        body = str(result.get("body") or "")
+        status = result.get("status")
+        haystack = f"{desc}\n{url}\n{body}".lower()
+
+        def add(title: str, owasp: str, score: float, description: str, impact: str, recommendation: str) -> None:
+            key = (title, url)
+            if key in seen:
+                return
+            seen.add(key)
+            findings.append(ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category=owasp,
+                severity=_severity_from_cvss(score),
+                title=title,
+                description=description,
+                impact=impact,
+                likelihood="Confirmed by deterministic response analysis.",
+                recommendation=recommendation,
+                cvss_score=score,
+                cvss_vector="",
+                affected_url=url,
+                evidence=str(result.get("evidence") or _combined_evidence(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body[:2000]),
+                ))[:4000],
+                request_evidence=str(result.get("request_evidence") or "")[:4000],
+                response_evidence=str(result.get("response_evidence") or body[:4000])[:4000],
+                screenshot_b64=result.get("screenshot_b64"),
+                validation_status="confirmed",
+                validation_note="Confirmed by deterministic module.",
+                created_at=_utcnow(),
+            ))
+
+        if ("sqli" in desc.lower() or any(p in haystack for p in ("' or '1'='1", "union select", "order by 999"))) and (
+            any(pattern in haystack for pattern in _SQL_ERROR_PATTERNS) or status == 500
+        ):
+            add(
+                "SQL injection error disclosure",
+                "A03",
+                7.1,
+                "An SQL injection probe produced a database error or server error indicative of unsafely handled input.",
+                "Attackers may be able to extract or modify database data by crafting SQL payloads.",
+                "Use parameterized queries, strict input validation, and generic error handling.",
+            )
+
+        reflected_payload = _reflected_payload_from_result(result)
+        if reflected_payload and reflected_payload in body and _looks_xss_payload(reflected_payload):
+            add(
+                "Reflected cross-site scripting",
+                "A03",
+                6.1,
+                "A script-capable payload was reflected in the response body without being removed or encoded.",
+                "Attackers could execute JavaScript in a victim browser if they can deliver a crafted URL or form submission.",
+                "Apply context-aware output encoding and reject dangerous HTML/JavaScript input where it is not expected.",
+            )
+
+        if "ssti" in desc.lower() and "49" in body and any(marker in haystack for marker in ("{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}")):
+            add(
+                "Server-side template injection",
+                "A03",
+                8.0,
+                "A template expression probe appears to have been evaluated by the server.",
+                "Template injection can lead to data exposure or remote code execution depending on the template engine.",
+                "Do not evaluate user-controlled strings as templates; sandbox template engines and validate input.",
+            )
+
+        if ("path" in desc.lower() or "../" in haystack or "%2f" in haystack) and "root:x:0:0" in body:
+            add(
+                "Path traversal file disclosure",
+                "A05",
+                7.5,
+                "A traversal payload returned content consistent with a system password file.",
+                "Attackers may read arbitrary files from the server filesystem.",
+                "Normalize paths, enforce allow-listed file roots, and reject traversal sequences before file access.",
+            )
+
+        if ("cmdi" in desc.lower() or "aespa_probe" in haystack) and "aespa_probe" in body:
+            add(
+                "Command injection",
+                "A03",
+                9.1,
+                "A command-injection marker appeared in the response after a shell metacharacter probe.",
+                "Attackers may execute arbitrary commands on the application server.",
+                "Avoid shell invocation with user input; use safe APIs and strict allow-list validation.",
+            )
+
+        if any(pattern in haystack for pattern in _SENSITIVE_FIELD_PATTERNS) and _looks_like_json_or_api(result):
+            add(
+                "Sensitive data exposed in API response",
+                "A02",
+                6.5,
+                "The response contains field names commonly associated with secrets, hashes, tokens, debug state, or privileged metadata.",
+                "Attackers can use leaked secrets or implementation details to compromise accounts or chain further attacks.",
+                "Remove sensitive fields from client-facing responses and enforce response DTO allow-lists.",
+            )
+
+    return findings
+
+
+def _reflected_payload_from_result(result: dict) -> str:
+    desc = str(result.get("desc") or "")
+    if ":" in desc:
+        candidate = desc.split(":", 1)[1].strip()
+        if candidate:
+            return candidate[:200]
+    parsed = urlparse(str(result.get("url") or ""))
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for values in qs.values():
+        for value in values:
+            if _looks_xss_payload(value):
+                return value
+    payload = str(result.get("payload") or "")
+    return payload if _looks_xss_payload(payload) else ""
+
+
+def _looks_xss_payload(value: str) -> bool:
+    lower = (value or "").lower()
+    return any(marker in lower for marker in (
+        "<script", "onerror=", "onload=", "ontoggle=", "javascript:alert",
+        "<svg", "autofocus", "<details", "alert(",
+    ))
+
+
+def _looks_like_json_or_api(result: dict) -> bool:
+    headers = {str(k).lower(): str(v).lower() for k, v in (result.get("headers") or {}).items()}
+    content_type = headers.get("content-type", "")
+    url = str(result.get("url") or "").lower()
+    body = str(result.get("body") or "").lstrip()
+    return "json" in content_type or "/api/" in url or body.startswith(("{", "["))
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────

@@ -483,6 +483,61 @@ def test_run_summary_ignores_non_live_running_scan_marker(monkeypatch):
         engine.dispose()
 
 
+def test_run_summary_does_not_infer_structured_complete_from_dynamic_page(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TestRunStatus
+    from aespa.services import scanner as scanner_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                title="Dynamic Scan target",
+                status="crawled",
+                in_scope=True,
+                scan_status="complete",
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(run)
+
+            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
+            monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {"status": "complete"})
+
+            summary = test_runs_api._run_summary(run, session)
+
+        assert summary.scan_total_pages == 1
+        assert summary.scan_pages_done == 1
+        assert summary.scan_status == "idle"
+        assert summary.thinking_status == "complete"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_get_run_not_found(client: TestClient):
     r = client.get("/api/test-runs/9999")
     assert r.status_code == 404
