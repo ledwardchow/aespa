@@ -78,8 +78,6 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
             if s.scan_status == "failed" and len(parts) > 2
             else None
         )
-    elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
-        s.scan_status = "complete"
     thinking = scanner_svc.get_thinking_scan_status(run.id)
     s.thinking_status = thinking.get("status", "idle")
     return s

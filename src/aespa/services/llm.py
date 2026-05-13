@@ -1612,6 +1612,20 @@ Context tools:
 - page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
 - history_search: args may include query and limit to retrieve prior response/request excerpts.
 - finding_list: args may include severity, owasp_category, search, and limit.
+- target_inventory: args may include kind, source, search/filter, and limit; returns normalized
+  endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
+- search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
+- traffic_search: args may include method, status, search/filter, and limit; returns captured HTTP
+  request/response excerpts from crawl and scans.
+- endpoint_detail: args may include url or page_id and limit; returns page, intel, traffic, history,
+  and extracted entities for that endpoint.
+- compare_responses: args include left_step/baseline_step and right_step/variant_step from history;
+  returns status, length, similarity, and term deltas.
+- mutate_request: args may include step or url/method/body plus mutation ("input_validation",
+  "idor", or "business_logic"); returns proposed http probe objects. Execute one with an http action.
+- auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
+- extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
+  redacted JWT hints, and error/debug lines.
 - Cap consecutive context-only tool calls; once you have enough detail, execute a probe or write a finding.
 
 To record a confirmed finding using prior evidence handles or response excerpts:

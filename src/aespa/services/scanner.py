@@ -22,7 +22,7 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun
+from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import task_graph as task_graph_svc
@@ -391,6 +391,8 @@ def _run_thinking_context_tool(
     pages_snapshot: list[dict[str, Any]],
     findings_snapshot: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    run_id: int | None = None,
+    base_url: str = "",
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -398,6 +400,7 @@ def _run_thinking_context_tool(
         limit = max(1, min(100, int(args.get("limit") or 20)))
     except (TypeError, ValueError):
         limit = 20
+    tool_name = (tool_name or "").strip()
     search = str(args.get("search") or args.get("filter") or "").lower()
     search_tokens = search.replace("-", "_").split()
 
@@ -503,11 +506,527 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name in {"target_inventory", "search_assets"}:
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_target_inventory(run_id, args, limit, search_tokens)
+
+    if tool_name == "traffic_search":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_traffic_search(run_id, args, limit, search_tokens)
+
+    if tool_name == "endpoint_detail":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_endpoint_detail(
+            run_id,
+            args,
+            pages_snapshot=pages_snapshot,
+            history=history,
+            limit=limit,
+        )
+
+    if tool_name == "compare_responses":
+        return _thinking_tool_compare_responses(args, history=history)
+
+    if tool_name == "mutate_request":
+        return _thinking_tool_mutate_request(args, history=history, base_url=base_url)
+
+    if tool_name == "auth_matrix":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_auth_matrix(run_id, base_url, args, limit)
+
+    if tool_name == "extract_entities":
+        return _thinking_tool_extract_entities(args, pages_snapshot=pages_snapshot, history=history, limit=limit)
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
-        "available_tools": ["site_map", "page_detail", "history_search", "finding_list"],
+        "available_tools": [
+            "site_map", "page_detail", "history_search", "finding_list",
+            "target_inventory", "search_assets", "traffic_search", "endpoint_detail",
+            "compare_responses", "mutate_request", "auth_matrix", "extract_entities",
+        ],
     }
+
+
+def _thinking_tool_target_inventory(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    kind = str(args.get("kind") or "").strip()
+    source = str(args.get("source") or "").strip()
+    with Session(get_engine()) as s:
+        query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+        if kind:
+            query = query.where(TargetIntelItem.kind == kind)
+        if source:
+            query = query.where(TargetIntelItem.source == source)
+        items = list(s.exec(
+            query.order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()).limit(1000)
+        ))
+    matches = []
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+        haystack = _target_intel_text(item).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 300),
+            "url": item.url,
+            "method": item.method,
+            "source": item.source,
+            "confidence": item.confidence,
+            "evidence": _compact_log_value(item.evidence, 300),
+            "metadata": _loads_json_dict(item.item_metadata),
+        })
+    return {
+        "tool": "target_inventory",
+        "counts": counts,
+        "count": len(matches),
+        "items": matches[:limit],
+        "truncated": len(matches) > limit,
+    }
+
+
+def _thinking_tool_traffic_search(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    method = str(args.get("method") or "").upper()
+    status = args.get("status")
+    try:
+        status_int = int(status) if status not in (None, "") else None
+    except (TypeError, ValueError):
+        status_int = None
+    with Session(get_engine()) as s:
+        query = select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        if method:
+            query = query.where(TrafficEntry.method == method)
+        if status_int is not None:
+            query = query.where(TrafficEntry.status == status_int)
+        entries = list(s.exec(query.order_by(TrafficEntry.id.desc()).limit(1000)))
+    matches = []
+    for entry in entries:
+        haystack = " ".join(str(part or "") for part in (
+            entry.method, entry.url, entry.request_body, entry.response_body,
+            entry.status, entry.username, entry.source,
+        )).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": entry.id,
+            "source": entry.source,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "duration_ms": entry.duration_ms,
+            "username": entry.username,
+            "request_headers": _safe_json_excerpt(entry.request_headers, 800),
+            "request_body": _compact_log_value(entry.request_body, 1000),
+            "response_headers": _safe_json_excerpt(entry.response_headers, 800),
+            "response_body": _compact_log_value(entry.response_body, 1800),
+        })
+    matches = list(reversed(matches[:limit]))
+    return {"tool": "traffic_search", "count": len(matches), "entries": matches}
+
+
+def _thinking_tool_endpoint_detail(
+    run_id: int,
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    url = str(args.get("url") or "")
+    page_id = args.get("page_id")
+    if not url and page_id is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(page_id):
+                url = str(page.get("url") or "")
+                break
+    if not url:
+        return {"tool": "endpoint_detail", "error": "url or page_id required"}
+
+    detail: dict[str, Any] = {"tool": "endpoint_detail", "url": url}
+    for page in pages_snapshot:
+        if page.get("url") == url or str(page.get("id")) == str(page_id):
+            detail["page"] = {
+                "page_id": page.get("id"),
+                "kind": _thinking_page_kind(page),
+                "title": page.get("title") or "",
+                "flags": _thinking_page_flags(page),
+                "context": str(page.get("context") or "")[:2500],
+                "page_text": str(page.get("page_text") or "")[:3000],
+            }
+            break
+
+    with Session(get_engine()) as s:
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .limit(1000)
+        ))
+        traffic = list(s.exec(
+            select(TrafficEntry)
+            .where(TrafficEntry.test_run_id == run_id)
+            .order_by(TrafficEntry.id.desc())
+            .limit(1000)
+        ))
+
+    detail["intel"] = [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 240),
+            "method": item.method,
+            "source": item.source,
+            "evidence": _compact_log_value(item.evidence, 240),
+        }
+        for item in intel
+        if _urls_related(url, item.url or item.value or item.key)
+    ][:limit]
+    detail["traffic"] = [
+        {
+            "id": entry.id,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "username": entry.username,
+            "request_body": _compact_log_value(entry.request_body, 600),
+            "response_body": _compact_log_value(entry.response_body, 1200),
+        }
+        for entry in traffic
+        if _urls_related(url, entry.url)
+    ][:limit]
+    detail["history"] = [
+        {
+            "step": item.get("step"),
+            "method": item.get("method"),
+            "url": item.get("url"),
+            "status": item.get("response_status"),
+            "note": item.get("note"),
+            "response_body": str(item.get("response_body") or "")[:1200],
+        }
+        for item in history
+        if _urls_related(url, str(item.get("url") or ""))
+    ][-limit:]
+    detail["entities"] = _extract_entities_from_text(json.dumps(detail, default=str), limit=limit)
+    return detail
+
+
+def _thinking_tool_compare_responses(args: dict[str, Any], *, history: list[dict[str, Any]]) -> dict[str, Any]:
+    left = _resolve_history_record(args.get("left_step") or args.get("baseline_step"), history)
+    right = _resolve_history_record(args.get("right_step") or args.get("variant_step"), history)
+    if left is None or right is None:
+        return {"tool": "compare_responses", "error": "left_step/baseline_step and right_step/variant_step must match history steps"}
+    left_body = str(left.get("response_body") or "")
+    right_body = str(right.get("response_body") or "")
+    left_status = left.get("response_status")
+    right_status = right.get("response_status")
+    added, removed = _word_diff_summary(left_body, right_body)
+    return {
+        "tool": "compare_responses",
+        "left": {"step": left.get("step"), "url": left.get("url"), "status": left_status, "length": len(left_body)},
+        "right": {"step": right.get("step"), "url": right.get("url"), "status": right_status, "length": len(right_body)},
+        "status_changed": left_status != right_status,
+        "length_delta": len(right_body) - len(left_body),
+        "similarity": _text_similarity(left_body, right_body),
+        "added_terms": added[:30],
+        "removed_terms": removed[:30],
+        "left_excerpt": left_body[:1200],
+        "right_excerpt": right_body[:1200],
+    }
+
+
+def _thinking_tool_mutate_request(args: dict[str, Any], *, history: list[dict[str, Any]], base_url: str) -> dict[str, Any]:
+    source = _resolve_history_record(args.get("step"), history)
+    url = str(args.get("url") or (source or {}).get("url") or base_url)
+    method = str(args.get("method") or (source or {}).get("method") or "GET").upper()
+    body = args.get("body")
+    if body is None and source is not None:
+        body = source.get("request_body")
+    mutation = str(args.get("mutation") or args.get("kind") or "input_validation")
+    probes = _mutated_probe_variants(method, url, body, mutation)
+    return {
+        "tool": "mutate_request",
+        "source_step": source.get("step") if source else None,
+        "mutation": mutation,
+        "count": len(probes),
+        "probes": probes[: max(1, min(20, int(args.get("limit") or 10)))],
+        "note": "These are proposed probe objects. Execute one with an http action when appropriate.",
+    }
+
+
+def _thinking_tool_auth_matrix(run_id: int, base_url: str, args: dict[str, Any], limit: int) -> dict[str, Any]:
+    targets = _auth_matrix_targets(run_id, base_url)
+    search = str(args.get("search") or args.get("filter") or "").lower()
+    if search:
+        tokens = search.split()
+        targets = [t for t in targets if all(token in json.dumps(t, default=str).lower() for token in tokens)]
+    return {
+        "tool": "auth_matrix",
+        "count": len(targets),
+        "targets": [
+            {
+                "url": t["url"],
+                "method": t.get("method", "GET"),
+                "requires_auth_or_sensitive": _target_requires_auth_or_sensitive(t),
+                "accessible_by": t.get("accessible_by") or [],
+                "page_id": t.get("page_id"),
+                "source": t.get("source"),
+                "has_object_ref": t.get("has_object_ref"),
+                "has_business_logic": t.get("has_business_logic"),
+            }
+            for t in targets[:limit]
+        ],
+        "truncated": len(targets) > limit,
+    }
+
+
+def _thinking_tool_extract_entities(
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    text = str(args.get("text") or "")
+    if not text and args.get("step") is not None:
+        record = _resolve_history_record(args.get("step"), history)
+        if record:
+            text = json.dumps(record, default=str)
+    if not text and args.get("page_id") is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(args.get("page_id")):
+                text = " ".join(str(page.get(k) or "") for k in ("url", "title", "context", "page_text"))
+                break
+    if not text:
+        text = "\n".join(str(item.get("response_body") or "") for item in history[-5:])
+    return {
+        "tool": "extract_entities",
+        "entities": _extract_entities_from_text(text, limit=limit),
+    }
+
+
+def _target_intel_text(item: TargetIntelItem) -> str:
+    return " ".join(str(part or "") for part in (
+        item.kind, item.key, item.value, item.url, item.method, item.source,
+        item.evidence, item.item_metadata,
+    ))
+
+
+def _loads_json_dict(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_json_excerpt(value: str | None, limit: int) -> dict | str:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return {
+                str(k): _compact_log_value(v, 180)
+                for k, v in list(parsed.items())[:20]
+            }
+        return _compact_log_value(parsed, limit)
+    except Exception:
+        return _compact_log_value(value, limit)
+
+
+def _urls_related(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    ap = urlparse(a)
+    bp = urlparse(b)
+    if ap.netloc and bp.netloc and ap.netloc != bp.netloc:
+        return False
+    return bool(ap.path and bp.path and (ap.path == bp.path or ap.path in bp.path or bp.path in ap.path))
+
+
+def _resolve_history_record(step, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if step is None:
+        return history[-1] if history else None
+    for item in history:
+        if str(item.get("step")) == str(step):
+            return item
+    return None
+
+
+def _word_diff_summary(left: str, right: str) -> tuple[list[str], list[str]]:
+    token_re = re.compile(r"[A-Za-z0-9_./:-]{3,}")
+    left_tokens = set(token_re.findall(left or ""))
+    right_tokens = set(token_re.findall(right or ""))
+    added = sorted(right_tokens - left_tokens, key=lambda x: (len(x), x), reverse=True)
+    removed = sorted(left_tokens - right_tokens, key=lambda x: (len(x), x), reverse=True)
+    return added, removed
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left_words = set(re.findall(r"[a-z0-9_]{3,}", (left or "").lower()))
+    right_words = set(re.findall(r"[a-z0-9_]{3,}", (right or "").lower()))
+    if not left_words and not right_words:
+        return 1.0
+    if not left_words or not right_words:
+        return 0.0
+    return round(len(left_words & right_words) / len(left_words | right_words), 3)
+
+
+def _mutated_probe_variants(method: str, url: str, body, mutation: str) -> list[dict]:
+    mutation_l = mutation.lower()
+    probes: list[dict] = []
+    if "idor" in mutation_l or "object" in mutation_l:
+        probes.extend(_mutate_url_numeric_values(method, url, "IDOR object-reference mutation"))
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:8]:
+                if _looks_id_key(key) or re.fullmatch(r"\d+", str(value or "")):
+                    for candidate in _numeric_mutations(value):
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"IDOR body mutation {key}={candidate}",
+                        })
+    elif "business" in mutation_l or "amount" in mutation_l:
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:10]:
+                if _looks_business_value_key(key):
+                    for candidate in ["0", "-1", "1", "999999999", str(value)]:
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"Business logic boundary mutation {key}={candidate}",
+                        })
+    else:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        if qs:
+            for param in list(qs.keys())[:3]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    base_params = {k: v[0] for k, v in qs.items()}
+                    base_params[param] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(base_params))),
+                        "headers": {}, "body": None,
+                        "desc": f"{label} mutation in query param {param}",
+                    })
+        if isinstance(body, dict):
+            for key in list(body.keys())[:5]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    mutated = dict(body)
+                    mutated[key] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": url,
+                        "headers": {}, "body": mutated,
+                        "desc": f"{label} mutation in body field {key}",
+                    })
+    return probes[:40]
+
+
+def _mutate_url_numeric_values(method: str, url: str, desc: str) -> list[dict]:
+    parsed = urlparse(url)
+    probes: list[dict] = []
+    parts = parsed.path.split("/")
+    for idx, part in enumerate(parts):
+        if re.fullmatch(r"\d+", part or ""):
+            for candidate in _numeric_mutations(part):
+                mutated = parts.copy()
+                mutated[idx] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(path="/".join(mutated))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: path {part}->{candidate}",
+                })
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for key, values in list(qs.items())[:8]:
+        if values and (re.fullmatch(r"\d+", values[0]) or _looks_id_key(key)):
+            for candidate in _numeric_mutations(values[0]):
+                params = {k: v[0] for k, v in qs.items()}
+                params[key] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(params))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: query {key}={candidate}",
+                })
+    return probes
+
+
+def _numeric_mutations(value) -> list[str]:
+    try:
+        base = int(value)
+    except (TypeError, ValueError):
+        base = 1
+    candidates = [base - 1, base + 1, 1, 2, 999999]
+    return [str(c) for c in candidates if c > 0 and c != base]
+
+
+def _looks_id_key(key: str) -> bool:
+    return bool(re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction|tenant)(?:_|$)", str(key), re.I))
+
+
+def _looks_business_value_key(key: str) -> bool:
+    return bool(re.search(r"(amount|price|total|quantity|qty|balance|limit|role|status|state)", str(key), re.I))
+
+
+def _extract_entities_from_text(text: str, limit: int = 20) -> dict[str, list[str]]:
+    text = text or ""
+    urls = _unique_limited(re.findall(r"https?://[^\s\"'<>)}]+", text), limit)
+    paths = _unique_limited(re.findall(r"(?<![A-Za-z0-9])/(?:api/)?[A-Za-z0-9_./{}:-]{2,}", text), limit)
+    emails = _unique_limited(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", text), limit)
+    uuids = _unique_limited(re.findall(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", text, re.I), limit)
+    jwt_like = _unique_limited(re.findall(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", text), limit)
+    ids = _unique_limited(re.findall(r"\b(?:id|user_id|account_id|order_id|invoice_id|transaction_id|tenant_id)[\"'=:\s]+([A-Za-z0-9_-]{1,80})", text, re.I), limit)
+    errors = _unique_limited([
+        line.strip() for line in text.splitlines()
+        if any(marker in line.lower() for marker in (
+            "error", "exception", "traceback", "stack trace", "sql syntax",
+            "unauthorized", "forbidden", "debug",
+        ))
+    ], limit)
+    return {
+        "urls": urls,
+        "paths": paths,
+        "emails": emails,
+        "uuids": uuids,
+        "ids": ids,
+        "jwt_like": ["[REDACTED_JWT]" for _ in jwt_like],
+        "errors": errors,
+    }
+
+
+def _unique_limited(values: list[str], limit: int) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        value = str(value).strip().rstrip(".,;")
+        if value and value not in out:
+            out.append(value)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
@@ -619,6 +1138,26 @@ def _finding_from_llm(
     )
 
 
+def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> int:
+    saved = 0
+    if not findings:
+        return saved
+    with Session(get_engine()) as s:
+        for finding in findings:
+            if _finding_exists(
+                s,
+                run_id=run_id,
+                title=finding.title,
+                affected_url=finding.affected_url,
+                owasp_category=finding.owasp_category,
+            ):
+                continue
+            s.add(finding)
+            saved += 1
+        s.commit()
+    return saved
+
+
 def _find_or_create_dynamic_page(
     session: Session,
     *,
@@ -720,6 +1259,32 @@ def _dynamic_finding_exists(
         f.title.strip().lower() == normalized_title
         or (
             f.owasp_category.strip().lower() == normalized_owasp
+            and f.title.strip().lower() == normalized_title
+        )
+        for f in existing
+    )
+
+
+def _finding_exists(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str = "",
+) -> bool:
+    existing = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.affected_url == affected_url)
+    ).all()
+    normalized_title = (title or "").strip().lower()
+    normalized_owasp = (owasp_category or "").strip().lower()
+    return any(
+        f.title.strip().lower() == normalized_title
+        or (
+            normalized_owasp
+            and f.owasp_category.strip().lower() == normalized_owasp
             and f.title.strip().lower() == normalized_title
         )
         for f in existing
@@ -895,23 +1460,17 @@ def _emit_thinking_status(run_id: int) -> None:
 
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
-    _mark_run(run_id, scan_status="running")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
-        _mark_run(run_id, scan_status="stopped")
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
         raise
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
-        _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
     finally:
         _thinking_stop_requested.discard(run_id)
@@ -1160,6 +1719,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                             pages_snapshot=pages_snapshot,
                             findings_snapshot=findings_snapshot,
                             history=history,
+                            run_id=run_id,
+                            base_url=base_url,
                         )
                     consecutive_context_tools += 1
                     result_text = json.dumps(output, separators=(",", ":"), default=str)
@@ -1701,8 +2262,6 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     stopped = run_id in _thinking_stop_requested
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
-    _mark_run(run_id, scan_status="stopped" if stopped else "complete")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
 
@@ -1944,6 +2503,14 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions
 
+        if run_id not in _stop_requested:
+            await _run_deterministic_site_modules(
+                run_id=run_id,
+                base_url=base_url,
+                cred_sessions=cred_sessions,
+                scanner_policy=scanner_policy,
+            )
+
         # Build httpx client with exported auth state.
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -1981,6 +2548,433 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
 
 # ── Per-page scan ─────────────────────────────────────────────────────────────
+
+async def _run_deterministic_site_modules(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> None:
+    """Run deterministic site-level modules that do not require LLM reasoning."""
+    if scanner_policy and scanner_policy.scan_mode == "passive":
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "start",
+        "message": "Running deterministic auth and IDOR modules…",
+    })
+    findings: list[ScanFinding] = []
+    findings.extend(await _run_auth_matrix_module(
+        run_id=run_id,
+        base_url=base_url,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    findings.extend(await _run_idor_matrix_module(
+        run_id=run_id,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    saved = _save_deterministic_findings(run_id, findings)
+    if saved:
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "complete",
+        "message": f"Deterministic modules complete — {saved} finding(s) recorded.",
+        "data": {"finding_count": saved},
+    })
+
+
+async def _run_auth_matrix_module(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Check high-value endpoints anonymously and across available sessions."""
+    targets = _auth_matrix_targets(run_id, base_url)
+    if not targets:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    findings: list[ScanFinding] = []
+
+    for target in targets[:80]:
+        if run_id in _stop_requested:
+            break
+        url = target["url"]
+        method = target.get("method") or "GET"
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            method = "GET"
+        if not _same_origin_or_relative(base_url, url):
+            continue
+
+        anon_result = await _fetch_matrix_url(
+            url,
+            method=method,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
+        if not anon_result:
+            continue
+        if _is_successful_access(anon_result) and _target_requires_auth_or_sensitive(target):
+            findings.append(_auth_matrix_finding(
+                run_id=run_id,
+                target=target,
+                result=anon_result,
+                title="Unauthenticated access to protected endpoint",
+                description=(
+                    "The deterministic auth matrix requested a protected or sensitive-looking "
+                    "endpoint without cookies or Authorization and received a successful response."
+                ),
+                actor="anonymous",
+                cvss_score=6.5,
+            ))
+
+        if not cred_sessions or "/admin" not in url.lower():
+            await sleep_between_probes(scanner_policy)
+            continue
+
+        for cred_id, session in cred_sessions.items():
+            if cred_id in set(target.get("accessible_by") or []):
+                continue
+            result = await _fetch_matrix_url(
+                url,
+                method=method,
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if result and _is_successful_access(result) and not _looks_like_denial(result["body"]):
+                findings.append(_auth_matrix_finding(
+                    run_id=run_id,
+                    target=target,
+                    result=result,
+                    title="Unauthorized role access to admin endpoint",
+                    description=(
+                        "A credential that was not observed with access to this admin-looking "
+                        "endpoint received a successful direct response."
+                    ),
+                    actor=session.get("username") or f"credential {cred_id}",
+                    cvss_score=8.1,
+                ))
+            await sleep_between_probes(scanner_policy)
+
+    return findings
+
+
+async def _run_idor_matrix_module(
+    *,
+    run_id: int,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Compare object-reference pages across users using crawled ground truth."""
+    if not cred_sessions or len(cred_sessions) < 2:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+            .where(CrawledPage.status == "crawled")
+        ))
+
+    findings: list[ScanFinding] = []
+    id_pages = [
+        page for page in pages
+        if _url_has_object_reference(page.url) and json.loads(page.accessible_by or "[]")
+    ]
+    for page in id_pages[:80]:
+        if run_id in _stop_requested:
+            break
+        accessible = set(json.loads(page.accessible_by or "[]"))
+        unauthorized = [
+            (cred_id, session)
+            for cred_id, session in cred_sessions.items()
+            if cred_id not in accessible
+        ]
+        if not unauthorized:
+            continue
+        for cred_id, session in unauthorized[:3]:
+            result = await _fetch_matrix_url(
+                page.url,
+                method="GET",
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if not result or not _is_successful_access(result):
+                continue
+            if _looks_like_denial(result["body"]) or _looks_like_spa_shell(
+                result["body"], result["headers"].get("content-type", "")
+            ):
+                continue
+            if not _body_contains_original_page_evidence(result["body"], page.title or "", page.page_text or ""):
+                continue
+            findings.append(_idor_matrix_finding(
+                run_id=run_id,
+                page=page,
+                result=result,
+                actor=session.get("username") or f"credential {cred_id}",
+            ))
+            break
+        await sleep_between_probes(scanner_policy)
+    return findings
+
+
+def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
+    targets: dict[str, dict] = {}
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+        ))
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind.in_(["endpoint", "script"]))
+        ))
+
+    for page in pages:
+        targets[page.url] = {
+            "url": page.url,
+            "method": "GET",
+            "source": "crawled_page",
+            "req_auth": page.req_auth,
+            "has_object_ref": page.has_object_ref,
+            "has_business_logic": page.has_business_logic,
+            "accessible_by": json.loads(page.accessible_by or "[]"),
+            "page_id": page.id,
+        }
+    for item in intel:
+        raw_url = item.value or item.url or item.key
+        url = _absolute_target_url(base_url, raw_url)
+        if not url:
+            continue
+        targets.setdefault(url, {
+            "url": url,
+            "method": (item.method or "GET").upper(),
+            "source": item.source,
+            "req_auth": None,
+            "has_object_ref": _url_has_object_reference(url),
+            "has_business_logic": False,
+            "accessible_by": [],
+            "page_id": None,
+            "intel_key": item.key,
+        })
+    return sorted(
+        targets.values(),
+        key=lambda t: (
+            0 if _target_requires_auth_or_sensitive(t) else 1,
+            t["url"],
+        ),
+    )
+
+
+async def _fetch_matrix_url(
+    url: str,
+    *,
+    method: str = "GET",
+    session: dict | None = None,
+    timeout: float = REQUEST_TIMEOUT,
+    follow_redirects: bool = True,
+) -> dict | None:
+    headers = {"User-Agent": _UA}
+    cookies = None
+    actor = "anonymous"
+    if session:
+        headers.update(session.get("extra_headers", {}))
+        cookies = session.get("cookies", {})
+        actor = session.get("username") or "credential"
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            verify=False,
+            timeout=timeout,
+        ) as client:
+            resp = await client.request(method, url)
+        request_evidence = (
+            f"{method} {url} HTTP/1.1\n"
+            f"Actor: {actor}\n"
+            f"Authorization: {'present' if session and session.get('extra_headers') else 'none'}"
+        )
+        response_evidence = (
+            f"HTTP/1.1 {resp.status_code}\n"
+            + "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+            + "\n\n"
+            + resp.text[:2000]
+        )
+        return {
+            "url": str(resp.url),
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text[:BODY_READ_LIMIT],
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
+        }
+    except Exception as exc:
+        log.debug("Deterministic matrix request failed for %s: %s", url, exc)
+        return None
+
+
+def _auth_matrix_finding(
+    *,
+    run_id: int,
+    target: dict,
+    result: dict,
+    title: str,
+    description: str,
+    actor: str,
+    cvss_score: float,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=target.get("page_id"),
+        owasp_category="A01",
+        severity=_severity_from_cvss(cvss_score),
+        title=title,
+        description=description,
+        impact=(
+            "Attackers may be able to access protected application functionality or "
+            "sensitive operational data without the intended authentication or role checks."
+        ),
+        likelihood="Confirmed by deterministic auth matrix request.",
+        recommendation=(
+            "Enforce server-side authentication and authorization on the endpoint. "
+            "Do not rely on client-side route hiding or UI controls."
+        ),
+        cvss_score=cvss_score,
+        cvss_vector="",
+        affected_url=result.get("url") or target["url"],
+        evidence=_combined_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+        )[:4000],
+        request_evidence=result["request_evidence"][:4000],
+        response_evidence=result["response_evidence"][:4000],
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic auth matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _idor_matrix_finding(
+    *,
+    run_id: int,
+    page: CrawledPage,
+    result: dict,
+    actor: str,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=page.id,
+        owasp_category="A01",
+        severity="high",
+        title="Insecure direct object reference",
+        description=(
+            "A credential that was not observed with access to this object-reference URL "
+            "could request it directly and received recognizable protected content."
+        ),
+        impact=(
+            "A user may be able to access another user's records or tenant data by "
+            "guessing or reusing object identifiers."
+        ),
+        likelihood="Confirmed by deterministic IDOR matrix comparison.",
+        recommendation=(
+            "Enforce object ownership checks on every request using server-side authorization "
+            "logic. Avoid exposing predictable object identifiers where possible."
+        ),
+        cvss_score=8.1,
+        cvss_vector="",
+        affected_url=page.url,
+        evidence=_combined_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received content matching the protected object page.",
+        )[:4000],
+        request_evidence=result["request_evidence"][:4000],
+        response_evidence=result["response_evidence"][:4000],
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic IDOR matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _target_requires_auth_or_sensitive(target: dict) -> bool:
+    url = str(target.get("url") or "").lower()
+    if target.get("req_auth") is True:
+        return True
+    if target.get("has_business_logic") or target.get("has_object_ref"):
+        return True
+    return any(marker in url for marker in (
+        "/admin", "/account", "/accounts", "/user", "/users", "/profile",
+        "/transfer", "/transaction", "/invoice", "/order", "/config", "/debug",
+        "/metrics", "/openapi", "/swagger",
+    ))
+
+
+def _is_successful_access(result: dict) -> bool:
+    status = result.get("status")
+    if status not in (200, 201, 202, 204, 206):
+        return False
+    body = result.get("body") or ""
+    return not _looks_like_denial(body)
+
+
+def _looks_like_denial(body: str) -> bool:
+    text = (body or "")[:5000].lower()
+    return any(marker in text for marker in (
+        "unauthorized", "forbidden", "access denied", "permission denied",
+        "not authorized", "login required", "please log in", "sign in",
+        "authentication required", "invalid token",
+    ))
+
+
+def _url_has_object_reference(url: str) -> bool:
+    parsed = urlparse(url)
+    if re.search(r"/(?:[0-9]+|[0-9a-f]{8,}(?:-[0-9a-f]{4,}){2,})(?:[/?.#]|$)", parsed.path, re.I):
+        return True
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return any(
+        re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction)(?:_|$)", key, re.I)
+        and values
+        for key, values in qs.items()
+    )
+
+
+def _absolute_target_url(base_url: str, raw_url: str) -> str:
+    raw_url = (raw_url or "").strip()
+    if not raw_url or raw_url.startswith(("javascript:", "mailto:", "#")):
+        return ""
+    parsed = urlparse(raw_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw_url
+    if raw_url.startswith("/"):
+        base = urlparse(base_url)
+        return urlunparse((base.scheme, base.netloc, raw_url, "", "", ""))
+    return ""
+
+
+def _same_origin_or_relative(base_url: str, url: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return True
+    base = urlparse(base_url)
+    return parsed.scheme in {"http", "https"} and parsed.netloc == base.netloc
+
 
 async def _scan_page(
     run_id: int,
@@ -2174,6 +3168,24 @@ async def _scan_page(
                 "message": _followup_log_message(followup_probes, tense="complete"),
                 "data": {"followup_count": len(followup_probes), **followup_details},
             })
+
+    deterministic_findings = _deterministic_findings_from_results(
+        run_id=run_id,
+        page_id=page_id,
+        page_url=page_url,
+        results=results,
+    )
+    deterministic_saved = _save_deterministic_findings(run_id, deterministic_findings)
+    if deterministic_saved:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "deterministic_analysis",
+            "status": "complete",
+            "page_url": page_url,
+            "message": f"{deterministic_saved} deterministic finding(s) recorded",
+            "data": {"finding_count": deterministic_saved},
+        })
+        _emit_scan_update(run_id)
 
     # Phase 3: LLM analyses results and produces findings.
     try:
@@ -2464,6 +3476,164 @@ def _protected_content_candidates(page_title: str, page_text: str) -> list[str]:
         if title.lower() not in generic_words:
             candidates.append(title)
     return candidates
+
+
+# ── Deterministic result analysis ─────────────────────────────────────────────
+
+_SQL_ERROR_PATTERNS = (
+    "sql syntax", "mysql", "postgresql", "sqlite", "ora-", "odbc",
+    "unterminated quoted string", "you have an error in your sql syntax",
+    "syntax error at or near", "unclosed quotation mark", "sqlstate",
+)
+_SENSITIVE_FIELD_PATTERNS = (
+    "password_hash", "passwordhash", "passwd", "jwt_secret", "api_key",
+    "apikey", "secret_key", "private_key", "totp_secret", "mfa_secret",
+    "access_token", "refresh_token", "debug", "stack_trace",
+)
+
+
+def _deterministic_findings_from_results(
+    *,
+    run_id: int,
+    page_id: int,
+    page_url: str,
+    results: list[dict],
+) -> list[ScanFinding]:
+    findings: list[ScanFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        desc = str(result.get("desc") or "")
+        url = str(result.get("url") or page_url)
+        body = str(result.get("body") or "")
+        status = result.get("status")
+        haystack = f"{desc}\n{url}\n{body}".lower()
+
+        def add(title: str, owasp: str, score: float, description: str, impact: str, recommendation: str) -> None:
+            key = (title, url)
+            if key in seen:
+                return
+            seen.add(key)
+            findings.append(ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category=owasp,
+                severity=_severity_from_cvss(score),
+                title=title,
+                description=description,
+                impact=impact,
+                likelihood="Confirmed by deterministic response analysis.",
+                recommendation=recommendation,
+                cvss_score=score,
+                cvss_vector="",
+                affected_url=url,
+                evidence=str(result.get("evidence") or _combined_evidence(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body[:2000]),
+                ))[:4000],
+                request_evidence=str(result.get("request_evidence") or "")[:4000],
+                response_evidence=str(result.get("response_evidence") or body[:4000])[:4000],
+                screenshot_b64=result.get("screenshot_b64"),
+                validation_status="confirmed",
+                validation_note="Confirmed by deterministic module.",
+                created_at=_utcnow(),
+            ))
+
+        if ("sqli" in desc.lower() or any(p in haystack for p in ("' or '1'='1", "union select", "order by 999"))) and (
+            any(pattern in haystack for pattern in _SQL_ERROR_PATTERNS) or status == 500
+        ):
+            add(
+                "SQL injection error disclosure",
+                "A03",
+                7.1,
+                "An SQL injection probe produced a database error or server error indicative of unsafely handled input.",
+                "Attackers may be able to extract or modify database data by crafting SQL payloads.",
+                "Use parameterized queries, strict input validation, and generic error handling.",
+            )
+
+        reflected_payload = _reflected_payload_from_result(result)
+        if reflected_payload and reflected_payload in body and _looks_xss_payload(reflected_payload):
+            add(
+                "Reflected cross-site scripting",
+                "A03",
+                6.1,
+                "A script-capable payload was reflected in the response body without being removed or encoded.",
+                "Attackers could execute JavaScript in a victim browser if they can deliver a crafted URL or form submission.",
+                "Apply context-aware output encoding and reject dangerous HTML/JavaScript input where it is not expected.",
+            )
+
+        if "ssti" in desc.lower() and "49" in body and any(marker in haystack for marker in ("{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}")):
+            add(
+                "Server-side template injection",
+                "A03",
+                8.0,
+                "A template expression probe appears to have been evaluated by the server.",
+                "Template injection can lead to data exposure or remote code execution depending on the template engine.",
+                "Do not evaluate user-controlled strings as templates; sandbox template engines and validate input.",
+            )
+
+        if ("path" in desc.lower() or "../" in haystack or "%2f" in haystack) and "root:x:0:0" in body:
+            add(
+                "Path traversal file disclosure",
+                "A05",
+                7.5,
+                "A traversal payload returned content consistent with a system password file.",
+                "Attackers may read arbitrary files from the server filesystem.",
+                "Normalize paths, enforce allow-listed file roots, and reject traversal sequences before file access.",
+            )
+
+        if ("cmdi" in desc.lower() or "aespa_probe" in haystack) and "aespa_probe" in body:
+            add(
+                "Command injection",
+                "A03",
+                9.1,
+                "A command-injection marker appeared in the response after a shell metacharacter probe.",
+                "Attackers may execute arbitrary commands on the application server.",
+                "Avoid shell invocation with user input; use safe APIs and strict allow-list validation.",
+            )
+
+        if any(pattern in haystack for pattern in _SENSITIVE_FIELD_PATTERNS) and _looks_like_json_or_api(result):
+            add(
+                "Sensitive data exposed in API response",
+                "A02",
+                6.5,
+                "The response contains field names commonly associated with secrets, hashes, tokens, debug state, or privileged metadata.",
+                "Attackers can use leaked secrets or implementation details to compromise accounts or chain further attacks.",
+                "Remove sensitive fields from client-facing responses and enforce response DTO allow-lists.",
+            )
+
+    return findings
+
+
+def _reflected_payload_from_result(result: dict) -> str:
+    desc = str(result.get("desc") or "")
+    if ":" in desc:
+        candidate = desc.split(":", 1)[1].strip()
+        if candidate:
+            return candidate[:200]
+    parsed = urlparse(str(result.get("url") or ""))
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for values in qs.values():
+        for value in values:
+            if _looks_xss_payload(value):
+                return value
+    payload = str(result.get("payload") or "")
+    return payload if _looks_xss_payload(payload) else ""
+
+
+def _looks_xss_payload(value: str) -> bool:
+    lower = (value or "").lower()
+    return any(marker in lower for marker in (
+        "<script", "onerror=", "onload=", "ontoggle=", "javascript:alert",
+        "<svg", "autofocus", "<details", "alert(",
+    ))
+
+
+def _looks_like_json_or_api(result: dict) -> bool:
+    headers = {str(k).lower(): str(v).lower() for k, v in (result.get("headers") or {}).items()}
+    content_type = headers.get("content-type", "")
+    url = str(result.get("url") or "").lower()
+    body = str(result.get("body") or "").lstrip()
+    return "json" in content_type or "/api/" in url or body.startswith(("{", "["))
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────
