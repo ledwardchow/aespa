@@ -1314,6 +1314,7 @@ legend {
 .phase-ok        { background:rgba(63,207,112,0.12); color:var(--ok); }
 .phase-sweep     { background:rgba(167,139,250,0.15); color:#a78bfa; }
 .phase-other     { background:rgba(107,118,145,0.15); color:var(--muted); }
+.phase-warning   { background:rgba(245,166,35,0.28); color:var(--warn); font-weight:800; }
 .phase-llm-req   { background:rgba(34,211,238,0.12);  color:#22d3ee; }
 .phase-llm-resp  { background:rgba(52,211,153,0.12);  color:#34d399; }
 .activity-entry--expandable { cursor:pointer; }

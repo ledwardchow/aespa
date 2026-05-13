@@ -154,16 +154,24 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
     _req_data: dict[int, dict] = {}
 
     async def on_request(request) -> None:
+        # Only store timing and body here.  Full headers are read in on_response
+        # via response.request.all_headers(), which is the only point where the
+        # browser has finalised cookies, Authorization, and other internally-added
+        # headers.  Reading them in on_request captures only what the caller
+        # explicitly set, which is why callers were seeing just the host header.
         rid = id(request)
         _pending[rid] = time.monotonic()
-        try:
-            hdrs = await request.all_headers()
-        except Exception:
-            hdrs = dict(request.headers)
+        post_data = request.post_data
+        if post_data is None:
+            try:
+                pd_json = request.post_data_json
+                if pd_json is not None:
+                    post_data = json.dumps(pd_json)
+            except Exception:
+                pass
         _req_data[rid] = {
             "method": request.method,
-            "headers": hdrs,
-            "post_data": request.post_data,
+            "post_data": post_data,
         }
 
     async def on_response(response) -> None:
@@ -175,14 +183,43 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
         req_data = _req_data.pop(rid, {})
         duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
 
+        # Read request headers here — the full set (cookies, Authorization, etc.)
+        # is only available after the request has been sent.
         try:
+            req_headers = await response.request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(response.request.headers)
+            except Exception:
+                req_headers = {}
+
+        # Prefer the body captured at request time; fall back to response.request.
+        post_data = req_data.get("post_data")
+        if post_data is None:
+            try:
+                post_data = response.request.post_data
+                if post_data is None:
+                    pd_json = response.request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        # Use response.body() (raw bytes) — more reliable than response.text().
+        # text() can fail if encoding detection breaks or the body is already consumed;
+        # body() reads the raw CDP buffer directly.
+        try:
+            body_bytes = await response.body()
             ct = response.headers.get("content-type", "")
             if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
-                resp_body: Optional[str] = (await response.text())[:BODY_LIMIT]
+                resp_body: Optional[str] = body_bytes.decode(errors="replace")[:BODY_LIMIT]
             else:
-                resp_body = "[binary]"
+                resp_body = f"[binary, {len(body_bytes)} bytes]"
         except Exception:
-            resp_body = None
+            try:
+                resp_body = (await response.text())[:BODY_LIMIT]
+            except Exception:
+                resp_body = None
 
         try:
             all_resp_hdrs = await response.all_headers()
@@ -195,8 +232,8 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             "playwright",
             req_data.get("method", response.request.method),
             response.url,
-            req_data.get("headers", {}),
-            req_data.get("post_data"),
+            req_headers,
+            post_data,
             response.status,
             all_resp_hdrs,
             resp_body,
