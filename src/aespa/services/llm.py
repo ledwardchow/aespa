@@ -281,8 +281,10 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         return await _google(config, prompt, screenshot_b64)
     if config.provider == "azure_openai":
         return await _azure_openai(config, prompt, screenshot_b64)
-    if config.provider == "azure_foundry":
-        return await _azure_foundry(config, prompt, screenshot_b64)
+    if config.provider in ("azure_foundry", "azure_foundry_openai"):
+        return await _azure_foundry_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry_anthropic":
+        return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
     if config.provider == "openrouter":
         return await _openrouter(config, prompt, screenshot_b64)
     if config.provider == "bedrock":
@@ -382,12 +384,22 @@ def _chat_completion_kwargs(
         "messages": messages,
     }
     token_limit = config.max_tokens
-    if provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model):
+    openai_reasoning_providers = (
+        "openai",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+    )
+    uses_reasoning_params = (
+        provider in openai_reasoning_providers
+        and _model_needs_reasoning_params(config.model)
+    )
+    if uses_reasoning_params:
         kwargs["max_completion_tokens"] = token_limit
     else:
         kwargs["max_tokens"] = token_limit
 
-    if not (provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model)):
+    if not uses_reasoning_params:
         kwargs["temperature"] = config.temperature
     return kwargs
 
@@ -547,15 +559,27 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
     return _extract_first_choice_text(resp)
 
 
-async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    """Azure AI Foundry serverless endpoints are OpenAI-compatible."""
+def _azure_foundry_openai_base_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith(("/openai/v1", "/v1")):
+        return base
+    if ".openai.azure.com" in base or ".services.ai.azure.com" in base:
+        return f"{base}/openai/v1"
+    return f"{base}/v1"
+
+
+async def _azure_foundry_openai(
+    config: LLMConfig,
+    prompt: str,
+    screenshot_b64: Optional[str],
+) -> str:
+    """Azure AI Foundry deployments that expose the OpenAI v1 chat completions API."""
     from openai import AsyncOpenAI
 
-    base = (config.base_url or "").rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-
-    client = AsyncOpenAI(api_key=config.api_key, base_url=base)
+    client = AsyncOpenAI(
+        api_key=config.api_key,
+        base_url=_azure_foundry_openai_base_url(config.base_url or ""),
+    )
 
     if screenshot_b64:
         msg_content: object = [
@@ -574,6 +598,63 @@ async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         ),
     )
     return _extract_first_choice_text(resp)
+
+
+def _azure_foundry_anthropic_messages_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/messages"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    if base.endswith("/anthropic"):
+        return f"{base}/v1/messages"
+    if ".openai.azure.com" in base or ".services.ai.azure.com" in base:
+        return f"{base}/anthropic/v1/messages"
+    return f"{base}/v1/messages"
+
+
+async def _azure_foundry_anthropic(
+    config: LLMConfig,
+    prompt: str,
+    screenshot_b64: Optional[str],
+) -> str:
+    """Azure AI Foundry Claude deployments that expose Anthropic Messages semantics."""
+    import httpx
+
+    content: list[dict[str, Any]] = []
+    if screenshot_b64:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": screenshot_b64,
+            },
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+        "messages": [{"role": "user", "content": content}],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-api-key": config.api_key or "",
+        "anthropic-version": "2023-06-01",
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            _azure_foundry_anthropic_messages_url(config.base_url or ""),
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return "".join(_content_part_text(block) for block in (data.get("content") or [])).strip()
 
 
 def _extract_bedrock_text(data: dict[str, Any]) -> str:

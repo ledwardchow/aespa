@@ -2407,8 +2407,23 @@ const PROVIDER_LABELS = {
   google:"Google Gemini",
   bedrock:"Amazon Bedrock",
   azure_openai:"Azure OpenAI",
-  azure_foundry:"Azure AI Foundry",
+  azure_foundry:"Azure AI Foundry (OpenAI API)",
+  azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
+  azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
+const PROVIDER_OPTIONS = [
+  ["anthropic", "Anthropic"],
+  ["openai", "OpenAI"],
+  ["openai_compatible", "OpenAI-compatible (LM Studio, Ollama, etc.)"],
+  ["openrouter", "OpenRouter"],
+  ["google", "Google Gemini"],
+  ["bedrock", "Amazon Bedrock"],
+  ["azure_openai", "Azure OpenAI"],
+  ["azure_foundry", "Azure AI Foundry"],
+];
+const FOUNDRY_PROVIDERS = ["azure_foundry", "azure_foundry_openai", "azure_foundry_anthropic"];
+const isFoundryProvider = (provider) => FOUNDRY_PROVIDERS.includes(provider);
+const selectedProviderOption = (provider) => isFoundryProvider(provider) ? "azure_foundry" : provider;
 const PROVIDER_PLACEHOLDERS = {
   anthropic:"claude-opus-4-5", openai:"gpt-4.1",
   openai_compatible:"e.g. llama-3.1-8b-instruct",
@@ -2416,25 +2431,33 @@ const PROVIDER_PLACEHOLDERS = {
   google:"gemini-2.5-flash-preview-04-17",
   bedrock:"e.g. global.anthropic.claude-sonnet-4-6",
   azure_openai:"Deployment name, e.g. gpt-4o",
-  azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
+  azure_foundry:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
+  azure_foundry_openai:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
+  azure_foundry_anthropic:"e.g. claude-sonnet-4-5",
 };
 const BASE_URL_LABELS = {
   openai_compatible:"Base URL",
   bedrock:"Bedrock Runtime Endpoint",
   azure_openai:"Azure Endpoint",
-  azure_foundry:"Endpoint URL",
+  azure_foundry:"Foundry Endpoint",
+  azure_foundry_openai:"Foundry Endpoint",
+  azure_foundry_anthropic:"Foundry Endpoint",
 };
 const BASE_URL_PLACEHOLDERS = {
   openai_compatible:"http://localhost:1234/v1",
   bedrock:"https://bedrock-runtime.ap-southeast-2.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com/",
-  azure_foundry:"https://models.inference.ai.azure.com",
+  azure_foundry:"https://myresource.services.ai.azure.com",
+  azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
+  azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
   bedrock:"Optional when using AWS SSO/profile credentials. If set, the region is inferred from this endpoint.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
-  azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
+  azure_foundry:"Paste the endpoint from Azure AI Foundry. The selected API format determines the final request path.",
+  azure_foundry_openai:"OpenAI-format deployments use /openai/v1. If you paste the resource endpoint, Aespa appends it automatically.",
+  azure_foundry_anthropic:"Claude deployments use Anthropic Messages semantics. If you paste the resource endpoint, Aespa appends /anthropic/v1/messages automatically.",
 };
 
 const DEFAULT_LLM_FORM = {
@@ -2451,7 +2474,7 @@ function llmProfileToForm(cfg) {
 }
 
 function llmPayload(form) {
-  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai",...FOUNDRY_PROVIDERS].includes(form.provider);
   return {
     name:form.name.trim(),
     provider:form.provider,
@@ -2472,15 +2495,22 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
   const changeProv = p => {
-    const ms=dms[p]||[];
+    const provider = p === "azure_foundry" ? "azure_foundry_openai" : p;
+    const ms=dms[provider]||[];
     setCustomModel(false);
     upd({
-      provider:p,
+      provider,
       model:ms[0]||"",
       api_key:"",
-      base_url:p==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
-      max_tokens:p==="bedrock"?64000:4096,
+      base_url:provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
+      max_tokens:provider==="bedrock"?64000:4096,
     });
+  };
+  const changeFoundryApi = apiMode => {
+    const provider = apiMode === "anthropic" ? "azure_foundry_anthropic" : "azure_foundry_openai";
+    const ms=dms[provider]||[];
+    setCustomModel(false);
+    upd({provider, model:ms[0]||"", base_url:form.base_url||""});
   };
 
   const onSubmit = async (e) => {
@@ -2497,9 +2527,10 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
   const models = form?(dms[form.provider]||[]):[];
   const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","azure_openai","azure_foundry"].includes(form.provider);
+  const needsBaseUrl = form&&(["openai_compatible","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
   const optionalBaseUrl = form&&form.provider==="bedrock";
-  const needsKey     = form&&["anthropic","openai","openrouter","google","azure_openai","azure_foundry"].includes(form.provider);
+  const needsKey     = form&&(["anthropic","openai","openrouter","google","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
+  const foundryApiMode = form&&form.provider==="azure_foundry_anthropic" ? "anthropic" : "openai";
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2510,14 +2541,23 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="divider"/>
       <div className="form-section-title">Provider</div>
       <div className="provider-grid">
-        ${Object.entries(PROVIDER_LABELS).map(([k,lbl])=>html`
-          <label key=${k} className=${"provider-card"+(form.provider===k?" selected":"")}>
-            <input type="radio" name="provider" value=${k} checked=${form.provider===k} onChange=${()=>changeProv(k)}/>
+        ${PROVIDER_OPTIONS.map(([k,lbl])=>html`
+          <label key=${k} className=${"provider-card"+(selectedProviderOption(form.provider)===k?" selected":"")}>
+            <input type="radio" name="provider" value=${k} checked=${selectedProviderOption(form.provider)===k} onChange=${()=>changeProv(k)}/>
             <span className="provider-name">${lbl}</span>
           </label>`)}
       </div>
       <div className="divider"/>
-      <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
+      <div className="form-section-title">${isFoundryProvider(form.provider)?"Azure AI Foundry":PROVIDER_LABELS[form.provider]} Configuration</div>
+      ${isFoundryProvider(form.provider)&&html`
+        <div className="field">
+          <label>API format</label>
+          <select className="select" value=${foundryApiMode} onChange=${e=>changeFoundryApi(e.target.value)}>
+            <option value="openai">OpenAI chat completions</option>
+            <option value="anthropic">Anthropic messages</option>
+          </select>
+          <div className="field-hint">Use OpenAI for GPT, DeepSeek, Mistral, Llama, Phi, and similar deployments. Use Anthropic for Claude deployments.</div>
+        </div>`}
       ${(needsBaseUrl||optionalBaseUrl)&&html`
         <div className="field">
           <label>${BASE_URL_LABELS[form.provider]||"Base URL"}${optionalBaseUrl&&html` <span className="field-optional">(optional)</span>`}</label>

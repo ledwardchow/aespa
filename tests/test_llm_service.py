@@ -45,6 +45,129 @@ def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     }
 
 
+def test_azure_foundry_openai_call_uses_openai_v1_base_url(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="foundry-key",
+        base_url="https://myresource.services.ai.azure.com",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["client"] == {
+        "api_key": "foundry-key",
+        "base_url": "https://myresource.services.ai.azure.com/openai/v1",
+    }
+    assert captured["completion"] == {
+        "model": "gpt-4o",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_legacy_azure_foundry_call_uses_openai_mode(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="azure_foundry",
+        api_key="foundry-key",
+        base_url="https://models.inference.ai.azure.com",
+        model="Meta-Llama-3.3-70B-Instruct",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["client"]["base_url"] == "https://models.inference.ai.azure.com/v1"
+
+
+def test_azure_foundry_anthropic_call_uses_messages_api(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["post"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="azure_foundry_anthropic",
+        api_key="foundry-key",
+        base_url="https://myresource.services.ai.azure.com",
+        model="claude-sonnet-4-5",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["client"] == {"timeout": 120}
+    assert captured["url"] == "https://myresource.services.ai.azure.com/anthropic/v1/messages"
+    assert captured["post"]["headers"]["x-api-key"] == "foundry-key"
+    assert "api-key" not in captured["post"]["headers"]
+    assert captured["post"]["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["post"]["json"] == {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+    }
+
+
 def test_extract_json_ignores_visible_thinking_blocks():
     raw = """
 <thinking>

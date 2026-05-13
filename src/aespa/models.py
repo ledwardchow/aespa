@@ -54,6 +54,8 @@ class LLMProvider(str, Enum):
     bedrock = "bedrock"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
+    azure_foundry_openai = "azure_foundry_openai"
+    azure_foundry_anthropic = "azure_foundry_anthropic"
 
 
 class LLMConfig(SQLModel, table=True):
