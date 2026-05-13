@@ -28,6 +28,7 @@ from aespa.schemas import (
     ScopeUpdate,
     ScannerSessionOut,
     ScannerSessionSummary,
+    ScannerSessionUpdate,
     TargetIntelItemOut,
     TargetIntelSummary,
     TestRunCreate,
@@ -35,6 +36,7 @@ from aespa.schemas import (
     TestRunUpdate,
 )
 from aespa.services import crawler as crawler_svc
+from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import task_graph as task_graph_svc
 from aespa.services.settings import get_llm_config
@@ -516,6 +518,41 @@ def get_scanner_sessions(
         counts=counts,
         sessions=[_scanner_session_out(record) for record in records],
     )
+
+
+@router.patch("/api/test-runs/{run_id}/scanner-sessions/{session_id}", response_model=ScannerSessionOut)
+def update_scanner_session(
+    run_id: int,
+    session_id: int,
+    payload: ScannerSessionUpdate,
+    session: Session = Depends(get_session),
+) -> ScannerSessionOut:
+    _get_run_or_404(session, run_id)
+    record = session.get(ScannerSession, session_id)
+    if record is None or record.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
+
+    if payload.label is not None:
+        normalized = scanner_session_svc.stable_label(payload.label)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="Session label cannot be blank")
+        duplicate = session.exec(
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.label == normalized)
+            .where(ScannerSession.id != session_id)
+        ).first()
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail=f"Session label '{normalized}' already exists")
+        record.label = normalized
+    if payload.is_active is not None:
+        record.is_active = payload.is_active
+    from aespa.models import _utcnow
+    record.updated_at = _utcnow()
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return _scanner_session_out(record)
 
 
 @router.get("/api/test-runs/{run_id}/task-graph", response_model=PentestTaskGraphOut)

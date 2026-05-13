@@ -89,6 +89,10 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
                 "as_user": "alice",
                 "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
                 "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
+                "duration_ms": 35,
+                "timing_delta_ms": 900,
+                "body_diff": {"added_terms": ["admin", "panel"]},
+                "action_outcome": "Replay returned protected content.",
             }],
             source="test_validation",
         ))
@@ -97,7 +101,7 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
             saved = session.get(ScanFinding, finding_id)
 
         item_types = {item["type"] for item in saved.evidence_items}
-        assert {"validation_verdict", "validation_reasoning", "validation_probe", "validation_request", "validation_response"} <= item_types
+        assert {"validation_verdict", "validation_reasoning", "validation_probe", "validation_request", "validation_response", "timing", "timing_delta", "body_diff", "action_outcome"} <= item_types
         assert saved.validation_status == "confirmed"
         assert saved.validation_note == "Replay returned protected content."
         assert "secret-token" not in saved.evidence_json
