@@ -635,6 +635,8 @@ class ScanFindingOut(BaseModel):
     evidence: str
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_json: str = "[]"
+    evidence_items: list[dict] = Field(default_factory=list)
     screenshot_b64: str | None
     validation_status: str
     validation_note: str | None
@@ -655,6 +657,7 @@ class ScanFindingImportIn(BaseModel):
     evidence: str = ""
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
     validation_status: str = "unvalidated"
     validation_note: str | None = None
 

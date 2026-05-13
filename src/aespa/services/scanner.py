@@ -54,6 +54,8 @@ BODY_READ_LIMIT = 512 * 1024  # 512 KB
 EVIDENCE_TEXT_LIMIT = 128 * 1024
 REQUEST_EVIDENCE_LIMIT = 64 * 1024
 RESPONSE_EVIDENCE_LIMIT = 128 * 1024
+EVIDENCE_ITEM_TEXT_LIMIT = 16 * 1024
+EVIDENCE_JSON_LIMIT = 64 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
@@ -187,10 +189,15 @@ def _redact_candidate(candidate: dict) -> dict:
 def _redact_sensitive_text(text: str) -> str:
     # Hide JWT-like bearer values in history/evidence. The session vault keeps
     # usable tokens separately under labels so the LLM does not need raw secrets.
-    return re.sub(
+    redacted = re.sub(
         r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
         "[REDACTED_JWT]",
         text,
+    )
+    return re.sub(
+        r"(?im)^(\s*authorization\s*:\s*bearer\s+)[^\s\r\n]+",
+        r"\1[REDACTED_BEARER]",
+        redacted,
     )
 
 
@@ -1148,6 +1155,62 @@ def _response_evidence(value: str) -> str:
     return _clip_evidence(value, RESPONSE_EVIDENCE_LIMIT)
 
 
+def _evidence_items_json(*items: dict) -> str:
+    cleaned: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        evidence_type = str(item.get("type") or "note").strip()[:80]
+        label = str(item.get("label") or evidence_type.replace("_", " ").title()).strip()[:160]
+        value = item.get("value")
+        if value is None or value == "":
+            continue
+        cleaned_item: dict[str, object] = {
+            "type": evidence_type,
+            "label": label,
+            "value": _clip_evidence(str(value), EVIDENCE_ITEM_TEXT_LIMIT),
+        }
+        for key in ("format", "source", "confidence"):
+            if item.get(key):
+                cleaned_item[key] = str(item[key])[:120]
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            cleaned_item["metadata"] = {
+                str(k)[:80]: _clip_evidence(str(v), 1000)
+                for k, v in metadata.items()
+                if v is not None
+            }
+        cleaned.append(cleaned_item)
+
+    text = json.dumps(cleaned, ensure_ascii=False)
+    if len(text) <= EVIDENCE_JSON_LIMIT:
+        return text
+    return json.dumps(cleaned[: max(1, len(cleaned) // 2)], ensure_ascii=False)[:EVIDENCE_JSON_LIMIT]
+
+
+def _http_evidence_items_json(
+    request_evidence: str,
+    response_evidence: str,
+    *,
+    summary: str = "",
+    status: int | str | None = None,
+    marker: str = "",
+    confidence: str = "confirmed",
+) -> str:
+    items = []
+    if summary:
+        items.append({"type": "summary", "label": "Proof summary", "value": summary, "confidence": confidence})
+    if status is not None:
+        items.append({"type": "status", "label": "HTTP status", "value": status, "confidence": confidence})
+    if marker:
+        items.append({"type": "marker", "label": "Matched marker", "value": marker, "confidence": confidence})
+    items.extend([
+        {"type": "http_request", "label": "Request", "value": request_evidence, "format": "http", "confidence": confidence},
+        {"type": "http_response", "label": "Response", "value": response_evidence, "format": "http", "confidence": confidence},
+    ])
+    return _evidence_items_json(*items)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1171,10 +1234,11 @@ def _finding_from_llm(
     matched = result_by_url.get(affected_url, {})
     request_evidence = str(matched.get("request_evidence") or raw.get("request_evidence") or "")
     response_evidence = str(matched.get("response_evidence") or raw.get("response_evidence") or "")
+    summary_evidence = str(raw.get("evidence") or matched.get("evidence") or "")
     evidence = _combined_evidence(
         request_evidence,
         response_evidence,
-        str(raw.get("evidence") or matched.get("evidence") or ""),
+        summary_evidence,
     )
     cvss_score = _cvss_score(raw.get("cvss_score"))
 
@@ -1194,6 +1258,13 @@ def _finding_from_llm(
         evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
         request_evidence=_request_evidence(request_evidence),
         response_evidence=_response_evidence(response_evidence),
+        evidence_json=_http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=summary_evidence,
+            status=matched.get("status"),
+            confidence="validating" if validation_status == "validating" else validation_status,
+        ),
         screenshot_b64=matched.get("screenshot_b64"),
         validation_status=validation_status,
         validation_note=validation_note,
@@ -3003,6 +3074,12 @@ def _auth_matrix_finding(
         ),
         request_evidence=_request_evidence(result["request_evidence"]),
         response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+            status=result.get("status"),
+        ),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic auth matrix module.",
         created_at=_utcnow(),
@@ -3045,6 +3122,13 @@ def _idor_matrix_finding(
         ),
         request_evidence=_request_evidence(result["request_evidence"]),
         response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received content matching the protected object page.",
+            status=result.get("status"),
+            marker="protected object page content matched",
+        ),
         validation_status="confirmed",
         validation_note="Confirmed by deterministic IDOR matrix module.",
         created_at=_utcnow(),
@@ -3670,6 +3754,13 @@ def _deterministic_findings_from_results(
                 )), EVIDENCE_TEXT_LIMIT),
                 request_evidence=_request_evidence(str(result.get("request_evidence") or "")),
                 response_evidence=_response_evidence(str(result.get("response_evidence") or body)),
+                evidence_json=_http_evidence_items_json(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body),
+                    summary="Confirmed by deterministic response analysis.",
+                    status=status,
+                    marker=title,
+                ),
                 screenshot_b64=result.get("screenshot_b64"),
                 validation_status="confirmed",
                 validation_note="Confirmed by deterministic module.",
@@ -3830,6 +3921,13 @@ async def _passive_checks(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary="Passive header and anonymous access check.",
+                status=status,
+                marker=", ".join(missing),
+            ),
             "screenshot_b64": None,
             "missing_security_headers": missing,
             "auth_bypass_status": auth_bypass_status,
@@ -3864,6 +3962,13 @@ async def _passive_checks(
                     ),
                     "request_evidence": f"GET {url} HTTP/1.1",
                     "response_evidence": f"Cookie issues:\n{issue_text}",
+                    "evidence_json": _http_evidence_items_json(
+                        f"GET {url} HTTP/1.1",
+                        f"Cookie issues:\n{issue_text}",
+                        summary="Cookie security attributes were missing.",
+                        status=status,
+                        marker=issue_text,
+                    ),
                     "screenshot_b64": None,
                 })
 
@@ -3930,6 +4035,13 @@ async def _run_http_probe(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=resp.status_code,
+                confidence="observed",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -3954,6 +4066,12 @@ async def _run_http_probe(
             "evidence": _combined_evidence(request_evidence, response_evidence),
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                confidence="error",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -4212,6 +4330,13 @@ async def _run_thinking_browser_action(
         "evidence": _combined_evidence(request_evidence, response_evidence),
         "request_evidence": request_evidence,
         "response_evidence": response_evidence,
+        "evidence_json": _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=action.get("note") or "Browser action",
+            status=last_status,
+            confidence="observed",
+        ),
         "screenshot_b64": screenshot_b64,
     }
 
@@ -4667,6 +4792,16 @@ async def _stored_xss_sweep(
                 evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
                 request_evidence=_request_evidence(request_evidence),
                 response_evidence=_response_evidence(response_evidence),
+                evidence_json=_http_evidence_items_json(
+                    request_evidence,
+                    response_evidence,
+                    summary=(
+                        f"XSS canary '{canary}' injected during scanning was found stored "
+                        "and rendered unescaped in this page's HTML response."
+                    ),
+                    status=resp.status_code,
+                    marker=matched,
+                ),
                 screenshot_b64=None,
                 validation_status="confirmed",
                 validation_note=(

@@ -134,6 +134,56 @@ def test_migrate_makes_scan_finding_page_id_nullable():
         engine.dispose()
 
 
+def test_migrate_adds_scan_finding_evidence_json():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE scan_finding RENAME TO scan_finding_old"))
+            conn.execute(text("""
+                CREATE TABLE scan_finding (
+                    id INTEGER PRIMARY KEY,
+                    test_run_id INTEGER NOT NULL,
+                    page_id INTEGER,
+                    owasp_category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    impact TEXT NOT NULL DEFAULT '',
+                    likelihood TEXT NOT NULL DEFAULT '',
+                    recommendation TEXT NOT NULL DEFAULT '',
+                    cvss_score REAL NOT NULL DEFAULT 0.0,
+                    cvss_vector TEXT NOT NULL DEFAULT '',
+                    affected_url TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL,
+                    request_evidence TEXT NOT NULL DEFAULT '',
+                    response_evidence TEXT NOT NULL DEFAULT '',
+                    screenshot_b64 TEXT,
+                    validation_status TEXT NOT NULL DEFAULT 'unvalidated',
+                    validation_note TEXT,
+                    created_at DATETIME NOT NULL
+                )
+            """))
+            conn.execute(text("DROP TABLE scan_finding_old"))
+            conn.commit()
+
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(scan_finding)"))}
+
+        assert "evidence_json" in columns
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_migrate_creates_target_intelligence_table():
     engine = create_engine(
         "sqlite:///:memory:",

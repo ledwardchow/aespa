@@ -94,6 +94,33 @@ def test_finding_from_llm_preserves_large_request_response_evidence():
     assert "RESPONSE:" in finding.evidence
 
 
+def test_finding_from_llm_emits_structured_evidence_items():
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=2,
+        page_url="https://target.local/admin",
+        raw={
+            "owasp_category": "A01",
+            "title": "Authorization bypass",
+            "affected_url": "https://target.local/admin",
+            "evidence": "Anonymous actor received a protected response.",
+            "cvss_score": 8.1,
+        },
+        result_by_url={
+            "https://target.local/admin": {
+                "status": 200,
+                "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
+                "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
+            }
+        },
+    )
+
+    item_types = {item["type"] for item in finding.evidence_items}
+    assert {"summary", "status", "http_request", "http_response"} <= item_types
+    assert "secret-token" not in finding.evidence_json
+    assert any(item["value"] == "200" for item in finding.evidence_items if item["type"] == "status")
+
+
 def test_dynamic_page_assignment_returns_none_for_non_page_finding():
     engine = create_engine(
         "sqlite:///:memory:",

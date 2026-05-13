@@ -2065,6 +2065,15 @@ function TestRunDetail({ runId }) {
                 const fpGroups = makeGroups(fpMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const evidenceItemsFor = (f) => {
+                  if (Array.isArray(f.evidence_items)) return f.evidence_items;
+                  try {
+                    const parsed = JSON.parse(f.evidence_json || "[]");
+                    return Array.isArray(parsed) ? parsed : [];
+                  } catch (_) {
+                    return [];
+                  }
+                };
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
@@ -2111,6 +2120,17 @@ function TestRunDetail({ runId }) {
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${evidenceItemsFor(f).length > 0 && html`
+                          <div className="structured-evidence">
+                            ${evidenceItemsFor(f).map((item,idx)=>html`
+                              <div key=${idx} className=${"structured-evidence-item evidence-type-"+(item.type||"note")}>
+                                <div className="structured-evidence-label">
+                                  <span>${item.label || item.type || "Evidence"}</span>
+                                  ${item.confidence && html`<span className="structured-evidence-confidence">${item.confidence}</span>`}
+                                </div>
+                                <pre className="structured-evidence-value">${item.value}</pre>
+                              </div>`)}
                           </div>`}
                         ${f.request_evidence && html`
                           <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
