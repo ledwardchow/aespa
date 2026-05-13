@@ -622,6 +622,26 @@ def _save_credential_view(
 _ENDPOINT_RE = re.compile(
     r"""(?P<quote>['"`])(?P<path>(?:https?://[^'"`\s<>]+|/(?:api|admin|auth|graphql|v\d+|[\w.-]+/)[^'"`\s<>]*))(?P=quote)"""
 )
+_FETCH_CALL_RE = re.compile(
+    r"\b(?:fetch|axios(?:\.(?P<axios_method>get|post|put|patch|delete|head|options))?)\s*\(\s*(?P<quote>['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)(?P=quote)(?P<args>[\s\S]{0,500}?)\)",
+    re.IGNORECASE,
+)
+_AXIOS_OBJECT_RE = re.compile(
+    r"\baxios\s*\(\s*\{(?P<object>[\s\S]{0,900}?)\}\s*\)",
+    re.IGNORECASE,
+)
+_ROUTE_LITERAL_RE = re.compile(
+    r"(?:path|route|url|href|to)\s*[:=]\s*(['\"`])(?P<path>/[^'\"`\s<>]+)\1",
+    re.IGNORECASE,
+)
+_STORAGE_ACCESS_RE = re.compile(
+    r"\b(?:localStorage|sessionStorage)\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*(['\"`])(?P<key>[^'\"`]{1,120})\1",
+    re.IGNORECASE,
+)
+_FEATURE_FLAG_RE = re.compile(
+    r"(['\"`])(?P<key>(?:feature|flag|enable|disable|beta|experimental|admin)[A-Za-z0-9_.:-]{2,100})\1\s*[:=]\s*(?P<value>true|false|['\"`][^'\"`]{0,120}['\"`]|\d+)",
+    re.IGNORECASE,
+)
 _JWT_STORAGE_KEY_RE = re.compile(
     r"\b(?:access[_-]?token|auth[_-]?token|id[_-]?token|jwt|bearer|session[_-]?token)\b",
     re.IGNORECASE,
@@ -649,6 +669,9 @@ _PUBLIC_ASSET_PATHS = (
     "/status",
     "/api/status",
 )
+_ADMIN_PATH_RE = re.compile(r"/(?:admin|manage|management|moderator|staff|backoffice|internal|superuser)(?:[/?.#-]|$)", re.IGNORECASE)
+_VALIDATION_PATH_RE = re.compile(r"/(?:validate|verify|verification|check|preflight|csrf|captcha|otp|mfa|2fa)(?:[/?.#-]|$)", re.IGNORECASE)
+_AUTH_PATH_RE = re.compile(r"/(?:login|logout|signup|register|auth|token|session|password|reset)(?:[/?.#-]|$)", re.IGNORECASE)
 
 
 def _save_intel_item(
@@ -978,6 +1001,60 @@ def _mine_asset_text(
             evidence=endpoint,
             metadata={"page_url": page_url},
         )
+    for call in _extract_js_api_calls(body)[:150]:
+        resolved = _resolve_asset_reference(asset_url, call["url"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method=call.get("method") or "GET",
+            source=source,
+            confidence=0.92,
+            evidence=call.get("evidence") or call["url"],
+            metadata={"page_url": page_url, "discovery": "js_api_call", **call.get("metadata", {})},
+        )
+        for field in call.get("body_fields", [])[:30]:
+            _save_intel_item(
+                run_id=run_id,
+                kind="input",
+                key=field,
+                value="js_request_body",
+                url=resolved,
+                method=call.get("method") or "GET",
+                source=source,
+                confidence=0.8,
+                metadata={"page_url": page_url, "asset_url": asset_url, "discovery": "js_api_call"},
+            )
+    for route in _extract_js_route_paths(body)[:150]:
+        resolved = _resolve_asset_reference(asset_url, route["path"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method="GET",
+            source=source,
+            confidence=route.get("confidence", 0.75),
+            evidence=route.get("evidence") or route["path"],
+            metadata={"page_url": page_url, "discovery": route.get("discovery", "js_route"), "category": route.get("category")},
+        )
+    for lead in _extract_js_path_leads(body)[:120]:
+        resolved = _resolve_asset_reference(asset_url, lead["path"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method=lead.get("method") or "GET",
+            source=source,
+            confidence=lead.get("confidence", 0.82),
+            evidence=lead.get("evidence") or lead["path"],
+            metadata={"page_url": page_url, "discovery": "js_path_lead", "category": lead.get("category")},
+        )
     for endpoint in _extract_sitemap_locations(body)[:200]:
         _save_intel_item(
             run_id=run_id,
@@ -1013,6 +1090,30 @@ def _mine_asset_text(
             url=asset_url,
             source=source,
             confidence=0.8,
+            metadata={"page_url": page_url},
+        )
+    for key in _extract_storage_keys_from_js(body)[:100]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="storage_key",
+            key=key,
+            value=key,
+            url=asset_url,
+            source=source,
+            confidence=0.9 if _JWT_STORAGE_KEY_RE.search(key) else 0.75,
+            evidence="JavaScript storage access",
+            metadata={"page_url": page_url, "discovery": "storage_api"},
+        )
+    for flag in _extract_feature_flags(body)[:100]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="feature_flag",
+            key=flag["key"],
+            value=flag["value"],
+            url=asset_url,
+            source=source,
+            confidence=0.75,
+            evidence=flag["evidence"],
             metadata={"page_url": page_url},
         )
     for field in _extract_interesting_response_fields(body):
@@ -1103,6 +1204,165 @@ def _extract_endpoint_strings(text: str) -> list[str]:
     return out
 
 
+def _extract_js_api_calls(text: str) -> list[dict]:
+    calls: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    body = text or ""
+    for match in _FETCH_CALL_RE.finditer(body[:500_000]):
+        url = match.group("url").strip()
+        args = match.group("args") or ""
+        method = (match.group("axios_method") or _extract_method_from_js_options(args) or "GET").upper()
+        key = (method, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append({
+            "url": url,
+            "method": method,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
+            "body_fields": _dedupe_strings([*_extract_jsonish_keys(args), *_extract_js_shorthand_object_keys(args)]),
+            "metadata": {"call": "fetch_or_axios"},
+        })
+        if len(calls) >= 200:
+            return calls
+
+    for match in _AXIOS_OBJECT_RE.finditer(body[:500_000]):
+        obj = match.group("object") or ""
+        url_match = re.search(r"\burl\s*:\s*(['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)\1", obj)
+        if not url_match:
+            continue
+        method_match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>[A-Za-z]+)\1", obj)
+        url = url_match.group("url").strip()
+        method = (method_match.group("method") if method_match else "GET").upper()
+        key = (method, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append({
+            "url": url,
+            "method": method,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
+            "body_fields": _dedupe_strings([*_extract_jsonish_keys(obj), *_extract_js_shorthand_object_keys(obj)]),
+            "metadata": {"call": "axios_object"},
+        })
+        if len(calls) >= 200:
+            break
+    return calls
+
+
+def _extract_method_from_js_options(text: str) -> str | None:
+    match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\1", text or "", re.IGNORECASE)
+    return match.group("method") if match else None
+
+
+def _extract_js_shorthand_object_keys(text: str) -> list[str]:
+    keys: list[str] = []
+    for match in re.finditer(r"\{(?P<body>[^{}]{1,500})\}", text or ""):
+        for token in re.split(r"\s*,\s*", match.group("body")):
+            token = token.strip()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{1,80}", token) and token not in keys:
+                keys.append(token)
+    return keys
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _extract_js_route_paths(text: str) -> list[dict]:
+    routes: list[dict] = []
+    seen: set[str] = set()
+    body = text or ""
+    for match in _ROUTE_LITERAL_RE.finditer(body[:500_000]):
+        path = match.group("path").strip()
+        if not _looks_like_route_path(path) or path in seen:
+            continue
+        seen.add(path)
+        routes.append({
+            "path": path,
+            "category": _path_category(path),
+            "confidence": 0.86 if _path_category(path) else 0.72,
+            "discovery": "route_literal",
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
+        })
+        if len(routes) >= 200:
+            break
+    return routes
+
+
+def _extract_js_path_leads(text: str) -> list[dict]:
+    leads: list[dict] = []
+    seen: set[str] = set()
+    for path in _extract_endpoint_strings(text):
+        category = _path_category(path)
+        if not category or path in seen:
+            continue
+        seen.add(path)
+        leads.append({
+            "path": path,
+            "category": category,
+            "method": "POST" if category in {"auth", "validation"} and re.search(r"/(?:login|register|signup|verify|validate|check|preflight)", path, re.IGNORECASE) else "GET",
+            "confidence": 0.9 if category in {"admin", "validation", "auth"} else 0.82,
+            "evidence": path,
+        })
+    return leads
+
+
+def _extract_storage_keys_from_js(text: str) -> list[str]:
+    keys: list[str] = []
+    for match in _STORAGE_ACCESS_RE.finditer(text or ""):
+        key = match.group("key").strip()
+        if key and key not in keys:
+            keys.append(key)
+        if len(keys) >= 120:
+            break
+    return keys
+
+
+def _extract_feature_flags(text: str) -> list[dict[str, str]]:
+    flags: list[dict[str, str]] = []
+    seen: set[str] = set()
+    body = text or ""
+    for match in _FEATURE_FLAG_RE.finditer(body[:500_000]):
+        key = match.group("key").strip()
+        value = match.group("value").strip().strip("'\"`")[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        flags.append({
+            "key": key,
+            "value": value,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
+        })
+        if len(flags) >= 120:
+            break
+    return flags
+
+
+def _looks_like_route_path(path: str) -> bool:
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return False
+    if len(path) > 240 or any(ch in path for ch in " \t\r\n<>{}"):
+        return False
+    return True
+
+
+def _path_category(path: str) -> str | None:
+    if _ADMIN_PATH_RE.search(path):
+        return "admin"
+    if _VALIDATION_PATH_RE.search(path):
+        return "validation"
+    if _AUTH_PATH_RE.search(path):
+        return "auth"
+    if re.search(r"/(?:feature|flag|beta|experiment|config)(?:[/?.#-]|$)", path, re.IGNORECASE):
+        return "feature"
+    return None
+
+
 def _public_asset_candidates(base_url: str) -> list[str]:
     parsed = urlparse(base_url)
     origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
@@ -1187,6 +1447,9 @@ def _extract_jsonish_keys(text: str) -> list[str]:
         _walk(data)
         return keys
     for key in re.findall(r'"([A-Za-z_][A-Za-z0-9_-]{1,80})"\s*:', text):
+        if key not in keys:
+            keys.append(key)
+    for key in re.findall(r"\b([A-Za-z_][A-Za-z0-9_-]{1,80})\s*:", text):
         if key not in keys:
             keys.append(key)
     return keys

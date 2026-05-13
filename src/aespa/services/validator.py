@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -384,6 +385,39 @@ def _validation_evidence_items(
             "source": source,
             "metadata": {"url": result.get("url"), "status": status, "as_user": result.get("as_user")},
         })
+        if result.get("duration_ms") is not None:
+            items.append({
+                "type": "timing",
+                "label": f"Validation timing {idx}",
+                "value": f"{round(float(result.get('duration_ms') or 0), 1)} ms",
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("timing_delta_ms") is not None:
+            items.append({
+                "type": "timing_delta",
+                "label": f"Validation timing delta {idx}",
+                "value": f"{round(float(result.get('timing_delta_ms') or 0), 1)} ms",
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("body_diff"):
+            diff = result.get("body_diff")
+            items.append({
+                "type": "body_diff",
+                "label": f"Validation body diff {idx}",
+                "value": json.dumps(diff, indent=2, sort_keys=True) if isinstance(diff, dict) else str(diff),
+                "confidence": verdict,
+                "source": source,
+            })
+        if result.get("action_outcome"):
+            items.append({
+                "type": "action_outcome",
+                "label": f"Validation action outcome {idx}",
+                "value": str(result.get("action_outcome") or ""),
+                "confidence": verdict,
+                "source": source,
+            })
         if result.get("request_evidence"):
             items.append({
                 "type": "validation_request",
@@ -627,7 +661,9 @@ async def _run_validation_probe(
                 content=content,
                 headers=request_headers,
             )
+            started = time.perf_counter()
             resp = await client.send(req, follow_redirects=scanner_policy.follow_redirects)
+            duration_ms = int((time.perf_counter() - started) * 1000)
             resp_body = resp.text[:min(800, scanner_policy.response_body_read_limit_bytes)]
             req_hdrs_text = "\n".join(
                 f"{k}: {v}" for k, v in req.headers.items() if k.lower() != "cookie"
@@ -648,8 +684,10 @@ async def _run_validation_probe(
                 "desc": desc,
                 "url": str(resp.url),
                 "status": resp.status_code,
+                "duration_ms": duration_ms,
                 "headers": dict(resp.headers),
                 "body": resp_body,
+                "action_outcome": "Validation probe completed.",
                 "evidence": evidence,
                 "request_evidence": request_evidence,
                 "response_evidence": response_evidence,
@@ -661,6 +699,7 @@ async def _run_validation_probe(
         return {
             "desc": desc, "url": url, "status": None,
             "headers": {}, "body": str(e),
+            "action_outcome": "Validation probe failed before receiving a response.",
             "evidence": f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}",
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,

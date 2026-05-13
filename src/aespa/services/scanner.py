@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -1269,12 +1270,27 @@ def _evidence_items_json(*items: dict) -> str:
     return json.dumps(cleaned[: max(1, len(cleaned) // 2)], ensure_ascii=False)[:EVIDENCE_JSON_LIMIT]
 
 
+def _evidence_items_from_json(value: str | None) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
 def _http_evidence_items_json(
     request_evidence: str,
     response_evidence: str,
     *,
     summary: str = "",
     status: int | str | None = None,
+    status_delta: str | None = None,
+    duration_ms: int | float | None = None,
+    timing_delta_ms: int | float | None = None,
+    body_diff: str | dict | None = None,
+    action_outcome: str | None = None,
+    action_log: str | list | None = None,
+    screenshot_b64: str | None = None,
     marker: str = "",
     confidence: str = "confirmed",
 ) -> str:
@@ -1283,6 +1299,28 @@ def _http_evidence_items_json(
         items.append({"type": "summary", "label": "Proof summary", "value": summary, "confidence": confidence})
     if status is not None:
         items.append({"type": "status", "label": "HTTP status", "value": status, "confidence": confidence})
+    if status_delta:
+        items.append({"type": "status_delta", "label": "Status delta", "value": status_delta, "confidence": confidence})
+    if duration_ms is not None:
+        items.append({"type": "timing", "label": "Response timing", "value": f"{round(float(duration_ms), 1)} ms", "confidence": confidence})
+    if timing_delta_ms is not None:
+        items.append({"type": "timing_delta", "label": "Timing delta", "value": f"{round(float(timing_delta_ms), 1)} ms", "confidence": confidence})
+    if body_diff:
+        diff_value = json.dumps(body_diff, indent=2, sort_keys=True) if isinstance(body_diff, dict) else str(body_diff)
+        items.append({"type": "body_diff", "label": "Body diff", "value": diff_value, "confidence": confidence})
+    if action_outcome:
+        items.append({"type": "action_outcome", "label": "Action outcome", "value": action_outcome, "confidence": confidence})
+    if action_log:
+        log_value = "\n".join(str(line) for line in action_log) if isinstance(action_log, list) else str(action_log)
+        items.append({"type": "action_log", "label": "Action log", "value": log_value, "confidence": confidence})
+    if screenshot_b64:
+        items.append({
+            "type": "screenshot",
+            "label": "Screenshot",
+            "value": "Screenshot captured and attached to the finding.",
+            "confidence": confidence,
+            "metadata": {"bytes_base64": len(screenshot_b64)},
+        })
     if marker:
         items.append({"type": "marker", "label": "Matched marker", "value": marker, "confidence": confidence})
     items.extend([
@@ -1322,6 +1360,26 @@ def _finding_from_llm(
         summary_evidence,
     )
     cvss_score = _cvss_score(raw.get("cvss_score"))
+    prebuilt_items = _evidence_items_from_json(str(matched.get("evidence_json") or ""))
+    if prebuilt_items:
+        evidence_json = _evidence_items_json(
+            {"type": "summary", "label": "Proof summary", "value": summary_evidence, "confidence": "validating" if validation_status == "validating" else validation_status},
+            *prebuilt_items,
+        )
+    else:
+        evidence_json = _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=summary_evidence,
+            status=matched.get("status"),
+            duration_ms=matched.get("duration_ms"),
+            timing_delta_ms=matched.get("timing_delta_ms"),
+            body_diff=matched.get("body_diff"),
+            action_outcome=matched.get("action_outcome"),
+            action_log=matched.get("action_log"),
+            screenshot_b64=matched.get("screenshot_b64"),
+            confidence="validating" if validation_status == "validating" else validation_status,
+        )
 
     return ScanFinding(
         test_run_id=run_id,
@@ -1339,13 +1397,7 @@ def _finding_from_llm(
         evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
         request_evidence=_request_evidence(request_evidence),
         response_evidence=_response_evidence(response_evidence),
-        evidence_json=_http_evidence_items_json(
-            request_evidence,
-            response_evidence,
-            summary=summary_evidence,
-            status=matched.get("status"),
-            confidence="validating" if validation_status == "validating" else validation_status,
-        ),
+        evidence_json=evidence_json,
         screenshot_b64=matched.get("screenshot_b64"),
         validation_status=validation_status,
         validation_note=validation_note,
@@ -2350,6 +2402,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     resp_headers = {}
                     resp_body = ""
                     created_label = None
+                    duration_ms: int | None = None
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
@@ -2362,6 +2415,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         )
                         if body_format == "form":
                             merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                            started = time.perf_counter()
                             resp = await hx.request(
                                 str(action.get("method") or "POST").upper(),
                                 url,
@@ -2371,6 +2425,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             )
                         else:
                             merged_headers.setdefault("Content-Type", "application/json")
+                            started = time.perf_counter()
                             resp = await hx.request(
                                 str(action.get("method") or "POST").upper(),
                                 url,
@@ -2378,6 +2433,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 headers=merged_headers,
                                 cookies=selected_cookies,
                             )
+                        duration_ms = int((time.perf_counter() - started) * 1000)
                         resp_status = resp.status_code
                         resp_headers = dict(resp.headers)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
@@ -2436,6 +2492,11 @@ async def _do_thinking_scan(run_id: int) -> None:
                             response_evidence,
                             summary=f"Disposable account registration attempted for {account['username']}.",
                             status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome=(
+                                f"Registration succeeded; stored reusable session label '{created_label}'."
+                                if created_label else "Registration did not produce reusable auth material."
+                            ),
                             marker=created_label or "no reusable auth material captured",
                             confidence="observed",
                         ),
@@ -2475,6 +2536,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     req_body_str = ""
+                    duration_ms: int | None = None
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
@@ -2487,13 +2549,19 @@ async def _do_thinking_scan(run_id: int) -> None:
                         )
                         if isinstance(body, dict):
                             merged_headers.setdefault("Content-Type", "application/json")
+                            started = time.perf_counter()
                             resp = await hx.request(method, url, json=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = json.dumps(body)[:800]
                         elif isinstance(body, str) and body:
+                            started = time.perf_counter()
                             resp = await hx.request(method, url, content=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = body[:800]
                         else:
+                            started = time.perf_counter()
                             resp = await hx.request(method, url, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
@@ -2539,10 +2607,21 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "desc": note,
                         "url": url,
                         "status": resp_status,
+                        "duration_ms": duration_ms,
                         "headers": resp_headers,
                         "body": resp_body,
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
+                        "action_outcome": "HTTP request completed." if resp_status else "HTTP request failed.",
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=note,
+                            status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome="HTTP request completed." if resp_status else "HTTP request failed.",
+                            confidence="observed",
+                        ),
                     }
 
                 log.info("Thinking scan step %d: %s %s → %s", step, method, url, resp_status)
@@ -4432,6 +4511,7 @@ async def _run_thinking_browser_action(
     last_status: Optional[int] = None
     last_headers: dict = {}
     action_log: list[str] = []
+    started = time.perf_counter()
 
     for raw_step in steps[:20]:
         if not isinstance(raw_step, dict):
@@ -4538,12 +4618,19 @@ async def _run_thinking_browser_action(
         f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
         f"Visible text excerpt:\n{visible_text[:3000]}"
     )
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    outcome = "Browser action completed."
+    if any(" failed:" in line for line in action_log):
+        outcome = "Browser action completed with failed steps."
     return {
         "desc": action.get("note") or "Browser action",
         "url": final_url,
         "status": last_status,
         "headers": last_headers,
         "body": body,
+        "duration_ms": duration_ms,
+        "action_log": action_log,
+        "action_outcome": outcome,
         "evidence": _combined_evidence(request_evidence, response_evidence),
         "request_evidence": request_evidence,
         "response_evidence": response_evidence,
@@ -4552,6 +4639,10 @@ async def _run_thinking_browser_action(
             response_evidence,
             summary=action.get("note") or "Browser action",
             status=last_status,
+            duration_ms=duration_ms,
+            action_outcome=outcome,
+            action_log=action_log,
+            screenshot_b64=screenshot_b64,
             confidence="observed",
         ),
         "screenshot_b64": screenshot_b64,
@@ -4592,6 +4683,7 @@ async def _run_form_probe(
             target_page = pw_page
 
     try:
+        started = time.perf_counter()
         await target_page.goto(url, wait_until="domcontentloaded", timeout=15_000)
         await target_page.wait_for_selector(selector, state="visible", timeout=5_000)
 
@@ -4643,17 +4735,32 @@ async def _run_form_probe(
             f"Response body excerpt:\n{response_body}"
         )
         evidence = _combined_evidence(request_evidence, response_evidence)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        outcome = "Form probe submitted and response evidence captured." if response_status else "Form probe submitted; no matching network response was captured."
 
         return {
             "desc": desc,
             "url": url,
             "payload": payload,
             "status": response_status,
+            "duration_ms": duration_ms,
             "headers": {},
             "body": response_body,
+            "action_outcome": outcome,
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=response_status,
+                duration_ms=duration_ms,
+                action_outcome=outcome,
+                action_log=[f"goto {url}", f"fill {selector}", f"submit {submit}"],
+                screenshot_b64=screenshot_b64,
+                confidence="observed",
+            ),
             "screenshot_b64": screenshot_b64,
             "as_user": as_user,
         }

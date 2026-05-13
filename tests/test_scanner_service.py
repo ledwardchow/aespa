@@ -121,6 +121,63 @@ def test_finding_from_llm_emits_structured_evidence_items():
     assert any(item["value"] == "200" for item in finding.evidence_items if item["type"] == "status")
 
 
+def test_http_evidence_items_include_timing_diff_outcome_and_screenshot():
+    evidence_json = scanner._http_evidence_items_json(
+        "GET /admin HTTP/1.1",
+        "HTTP/1.1 200 OK\n\nadmin panel",
+        summary="Admin panel rendered for an anonymous request.",
+        status=200,
+        status_delta="anonymous 200 vs expected 403",
+        duration_ms=42,
+        timing_delta_ms=1250,
+        body_diff={"added_terms": ["admin", "settings"]},
+        action_outcome="Request succeeded without an authenticated session.",
+        action_log=["goto /admin", "snapshot"],
+        screenshot_b64="abc123",
+    )
+    item_types = {item["type"] for item in scanner._evidence_items_from_json(evidence_json)}
+
+    assert {"status_delta", "timing", "timing_delta", "body_diff", "action_outcome", "action_log", "screenshot"} <= item_types
+
+
+def test_finding_from_llm_preserves_prebuilt_probe_evidence_items():
+    evidence_json = scanner._http_evidence_items_json(
+        "BROWSER ACTION\nInitial URL: https://target.local/admin",
+        "Final URL: https://target.local/admin\nVisible text excerpt:\nadmin panel",
+        summary="Browser action reached admin panel.",
+        status=200,
+        action_outcome="Browser action completed.",
+        action_log=["goto https://target.local/admin", "snapshot"],
+        screenshot_b64="abc123",
+    )
+
+    finding = scanner._finding_from_llm(
+        run_id=1,
+        page_id=2,
+        page_url="https://target.local/admin",
+        raw={
+            "owasp_category": "A01",
+            "title": "Authorization bypass",
+            "affected_url": "https://target.local/admin",
+            "evidence": "Browser evidence showed the admin panel.",
+            "cvss_score": 8.1,
+        },
+        result_by_url={
+            "https://target.local/admin": {
+                "status": 200,
+                "request_evidence": "BROWSER ACTION",
+                "response_evidence": "admin panel",
+                "evidence_json": evidence_json,
+                "screenshot_b64": "abc123",
+            }
+        },
+    )
+
+    item_types = {item["type"] for item in finding.evidence_items}
+    assert {"action_outcome", "action_log", "screenshot"} <= item_types
+    assert finding.screenshot_b64 == "abc123"
+
+
 def test_dynamic_page_assignment_returns_none_for_non_page_finding():
     engine = create_engine(
         "sqlite:///:memory:",
