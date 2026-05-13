@@ -100,6 +100,50 @@ def test_dynamic_scan_creates_page_for_findings_without_crawl():
         engine.dispose()
 
 
+def test_dynamic_scan_task_does_not_write_structured_scan_status(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    async def fake_do_thinking_scan(run_id: int) -> None:
+        scanner._thinking_scan_status[run_id] = "complete"
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            run_id = run.id
+
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+        monkeypatch.setattr(scanner, "_do_thinking_scan", fake_do_thinking_scan)
+        monkeypatch.setattr(scanner.events_svc, "emit", lambda *args, **kwargs: None)
+
+        scanner._thinking_scan_status.pop(run_id, None)
+        asyncio.run(scanner._thinking_scan_task(run_id))
+
+        with Session(engine) as session:
+            refreshed_run = session.get(RunModel, run_id)
+
+        assert refreshed_run.error_message is None
+        assert scanner.get_scan_status(run_id)["status"] == "idle"
+    finally:
+        scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_dynamic_scan_page_creation_reuses_existing_page():
     from aespa import models as _models  # noqa: F401
 
@@ -582,6 +626,49 @@ def test_input_validation_probes_include_expanded_sqli_and_xss_payloads():
     assert "pg_sleep" in text
     assert "onfocus" in text
     assert "%253Cscript%253Ealert%281%29%253C%2Fscript%253E" in text
+
+
+def test_deterministic_result_analysis_detects_sql_error():
+    findings = scanner._deterministic_findings_from_results(
+        run_id=1,
+        page_id=2,
+        page_url="https://target.local/search?q=test",
+        results=[{
+            "desc": "SQLi in param 'q': ' OR '1'='1",
+            "url": "https://target.local/search?q=%27",
+            "status": 500,
+            "headers": {"content-type": "text/html"},
+            "body": "SQL syntax error near unexpected quote",
+            "request_evidence": "GET /search?q='",
+            "response_evidence": "HTTP/1.1 500\nSQL syntax error",
+        }],
+    )
+
+    assert len(findings) == 1
+    assert findings[0].title == "SQL injection error disclosure"
+    assert findings[0].validation_status == "confirmed"
+
+
+def test_deterministic_result_analysis_detects_reflected_xss():
+    payload = '"><img src=x onerror=alert(1)>'
+    findings = scanner._deterministic_findings_from_results(
+        run_id=1,
+        page_id=2,
+        page_url="https://target.local/search?q=test",
+        results=[{
+            "desc": f"XSS in param 'q': {payload}",
+            "url": "https://target.local/search?q=x",
+            "status": 200,
+            "headers": {"content-type": "text/html"},
+            "body": f"<html>Results for {payload}</html>",
+            "request_evidence": "GET /search?q=payload",
+            "response_evidence": f"HTTP/1.1 200\n{payload}",
+        }],
+    )
+
+    assert len(findings) == 1
+    assert findings[0].title == "Reflected cross-site scripting"
+    assert findings[0].owasp_category == "A03"
 
 
 def test_thinking_action_log_message_describes_investigation_and_payload():
