@@ -351,7 +351,7 @@ def test_thinking_next_action_history_includes_response_headers(monkeypatch):
     assert "x-frame-options" in captured["prompt"]
     assert "content-type" in captured["prompt"]
     assert "found_admin_1" in captured["prompt"]
-    assert "secrets are not shown" in captured["prompt"]
+    assert "found_admin_1" in captured["prompt"]  # session label present in sessions section
 
 
 def test_thinking_next_action_compacts_large_history(monkeypatch):

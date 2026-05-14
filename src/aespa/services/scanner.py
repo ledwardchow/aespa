@@ -14,6 +14,8 @@ import asyncio
 import json
 import logging
 import re
+import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -22,9 +24,11 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TestRun
+from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services import scanner_sessions as session_svc
+from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
 
@@ -49,6 +53,11 @@ MAX_PROBES_PER_PAGE = 50
 MAX_FOLLOWUP_PROBES  = 20
 REQUEST_TIMEOUT = 10.0
 BODY_READ_LIMIT = 512 * 1024  # 512 KB
+EVIDENCE_TEXT_LIMIT = 128 * 1024
+REQUEST_EVIDENCE_LIMIT = 64 * 1024
+RESPONSE_EVIDENCE_LIMIT = 128 * 1024
+EVIDENCE_ITEM_TEXT_LIMIT = 16 * 1024
+EVIDENCE_JSON_LIMIT = 64 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
 
 _UA = (
@@ -182,10 +191,15 @@ def _redact_candidate(candidate: dict) -> dict:
 def _redact_sensitive_text(text: str) -> str:
     # Hide JWT-like bearer values in history/evidence. The session vault keeps
     # usable tokens separately under labels so the LLM does not need raw secrets.
-    return re.sub(
+    redacted = re.sub(
         r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
         "[REDACTED_JWT]",
         text,
+    )
+    return re.sub(
+        r"(?im)^(\s*authorization\s*:\s*bearer\s+)[^\s\r\n]+",
+        r"\1[REDACTED_BEARER]",
+        redacted,
     )
 
 
@@ -233,6 +247,123 @@ def _session_label(raw: str, existing: dict) -> str:
         label = f"{base}_{counter}"
         counter += 1
     return label
+
+
+def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
+    has_cookies = bool(cookies)
+    has_bearer = any(str(k).lower() == "authorization" for k in (extra_headers or {}))
+    if has_cookies and has_bearer:
+        return "mixed"
+    if has_bearer:
+        return "bearer"
+    if has_cookies:
+        return "cookie"
+    return "anonymous"
+
+
+def _record_session(
+    run_id: int,
+    *,
+    label: str,
+    session_data: dict,
+    source: str,
+    credential_id: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    session_svc.upsert_session(
+        run_id,
+        label=label,
+        kind=session_data.get("kind") or _session_kind(
+            session_data.get("cookies"),
+            session_data.get("extra_headers"),
+        ),
+        username=session_data.get("username"),
+        credential_id=credential_id or session_data.get("credential_id"),
+        source=source,
+        cookies=session_data.get("cookies") or {},
+        extra_headers=session_data.get("extra_headers") or {},
+        metadata=metadata or session_data.get("metadata") or {},
+    )
+
+
+def _disposable_account_fields(action: dict, *, base_url: str) -> dict[str, Any]:
+    suffix = secrets.token_hex(4)
+    username = str(action.get("username") or f"aespa_{suffix}").strip()
+    email = str(action.get("email") or f"aespa_{suffix}@example.invalid").strip()
+    password = str(action.get("password") or f"Aespa-{suffix}-Test!23")
+    username_field = str(action.get("username_field") or "username")
+    email_field = str(action.get("email_field") or "email")
+    password_field = str(action.get("password_field") or "password")
+    include_username = action.get("include_username", True) is not False
+    include_email = action.get("include_email", True) is not False
+    extra_fields = action.get("extra_fields") if isinstance(action.get("extra_fields"), dict) else {}
+    body = dict(extra_fields)
+    if include_username:
+        body[username_field] = username
+    if include_email:
+        body[email_field] = email
+    body[password_field] = password
+    return {
+        "username": username,
+        "email": email,
+        "password": password,
+        "body": body,
+        "username_field": username_field,
+        "email_field": email_field,
+        "password_field": password_field,
+        "metadata": {
+            "registration_url": str(action.get("url") or base_url),
+            "username": username,
+            "email": email,
+            "password": password,
+            "generated": not any(action.get(k) for k in ("username", "email", "password")),
+            "fields": {
+                "username": username_field if include_username else None,
+                "email": email_field if include_email else None,
+                "password": password_field,
+            },
+        },
+    }
+
+
+def _redacted_account_body(body: dict[str, Any], password_field: str) -> dict[str, Any]:
+    redacted = dict(body)
+    for key in list(redacted):
+        if str(key).lower() in {str(password_field).lower(), "password", "passwd", "pwd"}:
+            redacted[key] = "***"
+    return redacted
+
+
+def _merge_persisted_sessions(run_id: int, cred_sessions: dict[int, dict]) -> dict[int, dict]:
+    merged = dict(cred_sessions or {})
+    existing_labels = {str(s.get("label") or "") for s in merged.values()}
+    existing_credential_ids = {int(k) for k in merged if isinstance(k, int) and k > 0}
+    synthetic_id = -1
+    for label, stored in session_svc.load_session_vault(run_id).items():
+        if label in existing_labels or stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            if credential_id in existing_credential_ids:
+                continue
+            key = credential_id
+            existing_credential_ids.add(credential_id)
+        else:
+            while synthetic_id in merged:
+                synthetic_id -= 1
+            key = synthetic_id
+            synthetic_id -= 1
+        merged[key] = {
+            "label": label,
+            "username": stored.get("username") or label,
+            "credential_id": credential_id,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+            "source": stored.get("source") or "scanner_session",
+            "metadata": stored.get("metadata") or {},
+        }
+        existing_labels.add(label)
+    return merged
 
 
 def _thinking_action_log_message(step: int, method: str, url: str, action: dict) -> str:
@@ -329,8 +460,43 @@ def _build_compact_thinking_context(
             f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
             for f in findings_snapshot
         ]
-        sections.append("Existing findings summary:\n" + "\n".join(lines))
+        sections.append(
+            "CONFIRMED VULNERABILITIES — already proven, do NOT re-test:\n"
+            "You may USE a confirmed exploit capability (e.g. a known JWT secret or admin "
+            "password) only as a stepping stone to reach NEW endpoints. Do not spend steps "
+            "re-proving issues already in this list.\n"
+            + "\n".join(lines)
+        )
     return "\n\n".join(sections)
+
+
+def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
+    with Session(get_engine()) as s:
+        items = s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc())
+            .limit(limit)
+        ).all()
+    if not items:
+        return ""
+
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+    lines = [
+        "Target intelligence inventory:",
+        "Counts in sampled inventory: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
+    ]
+    for item in items[:limit]:
+        method = f" {item.method}" if item.method else ""
+        url = f" @ {item.url}" if item.url else ""
+        value = f" -> {_compact_log_value(item.value, 140)}" if item.value else ""
+        evidence = f" ({_compact_log_value(item.evidence, 140)})" if item.evidence else ""
+        lines.append(
+            f"  - {item.kind}{method} {item.key}{value}{url}; source={item.source}{evidence}"
+        )
+    return "\n".join(lines)
 
 
 def _thinking_tool_result_record(
@@ -361,6 +527,8 @@ def _run_thinking_context_tool(
     pages_snapshot: list[dict[str, Any]],
     findings_snapshot: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    run_id: int | None = None,
+    base_url: str = "",
 ) -> dict[str, Any]:
     if not isinstance(args, dict):
         args = {}
@@ -368,6 +536,7 @@ def _run_thinking_context_tool(
         limit = max(1, min(100, int(args.get("limit") or 20)))
     except (TypeError, ValueError):
         limit = 20
+    tool_name = (tool_name or "").strip()
     search = str(args.get("search") or args.get("filter") or "").lower()
     search_tokens = search.replace("-", "_").split()
 
@@ -473,11 +642,527 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name in {"target_inventory", "search_assets"}:
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_target_inventory(run_id, args, limit, search_tokens)
+
+    if tool_name == "traffic_search":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_traffic_search(run_id, args, limit, search_tokens)
+
+    if tool_name == "endpoint_detail":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_endpoint_detail(
+            run_id,
+            args,
+            pages_snapshot=pages_snapshot,
+            history=history,
+            limit=limit,
+        )
+
+    if tool_name == "compare_responses":
+        return _thinking_tool_compare_responses(args, history=history)
+
+    if tool_name == "mutate_request":
+        return _thinking_tool_mutate_request(args, history=history, base_url=base_url)
+
+    if tool_name == "auth_matrix":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        return _thinking_tool_auth_matrix(run_id, base_url, args, limit)
+
+    if tool_name == "extract_entities":
+        return _thinking_tool_extract_entities(args, pages_snapshot=pages_snapshot, history=history, limit=limit)
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
-        "available_tools": ["site_map", "page_detail", "history_search", "finding_list"],
+        "available_tools": [
+            "site_map", "page_detail", "history_search", "finding_list",
+            "target_inventory", "search_assets", "traffic_search", "endpoint_detail",
+            "compare_responses", "mutate_request", "auth_matrix", "extract_entities",
+        ],
     }
+
+
+def _thinking_tool_target_inventory(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    kind = str(args.get("kind") or "").strip()
+    source = str(args.get("source") or "").strip()
+    with Session(get_engine()) as s:
+        query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+        if kind:
+            query = query.where(TargetIntelItem.kind == kind)
+        if source:
+            query = query.where(TargetIntelItem.source == source)
+        items = list(s.exec(
+            query.order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()).limit(1000)
+        ))
+    matches = []
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+        haystack = _target_intel_text(item).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 300),
+            "url": item.url,
+            "method": item.method,
+            "source": item.source,
+            "confidence": item.confidence,
+            "evidence": _compact_log_value(item.evidence, 300),
+            "metadata": _loads_json_dict(item.item_metadata),
+        })
+    return {
+        "tool": "target_inventory",
+        "counts": counts,
+        "count": len(matches),
+        "items": matches[:limit],
+        "truncated": len(matches) > limit,
+    }
+
+
+def _thinking_tool_traffic_search(
+    run_id: int,
+    args: dict[str, Any],
+    limit: int,
+    search_tokens: list[str],
+) -> dict[str, Any]:
+    method = str(args.get("method") or "").upper()
+    status = args.get("status")
+    try:
+        status_int = int(status) if status not in (None, "") else None
+    except (TypeError, ValueError):
+        status_int = None
+    with Session(get_engine()) as s:
+        query = select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+        if method:
+            query = query.where(TrafficEntry.method == method)
+        if status_int is not None:
+            query = query.where(TrafficEntry.status == status_int)
+        entries = list(s.exec(query.order_by(TrafficEntry.id.desc()).limit(1000)))
+    matches = []
+    for entry in entries:
+        haystack = " ".join(str(part or "") for part in (
+            entry.method, entry.url, entry.request_body, entry.response_body,
+            entry.status, entry.username, entry.source,
+        )).lower()
+        if search_tokens and not all(token in haystack for token in search_tokens):
+            continue
+        matches.append({
+            "id": entry.id,
+            "source": entry.source,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "duration_ms": entry.duration_ms,
+            "username": entry.username,
+            "request_headers": _safe_json_excerpt(entry.request_headers, 800),
+            "request_body": _compact_log_value(entry.request_body, 1000),
+            "response_headers": _safe_json_excerpt(entry.response_headers, 800),
+            "response_body": _compact_log_value(entry.response_body, 1800),
+        })
+    matches = list(reversed(matches[:limit]))
+    return {"tool": "traffic_search", "count": len(matches), "entries": matches}
+
+
+def _thinking_tool_endpoint_detail(
+    run_id: int,
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    url = str(args.get("url") or "")
+    page_id = args.get("page_id")
+    if not url and page_id is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(page_id):
+                url = str(page.get("url") or "")
+                break
+    if not url:
+        return {"tool": "endpoint_detail", "error": "url or page_id required"}
+
+    detail: dict[str, Any] = {"tool": "endpoint_detail", "url": url}
+    for page in pages_snapshot:
+        if page.get("url") == url or str(page.get("id")) == str(page_id):
+            detail["page"] = {
+                "page_id": page.get("id"),
+                "kind": _thinking_page_kind(page),
+                "title": page.get("title") or "",
+                "flags": _thinking_page_flags(page),
+                "context": str(page.get("context") or "")[:2500],
+                "page_text": str(page.get("page_text") or "")[:3000],
+            }
+            break
+
+    with Session(get_engine()) as s:
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .limit(1000)
+        ))
+        traffic = list(s.exec(
+            select(TrafficEntry)
+            .where(TrafficEntry.test_run_id == run_id)
+            .order_by(TrafficEntry.id.desc())
+            .limit(1000)
+        ))
+
+    detail["intel"] = [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "key": item.key,
+            "value": _compact_log_value(item.value, 240),
+            "method": item.method,
+            "source": item.source,
+            "evidence": _compact_log_value(item.evidence, 240),
+        }
+        for item in intel
+        if _urls_related(url, item.url or item.value or item.key)
+    ][:limit]
+    detail["traffic"] = [
+        {
+            "id": entry.id,
+            "method": entry.method,
+            "url": entry.url,
+            "status": entry.status,
+            "username": entry.username,
+            "request_body": _compact_log_value(entry.request_body, 600),
+            "response_body": _compact_log_value(entry.response_body, 1200),
+        }
+        for entry in traffic
+        if _urls_related(url, entry.url)
+    ][:limit]
+    detail["history"] = [
+        {
+            "step": item.get("step"),
+            "method": item.get("method"),
+            "url": item.get("url"),
+            "status": item.get("response_status"),
+            "note": item.get("note"),
+            "response_body": str(item.get("response_body") or "")[:1200],
+        }
+        for item in history
+        if _urls_related(url, str(item.get("url") or ""))
+    ][-limit:]
+    detail["entities"] = _extract_entities_from_text(json.dumps(detail, default=str), limit=limit)
+    return detail
+
+
+def _thinking_tool_compare_responses(args: dict[str, Any], *, history: list[dict[str, Any]]) -> dict[str, Any]:
+    left = _resolve_history_record(args.get("left_step") or args.get("baseline_step"), history)
+    right = _resolve_history_record(args.get("right_step") or args.get("variant_step"), history)
+    if left is None or right is None:
+        return {"tool": "compare_responses", "error": "left_step/baseline_step and right_step/variant_step must match history steps"}
+    left_body = str(left.get("response_body") or "")
+    right_body = str(right.get("response_body") or "")
+    left_status = left.get("response_status")
+    right_status = right.get("response_status")
+    added, removed = _word_diff_summary(left_body, right_body)
+    return {
+        "tool": "compare_responses",
+        "left": {"step": left.get("step"), "url": left.get("url"), "status": left_status, "length": len(left_body)},
+        "right": {"step": right.get("step"), "url": right.get("url"), "status": right_status, "length": len(right_body)},
+        "status_changed": left_status != right_status,
+        "length_delta": len(right_body) - len(left_body),
+        "similarity": _text_similarity(left_body, right_body),
+        "added_terms": added[:30],
+        "removed_terms": removed[:30],
+        "left_excerpt": left_body[:1200],
+        "right_excerpt": right_body[:1200],
+    }
+
+
+def _thinking_tool_mutate_request(args: dict[str, Any], *, history: list[dict[str, Any]], base_url: str) -> dict[str, Any]:
+    source = _resolve_history_record(args.get("step"), history)
+    url = str(args.get("url") or (source or {}).get("url") or base_url)
+    method = str(args.get("method") or (source or {}).get("method") or "GET").upper()
+    body = args.get("body")
+    if body is None and source is not None:
+        body = source.get("request_body")
+    mutation = str(args.get("mutation") or args.get("kind") or "input_validation")
+    probes = _mutated_probe_variants(method, url, body, mutation)
+    return {
+        "tool": "mutate_request",
+        "source_step": source.get("step") if source else None,
+        "mutation": mutation,
+        "count": len(probes),
+        "probes": probes[: max(1, min(20, int(args.get("limit") or 10)))],
+        "note": "These are proposed probe objects. Execute one with an http action when appropriate.",
+    }
+
+
+def _thinking_tool_auth_matrix(run_id: int, base_url: str, args: dict[str, Any], limit: int) -> dict[str, Any]:
+    targets = _auth_matrix_targets(run_id, base_url)
+    search = str(args.get("search") or args.get("filter") or "").lower()
+    if search:
+        tokens = search.split()
+        targets = [t for t in targets if all(token in json.dumps(t, default=str).lower() for token in tokens)]
+    return {
+        "tool": "auth_matrix",
+        "count": len(targets),
+        "targets": [
+            {
+                "url": t["url"],
+                "method": t.get("method", "GET"),
+                "requires_auth_or_sensitive": _target_requires_auth_or_sensitive(t),
+                "accessible_by": t.get("accessible_by") or [],
+                "page_id": t.get("page_id"),
+                "source": t.get("source"),
+                "has_object_ref": t.get("has_object_ref"),
+                "has_business_logic": t.get("has_business_logic"),
+            }
+            for t in targets[:limit]
+        ],
+        "truncated": len(targets) > limit,
+    }
+
+
+def _thinking_tool_extract_entities(
+    args: dict[str, Any],
+    *,
+    pages_snapshot: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    text = str(args.get("text") or "")
+    if not text and args.get("step") is not None:
+        record = _resolve_history_record(args.get("step"), history)
+        if record:
+            text = json.dumps(record, default=str)
+    if not text and args.get("page_id") is not None:
+        for page in pages_snapshot:
+            if str(page.get("id")) == str(args.get("page_id")):
+                text = " ".join(str(page.get(k) or "") for k in ("url", "title", "context", "page_text"))
+                break
+    if not text:
+        text = "\n".join(str(item.get("response_body") or "") for item in history[-5:])
+    return {
+        "tool": "extract_entities",
+        "entities": _extract_entities_from_text(text, limit=limit),
+    }
+
+
+def _target_intel_text(item: TargetIntelItem) -> str:
+    return " ".join(str(part or "") for part in (
+        item.kind, item.key, item.value, item.url, item.method, item.source,
+        item.evidence, item.item_metadata,
+    ))
+
+
+def _loads_json_dict(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_json_excerpt(value: str | None, limit: int) -> dict | str:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return {
+                str(k): _compact_log_value(v, 180)
+                for k, v in list(parsed.items())[:20]
+            }
+        return _compact_log_value(parsed, limit)
+    except Exception:
+        return _compact_log_value(value, limit)
+
+
+def _urls_related(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    ap = urlparse(a)
+    bp = urlparse(b)
+    if ap.netloc and bp.netloc and ap.netloc != bp.netloc:
+        return False
+    return bool(ap.path and bp.path and (ap.path == bp.path or ap.path in bp.path or bp.path in ap.path))
+
+
+def _resolve_history_record(step, history: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if step is None:
+        return history[-1] if history else None
+    for item in history:
+        if str(item.get("step")) == str(step):
+            return item
+    return None
+
+
+def _word_diff_summary(left: str, right: str) -> tuple[list[str], list[str]]:
+    token_re = re.compile(r"[A-Za-z0-9_./:-]{3,}")
+    left_tokens = set(token_re.findall(left or ""))
+    right_tokens = set(token_re.findall(right or ""))
+    added = sorted(right_tokens - left_tokens, key=lambda x: (len(x), x), reverse=True)
+    removed = sorted(left_tokens - right_tokens, key=lambda x: (len(x), x), reverse=True)
+    return added, removed
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left_words = set(re.findall(r"[a-z0-9_]{3,}", (left or "").lower()))
+    right_words = set(re.findall(r"[a-z0-9_]{3,}", (right or "").lower()))
+    if not left_words and not right_words:
+        return 1.0
+    if not left_words or not right_words:
+        return 0.0
+    return round(len(left_words & right_words) / len(left_words | right_words), 3)
+
+
+def _mutated_probe_variants(method: str, url: str, body, mutation: str) -> list[dict]:
+    mutation_l = mutation.lower()
+    probes: list[dict] = []
+    if "idor" in mutation_l or "object" in mutation_l:
+        probes.extend(_mutate_url_numeric_values(method, url, "IDOR object-reference mutation"))
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:8]:
+                if _looks_id_key(key) or re.fullmatch(r"\d+", str(value or "")):
+                    for candidate in _numeric_mutations(value):
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"IDOR body mutation {key}={candidate}",
+                        })
+    elif "business" in mutation_l or "amount" in mutation_l:
+        if isinstance(body, dict):
+            for key, value in list(body.items())[:10]:
+                if _looks_business_value_key(key):
+                    for candidate in ["0", "-1", "1", "999999999", str(value)]:
+                        mutated = dict(body)
+                        mutated[key] = candidate
+                        probes.append({
+                            "type": "http", "method": method, "url": url,
+                            "headers": {}, "body": mutated,
+                            "desc": f"Business logic boundary mutation {key}={candidate}",
+                        })
+    else:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        if qs:
+            for param in list(qs.keys())[:3]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    base_params = {k: v[0] for k, v in qs.items()}
+                    base_params[param] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(base_params))),
+                        "headers": {}, "body": None,
+                        "desc": f"{label} mutation in query param {param}",
+                    })
+        if isinstance(body, dict):
+            for key in list(body.keys())[:5]:
+                for payload, label in [(_SQLI_PAYLOADS[0], "SQLi"), (_XSS_PAYLOADS[2], "XSS"), ("{{7*7}}", "SSTI")]:
+                    mutated = dict(body)
+                    mutated[key] = payload
+                    probes.append({
+                        "type": "http", "method": method, "url": url,
+                        "headers": {}, "body": mutated,
+                        "desc": f"{label} mutation in body field {key}",
+                    })
+    return probes[:40]
+
+
+def _mutate_url_numeric_values(method: str, url: str, desc: str) -> list[dict]:
+    parsed = urlparse(url)
+    probes: list[dict] = []
+    parts = parsed.path.split("/")
+    for idx, part in enumerate(parts):
+        if re.fullmatch(r"\d+", part or ""):
+            for candidate in _numeric_mutations(part):
+                mutated = parts.copy()
+                mutated[idx] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(path="/".join(mutated))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: path {part}->{candidate}",
+                })
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for key, values in list(qs.items())[:8]:
+        if values and (re.fullmatch(r"\d+", values[0]) or _looks_id_key(key)):
+            for candidate in _numeric_mutations(values[0]):
+                params = {k: v[0] for k, v in qs.items()}
+                params[key] = candidate
+                probes.append({
+                    "type": "http", "method": method, "url": urlunparse(parsed._replace(query=urlencode(params))),
+                    "headers": {}, "body": None,
+                    "desc": f"{desc}: query {key}={candidate}",
+                })
+    return probes
+
+
+def _numeric_mutations(value) -> list[str]:
+    try:
+        base = int(value)
+    except (TypeError, ValueError):
+        base = 1
+    candidates = [base - 1, base + 1, 1, 2, 999999]
+    return [str(c) for c in candidates if c > 0 and c != base]
+
+
+def _looks_id_key(key: str) -> bool:
+    return bool(re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction|tenant)(?:_|$)", str(key), re.I))
+
+
+def _looks_business_value_key(key: str) -> bool:
+    return bool(re.search(r"(amount|price|total|quantity|qty|balance|limit|role|status|state)", str(key), re.I))
+
+
+def _extract_entities_from_text(text: str, limit: int = 20) -> dict[str, list[str]]:
+    text = text or ""
+    urls = _unique_limited(re.findall(r"https?://[^\s\"'<>)}]+", text), limit)
+    paths = _unique_limited(re.findall(r"(?<![A-Za-z0-9])/(?:api/)?[A-Za-z0-9_./{}:-]{2,}", text), limit)
+    emails = _unique_limited(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", text), limit)
+    uuids = _unique_limited(re.findall(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", text, re.I), limit)
+    jwt_like = _unique_limited(re.findall(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", text), limit)
+    ids = _unique_limited(re.findall(r"\b(?:id|user_id|account_id|order_id|invoice_id|transaction_id|tenant_id)[\"'=:\s]+([A-Za-z0-9_-]{1,80})", text, re.I), limit)
+    errors = _unique_limited([
+        line.strip() for line in text.splitlines()
+        if any(marker in line.lower() for marker in (
+            "error", "exception", "traceback", "stack trace", "sql syntax",
+            "unauthorized", "forbidden", "debug",
+        ))
+    ], limit)
+    return {
+        "urls": urls,
+        "paths": paths,
+        "emails": emails,
+        "uuids": uuids,
+        "ids": ids,
+        "jwt_like": ["[REDACTED_JWT]" for _ in jwt_like],
+        "errors": errors,
+    }
+
+
+def _unique_limited(values: list[str], limit: int) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        value = str(value).strip().rstrip(".,;")
+        if value and value not in out:
+            out.append(value)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _followup_log_details(followup_probes: list[dict]) -> dict[str, str]:
@@ -536,6 +1221,121 @@ def _combined_evidence(request_evidence: str, response_evidence: str, summary: s
     return "\n\n".join(parts)
 
 
+def _clip_evidence(value: str, limit: int) -> str:
+    text = _redact_sensitive_text(str(value or ""))
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n[truncated {len(text) - limit} characters]"
+
+
+def _full_evidence(request_evidence: str, response_evidence: str, summary: str = "") -> str:
+    return _clip_evidence(
+        _combined_evidence(request_evidence, response_evidence, summary),
+        EVIDENCE_TEXT_LIMIT,
+    )
+
+
+def _request_evidence(value: str) -> str:
+    return _clip_evidence(value, REQUEST_EVIDENCE_LIMIT)
+
+
+def _response_evidence(value: str) -> str:
+    return _clip_evidence(value, RESPONSE_EVIDENCE_LIMIT)
+
+
+def _evidence_items_json(*items: dict) -> str:
+    cleaned: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        evidence_type = str(item.get("type") or "note").strip()[:80]
+        label = str(item.get("label") or evidence_type.replace("_", " ").title()).strip()[:160]
+        value = item.get("value")
+        if value is None or value == "":
+            continue
+        cleaned_item: dict[str, object] = {
+            "type": evidence_type,
+            "label": label,
+            "value": _clip_evidence(str(value), EVIDENCE_ITEM_TEXT_LIMIT),
+        }
+        for key in ("format", "source", "confidence"):
+            if item.get(key):
+                cleaned_item[key] = str(item[key])[:120]
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            cleaned_item["metadata"] = {
+                str(k)[:80]: _clip_evidence(str(v), 1000)
+                for k, v in metadata.items()
+                if v is not None
+            }
+        cleaned.append(cleaned_item)
+
+    text = json.dumps(cleaned, ensure_ascii=False)
+    if len(text) <= EVIDENCE_JSON_LIMIT:
+        return text
+    return json.dumps(cleaned[: max(1, len(cleaned) // 2)], ensure_ascii=False)[:EVIDENCE_JSON_LIMIT]
+
+
+def _evidence_items_from_json(value: str | None) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _http_evidence_items_json(
+    request_evidence: str,
+    response_evidence: str,
+    *,
+    summary: str = "",
+    status: int | str | None = None,
+    status_delta: str | None = None,
+    duration_ms: int | float | None = None,
+    timing_delta_ms: int | float | None = None,
+    body_diff: str | dict | None = None,
+    action_outcome: str | None = None,
+    action_log: str | list | None = None,
+    screenshot_b64: str | None = None,
+    marker: str = "",
+    confidence: str = "confirmed",
+) -> str:
+    items = []
+    if summary:
+        items.append({"type": "summary", "label": "Proof summary", "value": summary, "confidence": confidence})
+    if status is not None:
+        items.append({"type": "status", "label": "HTTP status", "value": status, "confidence": confidence})
+    if status_delta:
+        items.append({"type": "status_delta", "label": "Status delta", "value": status_delta, "confidence": confidence})
+    if duration_ms is not None:
+        items.append({"type": "timing", "label": "Response timing", "value": f"{round(float(duration_ms), 1)} ms", "confidence": confidence})
+    if timing_delta_ms is not None:
+        items.append({"type": "timing_delta", "label": "Timing delta", "value": f"{round(float(timing_delta_ms), 1)} ms", "confidence": confidence})
+    if body_diff:
+        diff_value = json.dumps(body_diff, indent=2, sort_keys=True) if isinstance(body_diff, dict) else str(body_diff)
+        items.append({"type": "body_diff", "label": "Body diff", "value": diff_value, "confidence": confidence})
+    if action_outcome:
+        items.append({"type": "action_outcome", "label": "Action outcome", "value": action_outcome, "confidence": confidence})
+    if action_log:
+        log_value = "\n".join(str(line) for line in action_log) if isinstance(action_log, list) else str(action_log)
+        items.append({"type": "action_log", "label": "Action log", "value": log_value, "confidence": confidence})
+    if screenshot_b64:
+        items.append({
+            "type": "screenshot",
+            "label": "Screenshot",
+            "value": "Screenshot captured and attached to the finding.",
+            "confidence": confidence,
+            "metadata": {"bytes_base64": len(screenshot_b64)},
+        })
+    if marker:
+        items.append({"type": "marker", "label": "Matched marker", "value": marker, "confidence": confidence})
+    items.extend([
+        {"type": "http_request", "label": "Request", "value": request_evidence, "format": "http", "confidence": confidence},
+        {"type": "http_response", "label": "Response", "value": response_evidence, "format": "http", "confidence": confidence},
+    ])
+    return _evidence_items_json(*items)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -559,12 +1359,33 @@ def _finding_from_llm(
     matched = result_by_url.get(affected_url, {})
     request_evidence = str(matched.get("request_evidence") or raw.get("request_evidence") or "")
     response_evidence = str(matched.get("response_evidence") or raw.get("response_evidence") or "")
+    summary_evidence = str(raw.get("evidence") or matched.get("evidence") or "")
     evidence = _combined_evidence(
         request_evidence,
         response_evidence,
-        str(raw.get("evidence") or matched.get("evidence") or ""),
+        summary_evidence,
     )
     cvss_score = _cvss_score(raw.get("cvss_score"))
+    prebuilt_items = _evidence_items_from_json(str(matched.get("evidence_json") or ""))
+    if prebuilt_items:
+        evidence_json = _evidence_items_json(
+            {"type": "summary", "label": "Proof summary", "value": summary_evidence, "confidence": "validating" if validation_status == "validating" else validation_status},
+            *prebuilt_items,
+        )
+    else:
+        evidence_json = _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=summary_evidence,
+            status=matched.get("status"),
+            duration_ms=matched.get("duration_ms"),
+            timing_delta_ms=matched.get("timing_delta_ms"),
+            body_diff=matched.get("body_diff"),
+            action_outcome=matched.get("action_outcome"),
+            action_log=matched.get("action_log"),
+            screenshot_b64=matched.get("screenshot_b64"),
+            confidence="validating" if validation_status == "validating" else validation_status,
+        )
 
     return ScanFinding(
         test_run_id=run_id,
@@ -579,14 +1400,35 @@ def _finding_from_llm(
         cvss_score=cvss_score,
         cvss_vector=raw.get("cvss_vector", ""),
         affected_url=affected_url,
-        evidence=evidence[:4000],
-        request_evidence=request_evidence[:4000],
-        response_evidence=response_evidence[:4000],
+        evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+        request_evidence=_request_evidence(request_evidence),
+        response_evidence=_response_evidence(response_evidence),
+        evidence_json=evidence_json,
         screenshot_b64=matched.get("screenshot_b64"),
         validation_status=validation_status,
         validation_note=validation_note,
         created_at=_utcnow(),
     )
+
+
+def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> int:
+    saved = 0
+    if not findings:
+        return saved
+    with Session(get_engine()) as s:
+        for finding in findings:
+            if _finding_exists(
+                s,
+                run_id=run_id,
+                title=finding.title,
+                affected_url=finding.affected_url,
+                owasp_category=finding.owasp_category,
+            ):
+                continue
+            s.add(finding)
+            saved += 1
+        s.commit()
+    return saved
 
 
 def _find_or_create_dynamic_page(
@@ -690,6 +1532,32 @@ def _dynamic_finding_exists(
         f.title.strip().lower() == normalized_title
         or (
             f.owasp_category.strip().lower() == normalized_owasp
+            and f.title.strip().lower() == normalized_title
+        )
+        for f in existing
+    )
+
+
+def _finding_exists(
+    session: Session,
+    *,
+    run_id: int,
+    title: str,
+    affected_url: str,
+    owasp_category: str = "",
+) -> bool:
+    existing = session.exec(
+        select(ScanFinding)
+        .where(ScanFinding.test_run_id == run_id)
+        .where(ScanFinding.affected_url == affected_url)
+    ).all()
+    normalized_title = (title or "").strip().lower()
+    normalized_owasp = (owasp_category or "").strip().lower()
+    return any(
+        f.title.strip().lower() == normalized_title
+        or (
+            normalized_owasp
+            and f.owasp_category.strip().lower() == normalized_owasp
             and f.title.strip().lower() == normalized_title
         )
         for f in existing
@@ -865,23 +1733,17 @@ def _emit_thinking_status(run_id: int) -> None:
 
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
-    _mark_run(run_id, scan_status="running")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
-        _mark_run(run_id, scan_status="stopped")
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
         raise
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
-        _mark_run(run_id, scan_status="failed", error=str(exc)[:2000])
-        _emit_scan_update(run_id)
         _emit_thinking_status(run_id)
     finally:
         _thinking_stop_requested.discard(run_id)
@@ -902,12 +1764,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
-        thinking_max_steps = max(
-            1,
-            int(
-                getattr(scanner_policy, "thinking_max_steps", DEFAULT_THINKING_MAX_STEPS)
-            ),
-        )
+        thinking_max_steps = 0  # unused — no step limit
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -950,7 +1807,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
-    base_url      = site.base_url.rstrip("/")
+    base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
     requires_auth = site.requires_auth
 
@@ -964,6 +1821,16 @@ async def _do_thinking_scan(run_id: int) -> None:
         pages_snapshot,
         findings_snapshot,
     )
+    intel_context = _build_target_intelligence_context(run_id)
+    if intel_context:
+        crawl_context = f"{crawl_context}\n\n{intel_context}"
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
+    if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
+        events_svc.emit(run_id, {
+            "type": "task_graph_update",
+            "reason": "seeded",
+            "data": seeded_task_graph,
+        })
 
     creds_for_llm = [
         {
@@ -978,7 +1845,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         "type": "scanner_phase",
         "phase": "thinking_scan",
         "status": "start",
-        "message": f"LLM-directed scan started — up to {thinking_max_steps} adaptive steps.",
+        "message": "LLM-directed scan started.",
     })
 
     # ── Bootstrap browser + auth session (Playwright) ─────────────────────────
@@ -989,8 +1856,14 @@ async def _do_thinking_scan(run_id: int) -> None:
     history:     list[dict] = []
     all_results: list[dict] = []
     progressive_findings_count = 0
-    session_vault: dict[str, dict] = {}
+    session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
+    session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     consecutive_context_tools = 0
+    failed_url_counts: dict[str, int] = {}  # "METHOD:url" → count of 404/error responses
+    blocked_urls: set[str] = set()          # URLs tried 3+ times and still failing
+    browser_url_counts: dict[str, int] = {}  # url → count of browser visits with failed steps
+    login_failure_counts: dict[str, int] = {}  # url → count of 401/403 on login endpoints
+    auth_bootstrap_warned = False           # prevent duplicate bootstrap warning events
 
     from playwright.async_api import async_playwright
 
@@ -1031,14 +1904,91 @@ async def _do_thinking_scan(run_id: int) -> None:
         extra_headers: dict[str, str] = {}
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
-            session_vault["configured_primary"] = {
+
+        if requires_auth and creds and not cookie_jar and not auth_token:
+            _cred_username = creds[0].username
+            _warn_msg = (
+                f"Configured credentials for '{_cred_username}' did not produce a session "
+                f"after the login attempt — the password may be incorrect. "
+                f"Check the username and password in site settings."
+            )
+            log.warning("Dynamic scan auth bootstrap: %s", _warn_msg)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "credential_warning",
+                "status": "warning",
+                "message": _warn_msg,
+            })
+            auth_bootstrap_warned = True
+            crawl_context = (
+                f"WARNING: Configured credentials for '{_cred_username}' did not authenticate "
+                f"successfully. The password may be wrong. Test unauthenticated attack surface "
+                f"and do not spend steps retrying this credential.\n\n{crawl_context}"
+            )
+
+        if requires_auth and creds and (cookie_jar or extra_headers):
+            configured_primary = {
                 "label": "configured_primary",
-                "kind": "bearer",
-                "username": creds[0].username if creds else None,
+                "kind": _session_kind(cookie_jar, extra_headers),
+                "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "source": "configured credential auth bootstrap",
-                "extra_headers": {"Authorization": f"Bearer {auth_token}"},
+                "extra_headers": extra_headers,
                 "cookies": cookie_jar,
             }
+            session_vault["configured_primary"] = configured_primary
+            _record_session(
+                run_id,
+                label="configured_primary",
+                session_data=configured_primary,
+                source="dynamic_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
+
+        # ── Detect client-controlled authorization cookies ─────────────────────
+        # If the login response set cookies whose names or values suggest that the
+        # server trusts them for access-control decisions (e.g. SysAdmin=true,
+        # Manager=false, role=admin), inject a high-priority prompt note so the
+        # LLM tests cookie forgery before anything else.
+        _priv_name_patterns = [
+            "admin", "sysadmin", "role", "manager", "privilege", "level",
+            "group", "perm", "isloggedin", "elevated", "superuser", "isadmin",
+            "staff", "access",
+        ]
+        _bool_values = {"true", "false", "1", "0", "yes", "no"}
+        _session_cookie_names = {
+            "session", "sessid", "sessionid", "asp.net_sessionid",
+            "phpsessid", "jsessionid", "csrftoken", "xsrf-token",
+        }
+        _suspicious_auth_cookies = {
+            name: value
+            for name, value in cookie_jar.items()
+            if name.lower() not in _session_cookie_names
+            and (
+                any(pat in name.lower() for pat in _priv_name_patterns)
+                or value.lower() in _bool_values
+            )
+        }
+        if _suspicious_auth_cookies:
+            _cookie_detail = ", ".join(
+                f"{k}={v}" for k, v in _suspicious_auth_cookies.items()
+            )
+            log.info(
+                "Thinking scan: suspicious client-controlled auth cookies detected: %s",
+                _cookie_detail,
+            )
+            _cookie_alert = (
+                f"PRIORITY FINDING LEAD — Client-controlled authorization cookies detected "
+                f"after login: {_cookie_detail}. "
+                f"The server appears to trust these cookie values for access-control. "
+                f"Immediately test whether forging them (e.g. flipping a boolean flag or "
+                f"changing a role value) grants unauthorized elevated access. "
+                f"Issue HTTP requests with a manually crafted Cookie header that modifies "
+                f"these values and compare responses to baseline. "
+                f"This is a broken access control (A01/A07) finding if the server honours them."
+            )
+            crawl_context = f"{_cookie_alert}\n\n{crawl_context}"
 
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -1050,7 +2000,23 @@ async def _do_thinking_scan(run_id: int) -> None:
                 run_id, username=creds[0].username if creds else None
             ),
         ) as hx:
-            for step in range(1, thinking_max_steps + 1):
+            # ── Continuous session path (Anthropic native tool use) ────────────
+            if llm_cfg.provider in llm_svc.AGENTIC_LOOP_PROVIDERS:
+                progressive_findings_count = await _do_agentic_thinking_loop(
+                    run_id=run_id, llm_cfg=llm_cfg, base_url=base_url,
+                    crawl_context=crawl_context, creds_for_llm=creds_for_llm,
+                    session_vault=session_vault, pages_snapshot=pages_snapshot,
+                    findings_snapshot=findings_snapshot, first_page_id=first_page_id,
+                    scanner_policy=scanner_policy,
+                    hx=hx, browser_ctx=browser_ctx, pw_page=pw_page,
+                    history=history, all_results=all_results,
+                )
+            # ── Step-by-step path (fallback for non-agentic providers) ──────
+            step = 0
+            while True:
+                if llm_cfg.provider in llm_svc.AGENTIC_LOOP_PROVIDERS:
+                    break  # agentic loop already ran above
+                step += 1
                 if run_id in _thinking_stop_requested:
                     break
 
@@ -1058,18 +2024,29 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "type": "scanner_phase",
                     "phase": "thinking_step",
                     "status": "deciding",
-                    "message": f"Step {step}/{thinking_max_steps}: LLM deciding next action…",
-                    "data": {"step": step, "max_steps": thinking_max_steps},
+                    "message": f"Step {step}: LLM deciding next action…",
+                    "data": {"step": step},
                 })
 
                 # Ask the LLM what to do next.
                 try:
+                    task_context = task_graph_svc.build_task_graph_context(run_id)
+                    step_context = (
+                        f"{crawl_context}\n\n{task_context}"
+                        if task_context else crawl_context
+                    )
+                    if blocked_urls:
+                        blocked_list = ", ".join(sorted(blocked_urls)[:12])
+                        step_context = (
+                            f"{step_context}\n\n"
+                            f"BLOCKED PATHS — already failed 3+ times, do NOT probe these again: "
+                            f"{blocked_list}. Switch to a completely different attack surface."
+                        )
                     action = await llm_svc.thinking_next_action(
                         llm_cfg,
                         target_url=base_url,
-                        crawl_context=crawl_context,
+                        crawl_context=step_context,
                         history=history,
-                        max_steps=thinking_max_steps,
                         current_step=step,
                         credentials=creds_for_llm,
                         sessions=[
@@ -1115,6 +2092,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                             pages_snapshot=pages_snapshot,
                             findings_snapshot=findings_snapshot,
                             history=history,
+                            run_id=run_id,
+                            base_url=base_url,
                         )
                     consecutive_context_tools += 1
                     result_text = json.dumps(output, separators=(",", ":"), default=str)
@@ -1135,6 +2114,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     continue
 
                 consecutive_context_tools = 0
+                active_task_id = task_graph_svc.mark_task_running_for_action(run_id, action, step)
 
                 if action_type == "finding_write":
                     affected = action.get("affected_url") or base_url
@@ -1182,10 +2162,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_body": (
                             f"{'Saved' if saved is not None else 'Skipped duplicate'} "
                             f"finding: {action.get('title', 'Untitled finding')}. "
-                            f"{str(action.get('evidence') or '')[:1200]}"
+                            + (
+                                "This finding already exists (recorded by structured scan or "
+                                "a prior step). Do NOT write it again. Your next action MUST "
+                                "probe a completely different endpoint or attack category. "
+                                if saved is None else ""
+                            )
+                            + f"{str(action.get('evidence') or '')[:1200]}"
                         ),
                     })
+                    task_graph_svc.complete_task_after_result(
+                        run_id,
+                        active_task_id,
+                        step=step,
+                        method="FINDING_WRITE",
+                        url=str(affected),
+                        status=200,
+                        note=note,
+                        response_excerpt=str(action.get("evidence") or "")[:2000],
+                        finding_written=saved is not None,
+                    )
                     if saved is not None:
+                        task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
                     events_svc.emit(run_id, {
@@ -1205,6 +2203,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                         },
                     })
                     continue
+
+                # Initialise per-action state that the step_record block always reads.
+                _js_paths: list[str] = []
 
                 if action_type == "browser":
                     url = (action.get("url") or base_url).strip()
@@ -1235,6 +2236,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     try:
+                        if selected_session and selected_session.get("cookies"):
+                            cookie_list = [
+                                {"name": k, "value": v, "url": url}
+                                for k, v in selected_session.get("cookies", {}).items()
+                            ]
+                            if cookie_list:
+                                await browser_ctx.add_cookies(cookie_list)
                         await browser_ctx.set_extra_http_headers(
                             selected_session.get("extra_headers", {})
                             if selected_session else {}
@@ -1247,12 +2255,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                         default_url=base_url,
                         scanner_policy=scanner_policy,
                     )
+                    # Traffic is captured in-function and already formatted into body.
                     resp_body = str(result.get("body") or "")[:BODY_READ_LIMIT]
                     resp_status = result.get("status") or 0
                     resp_headers = result.get("headers") or {}
                     url = result.get("url") or url
                     req_body = {"steps": steps}
                     result["desc"] = note
+
+                    # Track repeated failed browser interactions on the same URL.
+                    _action_log = result.get("action_log") or []
+                    _had_failures = any(" failed:" in line for line in _action_log)
+                    if _had_failures:
+                        _browser_url = action.get("url") or base_url
+                        browser_url_counts[_browser_url] = (
+                            browser_url_counts.get(_browser_url, 0) + 1
+                        )
+                        if browser_url_counts[_browser_url] >= 3:
+                            blocked_urls.add(_browser_url)
+                            log.debug(
+                                "Thinking scan: browser URL blocked after 3 failed attempts: %s",
+                                _browser_url,
+                            )
                 elif action_type == "jwt":
                     method = "JWT"
                     url = f"jwt://forge/{action.get('store_as') or 'token'}"
@@ -1287,6 +2311,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "extra_headers": {"Authorization": f"Bearer {token}"},
                             "cookies": {},
                         }
+                        _record_session(
+                            run_id,
+                            label=label,
+                            session_data=session_vault[label],
+                            source="dynamic_scan_jwt_action",
+                            metadata={"claims": claims, "header": header or {"typ": "JWT", "alg": "HS256"}},
+                        )
                         resp_status = 200
                         resp_headers = {"content-type": "application/json"}
                         resp_body = json.dumps({
@@ -1395,6 +2426,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     "extra_headers": {"Authorization": f"Bearer {token}"},
                                     "cookies": {},
                                 }
+                                _record_session(
+                                    run_id,
+                                    label=label,
+                                    session_data=session_vault[label],
+                                    source="dynamic_scan_credential_check",
+                                    metadata={"login_url": url},
+                                )
                         except Exception as exc:
                             response_excerpt = f"Request failed: {exc}"
                             success = False
@@ -1439,6 +2477,149 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "response_evidence": response_evidence,
                     }
                     resp_status = result["status"]
+                elif action_type == "register_account":
+                    method = "REGISTER_ACCOUNT"
+                    url = (action.get("url") or "").strip()
+                    if not url:
+                        log.warning("Thinking scan step %d: register_account missing URL.", step)
+                        break
+                    headers = action.get("headers") if isinstance(action.get("headers"), dict) else {}
+                    success_statuses = action.get("success_statuses") or [200, 201, 204]
+                    try:
+                        success_statuses = {int(s) for s in success_statuses}
+                    except Exception:
+                        success_statuses = {200, 201, 204}
+                    account = _disposable_account_fields(action, base_url=base_url)
+                    body = account["body"]
+                    redacted_body = _redacted_account_body(body, account["password_field"])
+                    store_as = str(action.get("store_as") or f"disposable_{account['username']}")
+                    use_session = action.get("use_session") or action.get("as_session")
+                    use_session = use_session if isinstance(use_session, str) else None
+                    selected_session = session_vault.get(use_session) if use_session else None
+                    body_format = str(action.get("body_format") or "json").lower()
+                    action_message = _thinking_action_log_message(step, method, url, action)
+
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step,
+                            "method": method,
+                            "url": url,
+                            "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                            "payload_purpose": action.get("payload_purpose"),
+                            "payload_summary": f"register {account['username']} / {account['email']}",
+                            "use_session": use_session,
+                        },
+                    })
+
+                    resp_status = 0
+                    resp_headers = {}
+                    resp_body = ""
+                    created_label = None
+                    duration_ms: int | None = None
+                    try:
+                        merged_headers = dict(hx.headers)
+                        if selected_session and selected_session.get("extra_headers"):
+                            merged_headers.update(selected_session["extra_headers"])
+                        merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
+                        if body_format == "form":
+                            merged_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                            started = time.perf_counter()
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                data=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        else:
+                            merged_headers.setdefault("Content-Type", "application/json")
+                            started = time.perf_counter()
+                            resp = await hx.request(
+                                str(action.get("method") or "POST").upper(),
+                                url,
+                                json=body,
+                                headers=merged_headers,
+                                cookies=selected_cookies,
+                            )
+                        duration_ms = int((time.perf_counter() - started) * 1000)
+                        resp_status = resp.status_code
+                        resp_headers = dict(resp.headers)
+                        raw_resp_body = resp.text[:BODY_READ_LIMIT]
+                        resp_body = _redact_sensitive_text(raw_resp_body)
+                        success = resp.status_code in success_statuses
+                        token = _extract_bearer_token_from_body(raw_resp_body) if success else None
+                        response_cookies = {k: v for k, v in resp.cookies.items()} if success else {}
+                        extra_headers = {"Authorization": f"Bearer {token}"} if token else {}
+                        if success:
+                            created_label = _session_label(store_as, session_vault)
+                            session_vault[created_label] = {
+                                "label": created_label,
+                                "kind": _session_kind(response_cookies, extra_headers),
+                                "username": account["username"],
+                                "source": "register_account",
+                                "extra_headers": extra_headers,
+                                "cookies": response_cookies,
+                                "metadata": account["metadata"],
+                            }
+                            _record_session(
+                                run_id,
+                                label=created_label,
+                                session_data=session_vault[created_label],
+                                source="dynamic_scan_register_account",
+                                metadata={
+                                    **account["metadata"],
+                                    "method": str(action.get("method") or "POST").upper(),
+                                    "status": resp.status_code,
+                                    "body_format": body_format,
+                                },
+                            )
+                    except Exception as exc:
+                        log.warning("Thinking scan step %d register_account error (%s): %s", step, url, exc)
+                        resp_body = f"Registration request failed: {exc}"
+
+                    req_body = redacted_body
+                    request_evidence = _request_evidence(
+                        f"REGISTER_ACCOUNT {url}\n{json.dumps(redacted_body, sort_keys=True)}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\nCreated session label: {created_label or 'none'}\n{resp_body}"
+                    )
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body,
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=f"Disposable account registration attempted for {account['username']}.",
+                            status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome=(
+                                f"Registration succeeded; stored reusable session label '{created_label}'."
+                                if created_label else "Registration did not produce reusable auth material."
+                            ),
+                            marker=created_label or "no reusable auth material captured",
+                            confidence="observed",
+                        ),
+                    }
                 else:
                     # Execute the HTTP request.
                     method  = (action.get("method") or "GET").upper()
@@ -1474,20 +2655,32 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     req_body_str = ""
+                    duration_ms: int | None = None
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
                             merged_headers.update(selected_session["extra_headers"])
                         merged_headers.update(headers)
+                        selected_cookies = (
+                            selected_session.get("cookies")
+                            if selected_session and selected_session.get("cookies")
+                            else None
+                        )
                         if isinstance(body, dict):
                             merged_headers.setdefault("Content-Type", "application/json")
-                            resp = await hx.request(method, url, json=body, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, json=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = json.dumps(body)[:800]
                         elif isinstance(body, str) and body:
-                            resp = await hx.request(method, url, content=body, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, content=body, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                             req_body_str = body[:800]
                         else:
-                            resp = await hx.request(method, url, headers=merged_headers)
+                            started = time.perf_counter()
+                            resp = await hx.request(method, url, headers=merged_headers, cookies=selected_cookies)
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
@@ -1503,9 +2696,46 @@ async def _do_thinking_scan(run_id: int) -> None:
                                 "extra_headers": {"Authorization": f"Bearer {token}"},
                                 "cookies": {},
                             }
+                            _record_session(
+                                run_id,
+                                label=label,
+                                session_data=session_vault[label],
+                                source="dynamic_scan_http_response",
+                                metadata={"method": method, "url": url},
+                            )
                         resp_body    = _redact_sensitive_text(raw_resp_body)
                         resp_status  = resp.status_code
                         resp_headers = dict(resp.headers)
+                        # Auto-extract API endpoint paths from JavaScript responses so the
+                        # LLM can find them without needing to parse JS bodies manually.
+                        _ct = resp_headers.get("content-type", "").lower()
+                        _is_js = "javascript" in _ct or url.split("?")[0].lower().endswith(".js")
+                        if _is_js and resp_status == 200:
+                            # Capture /api/... paths and also bare paths that look like
+                            # API routes (e.g. '/transfers', '/own-transfers', '/payments').
+                            _raw_paths = re.findall(
+                                r'["\']((?:/api)?/[a-zA-Z0-9_-][a-zA-Z0-9_/{}.-]*)["\']',
+                                raw_resp_body,
+                            )
+                            # Filter out obvious static assets and keep meaningful paths.
+                            _js_paths = list(dict.fromkeys(
+                                p for p in _raw_paths
+                                if len(p) >= 4
+                                and not p.endswith((".js", ".css", ".html", ".png", ".ico"))
+                                and not p.startswith("//")
+                            ))[:40]
+                            if _js_paths:
+                                try:
+                                    from aespa.services.crawler import _save_intel_item as _si
+                                    for _p in _js_paths:
+                                        _si(
+                                            run_id=run_id, kind="endpoint", key=_p, value=_p,
+                                            url=url, method="GET", source="js_mining_dynamic",
+                                            confidence=0.8,
+                                            evidence=f"Extracted from {url} at step {step}",
+                                        )
+                                except Exception as _exc:
+                                    log.debug("Dynamic JS path extraction failed: %s", _exc)
                     except Exception as exc:
                         log.warning("Thinking scan step %d HTTP error (%s %s): %s", step, method, url, exc)
                         resp_body    = f"Request failed: {exc}"
@@ -1513,19 +2743,45 @@ async def _do_thinking_scan(run_id: int) -> None:
                         resp_headers = {}
 
                     req_body = body
-                    request_evidence = f"{method} {url}\n{json.dumps(headers)}\n{req_body_str}"
-                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    request_evidence = _request_evidence(
+                        f"{method} {url}\n{json.dumps(headers, sort_keys=True)}\n{req_body_str}"
+                    )
+                    response_evidence = _response_evidence(
+                        "Status: "
+                        f"{resp_status}\n"
+                        + "\n".join(f"{k}: {v}" for k, v in resp_headers.items())
+                        + f"\n\n{resp_body}"
+                    )
                     result = {
                         "desc": note,
                         "url": url,
                         "status": resp_status,
+                        "duration_ms": duration_ms,
                         "headers": resp_headers,
-                        "body": resp_body[:1000],
+                        "body": resp_body,
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
+                        "action_outcome": "HTTP request completed." if resp_status else "HTTP request failed.",
+                        "evidence_json": _http_evidence_items_json(
+                            request_evidence,
+                            response_evidence,
+                            summary=note,
+                            status=resp_status,
+                            duration_ms=duration_ms,
+                            action_outcome="HTTP request completed." if resp_status else "HTTP request failed.",
+                            confidence="observed",
+                        ),
                     }
 
                 log.info("Thinking scan step %d: %s %s → %s", step, method, url, resp_status)
+
+                _resp_body_for_history = resp_body
+                if _js_paths:
+                    _paths_note = (
+                        f"[{len(_js_paths)} API path(s) auto-extracted from JS and added to "
+                        f"target intelligence: {', '.join(_js_paths[:15])}]\n\n"
+                    )
+                    _resp_body_for_history = _paths_note + resp_body
 
                 step_record = {
                     "step":             step,
@@ -1536,11 +2792,66 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "request_body":     req_body,
                     "response_status":  resp_status,
                     "response_headers": resp_headers,
-                    "response_body":    resp_body,
+                    "response_body":    _resp_body_for_history,
                 }
                 history.append(step_record)
 
+                # Track failed or uninformative probes and surface them as blocked URLs.
+                # "Uninformative" includes error codes AND 200s with an empty body — the
+                # latter catches API endpoints that silently return nothing (e.g. content-
+                # length: 0) regardless of how many times they are retried.
+                _probe_key = f"{method}:{url}"
+                _is_uninformative = (
+                    resp_status in (0, 404, 405)
+                    or resp_status >= 500
+                    or (resp_status == 200 and len(resp_body.strip()) < 5)
+                )
+                if _is_uninformative:
+                    failed_url_counts[_probe_key] = failed_url_counts.get(_probe_key, 0) + 1
+                    if failed_url_counts[_probe_key] >= 3:
+                        blocked_urls.add(url)
+                        log.debug(
+                            "Thinking scan: URL blocked after 3 uninformative responses: %s %s",
+                            method, url,
+                        )
+                # For repeated failures push the tool budget up so the LLM must think
+                # (pick tools or a different approach) rather than blindly retrying.
+                if failed_url_counts.get(_probe_key, 0) >= 2:
+                    consecutive_context_tools = max(consecutive_context_tools - 1, 0)
+
+                # Detect repeated 401/403 on login-like endpoints — likely a bad password.
+                _is_login_endpoint = method == "POST" and any(
+                    term in url.lower()
+                    for term in ("/login", "/auth/", "/signin", "/authenticate", "/token")
+                )
+                if _is_login_endpoint and resp_status in (401, 403):
+                    login_failure_counts[url] = login_failure_counts.get(url, 0) + 1
+                    if login_failure_counts[url] == 2 and not auth_bootstrap_warned:
+                        _cred_username = creds[0].username if creds else "configured user"
+                        _lf_msg = (
+                            f"Repeated {resp_status} from {url} — the configured credentials "
+                            f"for '{_cred_username}' are likely incorrect. "
+                            f"Check the password in site settings and do not retry this login."
+                        )
+                        log.warning("Thinking scan: %s", _lf_msg)
+                        events_svc.emit(run_id, {
+                            "type": "scanner_phase",
+                            "phase": "credential_warning",
+                            "status": "warning",
+                            "message": _lf_msg,
+                        })
+
                 all_results.append(result)
+                task_graph_svc.complete_task_after_result(
+                    run_id,
+                    active_task_id,
+                    step=step,
+                    method=method,
+                    url=url,
+                    status=resp_status,
+                    note=note,
+                    response_excerpt=resp_body[:2000],
+                )
 
                 events_svc.emit(run_id, {
                     "type": "scanner_phase",
@@ -1633,10 +2944,875 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     stopped = run_id in _thinking_stop_requested
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
-    _mark_run(run_id, scan_status="stopped" if stopped else "complete")
-    _emit_scan_update(run_id)
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
+
+
+# ── Agentic loop helper ───────────────────────────────────────────────────────
+
+# Maps Anthropic tool names → action strings expected by the task-graph service.
+_TOOL_NAME_TO_ACTION: dict[str, str] = {
+    "http_request":    "http",
+    "browser":         "browser",
+    "context_tool":    "tool",
+    "write_finding":   "finding_write",
+    "forge_jwt":       "jwt",
+    "credential_check": "credential_check",
+    "register_account": "register_account",
+    "done":            "done",
+}
+
+
+async def _do_agentic_thinking_loop(
+    *,
+    run_id: int,
+    llm_cfg,
+    base_url: str,
+    crawl_context: str,
+    creds_for_llm: list[dict],
+    session_vault: dict,
+    pages_snapshot: list[dict],
+    findings_snapshot: list[dict],
+    first_page_id: Optional[int],
+    scanner_policy,
+    hx,
+    browser_ctx,
+    pw_page,
+    history: list[dict],
+    all_results: list[dict],
+) -> int:
+    """Run the continuous tool-use agentic scan (Anthropic native tool use path).
+
+    Maintains a growing messages list so the model reads its own prior reasoning
+    verbatim.  Returns progressive_findings_count.
+    """
+    progressive_findings_count = 0
+    _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+
+    # ── Build the initial user message ────────────────────────────────────────
+    creds_text = ""
+    if creds_for_llm:
+        c_lines = [
+            f"  - username={c['username']}  password={c['password']}"
+            + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
+            for c in creds_for_llm
+        ]
+        creds_text = "Test credentials:\n" + "\n".join(c_lines)
+
+    sessions_text = ""
+    if session_vault:
+        s_lines = [
+            f"  - label={label}  kind={sd.get('kind', 'bearer')}"
+            + (f"  username={sd.get('username')}" if sd.get("username") else "")
+            + (f"  source={sd.get('source')}" if sd.get("source") else "")
+            for label, sd in session_vault.items()
+        ]
+        sessions_text = (
+            "Reusable authenticated sessions — use these labels instead of "
+            "re-authenticating:\n" + "\n".join(s_lines)
+        )
+
+    task_context = task_graph_svc.build_task_graph_context(run_id)
+    initial_message = "\n\n".join(filter(None, [
+        f"Target: {base_url}",
+        f"Application context:\n{crawl_context}",
+        creds_text,
+        sessions_text,
+        task_context or "",
+        "Begin the assessment.",
+    ]))
+
+    # ── Tool executor closure ─────────────────────────────────────────────────
+    async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
+        nonlocal progressive_findings_count
+        note = str(tool_input.get("note") or f"Step {step}")
+
+        # ── context_tool ──────────────────────────────────────────────────────
+        if tool_name == "context_tool":
+            inner_tool = str(tool_input.get("tool") or "").strip()
+            args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+            if _consecutive_ctx_tools[0] >= 3:
+                _consecutive_ctx_tools[0] += 1
+                output = {
+                    "tool": inner_tool,
+                    "error": (
+                        "context tool budget reached; execute a probe or "
+                        "write a finding next"
+                    ),
+                }
+            else:
+                output = _run_thinking_context_tool(
+                    inner_tool, args,
+                    pages_snapshot=pages_snapshot,
+                    findings_snapshot=findings_snapshot,
+                    history=history,
+                    run_id=run_id,
+                    base_url=base_url,
+                )
+                _consecutive_ctx_tools[0] += 1
+            result_text = json.dumps(output, separators=(",", ":"), default=str)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": (
+                    f"Step {step}: context tool {inner_tool} returned "
+                    f"{len(result_text):,} chars"
+                ),
+                "data": {
+                    "step": step,
+                    "tool": inner_tool,
+                    "note": note,
+                    "observation": tool_input.get("observation"),
+                    "hypothesis": tool_input.get("hypothesis"),
+                },
+            })
+            history.append(
+                _thinking_tool_result_record(step, inner_tool, args, output, note)
+            )
+            return result_text
+
+        # Non-context tools reset the consecutive counter
+        _consecutive_ctx_tools[0] = 0
+
+        action_for_task = {
+            "action": _TOOL_NAME_TO_ACTION.get(tool_name, tool_name),
+            **tool_input,
+        }
+        active_task_id = task_graph_svc.mark_task_running_for_action(
+            run_id, action_for_task, step
+        )
+
+        # ── write_finding ─────────────────────────────────────────────────────
+        if tool_name == "write_finding":
+            affected = str(tool_input.get("affected_url") or base_url)
+            fw_result = {
+                "source": "finding_write",
+                "desc": note,
+                "url": affected,
+                "status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": str(tool_input.get("evidence") or "")[:1000],
+                "request_evidence": str(tool_input.get("request_evidence") or ""),
+                "response_evidence": str(tool_input.get("response_evidence") or ""),
+            }
+            saved = await _persist_dynamic_finding(
+                run_id=run_id,
+                llm_cfg=llm_cfg,
+                raw=tool_input,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+                result_by_url={affected: fw_result},
+            )
+            if saved is not None:
+                progressive_findings_count += 1
+                findings_snapshot.append({
+                    "title": saved.title,
+                    "severity": saved.severity,
+                    "owasp": saved.owasp_category,
+                    "affected_url": saved.affected_url,
+                    "description": saved.description[:200],
+                })
+            history.append({
+                "step": step,
+                "note": note,
+                "method": "FINDING_WRITE",
+                "url": affected,
+                "request_headers": {},
+                "request_body": {
+                    "title": tool_input.get("title"),
+                    "owasp_category": tool_input.get("owasp_category"),
+                },
+                "response_status": 200,
+                "response_headers": {"content-type": "application/json"},
+                "response_body": (
+                    f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                    f"finding: {tool_input.get('title', 'Untitled')}. "
+                    + (
+                        "This finding already exists. Do NOT write it again. "
+                        "Move to a completely different endpoint or attack category. "
+                        if saved is None else ""
+                    )
+                    + str(tool_input.get("evidence") or "")[:600]
+                ),
+            })
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="FINDING_WRITE", url=affected, status=200,
+                note=note,
+                response_excerpt=str(tool_input.get("evidence") or "")[:2000],
+                finding_written=saved is not None,
+            )
+            if saved is not None:
+                task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
+                _emit_scan_update(run_id)
+                _emit_thinking_status(run_id)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": (
+                    f"Step {step}: "
+                    f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                    f"{tool_input.get('title', 'Untitled finding')}"
+                ),
+                "data": {
+                    "step": step,
+                    "affected_url": affected,
+                    "finding_id": saved.id if saved is not None else None,
+                    "note": note,
+                },
+            })
+            if saved is not None:
+                return (
+                    f"Finding recorded: \"{tool_input.get('title')}\" "
+                    f"(severity: {tool_input.get('severity')}, "
+                    f"OWASP: {tool_input.get('owasp_category')}, ID: {saved.id})"
+                )
+            return (
+                f"Duplicate skipped: \"{tool_input.get('title')}\" already exists. "
+                "Do NOT write it again. Move to a different attack surface."
+            )
+
+        # ── browser ───────────────────────────────────────────────────────────
+        if tool_name == "browser":
+            br_url = (tool_input.get("url") or base_url).strip()
+            steps_list = tool_input.get("steps") or []
+            use_session_label = (
+                tool_input.get("use_session")
+                if isinstance(tool_input.get("use_session"), str) else None
+            )
+            selected_session = session_vault.get(use_session_label) if use_session_label else None
+            payload_summary = _thinking_browser_payload_summary(steps_list)
+            action_message = _thinking_action_log_message(step, "BROWSER", br_url, tool_input)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": action_message,
+                "data": {
+                    "step": step, "method": "BROWSER", "url": br_url, "note": note,
+                    "observation": tool_input.get("observation"),
+                    "hypothesis": tool_input.get("hypothesis"),
+                    "payload_purpose": tool_input.get("payload_purpose"),
+                    "payload_summary": payload_summary,
+                    "use_session": use_session_label,
+                },
+            })
+            try:
+                if selected_session and selected_session.get("cookies"):
+                    cookie_list = [
+                        {"name": k, "value": v, "url": br_url}
+                        for k, v in selected_session["cookies"].items()
+                    ]
+                    if cookie_list:
+                        await browser_ctx.add_cookies(cookie_list)
+                await browser_ctx.set_extra_http_headers(
+                    selected_session.get("extra_headers", {}) if selected_session else {}
+                )
+            except Exception:
+                pass
+            br_result = await _run_thinking_browser_action(
+                pw_page, tool_input, default_url=base_url, scanner_policy=scanner_policy,
+            )
+            resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
+            resp_status = br_result.get("status") or 0
+            resp_headers = br_result.get("headers") or {}
+            final_url = br_result.get("url") or br_url
+            action_log = br_result.get("action_log") or []
+            request_evidence = _request_evidence(
+                f"BROWSER {final_url}\nSteps: {json.dumps(steps_list)[:800]}"
+            )
+            response_evidence = _response_evidence(
+                f"Status: {resp_status}\nURL: {final_url}\n"
+                + "\n".join(action_log)
+                + f"\n\n{resp_body}"
+            )
+            br_result_dict = {
+                "desc": note, "url": final_url, "status": resp_status,
+                "headers": resp_headers, "body": resp_body,
+                "request_evidence": request_evidence,
+                "response_evidence": response_evidence,
+                "action_outcome": "Browser interaction completed.",
+            }
+            history.append({
+                "step": step, "note": note, "method": "BROWSER", "url": final_url,
+                "request_headers": {}, "request_body": {"steps": steps_list},
+                "response_status": resp_status, "response_headers": resp_headers,
+                "response_body": resp_body,
+            })
+            all_results.append(br_result_dict)
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="BROWSER", url=final_url, status=resp_status,
+                note=note, response_excerpt=resp_body[:2000],
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": f"Step {step}: BROWSER {final_url} \u2192 {resp_status}",
+                "data": {"step": step, "status": resp_status, "note": note},
+            })
+            await sleep_between_probes(scanner_policy)
+            action_log_text = "\n".join(action_log) if action_log else "(none)"
+            return (
+                f"Browser: {final_url}\nStatus: {resp_status}\n"
+                f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
+            )
+
+        # ── forge_jwt ─────────────────────────────────────────────────────────
+        if tool_name == "forge_jwt":
+            jwt_secret = str(tool_input.get("secret") or "")
+            jwt_claims = (
+                tool_input.get("claims")
+                if isinstance(tool_input.get("claims"), dict) else {}
+            )
+            jwt_header = (
+                tool_input.get("header")
+                if isinstance(tool_input.get("header"), dict) else None
+            )
+            jwt_store_as = tool_input.get("store_as")
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": _thinking_action_log_message(
+                    step, "JWT", f"jwt://forge/{jwt_store_as or 'token'}", tool_input
+                ),
+                "data": {"step": step, "method": "JWT", "note": note},
+            })
+            try:
+                jwt_token = _sign_hs256_jwt(jwt_secret, jwt_claims, jwt_header)
+                jwt_label = jwt_store_as or _session_label("forged_jwt", session_vault)
+                session_vault[jwt_label] = {
+                    "label": jwt_label,
+                    "kind": "bearer",
+                    "username": (
+                        f"sub:{jwt_claims.get('sub')}"
+                        if jwt_claims.get("sub") is not None else None
+                    ),
+                    "source": "forge_jwt tool",
+                    "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
+                    "cookies": {},
+                }
+                _record_session(
+                    run_id, label=jwt_label,
+                    session_data=session_vault[jwt_label],
+                    source="dynamic_scan_jwt_action",
+                    metadata={
+                        "claims": jwt_claims,
+                        "header": jwt_header or {"typ": "JWT", "alg": "HS256"},
+                    },
+                )
+                jwt_resp_body = json.dumps({"store_as": jwt_label, "claims": jwt_claims})
+                jwt_resp_status = 200
+            except Exception as exc:
+                jwt_resp_body = f"JWT signing failed: {exc}"
+                jwt_resp_status = 0
+                jwt_label = None
+            history.append({
+                "step": step, "note": note, "method": "JWT",
+                "url": f"jwt://forge/{jwt_store_as or 'token'}",
+                "request_headers": {}, "request_body": {"claims": jwt_claims},
+                "response_status": jwt_resp_status, "response_headers": {},
+                "response_body": jwt_resp_body,
+            })
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="JWT",
+                url=f"jwt://forge/{jwt_label or 'token'}",
+                status=jwt_resp_status, note=note,
+                response_excerpt=jwt_resp_body[:500],
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": (
+                    f"Step {step}: JWT forge "
+                    f"{'succeeded' if jwt_label else 'failed'}"
+                ),
+                "data": {"step": step, "note": note},
+            })
+            if jwt_label:
+                return (
+                    f"JWT forged and stored as session label \"{jwt_label}\".\n"
+                    f"Use use_session=\"{jwt_label}\" in subsequent http_request calls.\n"
+                    f"Claims: {json.dumps(jwt_claims)}"
+                )
+            return jwt_resp_body
+
+        # ── credential_check ──────────────────────────────────────────────────
+        if tool_name == "credential_check":
+            cc_url = str(tool_input.get("url") or "").strip()
+            cc_candidates = tool_input.get("candidates")
+            if not isinstance(cc_candidates, list):
+                cc_candidates = []
+            cc_candidates = [c for c in cc_candidates if isinstance(c, dict)][:20]
+            cc_ufield = str(tool_input.get("username_field") or "username")
+            cc_pfield = str(tool_input.get("password_field") or "password")
+            try:
+                cc_ok_statuses = {int(s) for s in (tool_input.get("success_statuses") or [200, 201])}
+            except Exception:
+                cc_ok_statuses = {200, 201}
+            cc_extra_hdrs = tool_input.get("headers") or {}
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": _thinking_action_log_message(
+                    step, "CREDENTIAL_CHECK", cc_url, tool_input
+                ),
+                "data": {
+                    "step": step, "method": "CREDENTIAL_CHECK", "url": cc_url,
+                    "note": note,
+                    "payload_summary": f"{len(cc_candidates)} candidate(s)",
+                },
+            })
+            cc_attempts: list[dict] = []
+            cc_resp_status = 0
+            cc_resp_headers: dict = {}
+            for candidate in cc_candidates:
+                cc_body = {
+                    cc_ufield: candidate.get("username") or candidate.get("email") or "",
+                    cc_pfield: candidate.get("password") or "",
+                }
+                try:
+                    cc_merged = dict(hx.headers)
+                    cc_merged.update(cc_extra_hdrs)
+                    cc_merged.setdefault("Content-Type", "application/json")
+                    cc_r = await hx.request(
+                        str(tool_input.get("method") or "POST").upper(),
+                        cc_url, json=cc_body, headers=cc_merged,
+                    )
+                    cc_resp_status = cc_r.status_code
+                    cc_resp_headers = dict(cc_r.headers)
+                    cc_excerpt = cc_r.text[:800]
+                    cc_success = cc_r.status_code in cc_ok_statuses
+                    cc_token = (
+                        _extract_bearer_token_from_body(cc_r.text) if cc_success else None
+                    )
+                    cc_created_label = None
+                    if cc_token:
+                        cc_uname = (
+                            candidate.get("username")
+                            or candidate.get("email")
+                            or "discovered"
+                        )
+                        cc_created_label = _session_label(str(cc_uname), session_vault)
+                        session_vault[cc_created_label] = {
+                            "label": cc_created_label, "kind": "bearer",
+                            "username": cc_uname, "source": "credential_check",
+                            "extra_headers": {"Authorization": f"Bearer {cc_token}"},
+                            "cookies": {},
+                        }
+                        _record_session(
+                            run_id, label=cc_created_label,
+                            session_data=session_vault[cc_created_label],
+                            source="dynamic_scan_credential_check",
+                            metadata={"login_url": cc_url},
+                        )
+                except Exception as exc:
+                    cc_excerpt = f"Request failed: {exc}"
+                    cc_success = False
+                    cc_created_label = None
+                cc_attempts.append({
+                    **_redact_candidate(candidate),
+                    "status": cc_resp_status, "success": cc_success,
+                    "session_label": cc_created_label,
+                    "response_excerpt": (
+                        _redact_sensitive_text(cc_excerpt[:300]) if cc_success else ""
+                    ),
+                })
+                await sleep_between_probes(scanner_policy)
+            cc_successes = [a for a in cc_attempts if a["success"]]
+            cc_resp_body = json.dumps(
+                {"attempts": cc_attempts, "successes": cc_successes}
+            )
+            history.append({
+                "step": step, "note": note, "method": "CREDENTIAL_CHECK",
+                "url": cc_url, "request_headers": {}, "request_body": cc_candidates,
+                "response_status": 200 if cc_successes else cc_resp_status,
+                "response_headers": cc_resp_headers, "response_body": cc_resp_body,
+            })
+            all_results.append({
+                "desc": note, "url": cc_url,
+                "status": 200 if cc_successes else cc_resp_status,
+                "headers": cc_resp_headers, "body": cc_resp_body,
+                "request_evidence": f"CREDENTIAL_CHECK {cc_url}",
+                "response_evidence": cc_resp_body,
+            })
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="CREDENTIAL_CHECK", url=cc_url,
+                status=200 if cc_successes else cc_resp_status,
+                note=note, response_excerpt=cc_resp_body[:2000],
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": (
+                    f"Step {step}: credential_check {cc_url} — "
+                    f"{len(cc_successes)} success(es) of {len(cc_attempts)}"
+                ),
+                "data": {"step": step, "note": note},
+            })
+            return cc_resp_body
+
+        # ── register_account ──────────────────────────────────────────────────
+        if tool_name == "register_account":
+            ra_url = str(tool_input.get("url") or "").strip()
+            if not ra_url:
+                return "register_account: missing URL"
+            ra_hdrs = (
+                tool_input.get("headers")
+                if isinstance(tool_input.get("headers"), dict) else {}
+            )
+            try:
+                ra_ok_statuses = {
+                    int(s) for s in (tool_input.get("success_statuses") or [200, 201, 204])
+                }
+            except Exception:
+                ra_ok_statuses = {200, 201, 204}
+            ra_account = _disposable_account_fields(tool_input, base_url=base_url)
+            ra_body = ra_account["body"]
+            ra_redacted = _redacted_account_body(ra_body, ra_account["password_field"])
+            ra_store_as = str(
+                tool_input.get("store_as") or f"disposable_{ra_account['username']}"
+            )
+            ra_fmt = str(tool_input.get("body_format") or "json").lower()
+            ra_use_session = (
+                tool_input.get("use_session")
+                if isinstance(tool_input.get("use_session"), str) else None
+            )
+            ra_sel_session = session_vault.get(ra_use_session) if ra_use_session else None
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": _thinking_action_log_message(
+                    step, "REGISTER_ACCOUNT", ra_url, tool_input
+                ),
+                "data": {
+                    "step": step, "method": "REGISTER_ACCOUNT", "url": ra_url,
+                    "note": note,
+                    "payload_summary": (
+                        f"register {ra_account['username']} / {ra_account['email']}"
+                    ),
+                },
+            })
+            ra_resp_status = 0
+            ra_resp_hdrs: dict = {}
+            ra_resp_body = ""
+            ra_created_label = None
+            try:
+                ra_merged = dict(hx.headers)
+                if ra_sel_session and ra_sel_session.get("extra_headers"):
+                    ra_merged.update(ra_sel_session["extra_headers"])
+                ra_merged.update(ra_hdrs)
+                ra_sel_cookies = (
+                    ra_sel_session.get("cookies")
+                    if ra_sel_session and ra_sel_session.get("cookies") else None
+                )
+                if ra_fmt == "form":
+                    ra_merged.setdefault(
+                        "Content-Type", "application/x-www-form-urlencoded"
+                    )
+                    ra_r = await hx.request(
+                        str(tool_input.get("method") or "POST").upper(),
+                        ra_url, data=ra_body, headers=ra_merged, cookies=ra_sel_cookies,
+                    )
+                else:
+                    ra_merged.setdefault("Content-Type", "application/json")
+                    ra_r = await hx.request(
+                        str(tool_input.get("method") or "POST").upper(),
+                        ra_url, json=ra_body, headers=ra_merged, cookies=ra_sel_cookies,
+                    )
+                ra_resp_status = ra_r.status_code
+                ra_resp_hdrs = dict(ra_r.headers)
+                ra_raw = ra_r.text[:BODY_READ_LIMIT]
+                ra_resp_body = _redact_sensitive_text(ra_raw)
+                ra_ok = ra_r.status_code in ra_ok_statuses
+                ra_token = _extract_bearer_token_from_body(ra_raw) if ra_ok else None
+                ra_resp_cookies = {k: v for k, v in ra_r.cookies.items()} if ra_ok else {}
+                ra_extra_hdrs = {"Authorization": f"Bearer {ra_token}"} if ra_token else {}
+                if ra_ok:
+                    ra_created_label = _session_label(ra_store_as, session_vault)
+                    session_vault[ra_created_label] = {
+                        "label": ra_created_label,
+                        "kind": _session_kind(ra_resp_cookies, ra_extra_hdrs),
+                        "username": ra_account["username"],
+                        "source": "register_account",
+                        "extra_headers": ra_extra_hdrs,
+                        "cookies": ra_resp_cookies,
+                        "metadata": ra_account["metadata"],
+                    }
+                    _record_session(
+                        run_id, label=ra_created_label,
+                        session_data=session_vault[ra_created_label],
+                        source="dynamic_scan_register_account",
+                        metadata={**ra_account["metadata"], "status": ra_r.status_code},
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Agentic loop register_account error (%s): %s", ra_url, exc
+                )
+                ra_resp_body = f"Registration failed: {exc}"
+            history.append({
+                "step": step, "note": note, "method": "REGISTER_ACCOUNT",
+                "url": ra_url, "request_headers": {}, "request_body": ra_redacted,
+                "response_status": ra_resp_status,
+                "response_headers": ra_resp_hdrs,
+                "response_body": ra_resp_body,
+            })
+            all_results.append({
+                "desc": note, "url": ra_url, "status": ra_resp_status,
+                "headers": ra_resp_hdrs, "body": ra_resp_body,
+                "request_evidence": f"REGISTER_ACCOUNT {ra_url}",
+                "response_evidence": f"Status: {ra_resp_status}\n{ra_resp_body}",
+            })
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="REGISTER_ACCOUNT", url=ra_url,
+                status=ra_resp_status, note=note,
+                response_excerpt=ra_resp_body[:500],
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": (
+                    f"Step {step}: REGISTER_ACCOUNT {ra_url} \u2192 {ra_resp_status}"
+                    + (
+                        f" (session: {ra_created_label})"
+                        if ra_created_label else " (no session captured)"
+                    )
+                ),
+                "data": {"step": step, "note": note},
+            })
+            if ra_created_label:
+                return (
+                    f"Registration succeeded. Session stored as \"{ra_created_label}\".\n"
+                    f"Status: {ra_resp_status}\nBody: {ra_resp_body[:500]}"
+                )
+            return (
+                f"Registration attempted. Status: {ra_resp_status}\n"
+                f"Body: {ra_resp_body[:500]}"
+            )
+
+        # ── http_request (default) ────────────────────────────────────────────
+        hr_method = str(tool_input.get("method") or "GET").upper()
+        hr_url = str(tool_input.get("url") or "").strip()
+        if not hr_url:
+            return "http_request: missing URL"
+        hr_headers = tool_input.get("headers") or {}
+        hr_body = tool_input.get("body")
+        hr_use_session = (
+            tool_input.get("use_session")
+            if isinstance(tool_input.get("use_session"), str) else None
+        )
+        hr_sel_session = session_vault.get(hr_use_session) if hr_use_session else None
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_step",
+            "status": "running",
+            "message": _thinking_action_log_message(
+                step, hr_method, hr_url, tool_input
+            ),
+            "data": {
+                "step": step, "method": hr_method, "url": hr_url, "note": note,
+                "observation": tool_input.get("observation"),
+                "hypothesis": tool_input.get("hypothesis"),
+                "payload_purpose": tool_input.get("payload_purpose"),
+                "payload_summary": _thinking_payload_summary(hr_url, hr_body),
+                "use_session": hr_use_session,
+            },
+        })
+        hr_resp_status = 0
+        hr_resp_headers: dict = {}
+        hr_resp_body = ""
+        hr_req_body_str = ""
+        hr_duration_ms: Optional[int] = None
+        _js_paths: list[str] = []
+        try:
+            hr_merged = dict(hx.headers)
+            if hr_sel_session and hr_sel_session.get("extra_headers"):
+                hr_merged.update(hr_sel_session["extra_headers"])
+            hr_merged.update(hr_headers)
+            hr_sel_cookies = (
+                hr_sel_session.get("cookies")
+                if hr_sel_session and hr_sel_session.get("cookies") else None
+            )
+            hr_started = time.perf_counter()
+            if isinstance(hr_body, dict):
+                hr_merged.setdefault("Content-Type", "application/json")
+                hr_r = await hx.request(
+                    hr_method, hr_url, json=hr_body,
+                    headers=hr_merged, cookies=hr_sel_cookies,
+                )
+                hr_req_body_str = json.dumps(hr_body)[:800]
+            elif isinstance(hr_body, str) and hr_body:
+                hr_r = await hx.request(
+                    hr_method, hr_url, content=hr_body,
+                    headers=hr_merged, cookies=hr_sel_cookies,
+                )
+                hr_req_body_str = hr_body[:800]
+            else:
+                hr_r = await hx.request(
+                    hr_method, hr_url,
+                    headers=hr_merged, cookies=hr_sel_cookies,
+                )
+            hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
+            hr_raw = hr_r.text[:BODY_READ_LIMIT]
+            hr_token = _extract_bearer_token_from_body(hr_raw)
+            if hr_token and hr_r.status_code < 400:
+                hr_lbl = _session_label(
+                    str(tool_input.get("store_as") or "http_token"), session_vault
+                )
+                session_vault[hr_lbl] = {
+                    "label": hr_lbl, "kind": "bearer", "username": None,
+                    "source": f"{hr_method} {hr_url}",
+                    "extra_headers": {"Authorization": f"Bearer {hr_token}"},
+                    "cookies": {},
+                }
+                _record_session(
+                    run_id, label=hr_lbl, session_data=session_vault[hr_lbl],
+                    source="dynamic_scan_http_response",
+                    metadata={"method": hr_method, "url": hr_url},
+                )
+            hr_resp_body = _redact_sensitive_text(hr_raw)
+            hr_resp_status = hr_r.status_code
+            hr_resp_headers = dict(hr_r.headers)
+            # JS path extraction
+            _ct_r = hr_resp_headers.get("content-type", "").lower()
+            _is_js_r = (
+                "javascript" in _ct_r
+                or hr_url.split("?")[0].lower().endswith(".js")
+            )
+            if _is_js_r and hr_resp_status == 200:
+                _raw_paths_r = re.findall(
+                    r'["\']((?:/api)?/[a-zA-Z0-9_-][a-zA-Z0-9_/{}.-]*)["\']',
+                    hr_raw,
+                )
+                _js_paths = list(dict.fromkeys(
+                    p for p in _raw_paths_r
+                    if len(p) >= 4
+                    and not p.endswith((".js", ".css", ".html", ".png", ".ico"))
+                    and not p.startswith("//")
+                ))[:40]
+                if _js_paths:
+                    try:
+                        from aespa.services.crawler import _save_intel_item as _si
+                        for _p in _js_paths:
+                            _si(
+                                run_id=run_id, kind="endpoint", key=_p, value=_p,
+                                url=hr_url, method="GET", source="js_mining_dynamic",
+                                confidence=0.8,
+                                evidence=f"Extracted from {hr_url} at step {step}",
+                            )
+                    except Exception:
+                        pass
+        except Exception as exc:
+            log.warning(
+                "Agentic loop HTTP error (%s %s): %s", hr_method, hr_url, exc
+            )
+            hr_resp_body = f"Request failed: {exc}"
+
+        hr_req_ev = _request_evidence(
+            f"{hr_method} {hr_url}\n"
+            f"{json.dumps(hr_headers, sort_keys=True)}\n{hr_req_body_str}"
+        )
+        hr_resp_ev = _response_evidence(
+            f"Status: {hr_resp_status}\n"
+            + "\n".join(f"{k}: {v}" for k, v in hr_resp_headers.items())
+            + f"\n\n{hr_resp_body}"
+        )
+        hr_result = {
+            "desc": note, "url": hr_url, "status": hr_resp_status,
+            "duration_ms": hr_duration_ms, "headers": hr_resp_headers,
+            "body": hr_resp_body,
+            "request_evidence": hr_req_ev,
+            "response_evidence": hr_resp_ev,
+            "action_outcome": (
+                "HTTP request completed." if hr_resp_status else "HTTP request failed."
+            ),
+            "evidence_json": _http_evidence_items_json(
+                hr_req_ev, hr_resp_ev,
+                summary=note, status=hr_resp_status, duration_ms=hr_duration_ms,
+                action_outcome=(
+                    "HTTP request completed."
+                    if hr_resp_status else "HTTP request failed."
+                ),
+                confidence="observed",
+            ),
+        }
+        log.info(
+            "Agentic scan step %d: %s %s \u2192 %s",
+            step, hr_method, hr_url, hr_resp_status,
+        )
+        _resp_body_for_history = hr_resp_body
+        if _js_paths:
+            _resp_body_for_history = (
+                f"[{len(_js_paths)} API path(s) auto-extracted from JS: "
+                f"{', '.join(_js_paths[:15])}]\n\n"
+                + hr_resp_body
+            )
+        history.append({
+            "step": step, "note": note,
+            "method": hr_method, "url": hr_url,
+            "request_headers": hr_headers, "request_body": hr_body,
+            "response_status": hr_resp_status,
+            "response_headers": hr_resp_headers,
+            "response_body": _resp_body_for_history,
+        })
+        all_results.append(hr_result)
+        task_graph_svc.complete_task_after_result(
+            run_id, active_task_id,
+            step=step, method=hr_method, url=hr_url, status=hr_resp_status,
+            note=note, response_excerpt=hr_resp_body[:2000],
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_step",
+            "status": "complete",
+            "message": f"Step {step}: {hr_method} {hr_url} \u2192 {hr_resp_status}",
+            "data": {"step": step, "status": hr_resp_status, "note": note},
+        })
+        await sleep_between_probes(scanner_policy)
+        # Build the result string that goes back into the conversation
+        key_hdrs = {
+            k: v for k, v in hr_resp_headers.items()
+            if k.lower() in (
+                "content-type", "content-length", "location",
+                "set-cookie", "www-authenticate", "x-powered-by",
+                "server", "access-control-allow-origin",
+            )
+        }
+        return (
+            f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
+            + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
+            + (
+                "Key headers:\n"
+                + "\n".join(f"  {k}: {v}" for k, v in key_hdrs.items())
+                + "\n"
+                if key_hdrs else ""
+            )
+            + f"Body:\n{hr_resp_body}"
+        )
+
+    # ── Run the loop ──────────────────────────────────────────────────────────
+    await llm_svc.thinking_agentic_loop(
+        llm_cfg,
+        system_message=llm_svc._THINKING_AGENT_SYSTEM,
+        initial_user_message=initial_message,
+        tool_executor=_tool_executor,
+        emit_fn=lambda evt: events_svc.emit(run_id, evt),
+        stop_check=lambda: run_id in _thinking_stop_requested,
+    )
+    return progressive_findings_count
 
 
 # ── Core scan ─────────────────────────────────────────────────────────────────
@@ -1696,7 +3872,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
-    base_url      = site.base_url.rstrip("/")
+    base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
     requires_auth = site.requires_auth
 
@@ -1794,6 +3970,10 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         except Exception as e:
             log.warning("Site test plan generation failed: %s", e)
 
+    intel_context = _build_target_intelligence_context(run_id)
+    if intel_context:
+        site_context = "\n\n".join(part for part in [site_context, intel_context] if part)
+
     # Unique canary for stored XSS detection across pages.
     # Embedded in XSS probes so any page that stores + reflects it can be caught by the
     # post-scan sweep even if the injection and sink are on completely different pages.
@@ -1813,6 +3993,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         pw_page = await ctx.new_page()
 
         # ── Auth bootstrap ────────────────────────────────────────────────────
+        session_svc.ensure_anonymous_session(run_id, source="structured_scan")
         # Pre-load base URL, then authenticate to get a live session.
         try:
             await pw_page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -1853,24 +4034,56 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
         # cred_sessions maps credential_id → {username, cookies, extra_headers}
         cred_sessions: dict[int, dict] = {}
         if requires_auth and creds:
+            primary_label = session_svc.credential_label(creds[0].username, primary=True)
             cred_sessions[creds[0].id] = {
+                "label": primary_label,
                 "username": creds[0].username,
+                "credential_id": creds[0].id,
                 "cookies": cookie_jar,
                 "extra_headers": extra_headers,
             }
+            _record_session(
+                run_id,
+                label=primary_label,
+                session_data=cred_sessions[creds[0].id],
+                source="structured_scan_auth_bootstrap",
+                credential_id=creds[0].id,
+                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+            )
             for extra_cred in creds[1:]:
                 log.info("Exporting session for BAC checks: user=%s", extra_cred.username)
                 ec_cookies, ec_token = await _export_cred_session(
                     base_url, _login_url_for_credential(login_url, extra_cred), extra_cred
                 )
+                label = session_svc.credential_label(extra_cred.username)
                 cred_sessions[extra_cred.id] = {
+                    "label": label,
                     "username": extra_cred.username,
+                    "credential_id": extra_cred.id,
                     "cookies": ec_cookies,
                     "extra_headers": {"Authorization": f"Bearer {ec_token}"} if ec_token else {},
                 }
+                _record_session(
+                    run_id,
+                    label=label,
+                    session_data=cred_sessions[extra_cred.id],
+                    source="structured_scan_auth_export",
+                    credential_id=extra_cred.id,
+                    metadata={"login_url": _login_url_for_credential(login_url, extra_cred)},
+                )
+
+        cred_sessions = _merge_persisted_sessions(run_id, cred_sessions)
 
         # Expose sessions so the validator can reuse them while the scan is active.
         _active_sessions[run_id] = cred_sessions
+
+        if run_id not in _stop_requested:
+            await _run_deterministic_site_modules(
+                run_id=run_id,
+                base_url=base_url,
+                cred_sessions=cred_sessions,
+                scanner_policy=scanner_policy,
+            )
 
         # Build httpx client with exported auth state.
         async with httpx.AsyncClient(
@@ -1909,6 +4122,446 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
 
 
 # ── Per-page scan ─────────────────────────────────────────────────────────────
+
+async def _run_deterministic_site_modules(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> None:
+    """Run deterministic site-level modules that do not require LLM reasoning."""
+    if scanner_policy and scanner_policy.scan_mode == "passive":
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "start",
+        "message": "Running deterministic auth and IDOR modules…",
+    })
+    findings: list[ScanFinding] = []
+    findings.extend(await _run_auth_matrix_module(
+        run_id=run_id,
+        base_url=base_url,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    findings.extend(await _run_idor_matrix_module(
+        run_id=run_id,
+        cred_sessions=cred_sessions,
+        scanner_policy=scanner_policy,
+    ))
+    saved = _save_deterministic_findings(run_id, findings)
+    if saved:
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "deterministic_modules",
+        "status": "complete",
+        "message": f"Deterministic modules complete — {saved} finding(s) recorded.",
+        "data": {"finding_count": saved},
+    })
+
+
+async def _run_auth_matrix_module(
+    *,
+    run_id: int,
+    base_url: str,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Check high-value endpoints anonymously and across available sessions."""
+    targets = _auth_matrix_targets(run_id, base_url)
+    if not targets:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    findings: list[ScanFinding] = []
+
+    for target in targets[:80]:
+        if run_id in _stop_requested:
+            break
+        url = target["url"]
+        method = target.get("method") or "GET"
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            method = "GET"
+        if not _same_origin_or_relative(base_url, url):
+            continue
+
+        anon_result = await _fetch_matrix_url(
+            url,
+            method=method,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+        )
+        if not anon_result:
+            continue
+        if _is_successful_access(anon_result) and _target_requires_auth_or_sensitive(target):
+            findings.append(_auth_matrix_finding(
+                run_id=run_id,
+                target=target,
+                result=anon_result,
+                title="Unauthenticated access to protected endpoint",
+                description=(
+                    "The deterministic auth matrix requested a protected or sensitive-looking "
+                    "endpoint without cookies or Authorization and received a successful response."
+                ),
+                actor="anonymous",
+                cvss_score=6.5,
+            ))
+
+        if not cred_sessions or "/admin" not in url.lower():
+            await sleep_between_probes(scanner_policy)
+            continue
+
+        for cred_id, session in cred_sessions.items():
+            if cred_id in set(target.get("accessible_by") or []):
+                continue
+            result = await _fetch_matrix_url(
+                url,
+                method=method,
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if result and _is_successful_access(result) and not _looks_like_denial(result["body"]):
+                findings.append(_auth_matrix_finding(
+                    run_id=run_id,
+                    target=target,
+                    result=result,
+                    title="Unauthorized role access to admin endpoint",
+                    description=(
+                        "A credential that was not observed with access to this admin-looking "
+                        "endpoint received a successful direct response."
+                    ),
+                    actor=session.get("username") or f"credential {cred_id}",
+                    cvss_score=8.1,
+                ))
+            await sleep_between_probes(scanner_policy)
+
+    return findings
+
+
+async def _run_idor_matrix_module(
+    *,
+    run_id: int,
+    cred_sessions: dict[int, dict],
+    scanner_policy=None,
+) -> list[ScanFinding]:
+    """Compare object-reference pages across users using crawled ground truth."""
+    if not cred_sessions or len(cred_sessions) < 2:
+        return []
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+    follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+            .where(CrawledPage.status == "crawled")
+        ))
+
+    findings: list[ScanFinding] = []
+    id_pages = [
+        page for page in pages
+        if _url_has_object_reference(page.url) and json.loads(page.accessible_by or "[]")
+    ]
+    for page in id_pages[:80]:
+        if run_id in _stop_requested:
+            break
+        accessible = set(json.loads(page.accessible_by or "[]"))
+        unauthorized = [
+            (cred_id, session)
+            for cred_id, session in cred_sessions.items()
+            if cred_id not in accessible
+        ]
+        if not unauthorized:
+            continue
+        for cred_id, session in unauthorized[:3]:
+            result = await _fetch_matrix_url(
+                page.url,
+                method="GET",
+                session=session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+            )
+            if not result or not _is_successful_access(result):
+                continue
+            if _looks_like_denial(result["body"]) or _looks_like_spa_shell(
+                result["body"], result["headers"].get("content-type", "")
+            ):
+                continue
+            if not _body_contains_original_page_evidence(result["body"], page.title or "", page.page_text or ""):
+                continue
+            findings.append(_idor_matrix_finding(
+                run_id=run_id,
+                page=page,
+                result=result,
+                actor=session.get("username") or f"credential {cred_id}",
+            ))
+            break
+        await sleep_between_probes(scanner_policy)
+    return findings
+
+
+def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
+    targets: dict[str, dict] = {}
+    with Session(get_engine()) as s:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+        ))
+        intel = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind.in_(["endpoint", "script"]))
+        ))
+
+    for page in pages:
+        targets[page.url] = {
+            "url": page.url,
+            "method": "GET",
+            "source": "crawled_page",
+            "req_auth": page.req_auth,
+            "has_object_ref": page.has_object_ref,
+            "has_business_logic": page.has_business_logic,
+            "accessible_by": json.loads(page.accessible_by or "[]"),
+            "page_id": page.id,
+        }
+    for item in intel:
+        raw_url = item.value or item.url or item.key
+        url = _absolute_target_url(base_url, raw_url)
+        if not url:
+            continue
+        targets.setdefault(url, {
+            "url": url,
+            "method": (item.method or "GET").upper(),
+            "source": item.source,
+            "req_auth": None,
+            "has_object_ref": _url_has_object_reference(url),
+            "has_business_logic": False,
+            "accessible_by": [],
+            "page_id": None,
+            "intel_key": item.key,
+        })
+    return sorted(
+        targets.values(),
+        key=lambda t: (
+            0 if _target_requires_auth_or_sensitive(t) else 1,
+            t["url"],
+        ),
+    )
+
+
+async def _fetch_matrix_url(
+    url: str,
+    *,
+    method: str = "GET",
+    session: dict | None = None,
+    timeout: float = REQUEST_TIMEOUT,
+    follow_redirects: bool = True,
+) -> dict | None:
+    headers = {"User-Agent": _UA}
+    cookies = None
+    actor = "anonymous"
+    if session:
+        headers.update(session.get("extra_headers", {}))
+        cookies = session.get("cookies", {})
+        actor = session.get("username") or "credential"
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            verify=False,
+            timeout=timeout,
+        ) as client:
+            resp = await client.request(method, url)
+        request_evidence = (
+            f"{method} {url} HTTP/1.1\n"
+            f"Actor: {actor}\n"
+            f"Authorization: {'present' if session and session.get('extra_headers') else 'none'}"
+        )
+        response_evidence = (
+            f"HTTP/1.1 {resp.status_code}\n"
+            + "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+            + "\n\n"
+            + resp.text[:2000]
+        )
+        return {
+            "url": str(resp.url),
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text[:BODY_READ_LIMIT],
+            "request_evidence": request_evidence,
+            "response_evidence": response_evidence,
+        }
+    except Exception as exc:
+        log.debug("Deterministic matrix request failed for %s: %s", url, exc)
+        return None
+
+
+def _auth_matrix_finding(
+    *,
+    run_id: int,
+    target: dict,
+    result: dict,
+    title: str,
+    description: str,
+    actor: str,
+    cvss_score: float,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=target.get("page_id"),
+        owasp_category="A01",
+        severity=_severity_from_cvss(cvss_score),
+        title=title,
+        description=description,
+        impact=(
+            "Attackers may be able to access protected application functionality or "
+            "sensitive operational data without the intended authentication or role checks."
+        ),
+        likelihood="Confirmed by deterministic auth matrix request.",
+        recommendation=(
+            "Enforce server-side authentication and authorization on the endpoint. "
+            "Do not rely on client-side route hiding or UI controls."
+        ),
+        cvss_score=cvss_score,
+        cvss_vector="",
+        affected_url=result.get("url") or target["url"],
+        evidence=_full_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
+            status=result.get("status"),
+        ),
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic auth matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _idor_matrix_finding(
+    *,
+    run_id: int,
+    page: CrawledPage,
+    result: dict,
+    actor: str,
+) -> ScanFinding:
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=page.id,
+        owasp_category="A01",
+        severity="high",
+        title="Insecure direct object reference",
+        description=(
+            "A credential that was not observed with access to this object-reference URL "
+            "could request it directly and received recognizable protected content."
+        ),
+        impact=(
+            "A user may be able to access another user's records or tenant data by "
+            "guessing or reusing object identifiers."
+        ),
+        likelihood="Confirmed by deterministic IDOR matrix comparison.",
+        recommendation=(
+            "Enforce object ownership checks on every request using server-side authorization "
+            "logic. Avoid exposing predictable object identifiers where possible."
+        ),
+        cvss_score=8.1,
+        cvss_vector="",
+        affected_url=page.url,
+        evidence=_full_evidence(
+            result["request_evidence"],
+            result["response_evidence"],
+            f"Actor `{actor}` received content matching the protected object page.",
+        ),
+        request_evidence=_request_evidence(result["request_evidence"]),
+        response_evidence=_response_evidence(result["response_evidence"]),
+        evidence_json=_http_evidence_items_json(
+            result["request_evidence"],
+            result["response_evidence"],
+            summary=f"Actor `{actor}` received content matching the protected object page.",
+            status=result.get("status"),
+            marker="protected object page content matched",
+        ),
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic IDOR matrix module.",
+        created_at=_utcnow(),
+    )
+
+
+def _target_requires_auth_or_sensitive(target: dict) -> bool:
+    url = str(target.get("url") or "").lower()
+    if target.get("req_auth") is True:
+        return True
+    if target.get("has_business_logic") or target.get("has_object_ref"):
+        return True
+    return any(marker in url for marker in (
+        "/admin", "/account", "/accounts", "/user", "/users", "/profile",
+        "/transfer", "/transaction", "/invoice", "/order", "/config", "/debug",
+        "/metrics", "/openapi", "/swagger",
+    ))
+
+
+def _is_successful_access(result: dict) -> bool:
+    status = result.get("status")
+    if status not in (200, 201, 202, 204, 206):
+        return False
+    body = result.get("body") or ""
+    return not _looks_like_denial(body)
+
+
+def _looks_like_denial(body: str) -> bool:
+    text = (body or "")[:5000].lower()
+    return any(marker in text for marker in (
+        "unauthorized", "forbidden", "access denied", "permission denied",
+        "not authorized", "login required", "please log in", "sign in",
+        "authentication required", "invalid token",
+    ))
+
+
+def _url_has_object_reference(url: str) -> bool:
+    parsed = urlparse(url)
+    if re.search(r"/(?:[0-9]+|[0-9a-f]{8,}(?:-[0-9a-f]{4,}){2,})(?:[/?.#]|$)", parsed.path, re.I):
+        return True
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return any(
+        re.search(r"(?:^|_)(id|uuid|account|user|order|invoice|transaction)(?:_|$)", key, re.I)
+        and values
+        for key, values in qs.items()
+    )
+
+
+def _absolute_target_url(base_url: str, raw_url: str) -> str:
+    raw_url = (raw_url or "").strip()
+    if not raw_url or raw_url.startswith(("javascript:", "mailto:", "#")):
+        return ""
+    parsed = urlparse(raw_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw_url
+    if raw_url.startswith("/"):
+        base = urlparse(base_url)
+        return urlunparse((base.scheme, base.netloc, raw_url, "", "", ""))
+    return ""
+
+
+def _same_origin_or_relative(base_url: str, url: str) -> bool:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return True
+    base = urlparse(base_url)
+    return parsed.scheme in {"http", "https"} and parsed.netloc == base.netloc
+
 
 async def _scan_page(
     run_id: int,
@@ -2102,6 +4755,24 @@ async def _scan_page(
                 "message": _followup_log_message(followup_probes, tense="complete"),
                 "data": {"followup_count": len(followup_probes), **followup_details},
             })
+
+    deterministic_findings = _deterministic_findings_from_results(
+        run_id=run_id,
+        page_id=page_id,
+        page_url=page_url,
+        results=results,
+    )
+    deterministic_saved = _save_deterministic_findings(run_id, deterministic_findings)
+    if deterministic_saved:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "deterministic_analysis",
+            "status": "complete",
+            "page_url": page_url,
+            "message": f"{deterministic_saved} deterministic finding(s) recorded",
+            "data": {"finding_count": deterministic_saved},
+        })
+        _emit_scan_update(run_id)
 
     # Phase 3: LLM analyses results and produces findings.
     try:
@@ -2394,6 +5065,171 @@ def _protected_content_candidates(page_title: str, page_text: str) -> list[str]:
     return candidates
 
 
+# ── Deterministic result analysis ─────────────────────────────────────────────
+
+_SQL_ERROR_PATTERNS = (
+    "sql syntax", "mysql", "postgresql", "sqlite", "ora-", "odbc",
+    "unterminated quoted string", "you have an error in your sql syntax",
+    "syntax error at or near", "unclosed quotation mark", "sqlstate",
+)
+_SENSITIVE_FIELD_PATTERNS = (
+    "password_hash", "passwordhash", "passwd", "jwt_secret", "api_key",
+    "apikey", "secret_key", "private_key", "totp_secret", "mfa_secret",
+    "access_token", "refresh_token", "debug", "stack_trace",
+)
+
+
+def _deterministic_findings_from_results(
+    *,
+    run_id: int,
+    page_id: int,
+    page_url: str,
+    results: list[dict],
+) -> list[ScanFinding]:
+    findings: list[ScanFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        desc = str(result.get("desc") or "")
+        url = str(result.get("url") or page_url)
+        body = str(result.get("body") or "")
+        status = result.get("status")
+        haystack = f"{desc}\n{url}\n{body}".lower()
+
+        def add(title: str, owasp: str, score: float, description: str, impact: str, recommendation: str) -> None:
+            key = (title, url)
+            if key in seen:
+                return
+            seen.add(key)
+            findings.append(ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category=owasp,
+                severity=_severity_from_cvss(score),
+                title=title,
+                description=description,
+                impact=impact,
+                likelihood="Confirmed by deterministic response analysis.",
+                recommendation=recommendation,
+                cvss_score=score,
+                cvss_vector="",
+                affected_url=url,
+                evidence=_clip_evidence(str(result.get("evidence") or _combined_evidence(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body),
+                )), EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(str(result.get("request_evidence") or "")),
+                response_evidence=_response_evidence(str(result.get("response_evidence") or body)),
+                evidence_json=_http_evidence_items_json(
+                    str(result.get("request_evidence") or ""),
+                    str(result.get("response_evidence") or body),
+                    summary="Confirmed by deterministic response analysis.",
+                    status=status,
+                    marker=title,
+                ),
+                screenshot_b64=result.get("screenshot_b64"),
+                validation_status="confirmed",
+                validation_note="Confirmed by deterministic module.",
+                created_at=_utcnow(),
+            ))
+
+        if ("sqli" in desc.lower() or any(p in haystack for p in ("' or '1'='1", "union select", "order by 999"))) and (
+            any(pattern in haystack for pattern in _SQL_ERROR_PATTERNS) or status == 500
+        ):
+            add(
+                "SQL injection error disclosure",
+                "A03",
+                7.1,
+                "An SQL injection probe produced a database error or server error indicative of unsafely handled input.",
+                "Attackers may be able to extract or modify database data by crafting SQL payloads.",
+                "Use parameterized queries, strict input validation, and generic error handling.",
+            )
+
+        reflected_payload = _reflected_payload_from_result(result)
+        if reflected_payload and reflected_payload in body and _looks_xss_payload(reflected_payload):
+            add(
+                "Reflected cross-site scripting",
+                "A03",
+                6.1,
+                "A script-capable payload was reflected in the response body without being removed or encoded.",
+                "Attackers could execute JavaScript in a victim browser if they can deliver a crafted URL or form submission.",
+                "Apply context-aware output encoding and reject dangerous HTML/JavaScript input where it is not expected.",
+            )
+
+        if "ssti" in desc.lower() and "49" in body and any(marker in haystack for marker in ("{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}")):
+            add(
+                "Server-side template injection",
+                "A03",
+                8.0,
+                "A template expression probe appears to have been evaluated by the server.",
+                "Template injection can lead to data exposure or remote code execution depending on the template engine.",
+                "Do not evaluate user-controlled strings as templates; sandbox template engines and validate input.",
+            )
+
+        if ("path" in desc.lower() or "../" in haystack or "%2f" in haystack) and "root:x:0:0" in body:
+            add(
+                "Path traversal file disclosure",
+                "A05",
+                7.5,
+                "A traversal payload returned content consistent with a system password file.",
+                "Attackers may read arbitrary files from the server filesystem.",
+                "Normalize paths, enforce allow-listed file roots, and reject traversal sequences before file access.",
+            )
+
+        if ("cmdi" in desc.lower() or "aespa_probe" in haystack) and "aespa_probe" in body:
+            add(
+                "Command injection",
+                "A03",
+                9.1,
+                "A command-injection marker appeared in the response after a shell metacharacter probe.",
+                "Attackers may execute arbitrary commands on the application server.",
+                "Avoid shell invocation with user input; use safe APIs and strict allow-list validation.",
+            )
+
+        if any(pattern in haystack for pattern in _SENSITIVE_FIELD_PATTERNS) and _looks_like_json_or_api(result):
+            add(
+                "Sensitive data exposed in API response",
+                "A02",
+                6.5,
+                "The response contains field names commonly associated with secrets, hashes, tokens, debug state, or privileged metadata.",
+                "Attackers can use leaked secrets or implementation details to compromise accounts or chain further attacks.",
+                "Remove sensitive fields from client-facing responses and enforce response DTO allow-lists.",
+            )
+
+    return findings
+
+
+def _reflected_payload_from_result(result: dict) -> str:
+    desc = str(result.get("desc") or "")
+    if ":" in desc:
+        candidate = desc.split(":", 1)[1].strip()
+        if candidate:
+            return candidate[:200]
+    parsed = urlparse(str(result.get("url") or ""))
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for values in qs.values():
+        for value in values:
+            if _looks_xss_payload(value):
+                return value
+    payload = str(result.get("payload") or "")
+    return payload if _looks_xss_payload(payload) else ""
+
+
+def _looks_xss_payload(value: str) -> bool:
+    lower = (value or "").lower()
+    return any(marker in lower for marker in (
+        "<script", "onerror=", "onload=", "ontoggle=", "javascript:alert",
+        "<svg", "autofocus", "<details", "alert(",
+    ))
+
+
+def _looks_like_json_or_api(result: dict) -> bool:
+    headers = {str(k).lower(): str(v).lower() for k, v in (result.get("headers") or {}).items()}
+    content_type = headers.get("content-type", "")
+    url = str(result.get("url") or "").lower()
+    body = str(result.get("body") or "").lstrip()
+    return "json" in content_type or "/api/" in url or body.startswith(("{", "["))
+
+
 # ── Passive checks ────────────────────────────────────────────────────────────
 
 async def _passive_checks(
@@ -2450,6 +5286,13 @@ async def _passive_checks(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary="Passive header and anonymous access check.",
+                status=status,
+                marker=", ".join(missing),
+            ),
             "screenshot_b64": None,
             "missing_security_headers": missing,
             "auth_bypass_status": auth_bypass_status,
@@ -2484,6 +5327,13 @@ async def _passive_checks(
                     ),
                     "request_evidence": f"GET {url} HTTP/1.1",
                     "response_evidence": f"Cookie issues:\n{issue_text}",
+                    "evidence_json": _http_evidence_items_json(
+                        f"GET {url} HTTP/1.1",
+                        f"Cookie issues:\n{issue_text}",
+                        summary="Cookie security attributes were missing.",
+                        status=status,
+                        marker=issue_text,
+                    ),
                     "screenshot_b64": None,
                 })
 
@@ -2525,7 +5375,7 @@ async def _run_http_probe(
             headers=request_headers,
         )
         resp = await client.send(req, follow_redirects=True)
-        response_text = resp.text[:2000]
+        response_text = resp.text[:RESPONSE_EVIDENCE_LIMIT]
 
         req_headers_text = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
                                      if k.lower() not in ("cookie",))
@@ -2533,12 +5383,14 @@ async def _run_http_probe(
         user_note = f"Sent as user: {as_user}\n" if as_user else ""
         request_evidence = (
             f"{user_note}{method} {req.url} HTTP/1.1\n{req_headers_text}"
-            + (f"\n\n{body_preview[:2000]}" if body_preview else "")
+            + (f"\n\n{body_preview[:REQUEST_EVIDENCE_LIMIT]}" if body_preview else "")
         )
         response_evidence = (
             f"HTTP/1.1 {resp.status_code}\n{resp_headers_text}\n\n{response_text}"
         )
-        evidence = _combined_evidence(request_evidence, response_evidence)
+        request_evidence = _request_evidence(request_evidence)
+        response_evidence = _response_evidence(response_evidence)
+        evidence = _full_evidence(request_evidence, response_evidence)
         return {
             "desc": desc,
             "url": str(resp.url),
@@ -2548,6 +5400,13 @@ async def _run_http_probe(
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=resp.status_code,
+                confidence="observed",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -2572,6 +5431,12 @@ async def _run_http_probe(
             "evidence": _combined_evidence(request_evidence, response_evidence),
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                confidence="error",
+            ),
             "screenshot_b64": None,
             "as_user": as_user,
         }
@@ -2697,13 +5562,23 @@ def _probe_policy_rejection(probe: dict, page_url: str, scanner_policy) -> str |
 
 # ── Playwright form probe execution ───────────────────────────────────────────
 
+_BROWSER_TRAFFIC_BODY_LIMIT = 32 * 1024   # 32 KB per captured response body
+_BROWSER_SKIP_EXTENSIONS = {".js", ".css", ".png", ".jpg", ".ico", ".woff2", ".svg", ".ttf", ".gif", ".webp"}
+_BROWSER_SKIP_RESOURCE_TYPES = {"image", "font", "media", "stylesheet"}
+
+
 async def _run_thinking_browser_action(
     pw_page,
     action: dict,
     default_url: str,
     scanner_policy=None,
 ) -> dict:
-    """Execute a compact browser action chosen by the Thinking scan LLM."""
+    """Execute a compact browser action chosen by the Thinking scan LLM.
+
+    Captures all HTTP traffic made during the action via local page-level listeners
+    and includes a formatted summary directly in the response body so the LLM sees
+    it immediately without needing a traffic_search call.
+    """
     import base64 as _b64
 
     url = (action.get("url") or default_url).strip()
@@ -2715,72 +5590,162 @@ async def _run_thinking_browser_action(
     last_status: Optional[int] = None
     last_headers: dict = {}
     action_log: list[str] = []
+    started = time.perf_counter()
 
-    for raw_step in steps[:20]:
-        if not isinstance(raw_step, dict):
-            continue
-        op = str(raw_step.get("op") or "").lower().strip()
+    # ── Local traffic capture ─────────────────────────────────────────────────
+    # Register page-level listeners that collect traffic in-memory.  These fire
+    # in addition to the context-level handler that writes to the DB, so the DB
+    # record is unchanged.  Reading body() bytes here (rather than text()) is
+    # the most reliable approach: body() reads the raw buffer that Playwright
+    # already has, whereas text() can fail if encoding detection breaks.
+    _pending_reqs: dict[int, dict] = {}
+    _captured: list[dict] = []
+
+    async def _cap_request(req) -> None:
+        # Store timing and body only; full headers read in _cap_response.
+        rid = id(req)
+        post_data = req.post_data
+        if post_data is None:
+            try:
+                pd_json = req.post_data_json
+                if pd_json is not None:
+                    post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+        _pending_reqs[rid] = {
+            "method": req.method,
+            "url":    req.url,
+            "post_data": post_data,
+            "t0":    time.monotonic(),
+        }
+
+    async def _cap_response(resp) -> None:
+        if resp.request.resource_type in _BROWSER_SKIP_RESOURCE_TYPES:
+            return
+        rid = id(resp.request)
+        req_info = _pending_reqs.pop(rid, {})
+        dur = int((time.monotonic() - req_info.get("t0", time.monotonic())) * 1000)
+
+        # Full request headers — only reliable after the request has been sent.
         try:
-            if op == "goto":
-                step_url = (raw_step.get("url") or url or default_url).strip()
-                action_log.append(f"goto {step_url}")
-                resp = await pw_page.goto(step_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                if resp:
-                    last_status = resp.status
-                    try:
-                        last_headers = await resp.all_headers()
-                    except Exception:
-                        last_headers = {}
-            elif op in {"fill", "type"}:
-                selector = raw_step.get("selector")
-                value = str(raw_step.get("value") or "")
-                if not selector:
-                    action_log.append(f"{op} skipped: missing selector")
-                    continue
-                action_log.append(f"{op} {selector}={_compact_log_value(value, 120)}")
-                loc = pw_page.locator(selector).first
-                await loc.wait_for(state="visible", timeout=5_000)
-                if op == "fill":
-                    await loc.fill(value, timeout=5_000)
-                else:
-                    await loc.type(value, delay=20, timeout=5_000)
-            elif op == "click":
-                selector = raw_step.get("selector")
-                if not selector:
-                    action_log.append("click skipped: missing selector")
-                    continue
-                action_log.append(f"click {selector}")
-                await pw_page.locator(selector).first.click(timeout=5_000)
-            elif op == "press":
-                selector = raw_step.get("selector")
-                key = raw_step.get("key") or "Enter"
-                if not selector:
-                    action_log.append("press skipped: missing selector")
-                    continue
-                action_log.append(f"press {selector} {key}")
-                await pw_page.locator(selector).first.press(str(key), timeout=5_000)
-            elif op == "wait":
-                if raw_step.get("ms") is not None:
-                    ms = max(0, min(int(raw_step.get("ms") or 0), 10_000))
-                    action_log.append(f"wait {ms}ms")
-                    await asyncio.sleep(ms / 1000)
-                else:
-                    state = str(raw_step.get("state") or "networkidle")
-                    if state not in {"domcontentloaded", "load", "networkidle"}:
-                        state = "networkidle"
-                    action_log.append(f"wait {state}")
-                    await pw_page.wait_for_load_state(state, timeout=timeout_ms)
-            elif op == "snapshot":
-                action_log.append("snapshot")
+            req_headers = await resp.request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(resp.request.headers)
+            except Exception:
+                req_headers = {}
+
+        # Prefer body captured at request time; fall back to resp.request.
+        post_data = req_info.get("post_data")
+        if post_data is None:
+            try:
+                post_data = resp.request.post_data
+                if post_data is None:
+                    pd_json = resp.request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        try:
+            body_bytes = await resp.body()
+            ct = resp.headers.get("content-type", "")
+            if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
+                resp_text: Optional[str] = body_bytes.decode(errors="replace")[:_BROWSER_TRAFFIC_BODY_LIMIT]
             else:
-                action_log.append(f"unsupported op: {op or '(missing)'}")
-        except Exception as exc:
-            action_log.append(f"{op or 'step'} failed: {exc}")
+                resp_text = f"[binary, {len(body_bytes)} bytes]"
+        except Exception:
+            resp_text = None
+
+        _captured.append({
+            "method":          req_info.get("method", resp.request.method),
+            "url":             resp.url,
+            "status":          resp.status,
+            "request_headers": req_headers,
+            "request_body":    post_data,
+            "response_body":   resp_text,
+            "content_type":    resp.headers.get("content-type", ""),
+            "duration_ms":     dur,
+        })
+
+    pw_page.on("request", _cap_request)
+    pw_page.on("response", _cap_response)
+    # ─────────────────────────────────────────────────────────────────────────
 
     try:
-        await pw_page.wait_for_load_state("networkidle", timeout=2_000)
-    except Exception:
-        pass
+        for raw_step in steps[:20]:
+            if not isinstance(raw_step, dict):
+                continue
+            op = str(raw_step.get("op") or "").lower().strip()
+            try:
+                if op == "goto":
+                    step_url = (raw_step.get("url") or url or default_url).strip()
+                    action_log.append(f"goto {step_url}")
+                    resp = await pw_page.goto(step_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    if resp:
+                        last_status = resp.status
+                        try:
+                            last_headers = await resp.all_headers()
+                        except Exception:
+                            last_headers = {}
+                elif op in {"fill", "type"}:
+                    selector = raw_step.get("selector")
+                    value = str(raw_step.get("value") or "")
+                    if not selector:
+                        action_log.append(f"{op} skipped: missing selector")
+                        continue
+                    action_log.append(f"{op} {selector}={_compact_log_value(value, 120)}")
+                    loc = pw_page.locator(selector).first
+                    await loc.wait_for(state="visible", timeout=5_000)
+                    if op == "fill":
+                        await loc.fill(value, timeout=5_000)
+                    else:
+                        await loc.type(value, delay=20, timeout=5_000)
+                elif op == "click":
+                    selector = raw_step.get("selector")
+                    if not selector:
+                        action_log.append("click skipped: missing selector")
+                        continue
+                    action_log.append(f"click {selector}")
+                    await pw_page.locator(selector).first.click(timeout=5_000)
+                elif op == "press":
+                    selector = raw_step.get("selector")
+                    key = raw_step.get("key") or "Enter"
+                    if not selector:
+                        action_log.append("press skipped: missing selector")
+                        continue
+                    action_log.append(f"press {selector} {key}")
+                    await pw_page.locator(selector).first.press(str(key), timeout=5_000)
+                elif op == "wait":
+                    if raw_step.get("ms") is not None:
+                        ms = max(0, min(int(raw_step.get("ms") or 0), 10_000))
+                        action_log.append(f"wait {ms}ms")
+                        await asyncio.sleep(ms / 1000)
+                    else:
+                        state = str(raw_step.get("state") or "networkidle")
+                        if state not in {"domcontentloaded", "load", "networkidle"}:
+                            state = "networkidle"
+                        action_log.append(f"wait {state}")
+                        await pw_page.wait_for_load_state(state, timeout=timeout_ms)
+                elif op == "snapshot":
+                    action_log.append("snapshot")
+                else:
+                    action_log.append(f"unsupported op: {op or '(missing)'}")
+            except Exception as exc:
+                action_log.append(f"{op or 'step'} failed: {exc}")
+
+        try:
+            await pw_page.wait_for_load_state("networkidle", timeout=2_000)
+        except Exception:
+            pass
+
+    finally:
+        # Always deregister local listeners regardless of whether steps succeeded.
+        try:
+            pw_page.remove_listener("request", _cap_request)
+            pw_page.remove_listener("response", _cap_response)
+        except Exception:
+            pass
 
     final_url = pw_page.url or url or default_url
     try:
@@ -2803,12 +5768,40 @@ async def _run_thinking_browser_action(
     except Exception:
         pass
 
+    # ── Build traffic summary ─────────────────────────────────────────────────
+    # Filter to API / same-origin non-asset requests and format them for the LLM.
+    _api_entries = [
+        t for t in _captured
+        if "/api/" in t["url"]
+        or (
+            not any(t["url"].split("?")[0].endswith(ext) for ext in _BROWSER_SKIP_EXTENSIONS)
+            and not t["url"].startswith("data:")
+            and not t["url"].startswith("blob:")
+        )
+    ]
+    _traffic_section = ""
+    if _api_entries:
+        _lines: list[str] = []
+        for t in _api_entries[:15]:
+            _lines.append(f"  {t['method']} {t['url']} → {t['status']}")
+            if t.get("request_body"):
+                _lines.append(f"    Request body: {t['request_body'][:400]}")
+            if t.get("response_body"):
+                _lines.append(f"    Response: {t['response_body'][:600]}")
+        _traffic_section = (
+            "[Traffic captured during browser interaction:]\n"
+            + "\n".join(_lines)
+            + "\n\n"
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
     body = (
-        f"Final URL: {final_url}\n"
-        f"Title: {title}\n"
-        f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
-        f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
-        f"HTML excerpt:\n{html[:3000]}"
+        _traffic_section
+        + f"Final URL: {final_url}\n"
+        + f"Title: {title}\n"
+        + f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
+        + f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
+        + f"HTML excerpt:\n{html[:3000]}"
     )
     request_evidence = (
         f"BROWSER ACTION\nInitial URL: {url or default_url}\n"
@@ -2819,17 +5812,37 @@ async def _run_thinking_browser_action(
         f"Title: {title}\n"
         f"Last response status: {last_status}\n\n"
         f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
-        f"Visible text excerpt:\n{visible_text[:3000]}"
+        + (_traffic_section if _traffic_section else "")
+        + f"Visible text excerpt:\n{visible_text[:3000]}"
     )
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    outcome = "Browser action completed."
+    if any(" failed:" in line for line in action_log):
+        outcome = "Browser action completed with failed steps."
     return {
         "desc": action.get("note") or "Browser action",
         "url": final_url,
         "status": last_status,
         "headers": last_headers,
         "body": body,
+        "captured_traffic": _captured,
+        "duration_ms": duration_ms,
+        "action_log": action_log,
+        "action_outcome": outcome,
         "evidence": _combined_evidence(request_evidence, response_evidence),
         "request_evidence": request_evidence,
         "response_evidence": response_evidence,
+        "evidence_json": _http_evidence_items_json(
+            request_evidence,
+            response_evidence,
+            summary=action.get("note") or "Browser action",
+            status=last_status,
+            duration_ms=duration_ms,
+            action_outcome=outcome,
+            action_log=action_log,
+            screenshot_b64=screenshot_b64,
+            confidence="observed",
+        ),
         "screenshot_b64": screenshot_b64,
     }
 
@@ -2868,6 +5881,7 @@ async def _run_form_probe(
             target_page = pw_page
 
     try:
+        started = time.perf_counter()
         await target_page.goto(url, wait_until="domcontentloaded", timeout=15_000)
         await target_page.wait_for_selector(selector, state="visible", timeout=5_000)
 
@@ -2919,17 +5933,32 @@ async def _run_form_probe(
             f"Response body excerpt:\n{response_body}"
         )
         evidence = _combined_evidence(request_evidence, response_evidence)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        outcome = "Form probe submitted and response evidence captured." if response_status else "Form probe submitted; no matching network response was captured."
 
         return {
             "desc": desc,
             "url": url,
             "payload": payload,
             "status": response_status,
+            "duration_ms": duration_ms,
             "headers": {},
             "body": response_body,
+            "action_outcome": outcome,
             "evidence": evidence,
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "evidence_json": _http_evidence_items_json(
+                request_evidence,
+                response_evidence,
+                summary=desc,
+                status=response_status,
+                duration_ms=duration_ms,
+                action_outcome=outcome,
+                action_log=[f"goto {url}", f"fill {selector}", f"submit {submit}"],
+                screenshot_b64=screenshot_b64,
+                confidence="observed",
+            ),
             "screenshot_b64": screenshot_b64,
             "as_user": as_user,
         }
@@ -3282,9 +6311,19 @@ async def _stored_xss_sweep(
                 cvss_score=8.0,
                 cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
                 affected_url=page_url,
-                evidence=evidence[:4000],
-                request_evidence=request_evidence[:4000],
-                response_evidence=response_evidence[:4000],
+                evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+                request_evidence=_request_evidence(request_evidence),
+                response_evidence=_response_evidence(response_evidence),
+                evidence_json=_http_evidence_items_json(
+                    request_evidence,
+                    response_evidence,
+                    summary=(
+                        f"XSS canary '{canary}' injected during scanning was found stored "
+                        "and rendered unescaped in this page's HTML response."
+                    ),
+                    status=resp.status_code,
+                    marker=matched,
+                ),
                 screenshot_b64=None,
                 validation_status="confirmed",
                 validation_note=(
