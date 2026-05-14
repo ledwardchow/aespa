@@ -13,6 +13,7 @@ const api = {
   createSite:       (b)           => req("/api/sites",         { method:"POST",   body:b }),
   updateSite:       (id,b)        => req(`/api/sites/${id}`,   { method:"PUT",    body:b }),
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
+  importSite:       (text)        => fetch("/api/sites/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const d = r.ok ? await r.json() : (() => { throw new Error(`Import failed: ${r.status}`); })(); return d; }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -61,7 +62,10 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
-  clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
+  clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
+  clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
+  clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
+  clearTaskGraph:       (id)       => req(`/api/test-runs/${id}/task-graph`,            { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
 };
 
@@ -311,6 +315,8 @@ function App() {
 function SitesList() {
   const [sites, setSites] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
   const load = useCallback(async () => {
     try { setSites(await api.listSites()); } catch(e) { setError(e.message); }
   }, []);
@@ -319,6 +325,19 @@ function SitesList() {
     if (!confirm(`Delete "${s.name}"? This also removes all test runs and credentials.`)) return;
     try { await api.deleteSite(s.id); await load(); } catch(e) { setError(e.message); }
   };
+  const onExport = (s) => { window.location.href = `/api/sites/${s.id}/export`; };
+  const onImportFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setImporting(true); setError(null);
+    try {
+      const text = await file.text();
+      await api.importSite(text);
+      await load();
+    } catch(err) { setError(err.message); }
+    finally { setImporting(false); }
+  };
   const authCount = sites ? sites.filter(s=>s.requires_auth).length : 0;
   const credCount = sites ? sites.reduce((n,s)=>n+s.credential_count,0) : 0;
 
@@ -326,6 +345,8 @@ function SitesList() {
     <div className="topbar">
       <div className="topbar-title">Sites</div>
       <div className="topbar-actions">
+        <input ref=${importRef} type="file" accept=".json" style=${{display:"none"}} onChange=${onImportFile}/>
+        <button className="btn secondary" onClick=${()=>importRef.current.click()} disabled=${importing}>${importing?"Importing…":"Import site"}</button>
         <button className="btn" onClick=${()=>nav("#/sites/new")}><${IconPlus}/> New site</button>
       </div>
     </div>
@@ -358,6 +379,7 @@ function SitesList() {
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/sites/${s.id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>onExport(s)}>Export</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(s)}>Delete</button>
                   </div>
                 </td>
@@ -839,6 +861,8 @@ function TestRunDetail({ runId }) {
   const [taskGraph, setTaskGraph]           = useState(null);
   const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
+  const [clearBusy, setClearBusy]           = useState(""); // which section is clearing
+  const [clearError, setClearError]         = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
   const [editingSettings, setEditingSettings] = useState(false);
@@ -2029,6 +2053,16 @@ function TestRunDetail({ runId }) {
                   ${dedupeBusy && html`<span className="inline-spinner"></span>`}
                   ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
                 </button>`}
+              ${findings.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="findings"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all findings and reset page scan status?\nThis lets you re-run the scanner on the same crawl.")) return;
+                    setClearBusy("findings"); setClearError(null);
+                    try { await api.clearFindings(runId); setFindings([]); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="findings"?"Clearing…":"Clear all"}</button>`}
             </div>
           </div>
           ${findings.length === 0
@@ -2242,6 +2276,14 @@ function TestRunDetail({ runId }) {
           selectedKind=${targetIntelKind}
           onKind=${setTargetIntelKind}
           refresh=${()=>api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{})}
+          onClear=${async()=>{
+            if (!confirm("Clear all target intelligence for this run?")) return;
+            setClearBusy("intel"); setClearError(null);
+            try { await api.clearTargetIntel(runId); setTargetIntel(null); setTargetIntelKind(""); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="intel"}
         />`}
 
       ${activeTab==="tasks" && html`
@@ -2249,6 +2291,14 @@ function TestRunDetail({ runId }) {
           data=${taskGraph}
           refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
           seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
+          onClear=${async()=>{
+            if (!confirm("Clear all hypotheses and tasks for this run?")) return;
+            setClearBusy("tasks"); setClearError(null);
+            try { await api.clearTaskGraph(runId); setTaskGraph(null); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="tasks"}
         />`}
 
       ${activeTab==="sessions" && html`
@@ -2260,6 +2310,25 @@ function TestRunDetail({ runId }) {
 
       ${activeTab==="activity" && html`
         <div className="activity-panel">
+          ${(() => {
+            const isAgentic = activityLog.some(e => e.data?.mode === "agentic");
+            return html`
+              <div className="activity-toolbar">
+                <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
+                ${isAgentic && html`<span className="activity-mode-badge">Continuous session</span>`}
+                <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
+                ${activityLog.length>0 && html`
+                  <button className="btn danger-outline sm"
+                    disabled=${clearBusy==="activity"}
+                    onClick=${async()=>{
+                      if (!confirm("Clear all activity log entries for this run?")) return;
+                      setClearBusy("activity"); setClearError(null);
+                      try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); }
+                      catch(e) { setClearError(e.message); }
+                      finally { setClearBusy(""); }
+                    }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+              </div>`;
+          })()}
           <div className="activity-feed" ref=${activityFeedRef}>
             ${sitePlanData && html`
               <div className="site-plan-card">
@@ -2309,10 +2378,21 @@ function TestRunDetail({ runId }) {
                 llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
                 llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
                 credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
+                thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
               };
               const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
-              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
-              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : "";
+              // Augment llm_request message to surface agentic context count
+              const displayMessage = (
+                entry.phase === "llm_request" && entry.data?.message_count != null
+                  ? entry.message.replace(/\(.*messages in context\)/, `(${entry.data.message_count} msgs in context)`)
+                  : entry.message
+              );
+              const hasThinkingDetail = entry.phase === "thinking_step" && !!(
+                entry.data?.observation || entry.data?.hypothesis ||
+                entry.data?.payload_purpose || entry.data?.payload_summary
+              );
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail);
               const isExpanded = expandedLogIds.has(entry._id);
               return html`
                 <div key=${entry._id}>
@@ -2321,8 +2401,8 @@ function TestRunDetail({ runId }) {
                     <span className="activity-ts">${entry._ts}</span>
                     <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
                     ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
-                    <span className="activity-msg">${entry.message}</span>
-                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                    <span className="activity-msg">${displayMessage}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
                   </div>
                   ${isExpanded && html`
                     <div className="activity-payload">
@@ -2332,6 +2412,19 @@ function TestRunDetail({ runId }) {
                       ${entry.data?.raw_response && html`
                         <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
                         <pre>${entry.data.raw_response}</pre>`}
+                      ${hasThinkingDetail && html`
+                        ${entry.data?.observation && html`
+                          <div className="activity-payload-label">Observation</div>
+                          <pre>${entry.data.observation}</pre>`}
+                        ${entry.data?.hypothesis && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Hypothesis</div>
+                          <pre>${entry.data.hypothesis}</pre>`}
+                        ${entry.data?.payload_purpose && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload purpose</div>
+                          <pre>${entry.data.payload_purpose}</pre>`}
+                        ${entry.data?.payload_summary && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
+                          <pre>${entry.data.payload_summary}</pre>`}`}
                     </div>`}
                 </div>`;
             })}
@@ -2403,7 +2496,7 @@ function TestRunDetail({ runId }) {
     </div>`;
 }
 
-function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
+function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear, clearing }) {
   const counts = data?.counts || {};
   const items = data?.items || [];
   const kinds = ["", ...Object.keys(counts).sort()];
@@ -2439,6 +2532,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh }) {
             ${kinds.map(k => html`<option key=${k||"all"} value=${k}>${kindLabel(k)}${k ? ` (${counts[k]||0})` : ""}</option>`)}
           </select>
           <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${total>0 && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
         </div>
       </div>
 
@@ -2584,7 +2678,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     </div>`;
 }
 
-function TaskGraphPanel({ data, refresh, seed }) {
+function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
   const hypotheses = data?.hypotheses || [];
   const tasks = data?.tasks || [];
   const counts = data?.counts || {};
@@ -2609,6 +2703,7 @@ function TaskGraphPanel({ data, refresh, seed }) {
         <div className="intel-filter">
           <button className="btn ghost sm" onClick=${seed}>Seed from intelligence</button>
           <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${(hypotheses.length>0||tasks.length>0) && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
         </div>
       </div>
 

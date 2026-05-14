@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response as HTTPResponse
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -123,16 +125,29 @@ def delete_finding(
 @router.delete("/api/test-runs/{run_id}/findings", status_code=204)
 def delete_findings_group(
     run_id: int,
-    title: str = Query(..., description="Delete all findings with this title"),
+    title: str | None = Query(default=None, description="Delete all findings with this title. Omit to clear ALL findings."),
     session: Session = Depends(get_session),
 ) -> None:
-    """Delete all findings for this run that share the given title (a finding group)."""
+    """Delete findings for this run.  If *title* is supplied, only that group is
+    removed.  If omitted, **all** findings are deleted and every page's
+    scan_status is reset to 'pending' so the scanner can re-run from scratch."""
     _get_run_or_404(session, run_id)
-    findings = session.exec(
-        select(ScanFinding)
-        .where(ScanFinding.test_run_id == run_id)
-        .where(ScanFinding.title == title)
-    ).all()
+    if title is not None:
+        findings = session.exec(
+            select(ScanFinding)
+            .where(ScanFinding.test_run_id == run_id)
+            .where(ScanFinding.title == title)
+        ).all()
+    else:
+        findings = session.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all()
+        # Reset pages so the scanner can run again cleanly.
+        for page in session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+        ).all():
+            page.scan_status = "pending"
+            session.add(page)
     for f in findings:
         session.delete(f)
     session.commit()
@@ -333,6 +348,20 @@ def get_validation_status(
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
 
 
+@router.delete("/api/test-runs/{run_id}/scan-log", status_code=204)
+def clear_scan_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all persisted activity log entries for this run."""
+    _get_run_or_404(session, run_id)
+    for entry in session.exec(
+        select(ScanLog).where(ScanLog.test_run_id == run_id)
+    ).all():
+        session.delete(entry)
+    session.commit()
+
+
 @router.get("/api/test-runs/{run_id}/scan-log")
 def get_scan_log(
     run_id: int,
@@ -356,3 +385,114 @@ def get_scan_log(
         }
         for e in entries
     ]
+
+
+def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
+    """Format thinking-scan ScanLog entries as a readable markdown document."""
+    # Group events by step number so each step becomes one section.
+    steps: dict[int, list[tuple[ScanLog, dict]]] = {}
+    preamble: list[tuple[ScanLog, dict]] = []  # non-step events (warnings, etc.)
+    for e in entries:
+        data = json.loads(e.data_json) if e.data_json else {}
+        step_num = data.get("step")
+        if step_num is not None:
+            steps.setdefault(int(step_num), []).append((e, data))
+        else:
+            preamble.append((e, data))
+
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    total_steps = len(steps)
+    lines: list[str] = [
+        f"# Thinking Scan Log — Run #{run_id}",
+        f"",
+        f"Exported: {exported_at}  ",
+        f"Steps logged: {total_steps}",
+        f"",
+        "---",
+        "",
+    ]
+
+    # Non-step preamble events (e.g. credential warnings injected before loop start).
+    for e, data in preamble:
+        ts = e.created_at.strftime("%H:%M:%S") if e.created_at else ""
+        lines += [f"> `{ts}` **{e.status.upper()}** {e.message}", ""]
+
+    for step_num in sorted(steps.keys()):
+        evts = steps[step_num]
+
+        # Pick the most informative event in order: running → complete → deciding.
+        def _pick(status: str):
+            return next(((e, d) for e, d in evts if e.status == status), None)
+
+        main = _pick("running") or _pick("complete") or evts[0]
+        main_e, main_d = main
+
+        # Collect response status from the complete event.
+        complete_d = next((d for e, d in evts if e.status == "complete"), {})
+        resp_status = complete_d.get("status", "")
+
+        method       = main_d.get("method", "")
+        url          = main_d.get("url", "")
+        tool         = main_d.get("tool", "")
+        note         = main_d.get("note") or complete_d.get("note") or ""
+        observation  = main_d.get("observation", "")
+        hypothesis   = main_d.get("hypothesis", "")
+        payload_purp = main_d.get("payload_purpose", "")
+        payload_sum  = main_d.get("payload_summary", "")
+        finding_id   = complete_d.get("finding_id")
+        affected_url = complete_d.get("affected_url", "")
+        ts = main_e.created_at.strftime("%H:%M:%S") if main_e.created_at else ""
+
+        max_steps = next((d.get("max_steps") for _, d in evts if d.get("max_steps")), "?")
+
+        if tool:
+            heading = f"### `{ts}` Step {step_num}/{max_steps} — tool `{tool}`"
+        elif finding_id:
+            heading = f"### `{ts}` Step {step_num}/{max_steps} — **FINDING** {note}"
+        elif method and url:
+            status_suffix = f" → `{resp_status}`" if resp_status else ""
+            heading = f"### `{ts}` Step {step_num}/{max_steps} — `{method}` {url}{status_suffix}"
+        else:
+            heading = f"### `{ts}` Step {step_num}/{max_steps}"
+
+        lines.append(heading)
+        lines.append("")
+
+        if note and not finding_id:
+            lines += [f"**Note:** {note}", ""]
+        if observation:
+            lines += [f"**Observation:** {observation}", ""]
+        if hypothesis:
+            lines += [f"**Hypothesis:** {hypothesis}", ""]
+        if payload_purp:
+            lines += [f"**Payload purpose:** {payload_purp}", ""]
+        if payload_sum:
+            lines += ["**Payload:**", f"```", payload_sum, "```", ""]
+        if finding_id and affected_url:
+            lines += [f"**Affected URL:** {affected_url}  ", f"**Finding ID:** {finding_id}", ""]
+
+        lines += ["---", ""]
+
+    return "\n".join(lines)
+
+
+@router.get("/api/test-runs/{run_id}/thinking-log/export")
+def export_thinking_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> HTTPResponse:
+    """Download the thinking scan activity log as a markdown file."""
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.phase == "thinking_step")
+        .order_by(ScanLog.id)
+    ).all()
+    md = _build_thinking_log_markdown(run_id, list(entries))
+    filename = f"thinking-log-run-{run_id}.md"
+    return HTTPResponse(
+        content=md.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
