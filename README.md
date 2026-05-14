@@ -102,63 +102,7 @@ Findings
 
 ## Implementation details
 
-### Crawler/Site Map
-* The crawler works by submitting the contents of the page to an LLM and asking it where to visit next. 
-* Multi-user crawling works by having multiple headless Chromium browsers via Playwright crawl at once, and matching page URLs. (this is going to be an issue for SPA apps which don't update the URL)
-* Items are populated into the site map and the intelligence log as well as the task graph which can be looked up via tool calls by the scanners.
-
-### Structured Scan
-
-This works by grabbing auth tokens from each user via Playwright then the structure of pages from the site map, plus the information collected (i.e. uses authentication, has object references, takes user input etc) are sent to the LLM to determine what should be tested. The LLM generates HTTP probes in JSON format, which are then interpreted back to HTTP requests and sent by HTTPX. The responses are sent back to the LLM to determine whether there's a finding here.
-
-Use of this mode means that every crawled page is tested.
-
-This scan mode only has access to the following tools at the moment:
-- http — direct HTTP probe via httpx
-    - Supports method, url, params, headers, body, as_user, desc
-    - Used for auth bypass, headers, URL/query injection, JSON/form body tampering, SSRF, etc.
-- form — browser-based form probe
-    - Supports url, selector, payload, submit_selector, as_user, desc
-    - Used when browser interaction/CSRF/form state is needed.
-- idor — IDOR marker probe
-    - Supports url, as_user, desc
-    - The scanner expands it into concrete HTTP probes using peer IDs and a ±500 range.
-It also always runs deterministic/passive checks and can ask the LLM for up to 20 follow-up probes, but follow-ups are limited to http and form.
-
-### Dynamic Scan
-
-This is broadly similar to asking Claude/ChatGPT to perform a pentest through their respective chat interfaces except you can run the scan for as many turns as you like, and it doesn't refuse :) You can start this without running a crawl however not having a populated site map, intelligence log and task graph is a significan disadvantage.
-
-It will make tool calls as necessary from the following:
-
-**Context tools (`action: "tool"`)**
-
-Read-only reconnaissance against collected crawl/scan data. Up to 3 consecutive before the LLM must execute a probe or write a finding.
-
-| Tool | What it returns |
-|---|---|
-| `site_map` | Filtered list of discovered pages/routes with flags (auth required, takes input, etc.) |
-| `page_detail` | Full context, page text, and flags for a specific page |
-| `history_search` | Excerpts from prior request/response history matching a query |
-| `finding_list` | Findings already written this session, filterable by severity/category |
-| `target_inventory` / `search_assets` | Normalised endpoints, forms, inputs, scripts, storage keys, IDs extracted from crawl intelligence |
-| `traffic_search` | Captured HTTP request/response log from crawl and scan phases |
-| `endpoint_detail` | Consolidated page + intel + traffic + history for one specific URL |
-| `compare_responses` | Status, length, similarity, and term deltas between two history steps |
-| `mutate_request` | Proposes HTTP probe objects from a prior step via `input_validation`, `idor`, or `business_logic` mutations |
-| `auth_matrix` | Endpoints worth testing across anonymous/user/role boundaries |
-| `extract_entities` | URLs, paths, IDs, UUIDs, emails, JWT hints, error/debug lines from text or a prior step |
-
-**Action types**
-
-| Action | What it does |
-|---|---|
-| `http` | Issues an arbitrary HTTP request (any method, headers, body, optional session) |
-| `browser` | Runs Playwright steps — `goto`, `fill`, `type`, `click`, `press`, `wait`, `snapshot` |
-| `jwt` | Forges an HS256 JWT from a discovered signing secret and stores it as a reusable session |
-| `credential_check` | Posts a tiny explicit login dictionary (≤ 20 pairs) against a login endpoint; stores successful tokens as sessions |
-| `finding_write` | Directly records a confirmed finding from prior evidence without issuing another request |
-| `done` | Terminates the scan with a summary |
+See [Architecture](docs/architecture.md).
 
 
 ## Recommended models
