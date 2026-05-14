@@ -1764,12 +1764,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
-        thinking_max_steps = max(
-            1,
-            int(
-                getattr(scanner_policy, "thinking_max_steps", DEFAULT_THINKING_MAX_STEPS)
-            ),
-        )
+        thinking_max_steps = 0  # unused — no step limit
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -1850,7 +1845,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         "type": "scanner_phase",
         "phase": "thinking_scan",
         "status": "start",
-        "message": f"LLM-directed scan started — up to {thinking_max_steps} adaptive steps.",
+        "message": "LLM-directed scan started.",
     })
 
     # ── Bootstrap browser + auth session (Playwright) ─────────────────────────
@@ -2013,14 +2008,15 @@ async def _do_thinking_scan(run_id: int) -> None:
                     session_vault=session_vault, pages_snapshot=pages_snapshot,
                     findings_snapshot=findings_snapshot, first_page_id=first_page_id,
                     scanner_policy=scanner_policy,
-                    thinking_max_steps=thinking_max_steps,
                     hx=hx, browser_ctx=browser_ctx, pw_page=pw_page,
                     history=history, all_results=all_results,
                 )
-            # ── Step-by-step path (fallback for non-Anthropic providers) ──────
-            for step in range(1, thinking_max_steps + 1):
+            # ── Step-by-step path (fallback for non-agentic providers) ──────
+            step = 0
+            while True:
                 if llm_cfg.provider in llm_svc.AGENTIC_LOOP_PROVIDERS:
                     break  # agentic loop already ran above
+                step += 1
                 if run_id in _thinking_stop_requested:
                     break
 
@@ -2028,8 +2024,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "type": "scanner_phase",
                     "phase": "thinking_step",
                     "status": "deciding",
-                    "message": f"Step {step}/{thinking_max_steps}: LLM deciding next action…",
-                    "data": {"step": step, "max_steps": thinking_max_steps},
+                    "message": f"Step {step}: LLM deciding next action…",
+                    "data": {"step": step},
                 })
 
                 # Ask the LLM what to do next.
@@ -2051,7 +2047,6 @@ async def _do_thinking_scan(run_id: int) -> None:
                         target_url=base_url,
                         crawl_context=step_context,
                         history=history,
-                        max_steps=thinking_max_steps,
                         current_step=step,
                         credentials=creds_for_llm,
                         sessions=[
@@ -2980,7 +2975,6 @@ async def _do_agentic_thinking_loop(
     findings_snapshot: list[dict],
     first_page_id: Optional[int],
     scanner_policy,
-    thinking_max_steps: int,
     hx,
     browser_ctx,
     pw_page,
@@ -3816,7 +3810,6 @@ async def _do_agentic_thinking_loop(
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
-        max_steps=thinking_max_steps,
         stop_check=lambda: run_id in _thinking_stop_requested,
     )
     return progressive_findings_count

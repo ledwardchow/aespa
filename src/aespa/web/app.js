@@ -2810,8 +2810,6 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <div className="two-col">
       <div className="field"><label>Max probes per page</label>
         <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
-      <div className="field"><label>Dynamic Scan max steps</label>
-        <input type="number" disabled=${disabled} min="1" max="1000" step="1" value=${form.thinking_max_steps} onChange=${e=>upd({thinking_max_steps:e.target.value})}/></div>
       <div className="field"><label>Request timeout (seconds)</label>
         <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
       <div className="field"><label>Minimum delay (seconds)</label>
