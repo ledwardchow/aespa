@@ -2197,7 +2197,6 @@ async def thinking_agentic_loop(
     initial_user_message: str,
     tool_executor,
     emit_fn=None,
-    max_steps: int = 120,
     stop_check=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
@@ -2212,7 +2211,7 @@ async def thinking_agentic_loop(
     tool_call_count = 0
     final_summary = ""
 
-    while tool_call_count < max_steps:
+    while True:
         if stop_check and stop_check():
             break
 
@@ -2223,12 +2222,11 @@ async def thinking_agentic_loop(
                     "phase": "thinking_step",
                     "status": "deciding",
                     "message": (
-                        f"Step {tool_call_count + 1}/{max_steps}: "
+                        f"Step {tool_call_count + 1}: "
                         "LLM deciding next action\u2026"
                     ),
                     "data": {
                         "step": tool_call_count + 1,
-                        "max_steps": max_steps,
                         "mode": "agentic",
                     },
                 })
