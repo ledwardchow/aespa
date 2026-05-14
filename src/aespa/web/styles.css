@@ -1317,6 +1317,10 @@ legend {
 .phase-warning   { background:rgba(245,166,35,0.28); color:var(--warn); font-weight:800; }
 .phase-llm-req   { background:rgba(34,211,238,0.12);  color:#22d3ee; }
 .phase-llm-resp  { background:rgba(52,211,153,0.12);  color:#34d399; }
+.phase-thinking  { background:rgba(251,191,36,0.12);  color:#fbbf24; }
+.activity-toolbar { display:flex; align-items:center; gap:8px; padding:7px 16px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; }
+.activity-count-label { font-size:11px; color:var(--muted); margin-right:auto; }
+.activity-mode-badge { font-size:10px; font-weight:600; padding:1px 7px; border-radius:4px; background:rgba(139,92,246,0.15); color:#a78bfa; letter-spacing:0.03em; }
 .activity-entry--expandable { cursor:pointer; }
 .activity-expand-chevron { flex-shrink:0; margin-left:auto; color:var(--muted); font-size:10px; user-select:none; }
 .activity-payload { padding:6px 16px 8px 98px; border-bottom:1px solid var(--border); }
