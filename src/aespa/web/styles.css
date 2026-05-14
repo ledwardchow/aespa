@@ -321,15 +321,27 @@ a:hover { color: var(--accent-hover); }
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
+  overflow-x: auto;        /* allow horizontal scroll instead of crushing columns */
 }
 
-table { width: 100%; border-collapse: collapse; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;     /* honour explicit column widths; prevents starvation */
+  min-width: 480px;        /* never compress below this before scrolling kicks in */
+}
 th, td {
   padding: 11px 16px;
   text-align: left;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
+  /* wrap text instead of compressing sibling columns */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+/* Let action/button cells in the last column size to content */
+th:last-child, td:last-child { white-space: normal; overflow: visible; width: auto; }
 th {
   background: var(--panel-2);
   color: var(--muted);
@@ -341,7 +353,15 @@ th {
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: rgba(255,255,255,0.02); }
 
-td.url, .url { font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace; font-size: 12px; color: var(--text-2); }
+/* URL/monospace cells — allow to fill space but wrap long values gracefully */
+td.url, .url {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ── Badges ─────────────────────────────────────────────────── */
 
@@ -725,14 +745,14 @@ legend {
 .scan-status-stopped  { background: rgba(148,163,184,0.1); color: var(--muted); }
 .scan-status-failed   { background: rgba(239,68,68,0.15); color: var(--danger); }
 .scan-status-idle     { background: rgba(148,163,184,0.1); color: var(--muted); }
-.findings-table-wrap { flex: 1; overflow-y: auto; }
-.findings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.findings-table th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index:1; }
+.findings-table-wrap { flex: 1; overflow-y: auto; overflow-x: auto; }
+.findings-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; min-width: 640px; }
+.findings-table th { text-align: left; padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index:1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .finding-row { cursor: pointer; transition: background 0.1s; }
 .finding-row:hover { background: var(--hover); }
 .finding-row td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle, var(--border)); vertical-align: middle; }
 .finding-title { font-weight: 500; }
-.finding-url { color: var(--muted); font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.finding-url { color: var(--muted); font-size: 11px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .finding-evidence-row td { padding: 0; }
 .finding-description { padding: 10px 16px; font-size: 13px; color: var(--text-2); border-bottom: 1px solid var(--border); }
 .finding-evidence { margin: 0; padding: 10px 16px; font-family: monospace; font-size: 11px; background: var(--bg); color: var(--text-2); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--border); max-height: 200px; overflow-y: auto; }
@@ -872,7 +892,7 @@ legend {
 .tr-ts  { color:var(--muted); font-size:11px; font-family:monospace; width:90px; }
 .tr-user   { font-size:11px; color:var(--text-2); max-width:90px; overflow:hidden; text-overflow:ellipsis; }
 .tr-method { font-weight:700; font-family:monospace; font-size:11px; width:60px; }
-.tr-url { font-family:monospace; font-size:11px; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
+.tr-url { font-family:monospace; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tr-dur { color:var(--muted); font-size:11px; text-align:right; width:70px; }
 .status-pill { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:700; font-family:monospace; }
 .tr-2xx { background:rgba(52,211,153,0.15); color:#34d399; }
