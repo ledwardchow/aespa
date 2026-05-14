@@ -107,6 +107,8 @@ LLMProviderLiteral = Literal[
     "bedrock",
     "azure_openai",
     "azure_foundry",
+    "azure_foundry_openai",
+    "azure_foundry_anthropic",
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
@@ -160,13 +162,33 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "o4-mini",
     ],
     "azure_foundry": [
+        "gpt-4o",
+        "gpt-4.1",
+        "o3-mini",
+        "DeepSeek-R1",
         "Meta-Llama-3.3-70B-Instruct",
         "Meta-Llama-3.1-70B-Instruct",
         "Mistral-large-2411",
         "Phi-4",
-        "DeepSeek-R1",
+    ],
+    "azure_foundry_openai": [
         "gpt-4o",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "o3",
         "o3-mini",
+        "o4-mini",
+        "DeepSeek-R1",
+        "Meta-Llama-3.3-70B-Instruct",
+        "Mistral-large-2411",
+        "Phi-4",
+    ],
+    "azure_foundry_anthropic": [
+        "claude-sonnet-4-5",
+        "claude-opus-4-1",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
     ],
 }
 
@@ -192,8 +214,16 @@ class LLMConfigIn(BaseModel):
             "google",
             "azure_openai",
             "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
         )
-        _needs_url = ("openai_compatible", "azure_openai", "azure_foundry")
+        _needs_url = (
+            "openai_compatible",
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
+        )
         if self.provider in _needs_key and not self.api_key:
             raise ValueError(f"api_key is required for provider '{self.provider}'")
         if self.provider in _needs_url and not self.base_url:
@@ -451,6 +481,129 @@ class GraphData(BaseModel):
     links: list[GraphLink]
 
 
+class TargetIntelItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    kind: str
+    key: str
+    value: str
+    url: str | None
+    method: str | None
+    source: str
+    confidence: float
+    evidence: str
+    item_metadata: dict = Field(default_factory=dict)
+    discovered_at: datetime
+
+    @field_validator("item_metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                return _json.loads(v)
+            except Exception:
+                return {}
+        return v
+
+
+class TargetIntelSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    items: list[TargetIntelItemOut] = Field(default_factory=list)
+
+
+class ScannerSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    label: str
+    kind: str
+    username: str | None
+    credential_id: int | None
+    source: str
+    cookie_names: list[str] = Field(default_factory=list)
+    header_names: list[str] = Field(default_factory=list)
+    token_hint: str | None
+    session_metadata: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScannerSessionSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    sessions: list[ScannerSessionOut] = Field(default_factory=list)
+
+
+class ScannerSessionUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    is_active: bool | None = None
+
+
+class PentestHypothesisOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    title: str
+    description: str
+    attack_area: str
+    owasp_category: str
+    status: str
+    priority: int
+    confidence: float
+    rationale: str
+    created_from: str
+    related_intel_ids: list[int] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("related_intel_ids", mode="before")
+    @classmethod
+    def _coerce_related_intel_ids(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = _json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return v
+
+
+class PentestTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    hypothesis_id: int | None
+    title: str
+    description: str
+    target_url: str
+    method: str
+    task_type: str
+    status: str
+    priority: int
+    evidence: str
+    result_summary: str
+    last_action_step: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PentestTaskGraphOut(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    hypotheses: list[PentestHypothesisOut] = Field(default_factory=list)
+    tasks: list[PentestTaskOut] = Field(default_factory=list)
+
+
 class TrafficEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -487,6 +640,8 @@ class ScanFindingOut(BaseModel):
     evidence: str
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_json: str = "[]"
+    evidence_items: list[dict] = Field(default_factory=list)
     screenshot_b64: str | None
     validation_status: str
     validation_note: str | None
@@ -507,6 +662,7 @@ class ScanFindingImportIn(BaseModel):
     evidence: str = ""
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
     validation_status: str = "unvalidated"
     validation_note: str | None = None
 
