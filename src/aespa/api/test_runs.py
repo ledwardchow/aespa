@@ -10,6 +10,8 @@ from aespa.models import (
     CrawledPage,
     PageCredentialView,
     PageLink,
+    PentestHypothesis,
+    PentestTask,
     ScannerSession,
     TargetIntelItem,
     TestRun,
@@ -468,6 +470,20 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
     return GraphData(nodes=nodes, links=edges)
 
 
+@router.delete("/api/test-runs/{run_id}/target-intelligence", status_code=204)
+def clear_target_intelligence(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all target intelligence items discovered for this run."""
+    _get_run_or_404(session, run_id)
+    for item in session.exec(
+        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    ).all():
+        session.delete(item)
+    session.commit()
+
+
 @router.get("/api/test-runs/{run_id}/target-intelligence", response_model=TargetIntelSummary)
 def get_target_intelligence(
     run_id: int,
@@ -553,6 +569,24 @@ def update_scanner_session(
     session.commit()
     session.refresh(record)
     return _scanner_session_out(record)
+
+
+@router.delete("/api/test-runs/{run_id}/task-graph", status_code=204)
+def clear_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all hypotheses and tasks for this run."""
+    _get_run_or_404(session, run_id)
+    for task in session.exec(
+        select(PentestTask).where(PentestTask.test_run_id == run_id)
+    ).all():
+        session.delete(task)
+    for hyp in session.exec(
+        select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)
+    ).all():
+        session.delete(hyp)
+    session.commit()
 
 
 @router.get("/api/test-runs/{run_id}/task-graph", response_model=PentestTaskGraphOut)

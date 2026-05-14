@@ -1,4 +1,4 @@
-# Dynamic Scan Tool Calls
+# Dynamic Scan Tool Availability
 
 ## Context tools (`action: "tool"`)
 
@@ -31,7 +31,7 @@ Read-only reconnaissance against collected crawl/scan data. Up to 3 consecutive 
 
 ---
 
-# Structured Scan
+# Structured Scan Tool Availability
 
 The structured scanner runs page-by-page, driven by a plan → execute → analyse loop with deterministic modules layered on top.
 
