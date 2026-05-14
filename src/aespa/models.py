@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
@@ -54,6 +55,8 @@ class LLMProvider(str, Enum):
     bedrock = "bedrock"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
+    azure_foundry_openai = "azure_foundry_openai"
+    azure_foundry_anthropic = "azure_foundry_anthropic"
 
 
 class LLMConfig(SQLModel, table=True):
@@ -191,6 +194,27 @@ class TrafficEntry(SQLModel, table=True):
     username: Optional[str] = Field(default=None)      # credential username that made the request
 
 
+class ScannerSession(SQLModel, table=True):
+    """Reusable scanner session material discovered or configured during a run."""
+
+    __tablename__ = "scanner_session"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    label: str = Field(index=True)                 # anonymous | configured_primary | forged_admin | ...
+    kind: str = Field(default="cookie", index=True)  # anonymous | cookie | bearer | mixed
+    username: Optional[str] = Field(default=None, index=True)
+    credential_id: Optional[int] = Field(default=None, foreign_key="credential.id", index=True)
+    source: str = Field(default="scanner")
+    cookies_json: str = Field(default="{}")
+    extra_headers_json: str = Field(default="{}")
+    session_metadata: str = Field(default="{}")
+    token_hint: Optional[str] = Field(default=None)
+    is_active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class PageCredentialView(SQLModel, table=True):
     """Per-credential snapshot of a crawled page: screenshot, LLM context, and raw categories."""
 
@@ -208,6 +232,68 @@ class PageCredentialView(SQLModel, table=True):
     takes_input: Optional[bool] = Field(default=None)
     has_object_ref: Optional[bool] = Field(default=None)
     has_business_logic: Optional[bool] = Field(default=None)
+
+
+class TargetIntelItem(SQLModel, table=True):
+    """Normalized target intelligence discovered during crawl and recon."""
+
+    __tablename__ = "target_intel_item"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    kind: str = Field(index=True)              # endpoint | form | input | script | storage_key | id | token_hint | response_field
+    key: str = Field(default="", index=True)   # stable label, e.g. route path, field name, script URL
+    value: str = Field(default="")             # extracted value or display text
+    url: Optional[str] = Field(default=None, index=True)
+    method: Optional[str] = Field(default=None)
+    source: str = Field(default="crawler")     # dom | api_observation | js_asset | response_body
+    confidence: float = Field(default=1.0)
+    evidence: str = Field(default="")
+    item_metadata: str = Field(default="{}")
+    discovered_at: datetime = Field(default_factory=_utcnow)
+
+
+class PentestHypothesis(SQLModel, table=True):
+    """Durable attack hypothesis derived from crawl intelligence and scan progress."""
+
+    __tablename__ = "pentest_hypothesis"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    title: str = Field(index=True)
+    description: str = Field(default="")
+    attack_area: str = Field(default="", index=True)
+    owasp_category: str = Field(default="")
+    status: str = Field(default="open", index=True)  # open | testing | confirmed | rejected | unconfirmed
+    priority: int = Field(default=50, index=True)
+    confidence: float = Field(default=0.5)
+    rationale: str = Field(default="")
+    created_from: str = Field(default="")
+    related_intel_ids: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class PentestTask(SQLModel, table=True):
+    """Concrete work item in the LLM-directed pentest plan."""
+
+    __tablename__ = "pentest_task"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    hypothesis_id: Optional[int] = Field(default=None, foreign_key="pentest_hypothesis.id", index=True)
+    title: str = Field(index=True)
+    description: str = Field(default="")
+    target_url: str = Field(default="", index=True)
+    method: str = Field(default="GET")
+    task_type: str = Field(default="recon", index=True)
+    status: str = Field(default="queued", index=True)  # queued | running | blocked | done | skipped
+    priority: int = Field(default=50, index=True)
+    evidence: str = Field(default="")
+    result_summary: str = Field(default="")
+    last_action_step: Optional[int] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScanFinding(SQLModel, table=True):
@@ -239,11 +325,20 @@ class ScanFinding(SQLModel, table=True):
     evidence: str = Field(default="")          # formatted request + response excerpt
     request_evidence: str = Field(default="")
     response_evidence: str = Field(default="")
+    evidence_json: str = Field(default="[]")
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     # Validation fields
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     created_at: datetime = Field(default_factory=_utcnow)
+
+    @property
+    def evidence_items(self) -> list[dict]:
+        try:
+            parsed = json.loads(self.evidence_json or "[]")
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
 
 
 class ScanLog(SQLModel, table=True):

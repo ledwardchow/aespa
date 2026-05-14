@@ -64,6 +64,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "cvss_vector", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "request_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
@@ -114,6 +115,138 @@ def _migrate(engine: Engine) -> None:
                 data_json TEXT
             )
         """))
+        conn.commit()
+    # target_intel_item — normalized crawl/recon inventory used by the UI and scanners.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS target_intel_item (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                kind TEXT NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                value TEXT NOT NULL DEFAULT '',
+                url TEXT,
+                method TEXT,
+                source TEXT NOT NULL DEFAULT 'crawler',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                evidence TEXT NOT NULL DEFAULT '',
+                item_metadata TEXT NOT NULL DEFAULT '{}',
+                discovered_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_test_run_id "
+            "ON target_intel_item (test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_kind "
+            "ON target_intel_item (kind)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_key "
+            "ON target_intel_item (key)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_url "
+            "ON target_intel_item (url)"
+        ))
+        conn.commit()
+    # pentest_hypothesis / pentest_task — durable dynamic-scan plan.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS pentest_hypothesis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                attack_area TEXT NOT NULL DEFAULT '',
+                owasp_category TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                priority INTEGER NOT NULL DEFAULT 50,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                rationale TEXT NOT NULL DEFAULT '',
+                created_from TEXT NOT NULL DEFAULT '',
+                related_intel_ids TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS pentest_task (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                hypothesis_id INTEGER REFERENCES pentest_hypothesis(id),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                target_url TEXT NOT NULL DEFAULT '',
+                method TEXT NOT NULL DEFAULT 'GET',
+                task_type TEXT NOT NULL DEFAULT 'recon',
+                status TEXT NOT NULL DEFAULT 'queued',
+                priority INTEGER NOT NULL DEFAULT 50,
+                evidence TEXT NOT NULL DEFAULT '',
+                result_summary TEXT NOT NULL DEFAULT '',
+                last_action_step INTEGER,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for table in ("pentest_hypothesis", "pentest_task"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_test_run_id ON {table} (test_run_id)"
+            ))
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_status ON {table} (status)"
+            ))
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_priority ON {table} (priority)"
+            ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_title "
+            "ON pentest_hypothesis (title)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_attack_area "
+            "ON pentest_hypothesis (attack_area)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_hypothesis_id "
+            "ON pentest_task (hypothesis_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_title ON pentest_task (title)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_target_url ON pentest_task (target_url)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_task_type ON pentest_task (task_type)"
+        ))
+        conn.commit()
+    # scanner_session — durable scanner auth/session material with stable labels.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scanner_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'cookie',
+                username TEXT,
+                credential_id INTEGER REFERENCES credential(id),
+                source TEXT NOT NULL DEFAULT 'scanner',
+                cookies_json TEXT NOT NULL DEFAULT '{}',
+                extra_headers_json TEXT NOT NULL DEFAULT '{}',
+                session_metadata TEXT NOT NULL DEFAULT '{}',
+                token_hint TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for column in ("test_run_id", "label", "kind", "username", "credential_id", "is_active"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
+                f"ON scanner_session ({column})"
+            ))
         conn.commit()
 
 
