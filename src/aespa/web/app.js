@@ -13,6 +13,7 @@ const api = {
   createSite:       (b)           => req("/api/sites",         { method:"POST",   body:b }),
   updateSite:       (id,b)        => req(`/api/sites/${id}`,   { method:"PUT",    body:b }),
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
+  importSite:       (text)        => fetch("/api/sites/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const d = r.ok ? await r.json() : (() => { throw new Error(`Import failed: ${r.status}`); })(); return d; }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -35,6 +36,11 @@ const api = {
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
+  getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
+  getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
+  seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
@@ -56,7 +62,10 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
-  clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
+  clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
+  clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
+  clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
+  clearTaskGraph:       (id)       => req(`/api/test-runs/${id}/task-graph`,            { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
 };
 
@@ -306,6 +315,8 @@ function App() {
 function SitesList() {
   const [sites, setSites] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
   const load = useCallback(async () => {
     try { setSites(await api.listSites()); } catch(e) { setError(e.message); }
   }, []);
@@ -314,6 +325,19 @@ function SitesList() {
     if (!confirm(`Delete "${s.name}"? This also removes all test runs and credentials.`)) return;
     try { await api.deleteSite(s.id); await load(); } catch(e) { setError(e.message); }
   };
+  const onExport = (s) => { window.location.href = `/api/sites/${s.id}/export`; };
+  const onImportFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setImporting(true); setError(null);
+    try {
+      const text = await file.text();
+      await api.importSite(text);
+      await load();
+    } catch(err) { setError(err.message); }
+    finally { setImporting(false); }
+  };
   const authCount = sites ? sites.filter(s=>s.requires_auth).length : 0;
   const credCount = sites ? sites.reduce((n,s)=>n+s.credential_count,0) : 0;
 
@@ -321,6 +345,8 @@ function SitesList() {
     <div className="topbar">
       <div className="topbar-title">Sites</div>
       <div className="topbar-actions">
+        <input ref=${importRef} type="file" accept=".json" style=${{display:"none"}} onChange=${onImportFile}/>
+        <button className="btn secondary" onClick=${()=>importRef.current.click()} disabled=${importing}>${importing?"Importing…":"Import site"}</button>
         <button className="btn" onClick=${()=>nav("#/sites/new")}><${IconPlus}/> New site</button>
       </div>
     </div>
@@ -343,6 +369,9 @@ function SitesList() {
       ${sites&&sites.length>0 && html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"42%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"20%"}}/>
+            </colgroup>
             <thead><tr><th>Name</th><th>Base URL</th><th>Auth</th><th>Credentials</th><th></th></tr></thead>
             <tbody>${sites.map(s=>html`
               <tr key=${s.id}>
@@ -353,6 +382,7 @@ function SitesList() {
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/sites/${s.id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>onExport(s)}>Export</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(s)}>Delete</button>
                   </div>
                 </td>
@@ -420,6 +450,9 @@ function ActiveJobsPage() {
       ${jobs&&jobs.length>0 && html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"7%"}}/><col style=${{width:"13%"}}/><col style=${{width:"14%"}}/>
+            </colgroup>
             <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
             <tbody>${jobs.map(j=>html`
               <tr key=${`${j.job_type}-${j.run_id}`}>
@@ -575,6 +608,9 @@ function SiteDetail({ siteId }) {
         ${runs&&runs.length>0 && html`
           <div className="table-wrap">
             <table>
+              <colgroup>
+                <col style=${{width:"35%"}}/><col style=${{width:"18%"}}/><col style=${{width:"10%"}}/><col style=${{width:"16%"}}/><col style=${{width:"21%"}}/>
+              </colgroup>
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
@@ -829,7 +865,13 @@ function TestRunDetail({ runId }) {
   const [scopeBusy, setScopeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState("sitemap");
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
+  const [targetIntel, setTargetIntel]       = useState(null);
+  const [targetIntelKind, setTargetIntelKind] = useState("");
+  const [taskGraph, setTaskGraph]           = useState(null);
+  const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
+  const [clearBusy, setClearBusy]           = useState(""); // which section is clearing
+  const [clearError, setClearError]         = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
   const [editingSettings, setEditingSettings] = useState(false);
@@ -966,10 +1008,18 @@ function TestRunDetail({ runId }) {
         if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
           setSitePlanData(evt.data);
         }
+      } else if (evt.type === "task_graph_update") {
+        api.getTaskGraph(runId).then(setTaskGraph).catch(() => {});
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
-            ? { ...f, validation_status: evt.validation_status, validation_note: evt.validation_note ?? f.validation_note }
+            ? {
+                ...f,
+                validation_status: evt.validation_status,
+                validation_note: evt.validation_note ?? f.validation_note,
+                evidence_json: evt.evidence_json ?? f.evidence_json,
+                evidence_items: evt.evidence_items ?? f.evidence_items,
+              }
             : f
         ));
         // Refresh validation status summary when an individual finding resolves.
@@ -1051,6 +1101,36 @@ function TestRunDetail({ runId }) {
     api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
     api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
+
+  useEffect(() => {
+    if (activeTab !== "intelligence" && run?.status !== "running") return;
+    const loadIntel = () => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{});
+    loadIntel();
+    if (run?.status !== "running") return;
+    const iv = setInterval(loadIntel, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, targetIntelKind, run?.status]);
+
+  useEffect(() => {
+    const active = activeTab === "tasks" || isDynamicScanActive(thinkingStatus?.status);
+    if (!active) return;
+    const loadTasks = () => api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{});
+    loadTasks();
+    if (!isDynamicScanActive(thinkingStatus?.status)) return;
+    const iv = setInterval(loadTasks, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status]);
+
+  useEffect(() => {
+    const scanRunning = (scanStatus?.status || run?.scan_status) === "running";
+    const active = activeTab === "sessions" || isDynamicScanActive(thinkingStatus?.status) || scanRunning;
+    if (!active) return;
+    const loadSessions = () => api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{});
+    loadSessions();
+    if (activeTab === "sessions" && !isDynamicScanActive(thinkingStatus?.status) && !scanRunning) return;
+    const iv = setInterval(loadSessions, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
@@ -1610,6 +1690,18 @@ function TestRunDetail({ runId }) {
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
           Activity${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
+          onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); }}>
+          Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="tasks"?" active":"")}
+          onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); }}>
+          Task Graph${taskGraph?.counts?.tasks>0 ? html` <span className="traffic-count">${taskGraph.counts.tasks}</span>` : ""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="sessions"?" active":"")}
+          onClick=${()=>{ setActiveTab("sessions"); setSelNode(null); }}>
+          Sessions${scannerSessions?.counts?.total>0 ? html` <span className="traffic-count">${scannerSessions.counts.total}</span>` : ""}
+        </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
           onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
@@ -1782,7 +1874,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1911,7 +2003,7 @@ function TestRunDetail({ runId }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && !dynamicScanActive && html`
+            ${scanStatus && !dynamicScanActive && !(thinkingStatus?.status === "complete" && scanStatus.status === "complete") && html`
               <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
                 ${scanStopRequested ? "Stopping scan…" :
                   scanStatus.status==="running" ? "Structured Scan running…" :
@@ -1970,6 +2062,16 @@ function TestRunDetail({ runId }) {
                   ${dedupeBusy && html`<span className="inline-spinner"></span>`}
                   ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
                 </button>`}
+              ${findings.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="findings"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all findings and reset page scan status?\nThis lets you re-run the scanner on the same crawl.")) return;
+                    setClearBusy("findings"); setClearError(null);
+                    try { await api.clearFindings(runId); setFindings([]); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="findings"?"Clearing…":"Clear all"}</button>`}
             </div>
           </div>
           ${findings.length === 0
@@ -2013,6 +2115,15 @@ function TestRunDetail({ runId }) {
                 const fpGroups = makeGroups(fpMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const evidenceItemsFor = (f) => {
+                  if (Array.isArray(f.evidence_items)) return f.evidence_items;
+                  try {
+                    const parsed = JSON.parse(f.evidence_json || "[]");
+                    return Array.isArray(parsed) ? parsed : [];
+                  } catch (_) {
+                    return [];
+                  }
+                };
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
@@ -2059,6 +2170,17 @@ function TestRunDetail({ runId }) {
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${evidenceItemsFor(f).length > 0 && html`
+                          <div className="structured-evidence">
+                            ${evidenceItemsFor(f).map((item,idx)=>html`
+                              <div key=${idx} className=${"structured-evidence-item evidence-type-"+(item.type||"note")}>
+                                <div className="structured-evidence-label">
+                                  <span>${item.label || item.type || "Evidence"}</span>
+                                  ${item.confidence && html`<span className="structured-evidence-confidence">${item.confidence}</span>`}
+                                </div>
+                                <pre className="structured-evidence-value">${item.value}</pre>
+                              </div>`)}
                           </div>`}
                         ${f.request_evidence && html`
                           <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
@@ -2157,8 +2279,65 @@ function TestRunDetail({ runId }) {
               </div>`}
         </div>`}
 
+      ${activeTab==="intelligence" && html`
+        <${TargetIntelligencePanel}
+          data=${targetIntel}
+          selectedKind=${targetIntelKind}
+          onKind=${setTargetIntelKind}
+          refresh=${()=>api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{})}
+          onClear=${async()=>{
+            if (!confirm("Clear all target intelligence for this run?")) return;
+            setClearBusy("intel"); setClearError(null);
+            try { await api.clearTargetIntel(runId); setTargetIntel(null); setTargetIntelKind(""); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="intel"}
+        />`}
+
+      ${activeTab==="tasks" && html`
+        <${TaskGraphPanel}
+          data=${taskGraph}
+          refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
+          seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
+          onClear=${async()=>{
+            if (!confirm("Clear all hypotheses and tasks for this run?")) return;
+            setClearBusy("tasks"); setClearError(null);
+            try { await api.clearTaskGraph(runId); setTaskGraph(null); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="tasks"}
+        />`}
+
+      ${activeTab==="sessions" && html`
+        <${ScannerSessionsPanel}
+          runId=${runId}
+          data=${scannerSessions}
+          refresh=${()=>api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{})}
+        />`}
+
       ${activeTab==="activity" && html`
         <div className="activity-panel">
+          ${(() => {
+            const isAgentic = activityLog.some(e => e.data?.mode === "agentic");
+            return html`
+              <div className="activity-toolbar">
+                <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
+                ${isAgentic && html`<span className="activity-mode-badge">Continuous session</span>`}
+                <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
+                ${activityLog.length>0 && html`
+                  <button className="btn danger-outline sm"
+                    disabled=${clearBusy==="activity"}
+                    onClick=${async()=>{
+                      if (!confirm("Clear all activity log entries for this run?")) return;
+                      setClearBusy("activity"); setClearError(null);
+                      try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); }
+                      catch(e) { setClearError(e.message); }
+                      finally { setClearBusy(""); }
+                    }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+              </div>`;
+          })()}
           <div className="activity-feed" ref=${activityFeedRef}>
             ${sitePlanData && html`
               <div className="site-plan-card">
@@ -2200,17 +2379,29 @@ function TestRunDetail({ runId }) {
               </div>`}
             ${activityLog.map(entry => {
               const PHASE_META = {
-                site_plan:     { label: "Plan",      cls: "phase-plan" },
-                page_plan:     { label: "Probes",    cls: "phase-probes" },
-                page_followup: { label: "Follow-up", cls: "phase-followup" },
-                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
-                sweep:         { label: "Sweep",     cls: "phase-sweep" },
-                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
-                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
+                site_plan:          { label: "Plan",      cls: "phase-plan" },
+                page_plan:          { label: "Probes",    cls: "phase-probes" },
+                page_followup:      { label: "Follow-up", cls: "phase-followup" },
+                page_analysis:      { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:              { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
+                credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
+                thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
               };
               const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
-              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
-              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : "";
+              // Augment llm_request message to surface agentic context count
+              const displayMessage = (
+                entry.phase === "llm_request" && entry.data?.message_count != null
+                  ? entry.message.replace(/\(.*messages in context\)/, `(${entry.data.message_count} msgs in context)`)
+                  : entry.message
+              );
+              const hasThinkingDetail = entry.phase === "thinking_step" && !!(
+                entry.data?.observation || entry.data?.hypothesis ||
+                entry.data?.payload_purpose || entry.data?.payload_summary
+              );
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail);
               const isExpanded = expandedLogIds.has(entry._id);
               return html`
                 <div key=${entry._id}>
@@ -2219,8 +2410,8 @@ function TestRunDetail({ runId }) {
                     <span className="activity-ts">${entry._ts}</span>
                     <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
                     ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
-                    <span className="activity-msg">${entry.message}</span>
-                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                    <span className="activity-msg">${displayMessage}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
                   </div>
                   ${isExpanded && html`
                     <div className="activity-payload">
@@ -2230,6 +2421,19 @@ function TestRunDetail({ runId }) {
                       ${entry.data?.raw_response && html`
                         <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
                         <pre>${entry.data.raw_response}</pre>`}
+                      ${hasThinkingDetail && html`
+                        ${entry.data?.observation && html`
+                          <div className="activity-payload-label">Observation</div>
+                          <pre>${entry.data.observation}</pre>`}
+                        ${entry.data?.hypothesis && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Hypothesis</div>
+                          <pre>${entry.data.hypothesis}</pre>`}
+                        ${entry.data?.payload_purpose && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload purpose</div>
+                          <pre>${entry.data.payload_purpose}</pre>`}
+                        ${entry.data?.payload_summary && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
+                          <pre>${entry.data.payload_summary}</pre>`}`}
                     </div>`}
                 </div>`;
             })}
@@ -2301,6 +2505,303 @@ function TestRunDetail({ runId }) {
     </div>`;
 }
 
+function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear, clearing }) {
+  const counts = data?.counts || {};
+  const items = data?.items || [];
+  const kinds = ["", ...Object.keys(counts).sort()];
+  const total = Object.values(counts).reduce((a,b)=>a+b,0);
+  const KIND_LABELS = {
+    endpoint:"Endpoints",
+    form:"Forms",
+    input:"Inputs",
+    script:"Scripts",
+    storage_key:"Storage Keys",
+    id:"IDs",
+    response_field:"Response Fields",
+  };
+  const kindLabel = (k) => k ? (KIND_LABELS[k] || k.replace(/_/g, " ")) : "All";
+  const compactMeta = (meta) => {
+    if (!meta || Object.keys(meta).length === 0) return "";
+    const shown = Object.entries(meta)
+      .filter(([k]) => !["fields"].includes(k))
+      .slice(0, 5)
+      .map(([k,v]) => `${k}: ${Array.isArray(v) ? v.length+" item(s)" : String(v).slice(0,80)}`);
+    return shown.join(" · ");
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Target Intelligence</span>
+          <span className="subtle">${total} item${total===1?"":"s"} discovered during crawl</span>
+        </div>
+        <div className="intel-filter">
+          <label>Kind</label>
+          <select className="select" value=${selectedKind} onChange=${e=>onKind(e.target.value)}>
+            ${kinds.map(k => html`<option key=${k||"all"} value=${k}>${kindLabel(k)}${k ? ` (${counts[k]||0})` : ""}</option>`)}
+          </select>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${total>0 && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        ${Object.entries(counts).sort(([a],[b])=>a.localeCompare(b)).map(([kind,count]) => html`
+          <button key=${kind} className=${"intel-count-card"+(selectedKind===kind?" active":"")} onClick=${()=>onKind(selectedKind===kind?"":kind)}>
+            <span className="intel-count-value">${count}</span>
+            <span className="intel-count-label">${kindLabel(kind)}</span>
+          </button>`)}
+        ${total===0 && html`<div className="subtle">No target intelligence has been collected yet. Start or restart a crawl to populate the inventory.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table">
+          <thead>
+            <tr>
+              <th style=${{width:116}}>Kind</th>
+              <th style=${{width:86}}>Method</th>
+              <th>Key</th>
+              <th>Value</th>
+              <th style=${{width:130}}>Source</th>
+              <th style=${{width:82}}>Conf.</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(item => html`
+              <tr key=${item.id}>
+                <td><span className="intel-kind">${kindLabel(item.kind)}</span></td>
+                <td><span className="mono">${item.method || "-"}</span></td>
+                <td>
+                  <div className="intel-primary" title=${item.key}>${item.key || "—"}</div>
+                  ${item.url && html`<div className="intel-url mono" title=${item.url}>${truncUrl(item.url, 72)}</div>`}
+                </td>
+                <td>
+                  <div className="intel-value" title=${item.value}>${item.value || "—"}</div>
+                  ${item.evidence && html`<div className="intel-evidence">${item.evidence}</div>`}
+                  ${compactMeta(item.item_metadata) && html`<div className="intel-meta">${compactMeta(item.item_metadata)}</div>`}
+                </td>
+                <td>${item.source}</td>
+                <td>${Math.round((item.confidence ?? 0) * 100)}%</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${items.length===0 && total>0 && html`
+          <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No items match this filter.</div>`}
+      </div>
+    </div>`;
+}
+
+function ScannerSessionsPanel({ runId, data, refresh }) {
+  const sessions = data?.sessions || [];
+  const counts = data?.counts || {};
+  const kinds = Object.entries(counts)
+    .filter(([kind]) => !["total", "active", "inactive"].includes(kind))
+    .sort(([a],[b]) => a.localeCompare(b));
+  const fmtAge = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  };
+  const renameSession = async (session) => {
+    const next = prompt("Session label", session.label);
+    if (next === null) return;
+    try {
+      await api.updateScannerSession(runId, session.id, { label: next });
+      await refresh();
+    } catch(e) { alert(e.message); }
+  };
+  const setSessionActive = async (session, isActive) => {
+    const verb = isActive ? "Reactivate" : "Deactivate";
+    if (!confirm(`${verb} session "${session.label}"?`)) return;
+    try {
+      await api.updateScannerSession(runId, session.id, { is_active: isActive });
+      await refresh();
+    } catch(e) { alert(e.message); }
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Scanner Sessions</span>
+          <span className="subtle">${counts.total || 0} durable label${(counts.total || 0)===1?"":"s"}; auth material is redacted</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        <div className="task-summary-card"><span className="task-summary-value">${counts.total || 0}</span><span className="task-summary-label">Total</span></div>
+        <div className="task-summary-card"><span className="task-summary-value">${counts.active || 0}</span><span className="task-summary-label">Active</span></div>
+        ${kinds.map(([kind,count]) => html`
+          <div key=${kind} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${kind.replace(/_/g," ")}</span>
+          </div>`)}
+        ${sessions.length===0 && html`<div className="subtle">No scanner sessions have been recorded yet. Start a Structured or Dynamic Scan to populate durable session labels.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table scanner-session-table">
+          <thead>
+            <tr>
+              <th style=${{width:150}}>Label</th>
+              <th style=${{width:100}}>Kind</th>
+              <th style=${{width:130}}>User</th>
+              <th>Auth material</th>
+              <th style=${{width:180}}>Source</th>
+              <th style=${{width:170}}>Updated</th>
+              <th style=${{width:150}}></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sessions.map(s => html`
+              <tr key=${s.id}>
+                <td><div className="intel-primary mono">${s.label}</div>${!s.is_active && html`<span className="task-status status-skipped">inactive</span>`}</td>
+                <td><span className=${"task-status status-"+(s.kind === "anonymous" ? "skipped" : "confirmed")}>${s.kind}</span></td>
+                <td>${s.username || "—"}${s.credential_id ? html`<div className="intel-meta">credential #${s.credential_id}</div>` : ""}</td>
+                <td>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Cookies</span>
+                    <span>${(s.cookie_names||[]).length ? s.cookie_names.join(", ") : "none"}</span>
+                  </div>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Headers</span>
+                    <span>${(s.header_names||[]).length ? s.header_names.join(", ") : "none"}</span>
+                  </div>
+                  ${s.token_hint && html`<div className="intel-meta">token: ${s.token_hint}</div>`}
+                </td>
+                <td>${s.source || "scanner"}</td>
+                <td>${fmtAge(s.updated_at)}</td>
+                <td>
+                  <div className="row session-actions">
+                    <button className="btn secondary sm" onClick=${()=>renameSession(s)}>Rename</button>
+                    ${s.is_active
+                      ? html`<button className="btn danger-outline sm" onClick=${()=>setSessionActive(s, false)}>Deactivate</button>`
+                      : html`<button className="btn secondary sm" onClick=${()=>setSessionActive(s, true)}>Reactivate</button>`}
+                  </div>
+                </td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
+  const hypotheses = data?.hypotheses || [];
+  const tasks = data?.tasks || [];
+  const counts = data?.counts || {};
+  const tasksByHypothesis = tasks.reduce((acc, task) => {
+    const key = task.hypothesis_id || "none";
+    (acc[key] = acc[key] || []).push(task);
+    return acc;
+  }, {});
+  const statusLabel = (status) => (status || "queued").replace(/_/g, " ");
+  const taskStatusCounts = ["queued", "running", "blocked", "done", "skipped"]
+    .map(status => [status, counts["task_"+status] || 0])
+    .filter(([, count]) => count > 0);
+  const orphanTasks = tasksByHypothesis.none || [];
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+  return html`
+    <div className="task-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Hypothesis & Task Graph</span>
+          <span className="subtle">${hypotheses.length} hypotheses · ${tasks.length} tasks</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${seed}>Seed from intelligence</button>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${(hypotheses.length>0||tasks.length>0) && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
+        </div>
+      </div>
+
+      <div className="task-summary">
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.hypotheses || 0}</span>
+          <span className="task-summary-label">Hypotheses</span>
+        </div>
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.tasks || 0}</span>
+          <span className="task-summary-label">Tasks</span>
+        </div>
+        ${taskStatusCounts.map(([status, count]) => html`
+          <div key=${status} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${statusLabel(status)}</span>
+          </div>`)}
+        ${tasks.length===0 && html`<div className="subtle">No task graph yet. Seed it from collected target intelligence, or start a Dynamic Scan.</div>`}
+      </div>
+
+      <div className="task-list">
+        ${hypotheses.map(h => {
+          const groupedTasks = tasksByHypothesis[h.id] || [];
+          return html`
+            <div key=${h.id} className="hypothesis-card">
+              <div className="hypothesis-card-head">
+                <div>
+                  <div className="hypothesis-card-title">${h.title}</div>
+                  <div className="hypothesis-card-meta">
+                    <span className=${"task-priority "+priorityTone(h.priority)}>P${h.priority}</span>
+                    <span className=${"task-status status-"+h.status}>${statusLabel(h.status)}</span>
+                    ${h.owasp_category && html`<span className="owasp-badge">${h.owasp_category}</span>`}
+                    ${h.attack_area && html`<span>${h.attack_area}</span>`}
+                    <span>${Math.round((h.confidence || 0) * 100)}% confidence</span>
+                  </div>
+                </div>
+                <span className="task-count-pill">${groupedTasks.length} task${groupedTasks.length===1?"":"s"}</span>
+              </div>
+              <div className="hypothesis-rationale">${h.rationale || h.description}</div>
+              ${groupedTasks.length > 0 && html`
+                <div className="task-table-wrap">
+                  <table className="task-table">
+                    <thead>
+                      <tr>
+                        <th style=${{width:88}}>Status</th>
+                        <th style=${{width:84}}>Type</th>
+                        <th>Task</th>
+                        <th style=${{width:86}}>Method</th>
+                        <th>Target</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${groupedTasks.map(task => html`
+                        <tr key=${task.id}>
+                          <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                          <td><span className="intel-kind">${task.task_type}</span></td>
+                          <td>
+                            <div className="intel-primary">${task.title}</div>
+                            <div className="intel-evidence">${task.result_summary || task.description}</div>
+                            ${task.evidence && html`<div className="task-evidence">${task.evidence}</div>`}
+                          </td>
+                          <td><span className="mono">${task.method || "-"}</span></td>
+                          <td><span className="mono task-target" title=${task.target_url}>${task.target_url ? truncUrl(task.target_url, 86) : "—"}</span></td>
+                        </tr>`)}
+                    </tbody>
+                  </table>
+                </div>`}
+            </div>`;
+        })}
+        ${orphanTasks.length > 0 && html`
+          <div className="hypothesis-card">
+            <div className="hypothesis-card-title">Unlinked Tasks</div>
+            <div className="task-table-wrap">
+              <table className="task-table">
+                <tbody>
+                  ${orphanTasks.map(task => html`
+                    <tr key=${task.id}>
+                      <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                      <td>${task.title}</td>
+                      <td><span className="mono">${task.target_url}</span></td>
+                    </tr>`)}
+                </tbody>
+              </table>
+            </div>
+          </div>`}
+      </div>
+    </div>`;
+}
+
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 function ScannerPolicyFields({ form, upd, disabled=false }) {
@@ -2318,8 +2819,6 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <div className="two-col">
       <div className="field"><label>Max probes per page</label>
         <input type="number" disabled=${disabled} min="0" max="500" value=${form.max_probes_per_page} onChange=${e=>upd({max_probes_per_page:e.target.value})}/></div>
-      <div className="field"><label>Dynamic Scan max steps</label>
-        <input type="number" disabled=${disabled} min="1" max="1000" step="1" value=${form.thinking_max_steps} onChange=${e=>upd({thinking_max_steps:e.target.value})}/></div>
       <div className="field"><label>Request timeout (seconds)</label>
         <input type="number" disabled=${disabled} min="1" max="120" step="0.5" value=${form.request_timeout_s} onChange=${e=>upd({request_timeout_s:e.target.value})}/></div>
       <div className="field"><label>Minimum delay (seconds)</label>
@@ -2673,6 +3172,9 @@ function SettingsPage() {
       ${profiles&&screen==="list"&&html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"30%"}}/><col style=${{width:"7%"}}/><col style=${{width:"10%"}}/><col style=${{width:"21%"}}/>
+            </colgroup>
             <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
             <tbody>
               ${profiles.map(p=>html`
