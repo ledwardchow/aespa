@@ -369,6 +369,9 @@ function SitesList() {
       ${sites&&sites.length>0 && html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"42%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"20%"}}/>
+            </colgroup>
             <thead><tr><th>Name</th><th>Base URL</th><th>Auth</th><th>Credentials</th><th></th></tr></thead>
             <tbody>${sites.map(s=>html`
               <tr key=${s.id}>
@@ -447,6 +450,9 @@ function ActiveJobsPage() {
       ${jobs&&jobs.length>0 && html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"7%"}}/><col style=${{width:"13%"}}/><col style=${{width:"14%"}}/>
+            </colgroup>
             <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
             <tbody>${jobs.map(j=>html`
               <tr key=${`${j.job_type}-${j.run_id}`}>
@@ -602,6 +608,9 @@ function SiteDetail({ siteId }) {
         ${runs&&runs.length>0 && html`
           <div className="table-wrap">
             <table>
+              <colgroup>
+                <col style=${{width:"35%"}}/><col style=${{width:"18%"}}/><col style=${{width:"10%"}}/><col style=${{width:"16%"}}/><col style=${{width:"21%"}}/>
+              </colgroup>
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
@@ -3163,6 +3172,9 @@ function SettingsPage() {
       ${profiles&&screen==="list"&&html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"30%"}}/><col style=${{width:"7%"}}/><col style=${{width:"10%"}}/><col style=${{width:"21%"}}/>
+            </colgroup>
             <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
             <tbody>
               ${profiles.map(p=>html`
