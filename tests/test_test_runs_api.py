@@ -3,6 +3,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from aespa.db import get_session
+from aespa.models import ScannerSession, TargetIntelItem
+
 
 def _make_site(client: TestClient, **kw):
     defaults = {"name": "Target", "base_url": "https://target.local", "requires_auth": False}
@@ -132,6 +135,103 @@ def test_get_run(client: TestClient):
     assert r.json()["id"] == run["id"]
 
 
+def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/accounts",
+            value="https://target.local/api/accounts",
+            url="https://target.local/dashboard",
+            method="GET",
+            source="dom_link",
+            confidence=0.8,
+            evidence="Accounts",
+            item_metadata='{"page_url":"https://target.local/dashboard"}',
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="input",
+            key="account_id",
+            value="request_body",
+            url="https://target.local/api/transfers",
+            method="POST",
+            source="api_request",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.get(f"/api/test-runs/{run['id']}/target-intelligence")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"] == {"endpoint": 1, "input": 1}
+    assert {item["kind"] for item in data["items"]} == {"endpoint", "input"}
+    endpoint = next(item for item in data["items"] if item["kind"] == "endpoint")
+    assert endpoint["item_metadata"]["page_url"] == "https://target.local/dashboard"
+
+
+def test_seed_task_graph_from_target_intelligence(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/health",
+            value="https://target.local/api/health",
+            url="https://target.local/api/health",
+            method="GET",
+            source="js_asset",
+            evidence="public asset referenced /api/health",
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="response_field",
+            key="password_hash",
+            value="string",
+            url="https://target.local/api/me",
+            method="GET",
+            source="response_body",
+            evidence="profile response contained password_hash",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.post(f"/api/test-runs/{run['id']}/task-graph/seed")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"]["hypotheses"] >= 2
+    assert data["counts"]["tasks"] >= 2
+    titles = {h["title"] for h in data["hypotheses"]}
+    assert "Public operational/config endpoint exposure" in titles
+    assert "Sensitive field exposure" in titles
+    task_targets = {t["target_url"] for t in data["tasks"]}
+    assert "https://target.local/api/health" in task_targets
+    assert "https://target.local/api/me" in task_targets
+
+
 def test_import_findings_creates_findings_and_pages(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -149,6 +249,7 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
         "evidence": "GET /admin returned 200",
         "request_evidence": "GET /admin",
         "response_evidence": "Status: 200",
+        "evidence_items": [{"type": "status", "label": "HTTP status", "value": "200"}],
         "validation_status": "confirmed",
         "validation_note": "Imported validated issue.",
     }]
@@ -162,6 +263,7 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
     assert finding["title"] == "Imported authorization bypass"
     assert finding["validation_status"] == "confirmed"
     assert finding["affected_url"] == "https://target.local/admin"
+    assert finding["evidence_items"][0]["type"] == "status"
     run_after = client.get(f"/api/test-runs/{run['id']}").json()
     assert run_after["pages_discovered"] == 1
 
@@ -378,6 +480,168 @@ def test_run_summary_ignores_non_live_running_scan_marker(monkeypatch):
             summary = test_runs_api._run_summary(run, session)
 
         assert summary.scan_status == "idle"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_run_summary_does_not_infer_structured_complete_from_dynamic_page(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TestRunStatus
+    from aespa.services import scanner as scanner_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/api/accounts/1",
+                title="Dynamic Scan target",
+                status="crawled",
+                in_scope=True,
+                scan_status="complete",
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(run)
+
+            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
+            monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {"status": "complete"})
+
+            summary = test_runs_api._run_summary(run, session)
+
+        assert summary.scan_total_pages == 1
+        assert summary.scan_pages_done == 1
+        assert summary.scan_status == "idle"
+        assert summary.thinking_status == "complete"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_get_scanner_sessions_redacts_auth_material():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            session.add(ScannerSession(
+                test_run_id=run.id,
+                label="configured_primary",
+                kind="mixed",
+                username="alice",
+                credential_id=3,
+                source="test",
+                cookies_json='{"sid":"secret-cookie"}',
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+                session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
+                token_hint="secret...token",
+            ))
+            session.commit()
+
+            summary = test_runs_api.get_scanner_sessions(run.id, session=session)
+
+        assert summary.counts["total"] == 1
+        item = summary.sessions[0]
+        assert item.label == "configured_primary"
+        assert item.cookie_names == ["sid"]
+        assert item.header_names == ["Authorization"]
+        assert item.session_metadata["login_url"] == "https://target.local/login"
+        assert item.session_metadata["password"] == "[REDACTED]"
+        assert "secret-cookie" not in item.model_dump_json()
+        assert "secret-token" not in item.model_dump_json()
+        assert "generated-secret" not in item.model_dump_json()
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_update_scanner_session_renames_and_deactivates():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun
+    from aespa.schemas import ScannerSessionUpdate
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            record = ScannerSession(
+                test_run_id=run.id,
+                label="discovered_token",
+                kind="bearer",
+                source="test",
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+
+            updated = test_runs_api.update_scanner_session(
+                run.id,
+                record.id,
+                ScannerSessionUpdate(label="Forged Admin", is_active=False),
+                session=session,
+            )
+
+            summary = test_runs_api.get_scanner_sessions(run.id, include_inactive=True, session=session)
+
+        assert updated.label == "forged_admin"
+        assert updated.is_active is False
+        assert summary.counts["inactive"] == 1
+        assert summary.sessions[0].label == "forged_admin"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

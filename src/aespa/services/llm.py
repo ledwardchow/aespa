@@ -1470,6 +1470,14 @@ Recommended assessment strategy, distilled from effective manual pentest workflo
      - Fetch JavaScript bundles and look for API base paths, endpoint lists, token storage
          keys, hardcoded routes, feature flags, role-specific APIs, preflight/check endpoints,
          and client-side-only enforcement.
+     - After fetching a JS file, search its content using history_search with short code
+         patterns like "fetch(", "axios.post(", "/api/", "baseUrl" — NOT English descriptions.
+     - For single-page applications using hash routing (#/route), API endpoints used by a
+         feature are ONLY discoverable by: (a) using the browser action to navigate to the
+         SPA route, interact with its form (fill + submit), and capture the real API call in
+         traffic logs, or (b) finding the path in a fetched JS source with history_search
+         using code patterns. If /api/transfers or similar returns 404, do NOT keep guessing
+         variations — use a browser action to navigate to #/transfers and submit the form.
      - Build and maintain an endpoint inventory from the JS and crawl context before
          spending too many steps on generic payloads.
 
@@ -1545,6 +1553,807 @@ business-logic bypass → IDOR/injection/error disclosure → concise confirmati
 reveals a stronger lead than the current plan, follow that lead immediately.
 """
 
+# ── Continuous agentic session (Anthropic native tool use) ────────────────────
+
+TOOL_RESULT_CHAR_LIMIT = 8_000
+# All providers that support native tool use and therefore run the continuous
+# agentic session.  Non-Anthropic providers use the OpenAI function-calling
+# wire format or the Bedrock Converse toolConfig format.
+AGENTIC_LOOP_PROVIDERS = frozenset({
+    "anthropic",
+    "azure_foundry_anthropic",
+    "bedrock",
+    "openai",
+    "openai_compatible",
+    "openrouter",
+    "azure_openai",
+    "azure_foundry",
+    "azure_foundry_openai",
+    "google",
+})
+
+_THINKING_AGENT_SYSTEM = (
+    "You are an expert web application penetration tester conducting a hands-on "
+    "security assessment.\n"
+    "Use the provided tools to investigate the target. Work iteratively — after each "
+    "tool result, reason about what you observed and decide the single most valuable "
+    "next action.\n\n"
+    "Your conversation contains every prior tool result verbatim. "
+    "You do NOT need reconstructed summaries — read your actual prior tool_result "
+    "messages to find cookies, tokens, response bodies, and IDs you captured earlier. "
+    "When you reference a prior response, quote the exact text from that tool_result.\n\n"
+    + _THINKING_PENTEST_PLAYBOOK
+    + "\n\nTool rules:\n"
+    "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
+    "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
+    "interaction is genuinely required.\n"
+    "- context_tool: look up crawl data, history, findings, or traffic without hitting "
+    "the target. Cap at 3 consecutive calls — execute a probe or write a finding next.\n"
+    "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
+    "No duplicates.\n"
+    "- done: end the assessment when key areas are covered or steps are exhausted.\n"
+    "- Confirmed findings are CLOSED — do not re-probe them.\n"
+    "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
+    "attack surface.\n"
+    "- If a browser fill/click fails, immediately fall back to http_request with POST body.\n"
+)
+
+THINKING_AGENT_TOOLS: list[dict] = [
+    {
+        "name": "http_request",
+        "description": (
+            "Make one HTTP request to the target. Use for APIs, raw assets, "
+            "header checks, and direct endpoint testing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "headers": {"type": "object"},
+                "body": {},
+                "use_session": {"type": ["string", "null"]},
+                "observation": {"type": "string"},
+                "hypothesis": {"type": "string"},
+                "payload_purpose": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["method", "url"],
+        },
+    },
+    {
+        "name": "browser",
+        "description": (
+            "Interact with the target using a real browser. Use when JavaScript "
+            "execution, hash routes, form interaction, or DOM rendering is required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "use_session": {"type": ["string", "null"]},
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot, ...}. "
+                        "fill: selector+value. click: selector. press: selector+key. "
+                        "wait: state or ms."
+                    ),
+                },
+                "observation": {"type": "string"},
+                "hypothesis": {"type": "string"},
+                "payload_purpose": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["steps"],
+        },
+    },
+    {
+        "name": "context_tool",
+        "description": (
+            "Retrieve scanner context without hitting the target. "
+            "Available: site_map, page_detail, history_search, finding_list, "
+            "target_inventory, traffic_search, endpoint_detail, compare_responses, "
+            "mutate_request, auth_matrix, extract_entities. "
+            "Do not call more than 3 times in a row."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "args": {"type": "object"},
+                "note": {"type": "string"},
+            },
+            "required": ["tool"],
+        },
+    },
+    {
+        "name": "write_finding",
+        "description": (
+            "Record a confirmed security finding. Only call with concrete evidence "
+            "from prior tool results. Do not re-write confirmed findings."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "owasp_category": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "impact": {"type": "string"},
+                "likelihood": {"type": "string"},
+                "recommendation": {"type": "string"},
+                "cvss_score": {"type": "number"},
+                "cvss_vector": {"type": "string"},
+                "severity": {
+                    "type": "string",
+                    "enum": ["critical", "high", "medium", "low", "info"],
+                },
+                "affected_url": {"type": "string"},
+                "evidence": {"type": "string"},
+                "request_evidence": {"type": "string"},
+                "response_evidence": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["title", "severity", "affected_url", "evidence"],
+        },
+    },
+    {
+        "name": "forge_jwt",
+        "description": (
+            "Forge a JWT with a modified payload after discovering an exposed "
+            "HS256 signing secret."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "secret": {"type": "string"},
+                "claims": {"type": "object"},
+                "header": {"type": "object"},
+                "store_as": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["secret", "claims"],
+        },
+    },
+    {
+        "name": "credential_check",
+        "description": "Test a small explicit list of credentials (max 20) against a login endpoint.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string"},
+                "username_field": {"type": "string"},
+                "password_field": {"type": "string"},
+                "candidates": {"type": "array", "items": {"type": "object"}},
+                "headers": {"type": "object"},
+                "success_statuses": {"type": "array", "items": {"type": "integer"}},
+                "note": {"type": "string"},
+            },
+            "required": ["url", "candidates"],
+        },
+    },
+    {
+        "name": "register_account",
+        "description": "Create one disposable account through a discovered registration endpoint.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "method": {"type": "string"},
+                "body_format": {"type": "string", "enum": ["json", "form"]},
+                "username_field": {"type": "string"},
+                "email_field": {"type": "string"},
+                "password_field": {"type": "string"},
+                "include_username": {"type": "boolean"},
+                "include_email": {"type": "boolean"},
+                "extra_fields": {"type": "object"},
+                "headers": {"type": "object"},
+                "success_statuses": {"type": "array", "items": {"type": "integer"}},
+                "store_as": {"type": "string"},
+                "use_session": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "done",
+        "description": (
+            "Finish the assessment when key attack areas are covered "
+            "or steps are nearly exhausted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        },
+    },
+]
+
+
+async def _call_with_tools(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+) -> "tuple[list[dict], str, Any]":
+    """Call an LLM with tool definitions.
+
+    The *messages* list is always in Anthropic format (the canonical internal
+    representation used by thinking_agentic_loop).  Each provider branch
+    translates that list into the wire format it needs, calls the API, and
+    returns results normalised back to Anthropic-style content blocks so the
+    loop never has to know which provider it is talking to.
+
+    Returns (content_blocks, stop_reason, raw_content_for_history) where
+    content_blocks is a normalised list of dicts with {type, id, name, input, text}
+    and raw_content_for_history is appended as the assistant message (always in
+    Anthropic-format so the growing messages list stays consistent).
+    """
+    # ── Anthropic (direct) ────────────────────────────────────────────────────
+    if config.provider == "anthropic":
+        import anthropic as _ant
+
+        client = _ant.AsyncAnthropic(api_key=config.api_key)
+        resp = await client.messages.create(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            system=system_message,
+            tools=THINKING_AGENT_TOOLS,
+            messages=messages,
+        )
+        blocks = [
+            {
+                "type": b.type,
+                "id": getattr(b, "id", None),
+                "name": getattr(b, "name", None),
+                "input": getattr(b, "input", None),
+                "text": getattr(b, "text", None),
+            }
+            for b in (resp.content or [])
+        ]
+        return blocks, resp.stop_reason or "end_turn", resp.content
+
+    # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
+    if config.provider == "azure_foundry_anthropic":
+        import httpx as _httpx
+
+        payload = {
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "system": system_message,
+            "tools": THINKING_AGENT_TOOLS,
+            "messages": messages,
+        }
+        hdrs = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": config.api_key or "",
+            "anthropic-version": "2023-06-01",
+        }
+        async with _httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                _azure_foundry_anthropic_messages_url(config.base_url or ""),
+                headers=hdrs,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        content = data.get("content") or []
+        blocks = [
+            {
+                "type": b.get("type"),
+                "id": b.get("id"),
+                "name": b.get("name"),
+                "input": b.get("input"),
+                "text": b.get("text"),
+            }
+            for b in content
+        ]
+        return blocks, data.get("stop_reason") or "end_turn", content
+
+    # ── AWS Bedrock (Converse API with toolConfig) ────────────────────────────
+    if config.provider == "bedrock":
+        import asyncio as _asyncio
+
+        tool_config = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "inputSchema": {"json": t.get("input_schema", {"type": "object"})},
+                    }
+                }
+                for t in THINKING_AGENT_TOOLS
+            ]
+        }
+
+        def _ant_msg_to_converse(msg: dict) -> dict:
+            role = msg["role"]
+            content = msg["content"]
+            if isinstance(content, str):
+                return {"role": role, "content": [{"text": content}]}
+            cvt: list[dict] = []
+            for blk in content:
+                btype = blk.get("type")
+                if btype == "text":
+                    cvt.append({"text": blk.get("text") or ""})
+                elif btype == "tool_use":
+                    cvt.append({
+                        "toolUse": {
+                            "toolUseId": blk.get("id") or "",
+                            "name": blk.get("name") or "",
+                            "input": blk.get("input") or {},
+                        }
+                    })
+                elif btype == "tool_result":
+                    result_content = blk.get("content") or ""
+                    cvt.append({
+                        "toolResult": {
+                            "toolUseId": blk.get("tool_use_id") or "",
+                            "content": [{"text": result_content}]
+                            if isinstance(result_content, str)
+                            else result_content,
+                        }
+                    })
+            return {"role": role, "content": cvt}
+
+        converse_messages = [_ant_msg_to_converse(m) for m in messages]
+        system_list = [{"text": system_message}]
+
+        if config.api_key:
+            # Bearer-token path (SAML / federated credentials stored as api_key).
+            # Uses the same HTTP endpoint as _bedrock() so SAML token users work.
+            import httpx as _httpx
+
+            model_id = quote(config.model, safe="")
+            url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse"
+            payload: dict = {
+                "messages": converse_messages,
+                "system": system_list,
+                "toolConfig": tool_config,
+                "inferenceConfig": {
+                    "maxTokens": config.max_tokens,
+                    "temperature": config.temperature,
+                },
+            }
+            headers = {
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            async with _httpx.AsyncClient(timeout=120) as _hx:
+                _resp = await _hx.post(url, headers=headers, json=payload)
+                _resp.raise_for_status()
+                data = _resp.json()
+        else:
+            # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
+            def _run_converse():
+                import boto3
+
+                region = (
+                    os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or _bedrock_region_from_url(config.base_url or "")
+                )
+                profile = os.getenv("AWS_PROFILE")
+                session_kwargs = {"profile_name": profile} if profile else {}
+                session = boto3.Session(**session_kwargs)
+                client = session.client(
+                    "bedrock-runtime",
+                    region_name=region,
+                    endpoint_url=config.base_url or None,
+                )
+                return client.converse(
+                    modelId=config.model,
+                    system=system_list,
+                    messages=converse_messages,
+                    toolConfig=tool_config,
+                    inferenceConfig={
+                        "maxTokens": config.max_tokens,
+                        "temperature": config.temperature,
+                    },
+                )
+
+            loop = _asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _run_converse)
+        stop_reason_raw = data.get("stopReason") or "end_turn"
+        stop_reason = "tool_use" if stop_reason_raw == "tool_use" else "end_turn"
+        out_content = (
+            ((data.get("output") or {}).get("message") or {}).get("content") or []
+        )
+        blocks: list[dict] = []
+        for blk in out_content:
+            if "text" in blk:
+                blocks.append({"type": "text", "id": None, "name": None,
+                                "input": None, "text": blk["text"]})
+            elif "toolUse" in blk:
+                tu = blk["toolUse"]
+                blocks.append({"type": "tool_use", "id": tu.get("toolUseId"),
+                                "name": tu.get("name"), "input": tu.get("input") or {},
+                                "text": None})
+        # Store as Anthropic-format so the messages list stays consistent
+        raw_content_ant = [
+            {"type": b["type"], **{
+                k: v for k, v in b.items() if k != "type"
+            }}
+            for b in blocks
+        ]
+        return blocks, stop_reason, raw_content_ant
+
+    # ── OpenAI-style providers ─────────────────────────────────────────────────
+    # Covers: openai, openai_compatible, openrouter, azure_openai,
+    #         azure_foundry, azure_foundry_openai
+    def _ant_tools_to_openai() -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object"}),
+                },
+            }
+            for t in THINKING_AGENT_TOOLS
+        ]
+
+    def _ant_messages_to_openai(msgs: list[dict]) -> list[dict]:
+        """Translate Anthropic-format messages list to OpenAI chat format."""
+        result: list[dict] = [{"role": "system", "content": system_message}]
+        for msg in msgs:
+            role = msg["role"]
+            content = msg["content"]
+            if isinstance(content, str):
+                result.append({"role": role, "content": content})
+                continue
+            if role == "user":
+                tool_results = [b for b in content if b.get("type") == "tool_result"]
+                text_blocks  = [b for b in content if b.get("type") == "text"]
+                if tool_results:
+                    for tr in tool_results:
+                        rc = tr.get("content") or ""
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": tr.get("tool_use_id") or "",
+                            "content": rc if isinstance(rc, str) else json.dumps(rc),
+                        })
+                elif text_blocks:
+                    result.append({
+                        "role": "user",
+                        "content": " ".join(b.get("text", "") for b in text_blocks),
+                    })
+            elif role == "assistant":
+                text_parts    = [b.get("text", "") for b in content if b.get("type") == "text"]
+                tool_use_blks = [b for b in content if b.get("type") == "tool_use"]
+                oai_msg: dict = {
+                    "role": "assistant",
+                    "content": " ".join(filter(None, text_parts)) or None,
+                }
+                if tool_use_blks:
+                    oai_msg["tool_calls"] = [
+                        {
+                            "id": b.get("id") or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": b.get("name") or "",
+                                "arguments": json.dumps(b.get("input") or {}),
+                            },
+                        }
+                        for i, b in enumerate(tool_use_blks)
+                    ]
+                result.append(oai_msg)
+        return result
+
+    if config.provider in (
+        "openai", "openai_compatible", "openrouter",
+        "azure_openai", "azure_foundry", "azure_foundry_openai",
+    ):
+        from openai import AsyncOpenAI
+
+        client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.provider == "openrouter":
+            client_kwargs["base_url"] = OPENROUTER_BASE_URL
+        elif config.provider in ("azure_openai", "azure_foundry", "azure_foundry_openai"):
+            base = (config.base_url or "").rstrip("/")
+            client_kwargs["base_url"] = (
+                _azure_foundry_openai_base_url(base)
+                if config.provider in ("azure_foundry", "azure_foundry_openai")
+                else base
+            )
+        elif config.provider == "openai_compatible" and config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            client_kwargs["base_url"] = base
+
+        oai_client = AsyncOpenAI(**client_kwargs)
+        oai_tools = _ant_tools_to_openai()
+        oai_messages = _ant_messages_to_openai(messages)
+        call_kwargs = _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=oai_messages,
+        )
+        call_kwargs["tools"] = oai_tools
+        call_kwargs["tool_choice"] = "auto"
+        resp = await _create_chat_completion(oai_client, call_kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        finish = getattr(choice, "finish_reason", None) or "stop"
+        blocks = []
+        if msg.content:
+            blocks.append({"type": "text", "id": None, "name": None,
+                            "input": None, "text": msg.content})
+        for tc in (getattr(msg, "tool_calls", None) or []):
+            try:
+                inp = json.loads(tc.function.arguments)
+            except Exception:
+                inp = {}
+            blocks.append({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": inp,
+                "text": None,
+            })
+        stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
+        return blocks, stop_reason, blocks  # store Anthropic-format in history
+
+    # ── Google Gemini (function calling) ──────────────────────────────────────
+    if config.provider == "google":
+        from google import genai
+        from google.genai import types as _gtypes
+
+        def _ant_tools_to_gemini() -> list:
+            fn_decls = []
+            for t in THINKING_AGENT_TOOLS:
+                schema = t.get("input_schema") or {}
+                fn_decls.append(
+                    _gtypes.FunctionDeclaration(
+                        name=t["name"],
+                        description=t.get("description", ""),
+                        parameters=schema if schema else None,
+                    )
+                )
+            return [_gtypes.Tool(function_declarations=fn_decls)]
+
+        def _ant_contents_to_gemini(msgs: list[dict]) -> list:
+            result = []
+            for msg in msgs:
+                role = "user" if msg["role"] == "user" else "model"
+                content = msg["content"]
+                parts: list = []
+                if isinstance(content, str):
+                    parts.append(_gtypes.Part(text=content))
+                elif isinstance(content, list):
+                    for blk in content:
+                        btype = blk.get("type")
+                        if btype == "text":
+                            parts.append(_gtypes.Part(text=blk.get("text") or ""))
+                        elif btype == "tool_use":
+                            parts.append(_gtypes.Part(
+                                function_call=_gtypes.FunctionCall(
+                                    name=blk.get("name") or "",
+                                    args=blk.get("input") or {},
+                                )
+                            ))
+                        elif btype == "tool_result":
+                            rc = blk.get("content") or ""
+                            parts.append(_gtypes.Part(
+                                function_response=_gtypes.FunctionResponse(
+                                    name=blk.get("tool_use_id") or "",
+                                    response={"result": rc},
+                                )
+                            ))
+                if parts:
+                    result.append(_gtypes.Content(role=role, parts=parts))
+            return result
+
+        g_client = genai.Client(api_key=config.api_key)
+        g_tools = _ant_tools_to_gemini()
+        g_contents = _ant_contents_to_gemini(messages)
+        g_resp = await g_client.aio.models.generate_content(
+            model=config.model,
+            contents=g_contents,
+            config=_gtypes.GenerateContentConfig(
+                system_instruction=system_message,
+                tools=g_tools,
+                max_output_tokens=config.max_tokens,
+                temperature=config.temperature,
+            ),
+        )
+        blocks = []
+        for part in (g_resp.candidates[0].content.parts if g_resp.candidates else []):
+            if getattr(part, "text", None):
+                blocks.append({"type": "text", "id": None, "name": None,
+                                "input": None, "text": part.text})
+            elif getattr(part, "function_call", None):
+                fc = part.function_call
+                blocks.append({
+                    "type": "tool_use",
+                    "id": fc.name,   # Gemini doesn't issue call IDs; use name
+                    "name": fc.name,
+                    "input": dict(fc.args) if fc.args else {},
+                    "text": None,
+                })
+        stop_reason = (
+            "tool_use"
+            if any(b["type"] == "tool_use" for b in blocks)
+            else "end_turn"
+        )
+        return blocks, stop_reason, blocks
+
+    raise ValueError(f"Provider {config.provider!r} does not support native tool use")
+
+
+async def thinking_agentic_loop(
+    config: "LLMConfig",
+    *,
+    system_message: str,
+    initial_user_message: str,
+    tool_executor,
+    emit_fn=None,
+    stop_check=None,
+) -> str:
+    """Run a continuous Anthropic tool-use session.
+
+    Maintains a growing messages list so the model reads its own prior reasoning
+    verbatim instead of from a lossy reconstructed summary.
+
+    tool_executor: async (tool_name: str, tool_input: dict, step: int) -> str
+    Returns the summary string from the final ``done`` call (empty string otherwise).
+    """
+    messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    tool_call_count = 0
+    final_summary = ""
+
+    while True:
+        if stop_check and stop_check():
+            break
+
+        if emit_fn:
+            try:
+                emit_fn({
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "deciding",
+                    "message": (
+                        f"Step {tool_call_count + 1}: "
+                        "LLM deciding next action\u2026"
+                    ),
+                    "data": {
+                        "step": tool_call_count + 1,
+                        "mode": "agentic",
+                    },
+                })
+            except Exception:
+                pass
+
+        try:
+            if emit_fn:
+                try:
+                    emit_fn({
+                        "type": "scanner_phase",
+                        "phase": "llm_request",
+                        "status": "pending",
+                        "message": (
+                            f"Step {tool_call_count + 1}: sending to LLM "
+                            f"({len(messages)} messages in context)\u2026"
+                        ),
+                        "data": {
+                            "step": tool_call_count + 1,
+                            "message_count": len(messages),
+                        },
+                    })
+                except Exception:
+                    pass
+            content_blocks, stop_reason, raw_content = await _call_with_tools(
+                config, system_message, messages
+            )
+        except Exception as exc:
+            log.error(
+                "thinking_agentic_loop: API error at step %d: %s",
+                tool_call_count + 1, exc,
+            )
+            break
+
+        tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+        text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
+
+        if emit_fn:
+            action_label = (
+                ", ".join(b["name"] for b in tool_use_blocks)
+                if tool_use_blocks else "end_turn"
+            )
+            try:
+                emit_fn({
+                    "type": "scanner_phase",
+                    "phase": "llm_response",
+                    "status": "complete",
+                    "message": f"Step {tool_call_count + 1}: LLM \u2192 {action_label}",
+                    "data": {
+                        "step": tool_call_count + 1,
+                        "raw_response": "\n".join(
+                            b.get("text", "") for b in text_blocks
+                        )[:4000],
+                    },
+                })
+            except Exception:
+                pass
+
+        # Append the assistant turn to the growing conversation
+        messages.append({"role": "assistant", "content": raw_content})
+
+        if not tool_use_blocks:
+            # Model responded with text only — treat as implicit done
+            if text_blocks:
+                final_summary = (text_blocks[-1].get("text") or "")[:500]
+            break
+
+        # Execute each tool call and collect results for the next user message
+        tool_results = []
+        session_done = False
+
+        for block in tool_use_blocks:
+            tool_call_count += 1
+            tool_name = block.get("name") or ""
+            tool_input = block.get("input") or {}
+            tool_use_id = block.get("id") or ""
+
+            if stop_check and stop_check():
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Scan stopped by user.",
+                })
+                session_done = True
+                break
+
+            if tool_name == "done":
+                final_summary = str(tool_input.get("summary") or "")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Assessment complete.",
+                })
+                session_done = True
+                break
+
+            try:
+                result_str = await tool_executor(tool_name, tool_input, tool_call_count)
+            except Exception as exc:
+                log.warning(
+                    "thinking_agentic_loop: tool %r step %d error: %s",
+                    tool_name, tool_call_count, exc,
+                )
+                result_str = f"Tool execution error: {exc}"
+
+            if len(result_str) > TOOL_RESULT_CHAR_LIMIT:
+                omitted = len(result_str) - TOOL_RESULT_CHAR_LIMIT
+                result_str = (
+                    result_str[:TOOL_RESULT_CHAR_LIMIT]
+                    + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
+                )
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_str,
+            })
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+
+        if session_done:
+            break
+
+    return final_summary
+
+
 _THINKING_NEXT_ACTION_PROMPT = """\
 You are an expert web application penetration tester conducting a hands-on security assessment.
 You are working iteratively: each turn you review everything learned so far and decide on ONE
@@ -1557,6 +2366,11 @@ Application context discovered during crawling:
 
 {credentials_section}
 {sessions_section}
+RULE: Any vulnerability listed under CONFIRMED VULNERABILITIES is CLOSED — do not probe
+it again or attempt to re-prove it. If you need an authenticated session to reach a NEW
+endpoint, pick an existing session label from the list above; do not re-fetch secrets or
+re-forge tokens for issues that are already confirmed.
+
 Step {current_step} of {max_steps}.
 
 {pentest_playbook}
@@ -1570,6 +2384,8 @@ TASK: What is the single most valuable action to take RIGHT NOW?
 Think like a human tester:
 - Use context tools to pull only the specific crawl/history/finding details you need. Do not
   assume route details are available inline unless they appear in the compact context or history.
+- If a target-driven task graph is present in the crawl context, prefer high-priority queued
+  or running tasks and reference the matching hypothesis in your observation/note.
 - Start broad with site_map when route coverage is unclear, then use page_detail or
   history_search before sending a probe that depends on precise parameters or prior evidence.
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
@@ -1581,13 +2397,15 @@ Think like a human tester:
 - Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
 - Use browser actions when the next probe depends on JavaScript execution, hash routes,
     form interaction, client-side state, DOM rendering, or screenshot evidence.
+- Use register_account when a registration endpoint/form is discovered and a disposable
+    low-impact account would improve auth, IDOR, or business-logic coverage.
 - Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
     followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
 - Do not finish until you have covered the endpoint inventory, authentication boundaries,
     object ownership, business-logic gates, input validation, error disclosure, and headers,
     unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
-- If step count is getting high, prefer confirming likely findings over exploring new areas.
+- If step count is getting high, prefer discovering new attack surfaces over re-testing already-confirmed findings.
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
 
@@ -1608,8 +2426,24 @@ Context tools:
 - site_map: args may include filter/search/type ("api" or "page"), flags (array of
   req_auth/takes_input/has_object_ref/has_business_logic), and limit.
 - page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
-- history_search: args may include query and limit to retrieve prior response/request excerpts.
+- history_search: args may include query and limit. Uses EXACT substring matching — use short
+  code patterns ("fetch(", "/api/", "axios.post", a URL fragment, or a field name), NOT English
+  descriptions. The query must appear verbatim in the stored request/response text.
 - finding_list: args may include severity, owasp_category, search, and limit.
+- target_inventory: args may include kind, source, search/filter, and limit; returns normalized
+  endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
+- search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
+- traffic_search: args may include method, status, search/filter, and limit; returns captured HTTP
+  request/response excerpts from crawl and scans.
+- endpoint_detail: args may include url or page_id and limit; returns page, intel, traffic, history,
+  and extracted entities for that endpoint.
+- compare_responses: args include left_step/baseline_step and right_step/variant_step from history;
+  returns status, length, similarity, and term deltas.
+- mutate_request: args may include step or url/method/body plus mutation ("input_validation",
+  "idor", or "business_logic"); returns proposed http probe objects. Execute one with an http action.
+- auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
+- extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
+  redacted JWT hints, and error/debug lines.
 - Cap consecutive context-only tool calls; once you have enough detail, execute a probe or write a finding.
 
 To record a confirmed finding using prior evidence handles or response excerpts:
@@ -1732,6 +2566,34 @@ Credential-check rules:
 - Successful login responses with bearer tokens are stored as reusable in-memory sessions.
 - Later actions should reference those sessions with use_session rather than copying tokens.
 
+To create one disposable account through a discovered registration endpoint:
+{{
+    "action": "register_account",
+    "url": "https://.../api/users/register",
+    "method": "POST",
+    "body_format": "json",
+    "username_field": "username",
+    "email_field": "email",
+    "password_field": "password",
+    "include_username": true,
+    "include_email": true,
+    "extra_fields": {{"role": "user"}},
+    "headers": {{"Content-Type": "application/json"}},
+    "success_statuses": [200, 201, 204],
+    "store_as": "disposable_user_a",
+    "observation": "The target exposes a public registration endpoint.",
+    "hypothesis": "A fresh user account will allow authenticated boundary and IDOR checks.",
+    "payload_purpose": "Create one low-impact disposable account for controlled testing.",
+    "note": "Register a disposable user and store any returned cookies or bearer token as a reusable session."
+}}
+
+Register-account rules:
+- Only use this for explicit signup/registration endpoints or forms found in crawl/intelligence/history.
+- Create at most one account per distinct testing role unless a later IDOR/business-logic check needs a second user.
+- Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
+- Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
+- Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
+
 To finish the assessment (all key areas covered, or steps nearly exhausted):
 {{
   "action": "done",
@@ -1759,6 +2621,7 @@ async def thinking_next_action(
       {"action": "browser", "url": ..., "steps": [...], "note": ...}
       {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
       {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+    {"action": "register_account", "url": ..., "store_as": ..., "note": ...}
       {"action": "finding_write", ...}
     or:
       {"action": "done", "summary": ...}
@@ -1782,7 +2645,8 @@ async def thinking_next_action(
         for h in history[-RECENT:]:
             method = str(h.get("method") or "")
             is_tool = method == "TOOL"
-            body_limit = 2200 if is_tool else 1400
+            _is_js_step = str(h.get("url") or "").split("?")[0].lower().endswith(".js")
+            body_limit = 2200 if is_tool else (6000 if _is_js_step else 1400)
             resp_excerpt = str(h.get("response_body") or "")[:body_limit]
             req_body = h.get("request_body")
             req_body_str = (
@@ -1831,8 +2695,8 @@ async def thinking_next_action(
             for s in sessions
         ]
         sessions_section = (
-            "Reusable in-memory sessions discovered during this Thinking scan "
-            "(set use_session to one of these labels; secrets are not shown):\n"
+            "Reusable authenticated sessions (includes sessions from prior scans) — "
+            "use these labels instead of re-authenticating or re-forging tokens:\n"
             + "\n".join(session_lines)
         )
 
@@ -1860,13 +2724,28 @@ async def thinking_next_action(
     raw = await _call(config, prompt, None)
     action: dict
     try:
-        action = _normalize_thinking_action(_extract_json(raw or "", expect=dict))
-        valid_actions = ("tool", "http", "browser", "jwt", "credential_check", "finding_write", "done")
-        if not isinstance(action, dict) or action.get("action") not in valid_actions:
-            raise ValueError("unexpected action")
+        action = _normalize_thinking_action(_extract_action_json(raw or ""))
     except Exception as exc:
-        log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
-        action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+        log.warning(
+            "thinking_next_action: initial parse failed (%s), retrying with correction prompt. "
+            "Raw (first 300 chars): %r",
+            exc,
+            (raw or "")[:300],
+        )
+        try:
+            # Re-send the original prompt with the correction appended so the model
+            # has full context and doesn't return a generic "no task provided" done.
+            correction_with_context = (
+                prompt
+                + "\n\n---\n"
+                + _THINKING_CORRECTION_PROMPT
+            )
+            raw2 = await _call(config, correction_with_context, None)
+            action = _normalize_thinking_action(_extract_action_json(raw2 or ""))
+            log.info("thinking_next_action: correction retry succeeded — action=%r", action.get("action"))
+        except Exception as exc2:
+            log.warning("thinking_next_action: retry also failed (%s). Ending assessment.", exc2)
+            action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
     if emit_fn:
         try:
             emit_fn({

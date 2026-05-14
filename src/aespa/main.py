@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from aespa.api.events import router as events_router
@@ -44,6 +44,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     web_dir: Path = settings.web_dir
     if web_dir.exists() and (web_dir / "index.html").exists():
+        @app.middleware("http")
+        async def _no_cache_web_assets(request, call_next):
+            response = await call_next(request)
+            if request.url.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+                response.headers["Cache-Control"] = "no-store, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+            return response
+
+        def _index_html() -> HTMLResponse:
+            html = (web_dir / "index.html").read_text(encoding="utf-8")
+            html = html.replace("__AESPA_ASSET_VERSION__", settings.app_version)
+            return HTMLResponse(
+                html,
+                headers={
+                    "Cache-Control": "no-store, max-age=0",
+                    "Pragma": "no-cache",
+                },
+            )
+
+        app.add_api_route("/", _index_html, methods=["GET"], include_in_schema=False)
+        app.add_api_route("/index.html", _index_html, methods=["GET"], include_in_schema=False)
         app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
     else:
         @app.get("/")
