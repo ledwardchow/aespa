@@ -1717,6 +1717,22 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "decode_jwt",
+        "description": (
+            "Decode a JWT to inspect its header and payload claims. "
+            "Optionally verify the HS256 signature with a known secret."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "token": {"type": "string", "description": "The raw JWT string to decode."},
+                "secret": {"type": "string", "description": "HMAC secret to verify the HS256 signature (optional)."},
+                "note": {"type": "string"},
+            },
+            "required": ["token"],
+        },
+    },
+    {
         "name": "credential_check",
         "description": "Test a small explicit list of credentials (max 20) against a login endpoint.",
         "input_schema": {
