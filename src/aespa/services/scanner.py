@@ -181,6 +181,61 @@ def _sign_hs256_jwt(secret: str, claims: dict, header: dict | None = None) -> st
     return f"{signing_input}.{_b64url(signature)}"
 
 
+def _decode_jwt(token: str, secret: str | None = None) -> dict:
+    """Decode a JWT's header and payload without library dependencies.
+
+    If *secret* is provided, also validate the HS256 signature and include
+    a ``signature_valid`` boolean in the result.
+    """
+    import base64 as _b64
+    import hashlib
+    import hmac
+
+    def _b64url_decode(segment: str) -> bytes:
+        padding = 4 - len(segment) % 4
+        if padding != 4:
+            segment += "=" * padding
+        return _b64.urlsafe_b64decode(segment)
+
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return {"error": "not a valid JWT (expected 3 dot-separated parts)"}
+
+    try:
+        header = json.loads(_b64url_decode(parts[0]))
+    except Exception as exc:
+        return {"error": f"failed to decode header: {exc}"}
+
+    try:
+        payload = json.loads(_b64url_decode(parts[1]))
+    except Exception as exc:
+        return {"error": f"failed to decode payload: {exc}"}
+
+    result: dict = {"header": header, "payload": payload}
+
+    if secret is not None:
+        alg = header.get("alg", "")
+        if alg != "HS256":
+            result["signature_valid"] = None
+            result["signature_note"] = (
+                f"signature verification only supports HS256; token uses {alg!r}"
+            )
+        else:
+            signing_input = f"{parts[0]}.{parts[1]}"
+            expected_sig = hmac.new(
+                secret.encode(),
+                signing_input.encode(),
+                hashlib.sha256,
+            ).digest()
+            try:
+                actual_sig = _b64url_decode(parts[2])
+            except Exception:
+                actual_sig = b""
+            result["signature_valid"] = hmac.compare_digest(expected_sig, actual_sig)
+
+    return result
+
+
 def _redact_candidate(candidate: dict) -> dict:
     return {
         "username": candidate.get("username") or candidate.get("email") or "",
@@ -2348,6 +2403,44 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
                     }
+                elif action_type == "decode_jwt":
+                    method = "JWT_DECODE"
+                    raw_token = str(action.get("token") or "").strip()
+                    decode_secret = action.get("secret") or None
+                    url = "jwt://decode"
+                    action_message = _thinking_action_log_message(step, method, url, action)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step, "method": method, "url": url, "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                        },
+                    })
+                    if not raw_token:
+                        resp_status = 0
+                        resp_body = "decode_jwt: missing token"
+                    else:
+                        decoded = _decode_jwt(raw_token, secret=decode_secret)
+                        resp_status = 200
+                        resp_body = json.dumps(decoded)
+                    resp_headers = {"content-type": "application/json"}
+                    request_evidence = (
+                        f"JWT DECODE\nVerify signature: {decode_secret is not None}"
+                    )
+                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body[:1000],
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                    }
                 elif action_type == "credential_check":
                     method = "CREDENTIAL_CHECK"
                     url = (action.get("url") or "").strip()
@@ -2957,6 +3050,7 @@ _TOOL_NAME_TO_ACTION: dict[str, str] = {
     "context_tool":    "tool",
     "write_finding":   "finding_write",
     "forge_jwt":       "jwt",
+    "decode_jwt":      "jwt",
     "credential_check": "credential_check",
     "register_account": "register_account",
     "done":            "done",
@@ -3261,6 +3355,38 @@ async def _do_agentic_thinking_loop(
                 f"Browser: {final_url}\nStatus: {resp_status}\n"
                 f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
             )
+
+        # ── decode_jwt ────────────────────────────────────────────────────────
+        if tool_name == "decode_jwt":
+            raw_token = str(tool_input.get("token") or "").strip()
+            decode_secret = tool_input.get("secret") or None
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": _thinking_action_log_message(
+                    step, "JWT_DECODE", "jwt://decode", tool_input
+                ),
+                "data": {"step": step, "method": "JWT_DECODE", "note": note},
+            })
+            if not raw_token:
+                return "decode_jwt: missing token"
+            decoded = _decode_jwt(raw_token, secret=decode_secret)
+            history.append({
+                "step": step, "note": note, "method": "JWT_DECODE",
+                "url": "jwt://decode",
+                "request_headers": {}, "request_body": {"verify": decode_secret is not None},
+                "response_status": 200, "response_headers": {},
+                "response_body": json.dumps(decoded)[:2000],
+            })
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": f"Step {step}: JWT decoded",
+                "data": {"step": step, "note": note},
+            })
+            return json.dumps(decoded)
 
         # ── forge_jwt ─────────────────────────────────────────────────────────
         if tool_name == "forge_jwt":

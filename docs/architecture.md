@@ -288,8 +288,8 @@ Two execution modes depending on the configured LLM provider:
 
 | Mode | Providers | Description |
 |---|---|---|
-| **Native tool-use** | Anthropic models | Single continuous session; the LLM natively calls tools via the Anthropic tool-use API. Produces tighter reasoning chains. |
-| **Step-by-step** | All others | Each iteration sends the full conversation history; the LLM emits a JSON action; the harness executes it and appends the result. |
+| **Native tool-use** | All models | Single continuous session; the LLM natively calls tools. Produces tighter reasoning chains. |
+| **Step-by-step** | DEPRECATED| Each iteration sends the full conversation history; the LLM emits a JSON action; the harness executes it and appends the result. |
 
 The loop terminates when:
 - The LLM calls the `done` action (with a summary)
@@ -304,6 +304,7 @@ The loop terminates when:
 | `http` | Issue an arbitrary HTTP request (method, URL, headers, body) |
 | `browser` | Playwright commands: `goto`, `fill`, `click`, `wait`, `snapshot` |
 | `jwt` | Forge a signed HS256 JWT from a discovered secret |
+| `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a login URL with candidate credentials |
 | `finding_write` | Record a confirmed vulnerability |
 | `tool` | Call a read-only context tool (see below) |
