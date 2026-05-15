@@ -646,6 +646,16 @@ def test_thinking_context_tools_compare_mutate_and_extract():
     assert "1" in entities["entities"]["ids"]
 
 
+def test_context_tool_checkpoint_allows_reasoned_extension():
+    checkpoint = scanner._context_tool_checkpoint_output("site_map", 3)
+
+    assert "checkpoint reached" in checkpoint["error"]
+    assert checkpoint["checkpoint"]["checkpoint_interval"] == 3
+    assert "context_budget_reason" in checkpoint["checkpoint"]["next_options"][2]
+    assert scanner._context_budget_reason({"context_budget_reason": "Need exact IDs."}) == "Need exact IDs."
+    assert scanner._context_budget_reason({"note": "no budget reason"}) == ""
+
+
 def test_request_stop_cancels_running_validation(monkeypatch):
     class FakeTask:
         cancelled = False
