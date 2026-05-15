@@ -2,7 +2,7 @@
 
 This comparison consolidates equivalent findings across three penetration testing reports for the same OWASP Juice Shop target.
 
-The Aespa column has been updated from the re-exported Aespa/Sonnet 4.6 findings dated 2026-05-10 19:09:19, which reported 18 raw findings. Duplicate or overlapping findings are consolidated below into one row per underlying vulnerability.
+The Aespa column has been updated from the re-exported Aespa/Sonnet 4.6 findings dated 2026-05-10 19:09:19 (NOTE: this is before the agentic scan loop update), which reported 18 raw findings. Duplicate or overlapping findings are consolidated below into one row per underlying vulnerability.
 
 ## Consolidated Findings Matrix
 

@@ -149,7 +149,7 @@ async def _do_crawl(run_id: int) -> None:
                 pages_discovered=shared.pages_done, current_url=base_url,
                 per_user_progress=None)
 
-    phases = creds if (requires_auth and creds) else [None]
+    phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
     tasks = [
         asyncio.create_task(
@@ -214,7 +214,7 @@ async def _crawl_as_credential(
 ) -> None:
     from playwright.async_api import async_playwright
 
-    username      = cred.username if cred else None
+    username      = cred.username if cred else "unauthenticated"
     credential_id = cred.id if cred else None
     credential_login_url = _login_url_for_credential(login_url, cred)
 

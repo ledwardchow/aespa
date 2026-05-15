@@ -6,6 +6,147 @@ from aespa.models import LLMConfig
 from aespa.services import llm
 
 
+def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+    calls: list[list[dict]] = []
+    executed: list[tuple[str, dict, int]] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages):
+        calls.append(messages)
+        if len(calls) == 1:
+            block = {
+                "type": "text",
+                "id": None,
+                "name": None,
+                "input": None,
+                "text": "I should inspect the site map next.",
+            }
+            return [block], "end_turn", [block]
+        if len(calls) == 2:
+            block = {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "context_tool",
+                "input": {"tool": "site_map", "args": {"limit": 5}},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        block = {
+            "type": "tool_use",
+            "id": "call_2",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input, step))
+        return "site map result"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(llm.thinking_agentic_loop(
+        config,
+        system_message="system",
+        initial_user_message="start",
+        tool_executor=fake_tool_executor,
+    ))
+
+    assert summary == "Complete."
+    assert executed == [("context_tool", {"tool": "site_map", "args": {"limit": 5}}, 1)]
+    correction_messages = [
+        msg for msg in calls[1]
+        if msg["role"] == "user"
+        and isinstance(msg["content"], list)
+        and msg["content"][0].get("type") == "text"
+    ]
+    assert "did not call a tool" in correction_messages[-1]["content"][0]["text"]
+
+
+def test_agentic_loop_can_reject_premature_done(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+    executed: list[tuple[str, dict, int]] = []
+    done_attempts = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages):
+        nonlocal done_attempts
+        if done_attempts == 0:
+            done_attempts += 1
+            block = {
+                "type": "tool_use",
+                "id": "call_done_1",
+                "name": "done",
+                "input": {"summary": "Finished."},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        if not executed:
+            assert "not complete" in messages[-1]["content"][0]["content"]
+            block = {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "http_request",
+                "input": {
+                    "method": "GET",
+                    "url": "https://target.local/api/profile",
+                    "use_session": "customer_1",
+                },
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        block = {
+            "type": "tool_use",
+            "id": "call_done_2",
+            "name": "done",
+            "input": {"summary": "Really complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input, step))
+        return "Status: 200"
+
+    def done_check(tool_input, step):
+        return (bool(executed), "" if executed else "Assessment is not complete.")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(llm.thinking_agentic_loop(
+        config,
+        system_message="system",
+        initial_user_message="start",
+        tool_executor=fake_tool_executor,
+        done_check=done_check,
+    ))
+
+    assert summary == "Really complete."
+    assert executed == [(
+        "http_request",
+        {
+            "method": "GET",
+            "url": "https://target.local/api/profile",
+            "use_session": "customer_1",
+        },
+        2,
+    )]
+
+
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -536,6 +677,8 @@ def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
     assert action["tool"] == "site_map"
     assert action["args"]["limit"] == 10
     assert "Context tools:" in captured["prompt"]
+    assert "context_budget_reason" in captured["prompt"]
+    assert "adaptive checkpoint" in captured["prompt"]
     assert "page_detail" in captured["prompt"]
     assert "history_search" in captured["prompt"]
 

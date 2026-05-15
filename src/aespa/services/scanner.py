@@ -24,7 +24,7 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
+from aespa.models import Credential, CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
@@ -59,6 +59,12 @@ RESPONSE_EVIDENCE_LIMIT = 128 * 1024
 EVIDENCE_ITEM_TEXT_LIMIT = 16 * 1024
 EVIDENCE_JSON_LIMIT = 64 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
+CONTEXT_TOOL_CHECKPOINT_INTERVAL = 3
+CONTEXT_TOOL_CHECKPOINT_ERROR = (
+    "context tool checkpoint reached; summarize what you learned, state the "
+    "current hypothesis, and either execute a probe/write a finding or provide "
+    "context_budget_reason to justify another targeted context scan round"
+)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -115,6 +121,33 @@ def _compact_log_value(value, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _context_budget_reason(action: dict[str, Any]) -> str:
+    for key in ("context_budget_reason", "budget_reason", "scan_reason"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _context_tool_checkpoint_output(tool_name: str, consecutive_context_tools: int) -> dict[str, Any]:
+    return {
+        "tool": tool_name,
+        "error": CONTEXT_TOOL_CHECKPOINT_ERROR,
+        "checkpoint": {
+            "consecutive_context_tools": consecutive_context_tools,
+            "checkpoint_interval": CONTEXT_TOOL_CHECKPOINT_INTERVAL,
+            "next_options": [
+                "execute a probe",
+                "write a finding from existing evidence",
+                (
+                    "call a context tool again with context_budget_reason explaining "
+                    "why more context will change the next action"
+                ),
+            ],
+        },
+    }
 
 
 def _thinking_payload_summary(url: str, body) -> str:
@@ -179,6 +212,61 @@ def _sign_hs256_jwt(secret: str, claims: dict, header: dict | None = None) -> st
         hashlib.sha256,
     ).digest()
     return f"{signing_input}.{_b64url(signature)}"
+
+
+def _decode_jwt(token: str, secret: str | None = None) -> dict:
+    """Decode a JWT's header and payload without library dependencies.
+
+    If *secret* is provided, also validate the HS256 signature and include
+    a ``signature_valid`` boolean in the result.
+    """
+    import base64 as _b64
+    import hashlib
+    import hmac
+
+    def _b64url_decode(segment: str) -> bytes:
+        padding = 4 - len(segment) % 4
+        if padding != 4:
+            segment += "=" * padding
+        return _b64.urlsafe_b64decode(segment)
+
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return {"error": "not a valid JWT (expected 3 dot-separated parts)"}
+
+    try:
+        header = json.loads(_b64url_decode(parts[0]))
+    except Exception as exc:
+        return {"error": f"failed to decode header: {exc}"}
+
+    try:
+        payload = json.loads(_b64url_decode(parts[1]))
+    except Exception as exc:
+        return {"error": f"failed to decode payload: {exc}"}
+
+    result: dict = {"header": header, "payload": payload}
+
+    if secret is not None:
+        alg = header.get("alg", "")
+        if alg != "HS256":
+            result["signature_valid"] = None
+            result["signature_note"] = (
+                f"signature verification only supports HS256; token uses {alg!r}"
+            )
+        else:
+            signing_input = f"{parts[0]}.{parts[1]}"
+            expected_sig = hmac.new(
+                secret.encode(),
+                signing_input.encode(),
+                hashlib.sha256,
+            ).digest()
+            try:
+                actual_sig = _b64url_decode(parts[2])
+            except Exception:
+                actual_sig = b""
+            result["signature_valid"] = hmac.compare_digest(expected_sig, actual_sig)
+
+    return result
 
 
 def _redact_candidate(candidate: dict) -> dict:
@@ -259,6 +347,53 @@ def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
     if has_cookies:
         return "cookie"
     return "anonymous"
+
+
+def _maybe_persist_discovered_credential(
+    run_id: int,
+    username: str,
+    password: str,
+    login_url: str | None,
+) -> bool:
+    """Save a newly discovered valid credential to the site's credential store.
+
+    Returns True if a new Credential row was created, False if one already
+    existed for that username.  Emits a ``credential_discovered`` event
+    prompting the user to re-crawl with the new account.
+    """
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            return False
+        existing = s.exec(
+            select(Credential)
+            .where(Credential.site_id == run.site_id)
+            .where(Credential.username == username)
+        ).first()
+        if existing is not None:
+            return False
+        cred = Credential(
+            site_id=run.site_id,
+            username=username,
+            password=password,
+            label="Discovered by dynamic scan",
+            login_url=login_url or None,
+        )
+        s.add(cred)
+        s.commit()
+
+    log.info("Discovered credential saved: username=%r run_id=%s", username, run_id)
+    events_svc.emit(run_id, {
+        "type": "credential_discovered",
+        "username": username,
+        "login_url": login_url,
+        "message": (
+            f"Valid credential discovered: {username!r}. "
+            "Saved to the site credential store. "
+            "Re-run the crawl with this credential to test the authenticated attack surface."
+        ),
+    })
+    return True
 
 
 def _record_session(
@@ -1749,6 +1884,131 @@ async def _thinking_scan_task(run_id: int) -> None:
         _thinking_stop_requested.discard(run_id)
 
 
+async def _run_post_scan_llm_review(
+    run_id: int,
+    llm_cfg,
+    baseline_max_id: int,
+) -> None:
+    """LLM pre-screen pass over findings created during the current dynamic scan.
+
+    Findings the model flags as likely false positives are moved to
+    ``validation_status='low_confidence'`` with the reasoning attached as
+    ``validation_note``.  Findings that look credible remain ``unvalidated``
+    so the normal per-finding validation flow can process them later.
+
+    Only findings with id > baseline_max_id (i.e. created during this scan)
+    are reviewed.
+    """
+    with Session(get_engine()) as s:
+        q = (
+            select(ScanFinding)
+            .where(ScanFinding.test_run_id == run_id)
+            .where(ScanFinding.validation_status == "unvalidated")
+        )
+        if baseline_max_id > 0:
+            q = q.where(ScanFinding.id > baseline_max_id)
+        candidates = s.exec(q).all()
+        for f in candidates:
+            s.expunge(f)
+
+    if not candidates:
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "post_scan_review",
+        "status": "start",
+        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s)…",
+    })
+
+    BATCH = 10
+    low_confidence_ids: list[int] = []
+    reasons: dict[int, str] = {}
+
+    for batch_start in range(0, len(candidates), BATCH):
+        batch = candidates[batch_start : batch_start + BATCH]
+        batch_lines = []
+        for f in batch:
+            ep = f.affected_url or "(no URL)"
+            evidence_preview = (f.evidence or "")[:300].replace("\n", " ")
+            batch_lines.append(
+                f"ID:{f.id} | {f.severity.upper()} | {f.owasp_category} | {f.title}\n"
+                f"  URL: {ep}\n"
+                f"  Evidence: {evidence_preview}"
+            )
+        prompt = (
+            "You are reviewing security findings produced by an automated web application "
+            "scanner. For each finding decide whether it looks credible (ACCEPT) or is "
+            "likely a false positive (LOW_CONFIDENCE).\n\n"
+            "Mark LOW_CONFIDENCE only when there is a concrete reason to doubt the finding: "
+            "the evidence shows a generic error unrelated to the claimed vulnerability, "
+            "the payload is reflected as plain text without execution, the response status "
+            "contradicts the claim, or the evidence is empty or too vague to confirm anything. "
+            "When uncertain, mark ACCEPT.\n\n"
+            "FINDINGS TO REVIEW:\n"
+            + "\n\n".join(batch_lines)
+            + "\n\nFor EACH finding respond with exactly one line:\n"
+            "  <ID> | ACCEPT\n"
+            "  <ID> | LOW_CONFIDENCE:<short reason>\n"
+            "Do NOT include any other text."
+        )
+        try:
+            verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
+        except Exception as exc:
+            log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            continue
+
+        for line in verdict_text.strip().splitlines():
+            parts = [p.strip() for p in line.split("|", 1)]
+            if len(parts) != 2:
+                continue
+            try:
+                fid = int(parts[0].replace("ID:", "").strip())
+            except ValueError:
+                continue
+            verdict = parts[1].strip()
+            if verdict.upper().startswith("LOW_CONFIDENCE"):
+                reason = (
+                    verdict.split(":", 1)[1].strip()
+                    if ":" in verdict
+                    else "Pre-screen: low confidence"
+                )
+                low_confidence_ids.append(fid)
+                reasons[fid] = reason
+
+    if low_confidence_ids:
+        with Session(get_engine()) as s:
+            for fid in low_confidence_ids:
+                row = s.get(ScanFinding, fid)
+                if row and row.validation_status == "unvalidated":
+                    row.validation_status = "low_confidence"
+                    row.validation_note = reasons.get(fid, "Pre-screen flagged as low confidence.")
+                    s.add(row)
+            s.commit()
+        for fid in low_confidence_ids:
+            events_svc.emit(run_id, {
+                "type": "finding_validation_update",
+                "finding_id": fid,
+                "validation_status": "low_confidence",
+                "validation_note": reasons.get(fid, "Pre-screen flagged as low confidence."),
+            })
+
+    accepted = len(candidates) - len(low_confidence_ids)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "post_scan_review",
+        "status": "complete",
+        "message": (
+            f"Pre-screen complete: {accepted} accepted, "
+            f"{len(low_confidence_ids)} flagged as low confidence."
+        ),
+    })
+    log.info(
+        "Post-scan review run_id=%s: %d accepted, %d low_confidence",
+        run_id, accepted, len(low_confidence_ids),
+    )
+
+
 async def _do_thinking_scan(run_id: int) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
@@ -1803,6 +2063,20 @@ async def _do_thinking_scan(run_id: int) -> None:
             }
             for f in existing_findings
         ]
+        # Capture the highest finding ID before the scan starts so the
+        # post-scan review only considers findings created during this run.
+        _pre_scan_max_id = max((f.id for f in existing_findings if f.id), default=0)
+
+        # Load intel items for WSTG skill selection.
+        _intel_rows = s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .limit(500)
+        ).all()
+        intel_items_for_selector = [
+            {"kind": i.kind, "key": i.key, "value": i.value, "url": i.url}
+            for i in _intel_rows
+        ]
 
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -1824,6 +2098,23 @@ async def _do_thinking_scan(run_id: int) -> None:
     intel_context = _build_target_intelligence_context(run_id)
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
+
+    # Select and inject WSTG skill reference blocks based on observed attack surface.
+    _selected_skills = llm_svc.select_wstg_skills(
+        pages_snapshot,
+        intel_items_for_selector,
+        requires_auth=requires_auth,
+        base_url=base_url,
+    )
+    _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
+    if _skill_context:
+        crawl_context = f"{crawl_context}\n\n{_skill_context}"
+        log.info(
+            "WSTG skills injected for run_id=%s: %s",
+            run_id,
+            ", ".join(sorted(_selected_skills)),
+        )
+
     seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
@@ -2080,11 +2371,15 @@ async def _do_thinking_scan(run_id: int) -> None:
                 if action_type == "tool":
                     tool_name = str(action.get("tool") or "").strip()
                     args = action.get("args") if isinstance(action.get("args"), dict) else {}
-                    if consecutive_context_tools >= 3:
-                        output = {
-                            "tool": tool_name,
-                            "error": "context tool budget reached; execute a probe or write a finding next",
-                        }
+                    budget_reason = _context_budget_reason(action)
+                    if (
+                        consecutive_context_tools >= CONTEXT_TOOL_CHECKPOINT_INTERVAL
+                        and not budget_reason
+                    ):
+                        output = _context_tool_checkpoint_output(
+                            tool_name,
+                            consecutive_context_tools,
+                        )
                     else:
                         output = _run_thinking_context_tool(
                             tool_name,
@@ -2095,7 +2390,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                             run_id=run_id,
                             base_url=base_url,
                         )
-                    consecutive_context_tools += 1
+                        if budget_reason:
+                            output["context_budget_reason"] = budget_reason
+                            output["context_budget_extended"] = True
+                            consecutive_context_tools = 1
+                        else:
+                            consecutive_context_tools += 1
                     result_text = json.dumps(output, separators=(",", ":"), default=str)
                     events_svc.emit(run_id, {
                         "type": "scanner_phase",
@@ -2348,6 +2648,44 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "request_evidence": request_evidence,
                         "response_evidence": response_evidence,
                     }
+                elif action_type == "decode_jwt":
+                    method = "JWT_DECODE"
+                    raw_token = str(action.get("token") or "").strip()
+                    decode_secret = action.get("secret") or None
+                    url = "jwt://decode"
+                    action_message = _thinking_action_log_message(step, method, url, action)
+                    events_svc.emit(run_id, {
+                        "type": "scanner_phase",
+                        "phase": "thinking_step",
+                        "status": "running",
+                        "message": action_message,
+                        "data": {
+                            "step": step, "method": method, "url": url, "note": note,
+                            "observation": action.get("observation"),
+                            "hypothesis": action.get("hypothesis"),
+                        },
+                    })
+                    if not raw_token:
+                        resp_status = 0
+                        resp_body = "decode_jwt: missing token"
+                    else:
+                        decoded = _decode_jwt(raw_token, secret=decode_secret)
+                        resp_status = 200
+                        resp_body = json.dumps(decoded)
+                    resp_headers = {"content-type": "application/json"}
+                    request_evidence = (
+                        f"JWT DECODE\nVerify signature: {decode_secret is not None}"
+                    )
+                    response_evidence = f"Status: {resp_status}\n{resp_body[:3000]}"
+                    result = {
+                        "desc": note,
+                        "url": url,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                        "body": resp_body[:1000],
+                        "request_evidence": request_evidence,
+                        "response_evidence": response_evidence,
+                    }
                 elif action_type == "credential_check":
                     method = "CREDENTIAL_CHECK"
                     url = (action.get("url") or "").strip()
@@ -2432,6 +2770,17 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     session_data=session_vault[label],
                                     source="dynamic_scan_credential_check",
                                     metadata={"login_url": url},
+                                )
+                            if success:
+                                _maybe_persist_discovered_credential(
+                                    run_id,
+                                    username=str(
+                                        candidate.get("username")
+                                        or candidate.get("email")
+                                        or "discovered"
+                                    ),
+                                    password=str(candidate.get("password") or ""),
+                                    login_url=url or None,
                                 )
                         except Exception as exc:
                             response_excerpt = f"Request failed: {exc}"
@@ -2943,6 +3292,11 @@ async def _do_thinking_scan(run_id: int) -> None:
             log.warning("Thinking scan analysis failed: %s", exc)
 
     stopped = run_id in _thinking_stop_requested
+    if not stopped:
+        try:
+            await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
+        except Exception as _rev_exc:
+            log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
@@ -2957,6 +3311,7 @@ _TOOL_NAME_TO_ACTION: dict[str, str] = {
     "context_tool":    "tool",
     "write_finding":   "finding_write",
     "forge_jwt":       "jwt",
+    "decode_jwt":      "jwt",
     "credential_check": "credential_check",
     "register_account": "register_account",
     "done":            "done",
@@ -2988,6 +3343,44 @@ async def _do_agentic_thinking_loop(
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+    pending_session_labels: set[str] = set()
+
+    def _mark_session_pending(label: str | None) -> None:
+        if label:
+            pending_session_labels.add(str(label))
+
+    def _mark_session_used(label: str | None, status: int) -> None:
+        if label and status not in (0, 401, 403):
+            pending_session_labels.discard(str(label))
+
+    def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        if pending_session_labels:
+            label_list = ", ".join(sorted(pending_session_labels)[:5])
+            return False, (
+                "Assessment is not complete. You created or captured reusable "
+                f"authenticated session label(s) that have not been exercised yet: "
+                f"{label_list}. Before calling done, call http_request with "
+                f"use_session set to one of those labels against authenticated API "
+                f"endpoints such as /api/profile, /api/accounts, /api/transfers, "
+                f"or another endpoint discovered in the JavaScript/API inventory. "
+                f"If a session fails, report the exact status and then try a different "
+                f"valid session or endpoint."
+            )
+        if history:
+            last = history[-1]
+            last_status = int(last.get("response_status") or 0)
+            last_method = str(last.get("method") or "")
+            if last_status in (401, 403) and any(
+                (sd.get("extra_headers") or {}).get("Authorization")
+                for sd in session_vault.values()
+            ):
+                return False, (
+                    "Assessment is not complete. The previous request ended with "
+                    f"{last_status} ({last_method} {last.get('url')}) while bearer "
+                    "sessions exist in the session vault. Retry the relevant protected "
+                    "endpoint with a concrete use_session label before calling done."
+                )
+        return True, ""
 
     # ── Build the initial user message ────────────────────────────────────────
     creds_text = ""
@@ -3031,15 +3424,15 @@ async def _do_agentic_thinking_loop(
         if tool_name == "context_tool":
             inner_tool = str(tool_input.get("tool") or "").strip()
             args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
-            if _consecutive_ctx_tools[0] >= 3:
-                _consecutive_ctx_tools[0] += 1
-                output = {
-                    "tool": inner_tool,
-                    "error": (
-                        "context tool budget reached; execute a probe or "
-                        "write a finding next"
-                    ),
-                }
+            budget_reason = _context_budget_reason(tool_input)
+            if (
+                _consecutive_ctx_tools[0] >= CONTEXT_TOOL_CHECKPOINT_INTERVAL
+                and not budget_reason
+            ):
+                output = _context_tool_checkpoint_output(
+                    inner_tool,
+                    _consecutive_ctx_tools[0],
+                )
             else:
                 output = _run_thinking_context_tool(
                     inner_tool, args,
@@ -3049,7 +3442,12 @@ async def _do_agentic_thinking_loop(
                     run_id=run_id,
                     base_url=base_url,
                 )
-                _consecutive_ctx_tools[0] += 1
+                if budget_reason:
+                    output["context_budget_reason"] = budget_reason
+                    output["context_budget_extended"] = True
+                    _consecutive_ctx_tools[0] = 1
+                else:
+                    _consecutive_ctx_tools[0] += 1
             result_text = json.dumps(output, separators=(",", ":"), default=str)
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
@@ -3243,6 +3641,7 @@ async def _do_agentic_thinking_loop(
                 "response_body": resp_body,
             })
             all_results.append(br_result_dict)
+            _mark_session_used(use_session_label, resp_status)
             task_graph_svc.complete_task_after_result(
                 run_id, active_task_id,
                 step=step, method="BROWSER", url=final_url, status=resp_status,
@@ -3261,6 +3660,38 @@ async def _do_agentic_thinking_loop(
                 f"Browser: {final_url}\nStatus: {resp_status}\n"
                 f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
             )
+
+        # ── decode_jwt ────────────────────────────────────────────────────────
+        if tool_name == "decode_jwt":
+            raw_token = str(tool_input.get("token") or "").strip()
+            decode_secret = tool_input.get("secret") or None
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "running",
+                "message": _thinking_action_log_message(
+                    step, "JWT_DECODE", "jwt://decode", tool_input
+                ),
+                "data": {"step": step, "method": "JWT_DECODE", "note": note},
+            })
+            if not raw_token:
+                return "decode_jwt: missing token"
+            decoded = _decode_jwt(raw_token, secret=decode_secret)
+            history.append({
+                "step": step, "note": note, "method": "JWT_DECODE",
+                "url": "jwt://decode",
+                "request_headers": {}, "request_body": {"verify": decode_secret is not None},
+                "response_status": 200, "response_headers": {},
+                "response_body": json.dumps(decoded)[:2000],
+            })
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "thinking_step",
+                "status": "complete",
+                "message": f"Step {step}: JWT decoded",
+                "data": {"step": step, "note": note},
+            })
+            return json.dumps(decoded)
 
         # ── forge_jwt ─────────────────────────────────────────────────────────
         if tool_name == "forge_jwt":
@@ -3308,6 +3739,7 @@ async def _do_agentic_thinking_loop(
                 )
                 jwt_resp_body = json.dumps({"store_as": jwt_label, "claims": jwt_claims})
                 jwt_resp_status = 200
+                _mark_session_pending(jwt_label)
             except Exception as exc:
                 jwt_resp_body = f"JWT signing failed: {exc}"
                 jwt_resp_status = 0
@@ -3413,6 +3845,18 @@ async def _do_agentic_thinking_loop(
                             session_data=session_vault[cc_created_label],
                             source="dynamic_scan_credential_check",
                             metadata={"login_url": cc_url},
+                        )
+                        _mark_session_pending(cc_created_label)
+                    if cc_success:
+                        _maybe_persist_discovered_credential(
+                            run_id,
+                            username=str(
+                                candidate.get("username")
+                                or candidate.get("email")
+                                or "discovered"
+                            ),
+                            password=str(candidate.get("password") or ""),
+                            login_url=cc_url or None,
                         )
                 except Exception as exc:
                     cc_excerpt = f"Request failed: {exc}"
@@ -3556,6 +4000,8 @@ async def _do_agentic_thinking_loop(
                         source="dynamic_scan_register_account",
                         metadata={**ra_account["metadata"], "status": ra_r.status_code},
                     )
+                    if ra_extra_hdrs or ra_resp_cookies:
+                        _mark_session_pending(ra_created_label)
             except Exception as exc:
                 log.warning(
                     "Agentic loop register_account error (%s): %s", ra_url, exc
@@ -3683,6 +4129,7 @@ async def _do_agentic_thinking_loop(
                     source="dynamic_scan_http_response",
                     metadata={"method": hr_method, "url": hr_url},
                 )
+                _mark_session_pending(hr_lbl)
             hr_resp_body = _redact_sensitive_text(hr_raw)
             hr_resp_status = hr_r.status_code
             hr_resp_headers = dict(hr_r.headers)
@@ -3769,6 +4216,7 @@ async def _do_agentic_thinking_loop(
             "response_body": _resp_body_for_history,
         })
         all_results.append(hr_result)
+        _mark_session_used(hr_use_session, hr_resp_status)
         task_graph_svc.complete_task_after_result(
             run_id, active_task_id,
             step=step, method=hr_method, url=hr_url, status=hr_resp_status,
@@ -3811,6 +4259,7 @@ async def _do_agentic_thinking_loop(
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
+        done_check=_agentic_done_check,
     )
     return progressive_findings_count
 
