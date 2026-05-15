@@ -24,7 +24,7 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
+from aespa.models import Credential, CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
@@ -347,6 +347,53 @@ def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
     if has_cookies:
         return "cookie"
     return "anonymous"
+
+
+def _maybe_persist_discovered_credential(
+    run_id: int,
+    username: str,
+    password: str,
+    login_url: str | None,
+) -> bool:
+    """Save a newly discovered valid credential to the site's credential store.
+
+    Returns True if a new Credential row was created, False if one already
+    existed for that username.  Emits a ``credential_discovered`` event
+    prompting the user to re-crawl with the new account.
+    """
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            return False
+        existing = s.exec(
+            select(Credential)
+            .where(Credential.site_id == run.site_id)
+            .where(Credential.username == username)
+        ).first()
+        if existing is not None:
+            return False
+        cred = Credential(
+            site_id=run.site_id,
+            username=username,
+            password=password,
+            label="Discovered by dynamic scan",
+            login_url=login_url or None,
+        )
+        s.add(cred)
+        s.commit()
+
+    log.info("Discovered credential saved: username=%r run_id=%s", username, run_id)
+    events_svc.emit(run_id, {
+        "type": "credential_discovered",
+        "username": username,
+        "login_url": login_url,
+        "message": (
+            f"Valid credential discovered: {username!r}. "
+            "Saved to the site credential store. "
+            "Re-run the crawl with this credential to test the authenticated attack surface."
+        ),
+    })
+    return True
 
 
 def _record_session(
@@ -1837,6 +1884,131 @@ async def _thinking_scan_task(run_id: int) -> None:
         _thinking_stop_requested.discard(run_id)
 
 
+async def _run_post_scan_llm_review(
+    run_id: int,
+    llm_cfg,
+    baseline_max_id: int,
+) -> None:
+    """LLM pre-screen pass over findings created during the current dynamic scan.
+
+    Findings the model flags as likely false positives are moved to
+    ``validation_status='low_confidence'`` with the reasoning attached as
+    ``validation_note``.  Findings that look credible remain ``unvalidated``
+    so the normal per-finding validation flow can process them later.
+
+    Only findings with id > baseline_max_id (i.e. created during this scan)
+    are reviewed.
+    """
+    with Session(get_engine()) as s:
+        q = (
+            select(ScanFinding)
+            .where(ScanFinding.test_run_id == run_id)
+            .where(ScanFinding.validation_status == "unvalidated")
+        )
+        if baseline_max_id > 0:
+            q = q.where(ScanFinding.id > baseline_max_id)
+        candidates = s.exec(q).all()
+        for f in candidates:
+            s.expunge(f)
+
+    if not candidates:
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "post_scan_review",
+        "status": "start",
+        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s)…",
+    })
+
+    BATCH = 10
+    low_confidence_ids: list[int] = []
+    reasons: dict[int, str] = {}
+
+    for batch_start in range(0, len(candidates), BATCH):
+        batch = candidates[batch_start : batch_start + BATCH]
+        batch_lines = []
+        for f in batch:
+            ep = f.affected_url or "(no URL)"
+            evidence_preview = (f.evidence or "")[:300].replace("\n", " ")
+            batch_lines.append(
+                f"ID:{f.id} | {f.severity.upper()} | {f.owasp_category} | {f.title}\n"
+                f"  URL: {ep}\n"
+                f"  Evidence: {evidence_preview}"
+            )
+        prompt = (
+            "You are reviewing security findings produced by an automated web application "
+            "scanner. For each finding decide whether it looks credible (ACCEPT) or is "
+            "likely a false positive (LOW_CONFIDENCE).\n\n"
+            "Mark LOW_CONFIDENCE only when there is a concrete reason to doubt the finding: "
+            "the evidence shows a generic error unrelated to the claimed vulnerability, "
+            "the payload is reflected as plain text without execution, the response status "
+            "contradicts the claim, or the evidence is empty or too vague to confirm anything. "
+            "When uncertain, mark ACCEPT.\n\n"
+            "FINDINGS TO REVIEW:\n"
+            + "\n\n".join(batch_lines)
+            + "\n\nFor EACH finding respond with exactly one line:\n"
+            "  <ID> | ACCEPT\n"
+            "  <ID> | LOW_CONFIDENCE:<short reason>\n"
+            "Do NOT include any other text."
+        )
+        try:
+            verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
+        except Exception as exc:
+            log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            continue
+
+        for line in verdict_text.strip().splitlines():
+            parts = [p.strip() for p in line.split("|", 1)]
+            if len(parts) != 2:
+                continue
+            try:
+                fid = int(parts[0].replace("ID:", "").strip())
+            except ValueError:
+                continue
+            verdict = parts[1].strip()
+            if verdict.upper().startswith("LOW_CONFIDENCE"):
+                reason = (
+                    verdict.split(":", 1)[1].strip()
+                    if ":" in verdict
+                    else "Pre-screen: low confidence"
+                )
+                low_confidence_ids.append(fid)
+                reasons[fid] = reason
+
+    if low_confidence_ids:
+        with Session(get_engine()) as s:
+            for fid in low_confidence_ids:
+                row = s.get(ScanFinding, fid)
+                if row and row.validation_status == "unvalidated":
+                    row.validation_status = "low_confidence"
+                    row.validation_note = reasons.get(fid, "Pre-screen flagged as low confidence.")
+                    s.add(row)
+            s.commit()
+        for fid in low_confidence_ids:
+            events_svc.emit(run_id, {
+                "type": "finding_validation_update",
+                "finding_id": fid,
+                "validation_status": "low_confidence",
+                "validation_note": reasons.get(fid, "Pre-screen flagged as low confidence."),
+            })
+
+    accepted = len(candidates) - len(low_confidence_ids)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "post_scan_review",
+        "status": "complete",
+        "message": (
+            f"Pre-screen complete: {accepted} accepted, "
+            f"{len(low_confidence_ids)} flagged as low confidence."
+        ),
+    })
+    log.info(
+        "Post-scan review run_id=%s: %d accepted, %d low_confidence",
+        run_id, accepted, len(low_confidence_ids),
+    )
+
+
 async def _do_thinking_scan(run_id: int) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
@@ -1891,6 +2063,20 @@ async def _do_thinking_scan(run_id: int) -> None:
             }
             for f in existing_findings
         ]
+        # Capture the highest finding ID before the scan starts so the
+        # post-scan review only considers findings created during this run.
+        _pre_scan_max_id = max((f.id for f in existing_findings if f.id), default=0)
+
+        # Load intel items for WSTG skill selection.
+        _intel_rows = s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .limit(500)
+        ).all()
+        intel_items_for_selector = [
+            {"kind": i.kind, "key": i.key, "value": i.value, "url": i.url}
+            for i in _intel_rows
+        ]
 
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -1912,6 +2098,23 @@ async def _do_thinking_scan(run_id: int) -> None:
     intel_context = _build_target_intelligence_context(run_id)
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
+
+    # Select and inject WSTG skill reference blocks based on observed attack surface.
+    _selected_skills = llm_svc.select_wstg_skills(
+        pages_snapshot,
+        intel_items_for_selector,
+        requires_auth=requires_auth,
+        base_url=base_url,
+    )
+    _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
+    if _skill_context:
+        crawl_context = f"{crawl_context}\n\n{_skill_context}"
+        log.info(
+            "WSTG skills injected for run_id=%s: %s",
+            run_id,
+            ", ".join(sorted(_selected_skills)),
+        )
+
     seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
@@ -2568,6 +2771,17 @@ async def _do_thinking_scan(run_id: int) -> None:
                                     source="dynamic_scan_credential_check",
                                     metadata={"login_url": url},
                                 )
+                            if success:
+                                _maybe_persist_discovered_credential(
+                                    run_id,
+                                    username=str(
+                                        candidate.get("username")
+                                        or candidate.get("email")
+                                        or "discovered"
+                                    ),
+                                    password=str(candidate.get("password") or ""),
+                                    login_url=url or None,
+                                )
                         except Exception as exc:
                             response_excerpt = f"Request failed: {exc}"
                             success = False
@@ -3078,6 +3292,11 @@ async def _do_thinking_scan(run_id: int) -> None:
             log.warning("Thinking scan analysis failed: %s", exc)
 
     stopped = run_id in _thinking_stop_requested
+    if not stopped:
+        try:
+            await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
+        except Exception as _rev_exc:
+            log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
@@ -3628,6 +3847,17 @@ async def _do_agentic_thinking_loop(
                             metadata={"login_url": cc_url},
                         )
                         _mark_session_pending(cc_created_label)
+                    if cc_success:
+                        _maybe_persist_discovered_credential(
+                            run_id,
+                            username=str(
+                                candidate.get("username")
+                                or candidate.get("email")
+                                or "discovered"
+                            ),
+                            password=str(candidate.get("password") or ""),
+                            login_url=cc_url or None,
+                        )
                 except Exception as exc:
                     cc_excerpt = f"Request failed: {exc}"
                     cc_success = False

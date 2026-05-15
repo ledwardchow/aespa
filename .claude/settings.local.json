@@ -7,7 +7,9 @@
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\ledwardchow\\\\GitHub\\\\aespa\" -Recurse -Force)",
       "Bash(Select-Object -First 100)",
       "Bash(Format-Table -AutoSize)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('src/aespa/services/scanner.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/aespa/services/scanner.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(uv run *)"
     ]
   }
 }

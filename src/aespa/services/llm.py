@@ -308,6 +308,11 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     return await _openai_compat(config, prompt, screenshot_b64)
 
 
+async def plain_completion(config: LLMConfig, prompt: str) -> str:
+    """Send a plain text prompt and return the raw response text."""
+    return await _call(config, prompt, None)
+
+
 def _content_part_text(part: Any) -> str:
     if part is None:
         return ""
@@ -1569,6 +1574,264 @@ business-logic bypass → IDOR/injection/error disclosure → concise confirmati
 reveals a stronger lead than the current plan, follow that lead immediately.
 """
 
+# ── WSTG technique quick-reference (distilled from OWASP WSTG skill prompts) ──
+# These blocks add specific payloads, indicators, and decision criteria not
+# already covered by the high-level playbook above.
+# ── WSTG technique blocks — keyed by category ────────────────────────────────
+# Each value is injected into the initial user message only when the selector
+# determines it is relevant to the discovered attack surface.
+
+WSTG_SKILLS: dict[str, str] = {
+    "sqli": r"""─── SQL INJECTION (WSTG-INPV-05) ───────────────────────────────────────────────
+Error-based probes: submit `'`, `''`, `1'`, `\`, `1 OR 1=1--`, `' OR ''='`
+DB error signatures:
+  MySQL:      "You have an error in your SQL syntax" / "Warning.*mysql"
+  PostgreSQL: "pg_query()" / "unterminated quoted string" / "PostgreSQL.*ERROR"
+  MSSQL:      "Microsoft OLE DB Provider" / "Unclosed quotation mark"
+  Oracle:     "ORA-\d{5}" / "quoted string not properly terminated"
+  SQLite:     "SQLite3::query" / "SQLITE_ERROR"
+  Generic:    "SQLSTATE[" / "syntax error at or near"
+Boolean-blind: send baseline → `1 AND 1=1--` (true) → `1 AND 1=2--` (false);
+  if true matches baseline and false differs significantly → injectable.
+Time-blind: MySQL `' AND SLEEP(5)--` | MSSQL `'; WAITFOR DELAY '0:0:5'--` |
+  PostgreSQL `'; SELECT pg_sleep(5)--` — confirm with baseline timing.
+UNION: find column count with `' ORDER BY N--`; find reflected column with
+  `' UNION SELECT NULL,NULL,'x',NULL--`; extract `' UNION SELECT NULL,@@version--`.
+Constraint: never DROP/INSERT/UPDATE/DELETE; limit to version/DB name for PoC.""",
+
+    "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
+Step 1 — inject a unique canary string; check if it appears in the response.
+Step 2 — identify rendering context, then use a context-matched payload:
+  HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>
+  HTML attribute: " onfocus="alert(1)" autofocus="  /  ' onmouseover='alert(1)
+  JS string:      ';alert(1)//  /  </script><script>alert(1)//
+  URL context:    javascript:alert(1)
+Filter bypass: case variation <ScRiPt>, HTML entities &#x3C;script&#x3E;,
+  tag alternatives <details open ontoggle=alert(1)>, double-encode %253C.
+Stored XSS: submit payload → navigate to every related rendering page → confirm.""",
+
+    "idor": r"""─── IDOR / AUTHORIZATION (WSTG-ATHZ-04) ────────────────────────────────────────
+Object references: URL path `/api/users/123`, query `?id=123`, POST body `{"user_id":123}`.
+Horizontal escalation: access own resource → swap ID to adjacent (+1/-1) or another user's.
+Vertical escalation: use low-privilege session on admin-only endpoints.
+Manipulation: sequential IDs, `?id=*`, `?id[]=100&id[]=101`, base64/hex IDs.
+Response comparison: same data = IDOR; same structure different data = partial; error = check msg.""",
+
+    "auth_bypass": r"""─── AUTHENTICATION BYPASS (WSTG-ATHN-04) ────────────────────────────────────────
+Forced browsing: send protected endpoint request without any auth headers.
+Bypass headers to add on protected endpoints:
+  X-Original-URL: /admin  |  X-Rewrite-URL: /admin  |  X-Forwarded-For: 127.0.0.1
+  X-Custom-IP-Authorization: 127.0.0.1  |  X-Real-IP: 127.0.0.1
+Path variation: /Admin, /ADMIN, /admin/, /admin/., /admin%2fpanel, /admin;foo=bar/panel,
+  /%61dmin (URL-encoded 'a'), /admin..
+Method override: try HEAD, OPTIONS; add X-HTTP-Method-Override: GET header.
+Parameter tampering: flip hidden `isAdmin=false` → true, `role=user` → admin in cookie/param.""",
+
+    "ssrf": r"""─── SSRF (WSTG-INPV-19) ──────────────────────────────────────────────────────────
+Candidate parameter names: url, uri, link, href, src, dest, redirect, target, path,
+  file, page, next, callback, feed, fetch, load, resource, proxy, imageurl, webhook.
+Internal targets:
+  http://127.0.0.1/  |  http://localhost/  |  http://[::1]/
+  http://169.254.169.254/latest/meta-data/              (AWS IMDSv1)
+  http://metadata.google.internal/computeMetadata/v1/   (GCP — add Metadata-Flavor: Google header)
+  http://169.254.169.254/metadata/instance?api-version=2021-02-01 (Azure — add Metadata: true)
+Evidence: "ami-id", "instance-id", "computeMetadata", "vmId", "Welcome to nginx".
+Filter bypass: hex IP `http://0x7f000001/`, octal `http://0177.0.0.1/`, decimal `http://2130706433/`,
+  short form `http://127.1/`, `http://evil.com@127.0.0.1/`, redirect chain via external 302.
+Constraint: if cloud credentials are found, report CRITICAL but do NOT use them.""",
+
+    "csrf": r"""─── CSRF (WSTG-SESS-05) ──────────────────────────────────────────────────────────
+Focus on state-changing endpoints (POST/PUT/DELETE): profile update, password/email change,
+  transactions, admin actions.
+Token validation tests (do each in turn):
+  1. Remove token entirely — if request succeeds, token not enforced.
+  2. Set token to empty string.  3. Replace with random same-length string.
+  4. Reuse token from a previous session.
+SameSite bypass: Lax permits top-level GET navigations; test if action works via GET/method-override.
+Referer bypass: omit header entirely; `Referer: https://evil.target.com`.""",
+
+    "cmdi": r"""─── COMMAND INJECTION (WSTG-INPV-12) ────────────────────────────────────────────
+Separators (prefix with valid value): `; echo CANARY` | `| echo CANARY` | `&& echo CANARY`
+  `` `echo CANARY` `` | `$(echo CANARY)` | `\necho CANARY`
+Time-based blind: Unix `; sleep 5` / `$(sleep 5)` | Windows `& timeout /T 5 /NOBREAK`
+  — measure baseline, inject, confirm with a different delay (3s) to rule out jitter.
+Filter bypass: `{echo,CANARY}`, `echo$IFS CANARY`, base64 decode `$(echo Y2F0|base64 -d)`.
+Constraint: limit to echo/sleep/id/whoami — no reverse shells, no rm/del.""",
+
+    "cors": r"""─── CORS (WSTG-CLNT-07) ─────────────────────────────────────────────────────────
+Test on every API endpoint that returns user data. Add `Origin: https://evil.com` to the request.
+Vulnerable: response contains `Access-Control-Allow-Origin: https://evil.com`.
+Critical: also has `Access-Control-Allow-Credentials: true`.
+Also test: `Origin: null` (sandbox), `Origin: https://evil.target.com` (subdomain trust),
+  `Origin: http://target.com` (scheme downgrade on HTTPS site).""",
+
+    "headers": r"""─── SECURITY HEADERS (WSTG-CONF-07) ──────────────────────────────────────────────
+Check main page, login page, API endpoints, and error pages. Expected values:
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Content-Security-Policy: restrictive — no unsafe-inline, no unsafe-eval, no *
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY or SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+Should be absent: Server (with version), X-Powered-By, X-AspNet-Version.
+CSP weak patterns: unsafe-inline in script-src, *, data: in script-src, CDN hosting user content.""",
+
+    "sessions": r"""─── SESSION MANAGEMENT (WSTG-SESS-01/02/03/07) ────────────────────────────────────
+Cookie attributes — every session cookie must have: Secure (HTTPS), HttpOnly, SameSite=Strict|Lax.
+Session fixation: capture token before login → log in → compare token. If unchanged: fixation vuln.
+Logout invalidation: after clicking logout, re-send the old session cookie — if still valid, server
+  does not invalidate tokens.
+Token entropy: collect several tokens and check for sequential or timestamp-correlated patterns.""",
+
+    "workflow": r"""─── WORKFLOW BYPASS (WSTG-BUSL-06) ────────────────────────────────────────────────
+Multi-step flows: registration, checkout, password-reset, approval, onboarding wizards.
+Step skipping: jump directly to the final confirmation/submit step without completing earlier steps.
+Parameter tampering: modify hidden `step=3`, `status=approved`, `verified=true` fields.
+Price/quantity manipulation: change `price=0.01`, `qty=-1`, modify discount values in POST body.
+Race conditions: send the same state-changing request twice simultaneously.""",
+}
+
+# SSRF-indicative parameter names used by the selector.
+_SSRF_PARAM_NAMES: frozenset[str] = frozenset({
+    "url", "uri", "link", "href", "src", "dest", "destination", "redirect",
+    "redirecturl", "target", "path", "file", "page", "next", "return",
+    "returnurl", "callback", "feed", "fetch", "load", "resource", "proxy",
+    "imageurl", "image_url", "webhook", "endpoint", "host", "site",
+})
+
+# URL path fragments that imply auth-related pages.
+_AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
+    "/login", "/signin", "/sign-in", "/auth", "/authenticate",
+    "/register", "/signup", "/sign-up", "/logout", "/password",
+    "/account", "/profile", "/admin",
+})
+
+_SKILL_ORDER = (
+    "sqli", "xss", "cmdi", "ssrf", "idor", "auth_bypass",
+    "csrf", "sessions", "cors", "headers", "workflow",
+)
+
+
+def select_wstg_skills(
+    pages: list[dict],
+    intel_items: list[dict],
+    *,
+    requires_auth: bool = False,
+    base_url: str = "",
+) -> set[str]:
+    """Evaluate crawl intelligence and return the set of WSTG skill keys to inject.
+
+    Parameters
+    ----------
+    pages:
+        List of page dicts from pages_snapshot (keys: url, req_auth,
+        takes_input, has_object_ref, has_business_logic).
+    intel_items:
+        List of TargetIntelItem dicts (keys: kind, key, value, url).
+    requires_auth:
+        Whether the site requires authentication.
+    base_url:
+        Target base URL (used for path-pattern matching when page list is sparse).
+    """
+    selected: set[str] = {"headers"}  # security headers: always relevant
+
+    page_urls_lower = [str(p.get("url") or "").lower() for p in pages]
+    intel_kinds = {str(i.get("kind") or "") for i in intel_items}
+    intel_keys_lower = {str(i.get("key") or "").lower() for i in intel_items}
+    intel_values_lower = {str(i.get("value") or "").lower() for i in intel_items}
+    intel_urls_lower = {str(i.get("url") or "").lower() for i in intel_items}
+
+    # ── Injection surface ──────────────────────────────────────────────────────
+    has_inputs = (
+        any(p.get("takes_input") for p in pages)
+        or "form" in intel_kinds
+        or "input" in intel_kinds
+    )
+    if has_inputs:
+        selected.update({"sqli", "xss", "cmdi"})
+
+    # ── Authentication surface ─────────────────────────────────────────────────
+    has_auth_pages = (
+        requires_auth
+        or any(p.get("req_auth") for p in pages)
+        or any(
+            frag in url
+            for frag in _AUTH_PATH_FRAGMENTS
+            for url in page_urls_lower
+        )
+        or "token_hint" in intel_kinds
+    )
+    if has_auth_pages:
+        selected.update({"auth_bypass", "sessions"})
+        if has_inputs:
+            selected.add("csrf")
+
+    # ── Object references / IDOR ───────────────────────────────────────────────
+    has_object_refs = (
+        any(p.get("has_object_ref") for p in pages)
+        or "id" in intel_kinds
+        or any("/api/" in url for url in page_urls_lower)
+        or any(
+            part.isdigit()
+            for url in page_urls_lower
+            for part in url.split("/")
+            if part
+        )
+    )
+    if has_object_refs:
+        selected.add("idor")
+
+    # ── SSRF — URL-type input parameters ──────────────────────────────────────
+    has_ssrf_params = (
+        any(key in _SSRF_PARAM_NAMES for key in intel_keys_lower)
+        or any(val.startswith("http") for val in intel_values_lower)
+        or any(
+            any(name in url for name in ("webhook", "callback", "redirect", "proxy"))
+            for url in page_urls_lower + list(intel_urls_lower)
+        )
+    )
+    if has_ssrf_params:
+        selected.add("ssrf")
+
+    # ── API endpoints → CORS ───────────────────────────────────────────────────
+    has_api = (
+        any("/api/" in url or "/graphql" in url for url in page_urls_lower)
+        or "endpoint" in intel_kinds
+        or any("/api/" in url for url in intel_urls_lower)
+    )
+    if has_api:
+        selected.add("cors")
+
+    # ── Business logic / multi-step flows ─────────────────────────────────────
+    has_business_logic = (
+        any(p.get("has_business_logic") for p in pages)
+        or any(
+            frag in url
+            for frag in ("/checkout", "/payment", "/order", "/cart",
+                         "/transfer", "/confirm", "/submit", "/approve")
+            for url in page_urls_lower
+        )
+    )
+    if has_business_logic:
+        selected.add("workflow")
+
+    return selected
+
+
+def build_wstg_skill_context(selected: set[str]) -> str:
+    """Assemble selected WSTG skill blocks into a single context string."""
+    blocks = [
+        WSTG_SKILLS[key]
+        for key in _SKILL_ORDER
+        if key in selected and key in WSTG_SKILLS
+    ]
+    if not blocks:
+        return ""
+    return (
+        "WSTG technique reference — selected for this target's attack surface:\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
@@ -1941,7 +2204,23 @@ async def _call_with_tools(
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
-        system_list = [{"text": system_message}]
+        system_list = [
+            {"text": system_message},
+            {"cachePoint": {"type": "default"}},
+        ]
+
+        # Cache the static initial user message (crawl context + WSTG blocks).
+        # It is messages[0] and never changes during the scan, so it qualifies
+        # as a stable prefix.  The cachePoint is re-sent on every turn, which
+        # is correct — Bedrock resets the TTL on each cache hit.
+        if converse_messages and converse_messages[0].get("role") == "user":
+            first_content = list(converse_messages[0].get("content") or [])
+            if not any("cachePoint" in blk for blk in first_content):
+                first_content = first_content + [{"cachePoint": {"type": "default"}}]
+            converse_messages = [
+                {**converse_messages[0], "content": first_content},
+                *converse_messages[1:],
+            ]
 
         if config.api_key:
             # Bearer-token path (SAML / federated credentials stored as api_key).
