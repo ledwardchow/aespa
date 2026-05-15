@@ -2083,14 +2083,14 @@ function TestRunDetail({ runId }) {
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4};
+                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4, low_confidence:4};
                 const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
                 const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
                 const unconfirmedMap = {};
                 const fpMap = {};
                 for (const f of findings) {
-                  const target = f.validation_status === "false_positive"
+                  const target = (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
                     ? fpMap
                     : f.validation_status === "unconfirmed"
                       ? unconfirmedMap
@@ -2128,9 +2128,10 @@ function TestRunDetail({ runId }) {
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
                     <td>
-                      ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
+                      ${f.validation_status==="confirmed"      && html`<span className="val-badge val-confirmed">confirmed</span>`}
                       ${f.validation_status==="unconfirmed"   && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
                       ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">low conf</span>`}
+                      ${f.validation_status==="low_confidence" && html`<span className="val-badge val-fp">low conf</span>`}
                       ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
                     </td>
                     <td></td>
@@ -2141,7 +2142,7 @@ function TestRunDetail({ runId }) {
                     </td>
                     <td>
                       <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
-                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive") && html`
+                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive"||f.validation_status==="low_confidence") && html`
                           <button className="btn ghost sm finding-del-btn" title="Validate"
                             onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
                         <button className="btn ghost sm finding-del-btn" title="Delete"
@@ -2952,7 +2953,7 @@ const BASE_URL_PLACEHOLDERS = {
 };
 const BASE_URL_HINTS = {
   openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Optional when using AWS SSO/profile credentials. If set, the region is inferred from this endpoint.",
+  bedrock:"Defaults to ap-southeast-2. The region is inferred from this endpoint — change it to match your Bedrock region.",
   azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
   azure_foundry:"Paste the endpoint from Azure AI Foundry. The selected API format determines the final request path.",
   azure_foundry_openai:"OpenAI-format deployments use /openai/v1. If you paste the resource endpoint, Aespa appends it automatically.",
@@ -2966,7 +2967,8 @@ const DEFAULT_LLM_FORM = {
 
 function llmProfileToForm(cfg) {
   return cfg ? {
-    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"", base_url:cfg.base_url??"",
+    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"",
+    base_url:cfg.base_url||(cfg.provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:""),
     model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
     use_vision:cfg.use_vision??false,
   } : {...DEFAULT_LLM_FORM};
@@ -3071,7 +3073,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
             placeholder="Leave blank to use AWS_PROFILE / AWS SSO credentials"
             onChange=${e=>upd({api_key:e.target.value})}/>
           <div className="field-hint">For SSO, run aws sso login outside Aespa and set AWS_PROFILE plus AWS_REGION/AWS_DEFAULT_REGION before starting the app.</div>
-        </div>`}
+        </div>
+        <div className="field-hint" style=${{marginBottom:8}}>The system prompt and initial scan context are automatically marked as cache checkpoints on every request, reducing per-turn token costs across long scans.</div>`}
       ${needsKey&&html`
         <div className="field"><label>API Key</label>
           <input type="password" required value=${form.api_key}
@@ -3272,7 +3275,7 @@ function downloadTextFile(filename, content, type) {
 
 function findingsToMarkdown(findings, meta = {}) {
   const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
-  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4};
+  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4,low_confidence:4};
   const sorted = [...(findings || [])].sort((a, b) => {
     const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
     if (sev !== 0) return sev;

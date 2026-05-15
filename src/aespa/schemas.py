@@ -146,12 +146,6 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "bedrock": [
         "global.anthropic.claude-sonnet-4-6",
         "global.anthropic.claude-opus-4-7",
-        "anthropic.claude-3-7-sonnet-20250219-v1:0",
-        "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "anthropic.claude-3-5-haiku-20241022-v1:0",
-        "amazon.nova-pro-v1:0",
-        "amazon.nova-lite-v1:0",
-        "meta.llama3-3-70b-instruct-v1:0",
     ],
     "azure_openai": [
         "gpt-4o",
