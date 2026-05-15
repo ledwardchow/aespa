@@ -312,7 +312,10 @@ The loop terminates when:
 
 ### Context tools (read-only reconnaissance)
 
-These can be called up to 3 consecutive times before the LLM must take a real action.
+These use an adaptive checkpoint. After 3 consecutive context calls, the LLM should
+take a real action. If more context is genuinely needed, it can continue by including
+`context_budget_reason` with a short summary, current hypothesis, and why another
+targeted scan round will change the next action.
 
 | Tool | Returns |
 |---|---|
@@ -438,5 +441,4 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
-
 
