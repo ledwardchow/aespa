@@ -2,7 +2,11 @@
 
 ## Context tools (`action: "tool"`)
 
-Read-only reconnaissance against collected crawl/scan data. Up to 3 consecutive before the LLM must execute a probe or write a finding.
+Read-only reconnaissance against collected crawl/scan data. The scanner starts with a
+3-call context budget. After that checkpoint, the LLM should execute a probe or write
+a finding; if another targeted scan round is needed, it can include
+`context_budget_reason` summarizing what it learned, the current hypothesis, and why
+more context will change the next action.
 
 | Tool | What it returns |
 |---|---|
