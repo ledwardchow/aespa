@@ -59,6 +59,12 @@ RESPONSE_EVIDENCE_LIMIT = 128 * 1024
 EVIDENCE_ITEM_TEXT_LIMIT = 16 * 1024
 EVIDENCE_JSON_LIMIT = 64 * 1024
 MIN_DELAY = 0.05              # ~20 req/s
+CONTEXT_TOOL_CHECKPOINT_INTERVAL = 3
+CONTEXT_TOOL_CHECKPOINT_ERROR = (
+    "context tool checkpoint reached; summarize what you learned, state the "
+    "current hypothesis, and either execute a probe/write a finding or provide "
+    "context_budget_reason to justify another targeted context scan round"
+)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -115,6 +121,33 @@ def _compact_log_value(value, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _context_budget_reason(action: dict[str, Any]) -> str:
+    for key in ("context_budget_reason", "budget_reason", "scan_reason"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _context_tool_checkpoint_output(tool_name: str, consecutive_context_tools: int) -> dict[str, Any]:
+    return {
+        "tool": tool_name,
+        "error": CONTEXT_TOOL_CHECKPOINT_ERROR,
+        "checkpoint": {
+            "consecutive_context_tools": consecutive_context_tools,
+            "checkpoint_interval": CONTEXT_TOOL_CHECKPOINT_INTERVAL,
+            "next_options": [
+                "execute a probe",
+                "write a finding from existing evidence",
+                (
+                    "call a context tool again with context_budget_reason explaining "
+                    "why more context will change the next action"
+                ),
+            ],
+        },
+    }
 
 
 def _thinking_payload_summary(url: str, body) -> str:
@@ -2135,11 +2168,15 @@ async def _do_thinking_scan(run_id: int) -> None:
                 if action_type == "tool":
                     tool_name = str(action.get("tool") or "").strip()
                     args = action.get("args") if isinstance(action.get("args"), dict) else {}
-                    if consecutive_context_tools >= 3:
-                        output = {
-                            "tool": tool_name,
-                            "error": "context tool budget reached; execute a probe or write a finding next",
-                        }
+                    budget_reason = _context_budget_reason(action)
+                    if (
+                        consecutive_context_tools >= CONTEXT_TOOL_CHECKPOINT_INTERVAL
+                        and not budget_reason
+                    ):
+                        output = _context_tool_checkpoint_output(
+                            tool_name,
+                            consecutive_context_tools,
+                        )
                     else:
                         output = _run_thinking_context_tool(
                             tool_name,
@@ -2150,7 +2187,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                             run_id=run_id,
                             base_url=base_url,
                         )
-                    consecutive_context_tools += 1
+                        if budget_reason:
+                            output["context_budget_reason"] = budget_reason
+                            output["context_budget_extended"] = True
+                            consecutive_context_tools = 1
+                        else:
+                            consecutive_context_tools += 1
                     result_text = json.dumps(output, separators=(",", ":"), default=str)
                     events_svc.emit(run_id, {
                         "type": "scanner_phase",
@@ -3082,6 +3124,44 @@ async def _do_agentic_thinking_loop(
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+    pending_session_labels: set[str] = set()
+
+    def _mark_session_pending(label: str | None) -> None:
+        if label:
+            pending_session_labels.add(str(label))
+
+    def _mark_session_used(label: str | None, status: int) -> None:
+        if label and status not in (0, 401, 403):
+            pending_session_labels.discard(str(label))
+
+    def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        if pending_session_labels:
+            label_list = ", ".join(sorted(pending_session_labels)[:5])
+            return False, (
+                "Assessment is not complete. You created or captured reusable "
+                f"authenticated session label(s) that have not been exercised yet: "
+                f"{label_list}. Before calling done, call http_request with "
+                f"use_session set to one of those labels against authenticated API "
+                f"endpoints such as /api/profile, /api/accounts, /api/transfers, "
+                f"or another endpoint discovered in the JavaScript/API inventory. "
+                f"If a session fails, report the exact status and then try a different "
+                f"valid session or endpoint."
+            )
+        if history:
+            last = history[-1]
+            last_status = int(last.get("response_status") or 0)
+            last_method = str(last.get("method") or "")
+            if last_status in (401, 403) and any(
+                (sd.get("extra_headers") or {}).get("Authorization")
+                for sd in session_vault.values()
+            ):
+                return False, (
+                    "Assessment is not complete. The previous request ended with "
+                    f"{last_status} ({last_method} {last.get('url')}) while bearer "
+                    "sessions exist in the session vault. Retry the relevant protected "
+                    "endpoint with a concrete use_session label before calling done."
+                )
+        return True, ""
 
     # ── Build the initial user message ────────────────────────────────────────
     creds_text = ""
@@ -3125,15 +3205,15 @@ async def _do_agentic_thinking_loop(
         if tool_name == "context_tool":
             inner_tool = str(tool_input.get("tool") or "").strip()
             args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
-            if _consecutive_ctx_tools[0] >= 3:
-                _consecutive_ctx_tools[0] += 1
-                output = {
-                    "tool": inner_tool,
-                    "error": (
-                        "context tool budget reached; execute a probe or "
-                        "write a finding next"
-                    ),
-                }
+            budget_reason = _context_budget_reason(tool_input)
+            if (
+                _consecutive_ctx_tools[0] >= CONTEXT_TOOL_CHECKPOINT_INTERVAL
+                and not budget_reason
+            ):
+                output = _context_tool_checkpoint_output(
+                    inner_tool,
+                    _consecutive_ctx_tools[0],
+                )
             else:
                 output = _run_thinking_context_tool(
                     inner_tool, args,
@@ -3143,7 +3223,12 @@ async def _do_agentic_thinking_loop(
                     run_id=run_id,
                     base_url=base_url,
                 )
-                _consecutive_ctx_tools[0] += 1
+                if budget_reason:
+                    output["context_budget_reason"] = budget_reason
+                    output["context_budget_extended"] = True
+                    _consecutive_ctx_tools[0] = 1
+                else:
+                    _consecutive_ctx_tools[0] += 1
             result_text = json.dumps(output, separators=(",", ":"), default=str)
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
@@ -3337,6 +3422,7 @@ async def _do_agentic_thinking_loop(
                 "response_body": resp_body,
             })
             all_results.append(br_result_dict)
+            _mark_session_used(use_session_label, resp_status)
             task_graph_svc.complete_task_after_result(
                 run_id, active_task_id,
                 step=step, method="BROWSER", url=final_url, status=resp_status,
@@ -3434,6 +3520,7 @@ async def _do_agentic_thinking_loop(
                 )
                 jwt_resp_body = json.dumps({"store_as": jwt_label, "claims": jwt_claims})
                 jwt_resp_status = 200
+                _mark_session_pending(jwt_label)
             except Exception as exc:
                 jwt_resp_body = f"JWT signing failed: {exc}"
                 jwt_resp_status = 0
@@ -3540,6 +3627,7 @@ async def _do_agentic_thinking_loop(
                             source="dynamic_scan_credential_check",
                             metadata={"login_url": cc_url},
                         )
+                        _mark_session_pending(cc_created_label)
                 except Exception as exc:
                     cc_excerpt = f"Request failed: {exc}"
                     cc_success = False
@@ -3682,6 +3770,8 @@ async def _do_agentic_thinking_loop(
                         source="dynamic_scan_register_account",
                         metadata={**ra_account["metadata"], "status": ra_r.status_code},
                     )
+                    if ra_extra_hdrs or ra_resp_cookies:
+                        _mark_session_pending(ra_created_label)
             except Exception as exc:
                 log.warning(
                     "Agentic loop register_account error (%s): %s", ra_url, exc
@@ -3809,6 +3899,7 @@ async def _do_agentic_thinking_loop(
                     source="dynamic_scan_http_response",
                     metadata={"method": hr_method, "url": hr_url},
                 )
+                _mark_session_pending(hr_lbl)
             hr_resp_body = _redact_sensitive_text(hr_raw)
             hr_resp_status = hr_r.status_code
             hr_resp_headers = dict(hr_r.headers)
@@ -3895,6 +3986,7 @@ async def _do_agentic_thinking_loop(
             "response_body": _resp_body_for_history,
         })
         all_results.append(hr_result)
+        _mark_session_used(hr_use_session, hr_resp_status)
         task_graph_svc.complete_task_after_result(
             run_id, active_task_id,
             step=step, method=hr_method, url=hr_url, status=hr_resp_status,
@@ -3937,6 +4029,7 @@ async def _do_agentic_thinking_loop(
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
+        done_check=_agentic_done_check,
     )
     return progressive_findings_count
 

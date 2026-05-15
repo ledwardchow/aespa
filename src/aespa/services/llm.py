@@ -105,6 +105,13 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     raise ValueError("could not extract balanced JSON from LLM response")
 
 
+def _extract_action_json(raw: str) -> dict:
+    action = _extract_json(raw, expect=dict)
+    if not isinstance(action, dict):
+        raise ValueError("action response was not a JSON object")
+    return action
+
+
 def _normalize_thinking_action(action: Any) -> Any:
     if not isinstance(action, dict):
         return action
@@ -127,6 +134,15 @@ def _normalize_thinking_action(action: Any) -> Any:
     normalized["tool"] = action_name
     normalized["args"] = args
     return normalized
+
+
+_THINKING_CORRECTION_PROMPT = """\
+Your previous response was not valid for the scanner control loop.
+
+Return exactly one JSON object and no markdown or prose. The object must use one of these
+actions: tool, http, browser, jwt, decode_jwt, credential_check, register_account,
+finding_write, done.
+"""
 
 _ANALYSIS_PROMPT = """\
 You are a web application security analyst performing reconnaissance on a target web application.
@@ -1588,7 +1604,9 @@ _THINKING_AGENT_SYSTEM = (
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required.\n"
     "- context_tool: look up crawl data, history, findings, or traffic without hitting "
-    "the target. Cap at 3 consecutive calls — execute a probe or write a finding next.\n"
+    "the target. After 3 consecutive calls, either execute a probe/write a finding or "
+    "include context_budget_reason with a concrete summary and why one more targeted "
+    "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
     "No duplicates.\n"
     "- done: end the assessment when key areas are covered or steps are exhausted.\n"
@@ -1656,13 +1674,17 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "Available: site_map, page_detail, history_search, finding_list, "
             "target_inventory, traffic_search, endpoint_detail, compare_responses, "
             "mutate_request, auth_matrix, extract_entities. "
-            "Do not call more than 3 times in a row."
+            "After 3 consecutive calls, either act or include context_budget_reason "
+            "explaining why another targeted context scan round is needed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "tool": {"type": "string"},
                 "args": {"type": "object"},
+                "context_budget_reason": {"type": "string"},
+                "observation": {"type": "string"},
+                "hypothesis": {"type": "string"},
                 "note": {"type": "string"},
             },
             "required": ["tool"],
@@ -2214,6 +2236,7 @@ async def thinking_agentic_loop(
     tool_executor,
     emit_fn=None,
     stop_check=None,
+    done_check=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -2226,6 +2249,7 @@ async def thinking_agentic_loop(
     messages: list[dict] = [{"role": "user", "content": initial_user_message}]
     tool_call_count = 0
     final_summary = ""
+    consecutive_text_only_turns = 0
 
     while True:
         if stop_check and stop_check():
@@ -2305,10 +2329,35 @@ async def thinking_agentic_loop(
         messages.append({"role": "assistant", "content": raw_content})
 
         if not tool_use_blocks:
-            # Model responded with text only — treat as implicit done
+            # OpenAI-style reasoning models occasionally narrate the next step instead
+            # of emitting the required tool call. Treat that as a recoverable protocol
+            # slip; only the explicit `done` tool is allowed to finish the scan.
             if text_blocks:
                 final_summary = (text_blocks[-1].get("text") or "")[:500]
-            break
+            consecutive_text_only_turns += 1
+            if consecutive_text_only_turns >= 3:
+                log.warning(
+                    "thinking_agentic_loop: model returned %d consecutive text-only "
+                    "turns; ending assessment.",
+                    consecutive_text_only_turns,
+                )
+                break
+            messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Your previous response did not call a tool, so no scan action "
+                        "was executed. Continue by calling exactly one tool now. Use "
+                        "http_request, browser, context_tool, write_finding, forge_jwt, "
+                        "decode_jwt, credential_check, or register_account for the next "
+                        "assessment step. Call done only if the assessment is genuinely "
+                        "complete and key attack areas have been covered."
+                    ),
+                }],
+            })
+            continue
+        consecutive_text_only_turns = 0
 
         # Execute each tool call and collect results for the next user message
         tool_results = []
@@ -2331,6 +2380,23 @@ async def thinking_agentic_loop(
 
             if tool_name == "done":
                 final_summary = str(tool_input.get("summary") or "")
+                if done_check:
+                    try:
+                        done_ok, done_feedback = done_check(tool_input, tool_call_count)
+                    except Exception as exc:
+                        log.warning("thinking_agentic_loop: done_check failed: %s", exc)
+                        done_ok, done_feedback = True, ""
+                    if not done_ok:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": (
+                                done_feedback
+                                or "Assessment is not complete. Continue with one concrete tool call."
+                            ),
+                        })
+                        session_done = False
+                        break
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
@@ -2460,7 +2526,10 @@ Context tools:
 - auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
 - extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
   redacted JWT hints, and error/debug lines.
-- Cap consecutive context-only tool calls; once you have enough detail, execute a probe or write a finding.
+- Context tools have an adaptive checkpoint: after 3 consecutive context-only calls,
+  execute a probe/write a finding, or include context_budget_reason summarizing what
+  you learned, naming the current hypothesis, and explaining why another targeted
+  context scan round will change the next action.
 
 To record a confirmed finding using prior evidence handles or response excerpts:
 {{
