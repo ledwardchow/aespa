@@ -1566,6 +1566,80 @@ def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> in
     return saved
 
 
+def _deterministic_sessions_from_vault(
+    run_id: int,
+    session_vault: dict[str, dict],
+) -> dict[int, dict]:
+    """Return credential-shaped sessions for deterministic auth/IDOR modules."""
+    configured: dict[int, dict] = {}
+    synthetic_id = -1
+    for label, stored in (session_vault or {}).items():
+        if stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            key = credential_id
+        else:
+            while synthetic_id in configured:
+                synthetic_id -= 1
+            key = synthetic_id
+            synthetic_id -= 1
+        configured[key] = {
+            "label": stored.get("label") or label,
+            "username": stored.get("username") or label,
+            "credential_id": credential_id,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+            "source": stored.get("source") or "scanner_session",
+            "metadata": stored.get("metadata") or {},
+        }
+    return _merge_persisted_sessions(run_id, configured)
+
+
+def _run_deterministic_analysis_for_dynamic_results(
+    *,
+    run_id: int,
+    base_url: str,
+    pages_snapshot: list[dict],
+    first_page_id: int | None,
+    results: list[dict],
+) -> int:
+    """Persist deterministic findings from dynamic scan observations."""
+    if not results:
+        return 0
+
+    findings: list[ScanFinding] = []
+    with Session(get_engine()) as s:
+        for result in results:
+            affected = str(result.get("url") or base_url)
+            page_id = _dynamic_finding_page_id(
+                s,
+                run_id=run_id,
+                affected_url=affected,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+            )
+            findings.extend(_deterministic_findings_from_results(
+                run_id=run_id,
+                page_id=page_id or first_page_id,
+                page_url=affected,
+                results=[result],
+            ))
+
+    saved = _save_deterministic_findings(run_id, findings)
+    if saved:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "deterministic_analysis",
+            "status": "complete",
+            "message": f"{saved} deterministic finding(s) recorded from dynamic scan evidence.",
+            "data": {"finding_count": saved},
+        })
+        _emit_scan_update(run_id)
+    return saved
+
+
 def _find_or_create_dynamic_page(
     session: Session,
     *,
@@ -2280,6 +2354,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                 f"This is a broken access control (A01/A07) finding if the server honours them."
             )
             crawl_context = f"{_cookie_alert}\n\n{crawl_context}"
+
+        deterministic_sessions = _deterministic_sessions_from_vault(run_id, session_vault)
+        _active_sessions[run_id] = deterministic_sessions
+        if run_id not in _thinking_stop_requested:
+            await _run_deterministic_site_modules(
+                run_id=run_id,
+                base_url=base_url,
+                cred_sessions=deterministic_sessions,
+                scanner_policy=scanner_policy,
+            )
 
         async with httpx.AsyncClient(
             cookies=cookie_jar,
@@ -3216,13 +3300,21 @@ async def _do_thinking_scan(run_id: int) -> None:
     if all_results:
         _thinking_scan_status[run_id] = "analysing"
         _emit_thinking_status(run_id)
+        deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
+            run_id=run_id,
+            base_url=base_url,
+            pages_snapshot=pages_snapshot,
+            first_page_id=first_page_id,
+            results=all_results,
+        )
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_analysis",
             "status": "start",
             "message": (
                 f"Analysing {len(all_results)} probe result(s); "
-                f"{progressive_findings_count} progressive finding(s) already recorded…"
+                f"{progressive_findings_count} progressive and "
+                f"{deterministic_saved} deterministic finding(s) already recorded…"
             ),
         })
         try:
@@ -5531,7 +5623,7 @@ _SENSITIVE_FIELD_PATTERNS = (
 def _deterministic_findings_from_results(
     *,
     run_id: int,
-    page_id: int,
+    page_id: int | None,
     page_url: str,
     results: list[dict],
 ) -> list[ScanFinding]:
