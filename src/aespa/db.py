@@ -66,6 +66,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
+    _ensure_column(engine, "scan_finding", "finding_source", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
     _ensure_scan_finding_page_id_nullable(engine)
@@ -73,6 +74,64 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS upstream_proxy_config (
+                id INTEGER PRIMARY KEY,
+                proxy_url TEXT,
+                proxy_scanner INTEGER NOT NULL DEFAULT 0,
+                proxy_llm INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS burp_mcp_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                server_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:9876/sse',
+                transport TEXT NOT NULL DEFAULT 'sse',
+                send_http1_tool TEXT NOT NULL DEFAULT 'send_http1_request',
+                scanner_issues_tool TEXT NOT NULL DEFAULT 'get_scanner_issues',
+                active_scan_tool TEXT,
+                seed_limit INTEGER NOT NULL DEFAULT 200,
+                issue_poll_retries INTEGER NOT NULL DEFAULT 6,
+                issue_poll_interval_s REAL NOT NULL DEFAULT 5.0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS burp_rest_api_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                api_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:1337',
+                api_key TEXT,
+                scan_configuration_name TEXT DEFAULT 'Audit checks - all except time-based detection methods',
+                scan_sqli INTEGER NOT NULL DEFAULT 1,
+                scan_xss INTEGER NOT NULL DEFAULT 1,
+                scan_command_injection INTEGER NOT NULL DEFAULT 1,
+                scan_path_traversal INTEGER NOT NULL DEFAULT 1,
+                scan_ssrf INTEGER NOT NULL DEFAULT 1,
+                scan_xxe INTEGER NOT NULL DEFAULT 1,
+                scan_ssti INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    _ensure_column(
+        engine,
+        "burp_rest_api_config",
+        "scan_configuration_name",
+        "TEXT DEFAULT 'Audit checks - all except time-based detection methods'",
+    )
+    _ensure_column(engine, "burp_rest_api_config", "scan_command_injection", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_path_traversal", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_ssrf", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_xxe", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_ssti", "INTEGER NOT NULL DEFAULT 1")
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
