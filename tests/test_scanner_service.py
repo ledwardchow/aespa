@@ -1,7 +1,9 @@
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import ScanFinding
+from aespa.models import CrawledPage, ScanFinding, Site, TrafficEntry
+from aespa.models import TestRun as RunModel
+from aespa.services import burp_rest
 from aespa.services import scanner
 
 
@@ -25,6 +27,69 @@ def test_compact_thinking_context_includes_all_existing_findings():
     assert "+2 more" not in context
     assert "Finding 0 @ https://target.local/finding/0" in context
     assert "Finding 11 @ https://target.local/finding/11" in context
+
+
+def test_burp_scan_body_uses_default_configuration_when_name_blank():
+    body = burp_rest._build_scan_body(
+        "https://target.local/api/customers?search=test",
+        cookies=None,
+        extra_headers=None,
+        application_logins=None,
+        scan_configuration_name=None,
+    )
+
+    assert "scan_configurations" not in body
+
+
+def test_burp_scan_body_can_use_named_configuration():
+    body = burp_rest._build_scan_body(
+        "https://target.local/api/customers?search=test",
+        cookies=None,
+        extra_headers=None,
+        application_logins=None,
+        scan_configuration_name="Fast audit",
+    )
+
+    assert body["scan_configurations"] == [
+        {"name": "Fast audit", "type": "NamedConfiguration"}
+    ]
+
+
+def test_burp_investigation_candidate_detects_sqli_intent():
+    candidate = scanner._burp_investigation_candidate(
+        {
+            "url": "https://target.local/api/admin/customers?search=test'",
+            "hypothesis": "Admin customers list - test SQL injection in search parameter",
+            "payload_purpose": "Test SQL injection in admin customers search",
+        },
+        "investigating Admin customers list",
+    )
+
+    assert candidate == (
+        "SQL Injection",
+        "Admin customers list - test SQL injection in search parameter",
+    )
+
+
+def test_burp_investigation_candidate_detects_additional_active_scan_classes():
+    cases = [
+        ("test OS command injection in ping parameter", "Command Injection"),
+        ("probe path traversal with ../../etc/passwd", "Path Traversal"),
+        ("test SSRF URL fetcher against localhost", "SSRF"),
+        ("test XXE payload in XML parser", "XXE"),
+        ("test server-side template injection with {{7*7}}", "SSTI"),
+    ]
+
+    for hypothesis, expected in cases:
+        candidate = scanner._burp_investigation_candidate(
+            {
+                "url": "https://target.local/api/test",
+                "hypothesis": hypothesis,
+            },
+            "investigating input validation",
+        )
+        assert candidate is not None
+        assert candidate[0] == expected
 
 
 def test_dynamic_finding_can_be_saved_without_page_assignment():
@@ -60,6 +125,7 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
         assert saved is not None
         assert saved.page_id is None
         assert saved.affected_url == "global application configuration"
+        assert saved.finding_source == "dynamic_scan"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -176,6 +242,7 @@ def test_finding_from_llm_preserves_prebuilt_probe_evidence_items():
     item_types = {item["type"] for item in finding.evidence_items}
     assert {"action_outcome", "action_log", "screenshot"} <= item_types
     assert finding.screenshot_b64 == "abc123"
+    assert finding.finding_source == "dynamic_scan"
 
 
 def test_dynamic_page_assignment_returns_none_for_non_page_finding():

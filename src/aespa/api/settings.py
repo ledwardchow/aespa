@@ -4,8 +4,19 @@ from fastapi import APIRouter, Depends, Response
 from sqlmodel import Session
 
 from aespa.db import get_session
-from aespa.schemas import LLMConfigIn, LLMConfigOut, PROVIDER_DEFAULT_MODELS, ScannerPolicyIn, ScannerPolicyOut
+from aespa.schemas import (
+    BurpRestApiConfigIn,
+    BurpRestApiConfigOut,
+    LLMConfigIn,
+    LLMConfigOut,
+    PROVIDER_DEFAULT_MODELS,
+    ScannerPolicyIn,
+    ScannerPolicyOut,
+    UpstreamProxyConfigIn,
+    UpstreamProxyConfigOut,
+)
 from aespa.services import settings as settings_service
+from aespa.services import burp_rest as burp_rest_svc
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -87,3 +98,38 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return settings_service.upsert_scanner_policy(session, payload)
+
+
+@router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
+def get_burp_rest_api_config(session: Session = Depends(get_session)) -> BurpRestApiConfigOut:
+    return settings_service.get_burp_rest_api_config(session)
+
+
+@router.put("/burp-rest-api", response_model=BurpRestApiConfigOut)
+def upsert_burp_rest_api_config(
+    payload: BurpRestApiConfigIn,
+    session: Session = Depends(get_session),
+) -> BurpRestApiConfigOut:
+    return settings_service.upsert_burp_rest_api_config(session, payload)
+
+
+@router.post("/burp-rest-api/test-connection")
+async def test_burp_rest_api_connection(
+    session: Session = Depends(get_session),
+) -> dict:
+    cfg = settings_service.get_burp_rest_api_config(session)
+    ok, message = await burp_rest_svc.test_connection(cfg)
+    return {"ok": ok, "message": message}
+
+
+@router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)
+def get_upstream_proxy_config(session: Session = Depends(get_session)) -> UpstreamProxyConfigOut:
+    return settings_service.get_upstream_proxy_config(session)
+
+
+@router.put("/upstream-proxy", response_model=UpstreamProxyConfigOut)
+def upsert_upstream_proxy_config(
+    payload: UpstreamProxyConfigIn,
+    session: Session = Depends(get_session),
+) -> UpstreamProxyConfigOut:
+    return settings_service.upsert_upstream_proxy_config(session, payload)
