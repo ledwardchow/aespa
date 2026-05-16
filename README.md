@@ -10,15 +10,19 @@ Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparis
 * Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
 * Claude Code + Qwen3.6-35b-A3b (Abliterated)
 
+## How does it work?
+
+See [Architecture](docs/architecture.md).
 
 ## Requirements
 
 - Python 3.12+
 - uv: https://docs.astral.sh/uv/getting-started/installation/
+- Burp Suite Professional, if you want to use the active scan integration
 - Anthropic/OpenAI/Google/AWS Bedrock API key **OR**
 - A local model - some suggestions at the bottom
 
-
+Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
 
 ## Setup
 
@@ -37,6 +41,10 @@ uv run aespa
 ```
 
 The UI is available at `http://127.0.0.1:8000` by default.
+
+Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6. (I've never tried Opus4.6/4.7/GPT 5.5 due to cost). 
+
+Structured scans are low quality compared to the dynamic scan and will be removed in a later version. (It does, however, provide some usable results on local models.)
 
 ## Configuration
 
@@ -61,9 +69,9 @@ Open the app, go to **LLM Settings**, and configure one of:
 - **Anthropic** — requires an Anthropic API key
 - **OpenAI** — requires an OpenAI API key
 - **Google** - requires a Google API key
-- **AWS Bedrock** - requires a Bedrock API key. Short-term key refresh currently not supported
+- **AWS Bedrock** - requires a Bedrock API key, or you can use boto3 for authentication. Short-term key refresh currently not supported.
 - **OpenAI-compatible** — for local models via LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`); no API key required
-- **OpenRouter** — requires an OpenRouter API key (`sk-or-v1-...`) and an OpenRouter model id, such as a model marked free in their catalog or use OpenAI-compatible by setting the base URL to `https://openrouter.ai/api/v1`, entering your OpenRouter API key, and using an exact OpenRouter model id.
+- **OpenRouter** — requires an OpenRouter API key (`sk-or-v1-...`) 
 
 
 
@@ -98,12 +106,6 @@ Traffic log:
 
 Findings
 ![Screenshot](docs/images/finding.png)
-
-
-## Implementation details
-
-See [Architecture](docs/architecture.md).
-
 
 ## Recommended models
 * Claude Sonnet 4.6 - set output token cap to 60000
