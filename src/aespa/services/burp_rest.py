@@ -64,6 +64,7 @@ def _build_scan_body(
     cookies: dict[str, str] | None,
     extra_headers: dict[str, str] | None,
     application_logins: list[dict] | None,
+    scan_configuration_name: str | None = None,
 ) -> dict:
     """Build the POST /v0.1/scan request body."""
     parsed = urlparse(url)
@@ -78,13 +79,15 @@ def _build_scan_body(
             "include": [{"rule": scope_rule, "enabled": True}],
             "exclude": [],
         },
-        "scan_configurations": [
+    }
+
+    if scan_configuration_name:
+        body["scan_configurations"] = [
             {
-                "name": "Audit checks - all insertion points",
+                "name": scan_configuration_name,
                 "type": "NamedConfiguration",
             }
-        ],
-    }
+        ]
 
     # Build custom headers for session-based auth (cookies + bearer tokens).
     custom_headers: list[dict] = []
@@ -174,6 +177,7 @@ async def launch_active_scan(
         cookies=cookies,
         extra_headers=extra_headers,
         application_logins=application_logins,
+        scan_configuration_name=config.scan_configuration_name,
     )
     endpoint = f"{config.api_url}/v0.1/scan"
     log.info("burp_rest: launching active scan url=%s endpoint=%s", url, endpoint)

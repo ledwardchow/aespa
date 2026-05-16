@@ -64,6 +64,7 @@ _active_sessions: dict[int, dict[int, dict]] = {}  # run_id → cred_id → sess
 _thinking_stop_requested: set[int] = set()
 _thinking_tasks: dict[int, asyncio.Task] = {}
 _thinking_scan_status: dict[int, str] = {}  # run_id → idle|running|complete|stopped|failed
+_burp_active_scan_targets: set[tuple[int, str, str]] = set()
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -1558,6 +1559,7 @@ def _finding_from_llm(
         response_evidence=_response_evidence(response_evidence),
         evidence_json=evidence_json,
         screenshot_b64=matched.get("screenshot_b64"),
+        finding_source=str(raw.get("finding_source") or "dynamic_scan"),
         validation_status=validation_status,
         validation_note=validation_note,
         created_at=_utcnow(),
@@ -1798,6 +1800,24 @@ _XSS_TITLE_KEYWORDS = frozenset([
     "xss", "cross-site scripting", "cross site scripting",
     "reflected xss", "stored xss", "dom xss", "dom-based xss",
 ])
+_COMMAND_INJECTION_KEYWORDS = frozenset([
+    "command injection", "os command", "shell injection", "shell command",
+    "rce", "remote code execution",
+])
+_PATH_TRAVERSAL_KEYWORDS = frozenset([
+    "path traversal", "directory traversal", "file traversal",
+    "local file inclusion", "remote file inclusion", "lfi", "rfi",
+])
+_SSRF_KEYWORDS = frozenset([
+    "ssrf", "server-side request forgery", "server side request forgery",
+])
+_XXE_KEYWORDS = frozenset([
+    "xxe", "xml external entity", "external entity",
+])
+_SSTI_KEYWORDS = frozenset([
+    "ssti", "server-side template injection", "server side template injection",
+    "template injection",
+])
 
 
 def _finding_triggers_burp_sqli(finding: ScanFinding) -> bool:
@@ -1820,6 +1840,62 @@ def _finding_triggers_burp_xss(finding: ScanFinding) -> bool:
     )
 
 
+def _finding_burp_vuln_class(finding: ScanFinding) -> str | None:
+    text = " ".join([
+        finding.title or "",
+        finding.description or "",
+        finding.owasp_category or "",
+    ])
+    return _burp_vuln_class_from_text(text)
+
+
+def _burp_vuln_class_from_text(text: str) -> str | None:
+    text = (text or "").lower()
+    if (
+        any(kw in text for kw in _SQLI_TITLE_KEYWORDS)
+        or ("sql" in text and "inject" in text)
+    ):
+        return "SQL Injection"
+    if any(kw in text for kw in _XSS_TITLE_KEYWORDS) or "cross-site" in text:
+        return "XSS"
+    if any(kw in text for kw in _COMMAND_INJECTION_KEYWORDS):
+        return "Command Injection"
+    if any(kw in text for kw in _PATH_TRAVERSAL_KEYWORDS):
+        return "Path Traversal"
+    if any(kw in text for kw in _SSRF_KEYWORDS):
+        return "SSRF"
+    if any(kw in text for kw in _XXE_KEYWORDS):
+        return "XXE"
+    if any(kw in text for kw in _SSTI_KEYWORDS):
+        return "SSTI"
+    return None
+
+
+def _burp_class_enabled(config, vuln_class: str) -> bool:
+    return {
+        "SQL Injection": config.scan_sqli,
+        "XSS": config.scan_xss,
+        "Command Injection": config.scan_command_injection,
+        "Path Traversal": config.scan_path_traversal,
+        "SSRF": config.scan_ssrf,
+        "XXE": config.scan_xxe,
+        "SSTI": config.scan_ssti,
+    }.get(vuln_class, False)
+
+
+def _burp_investigation_candidate(tool_input: dict, note: str) -> tuple[str, str] | None:
+    text = " ".join(
+        str(tool_input.get(key) or "")
+        for key in ("hypothesis", "payload_purpose", "observation", "url")
+    )
+    text = f"{note or ''} {text}"
+    vuln_class = _burp_vuln_class_from_text(text)
+    if not vuln_class:
+        return None
+    title = str(tool_input.get("hypothesis") or tool_input.get("payload_purpose") or note or vuln_class)
+    return vuln_class, title[:200]
+
+
 def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]]:
     """Return (cookies, extra_headers) from the first non-anonymous session found."""
     for label, session in (session_vault or {}).items():
@@ -1832,41 +1908,46 @@ def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]
     return {}, {}
 
 
-async def _run_burp_active_scan_for_finding(
+async def _run_burp_active_scan_for_target(
     run_id: int,
-    finding: ScanFinding,
+    *,
+    url: str,
+    title: str,
+    vuln_class: str,
     session_vault: dict,
+    finding_id: int | None = None,
+    page_id: int | None = None,
 ) -> None:
-    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
+    """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
     with Session(get_engine()) as s:
         burp_cfg = get_burp_rest_api_config(s)
 
     if not burp_cfg.enabled:
         return
 
-    check_sqli = burp_cfg.scan_sqli and _finding_triggers_burp_sqli(finding)
-    check_xss = burp_cfg.scan_xss and _finding_triggers_burp_xss(finding)
-    if not (check_sqli or check_xss):
+    if not _burp_class_enabled(burp_cfg, vuln_class):
         return
 
-    url = finding.affected_url or ""
     if not url.startswith(("http://", "https://")):
         return
+    target_key = (run_id, vuln_class, url)
+    if target_key in _burp_active_scan_targets:
+        return
+    _burp_active_scan_targets.add(target_key)
 
-    vuln_class = "SQL Injection" if check_sqli else "XSS"
     log.info(
-        "burp_rest: scheduling active scan for %s finding %d url=%s",
-        vuln_class, finding.id, url,
+        "burp_rest: scheduling active scan for %s url=%s",
+        vuln_class, url,
     )
+    target_label = f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "burp_active_scan",
         "status": "start",
         "message": (
-            f"Burp active scan triggered for {vuln_class} finding "
-            f"\"{finding.title}\" — {url}"
+            f"Burp active scan triggered for {vuln_class} {target_label} — {url}"
         ),
-        "data": {"finding_id": finding.id, "url": url, "vuln_class": vuln_class},
+        "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
     })
 
     cookies, extra_headers = _best_burp_auth(session_vault)
@@ -1878,13 +1959,14 @@ async def _run_burp_active_scan_for_finding(
             extra_headers=extra_headers or None,
         )
     except Exception as exc:
-        log.warning("burp_rest: failed to launch scan for finding %d: %s", finding.id, exc)
+        log.warning("burp_rest: failed to launch scan for %s %s: %s", vuln_class, url, exc)
+        _burp_active_scan_targets.discard(target_key)
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "burp_active_scan",
             "status": "error",
             "message": f"Burp active scan launch failed: {exc}",
-            "data": {"finding_id": finding.id, "url": url},
+            "data": {"finding_id": finding_id, "url": url},
         })
         return
 
@@ -1892,8 +1974,8 @@ async def _run_burp_active_scan_for_finding(
         "type": "scanner_phase",
         "phase": "burp_active_scan",
         "status": "running",
-        "message": f"Burp active scan task {task_id} running for \"{finding.title}\" — polling…",
-        "data": {"finding_id": finding.id, "task_id": task_id, "url": url},
+        "message": f"Burp active scan task {task_id} running for \"{title}\" — polling…",
+        "data": {"finding_id": finding_id, "task_id": task_id, "url": url},
     })
 
     try:
@@ -1905,7 +1987,7 @@ async def _run_burp_active_scan_for_finding(
             "phase": "burp_active_scan",
             "status": "error",
             "message": f"Burp active scan task {task_id} failed: {exc}",
-            "data": {"finding_id": finding.id, "task_id": task_id},
+            "data": {"finding_id": finding_id, "task_id": task_id},
         })
         return
 
@@ -1915,14 +1997,13 @@ async def _run_burp_active_scan_for_finding(
             "phase": "burp_active_scan",
             "status": "complete",
             "message": f"Burp active scan task {task_id} completed — no issues found.",
-            "data": {"finding_id": finding.id, "task_id": task_id, "issue_count": 0},
+            "data": {"finding_id": finding_id, "task_id": task_id, "issue_count": 0},
         })
         return
 
     # Persist Burp findings as new ScanFinding rows
     saved_count = 0
     with Session(get_engine()) as s:
-        run = s.get(TestRun, run_id)
         for issue in issues:
             issue_url = issue.get("affected_url") or url
             issue_title = f"[Burp] {issue.get('name') or 'Unknown issue'}"
@@ -1933,7 +2014,7 @@ async def _run_burp_active_scan_for_finding(
                 continue
             new_finding = ScanFinding(
                 test_run_id=run_id,
-                page_id=finding.page_id,
+                page_id=page_id,
                 owasp_category=owasp,
                 severity=severity,
                 title=issue_title,
@@ -1949,6 +2030,7 @@ async def _run_burp_active_scan_for_finding(
                 response_evidence=issue.get("response_evidence") or "",
                 evidence_json="[]",
                 screenshot_b64=None,
+                finding_source="burp_active_scan",
                 validation_status="confirmed",
                 validation_note=f"Confirmed by Burp active scanner (task {task_id}).",
                 created_at=_utcnow(),
@@ -1973,13 +2055,33 @@ async def _run_burp_active_scan_for_finding(
             f"{len(issues)} issue(s) found, {saved_count} saved."
         ),
         "data": {
-            "finding_id": finding.id,
+            "finding_id": finding_id,
             "task_id": task_id,
             "url": url,
             "issue_count": len(issues),
             "saved_count": saved_count,
         },
     })
+
+
+async def _run_burp_active_scan_for_finding(
+    run_id: int,
+    finding: ScanFinding,
+    session_vault: dict,
+) -> None:
+    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
+    vuln_class = _finding_burp_vuln_class(finding)
+    if not vuln_class:
+        return
+    await _run_burp_active_scan_for_target(
+        run_id,
+        url=finding.affected_url or "",
+        title=finding.title or vuln_class,
+        vuln_class=vuln_class,
+        session_vault=session_vault,
+        finding_id=finding.id,
+        page_id=finding.page_id,
+    )
 
 
 def _schedule_burp_active_scan(
@@ -1995,6 +2097,34 @@ def _schedule_burp_active_scan(
         )
     except RuntimeError:
         # No running event loop (e.g. during tests) — silently skip
+        pass
+
+
+def _schedule_burp_active_scan_for_investigation(
+    run_id: int,
+    tool_input: dict,
+    note: str,
+    session_vault: dict,
+) -> None:
+    candidate = _burp_investigation_candidate(tool_input, note)
+    if not candidate:
+        return
+    url = str(tool_input.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return
+    vuln_class, title = candidate
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            _run_burp_active_scan_for_target(
+                run_id,
+                url=url,
+                title=title,
+                vuln_class=vuln_class,
+                session_vault=session_vault,
+            )
+        )
+    except RuntimeError:
         pass
 
 
@@ -4403,6 +4533,9 @@ async def _do_agentic_thinking_loop(
                 "use_session": hr_use_session,
             },
         })
+        _schedule_burp_active_scan_for_investigation(
+            run_id, tool_input, note, session_vault
+        )
         hr_resp_status = 0
         hr_resp_headers: dict = {}
         hr_resp_body = ""
@@ -5227,6 +5360,7 @@ def _auth_matrix_finding(
             summary=f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
             status=result.get("status"),
         ),
+        finding_source="deterministic_probe",
         validation_status="confirmed",
         validation_note="Confirmed by deterministic auth matrix module.",
         created_at=_utcnow(),
@@ -5276,6 +5410,7 @@ def _idor_matrix_finding(
             status=result.get("status"),
             marker="protected object page content matched",
         ),
+        finding_source="deterministic_probe",
         validation_status="confirmed",
         validation_note="Confirmed by deterministic IDOR matrix module.",
         created_at=_utcnow(),
@@ -5909,6 +6044,7 @@ def _deterministic_findings_from_results(
                     marker=title,
                 ),
                 screenshot_b64=result.get("screenshot_b64"),
+                finding_source="deterministic_probe",
                 validation_status="confirmed",
                 validation_note="Confirmed by deterministic module.",
                 created_at=_utcnow(),
@@ -7107,6 +7243,7 @@ async def _stored_xss_sweep(
                     marker=matched,
                 ),
                 screenshot_b64=None,
+                finding_source="deterministic_probe",
                 validation_status="confirmed",
                 validation_note=(
                     f"Canary pattern '{matched}' found in page response during post-scan sweep."

@@ -375,8 +375,17 @@ class BurpRestApiConfigBase(BaseModel):
     enabled: bool = False
     api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
     api_key: str | None = None
+    scan_configuration_name: str | None = Field(
+        default="Audit checks - all except time-based detection methods",
+        max_length=200,
+    )
     scan_sqli: bool = True
     scan_xss: bool = True
+    scan_command_injection: bool = True
+    scan_path_traversal: bool = True
+    scan_ssrf: bool = True
+    scan_xxe: bool = True
+    scan_ssti: bool = True
 
     @field_validator("api_url")
     @classmethod
@@ -385,6 +394,14 @@ class BurpRestApiConfigBase(BaseModel):
         if not v.startswith(("http://", "https://")):
             raise ValueError("api_url must start with http:// or https://")
         return v
+
+    @field_validator("scan_configuration_name")
+    @classmethod
+    def _normalize_scan_configuration_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
 
 class BurpRestApiConfigIn(BurpRestApiConfigBase):
@@ -689,6 +706,7 @@ class ScanFindingOut(BaseModel):
     evidence_json: str = "[]"
     evidence_items: list[dict] = Field(default_factory=list)
     screenshot_b64: str | None
+    finding_source: str = "unknown"
     validation_status: str
     validation_note: str | None
     created_at: datetime
@@ -709,6 +727,7 @@ class ScanFindingImportIn(BaseModel):
     request_evidence: str = ""
     response_evidence: str = ""
     evidence_items: list[dict] = Field(default_factory=list)
+    finding_source: str = "manual_import"
     validation_status: str = "unvalidated"
     validation_note: str | None = None
 

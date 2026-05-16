@@ -764,6 +764,7 @@ legend {
 .structured-evidence-confidence { color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0; }
 .structured-evidence-value { margin: 0; padding: 9px 10px; font-family: monospace; font-size: 11px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto; }
 .owasp-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; background: rgba(99,102,241,0.12); color: #818cf8; font-family: monospace; }
+.source-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-weight: 700; background: rgba(45,212,191,0.12); color: #5eead4; }
 .sev-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
 .sev-critical { background: rgba(239,68,68,0.2);   color: #ef4444; }
 .sev-high     { background: rgba(249,115,22,0.2);  color: #f97316; }

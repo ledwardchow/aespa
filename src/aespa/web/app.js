@@ -2141,7 +2141,7 @@ function TestRunDetail({ runId, initialTab }) {
                   });
                   const topSev = items.reduce((b,f)=>
                     (SEV_ORDER[f.severity]??99)<(SEV_ORDER[b]??99)?f.severity:b, items[0].severity);
-                  return { title, items:sortedItems, topSev, count:items.length, owasp:items[0].owasp_category };
+                  return { title, items:sortedItems, topSev, count:items.length, source:items[0].finding_source || "unknown" };
                 }).sort((a,b)=>{
                   return (SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99);
                 });
@@ -2239,7 +2239,7 @@ function TestRunDetail({ runId, initialTab }) {
                     <tr key=${groupKey} className="finding-group-row"
                       onClick=${()=>toggleGroup(groupKey)}>
                       <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
-                      <td><span className="owasp-badge">${g.owasp}</span></td>
+                      <td><span className="source-badge">${sourceLabel(g.source)}</span></td>
                       <td className="finding-title">
                         <span className="group-chevron">${expandedGroups.has(groupKey)?"▾":"▸"}</span>
                         ${g.title}
@@ -2258,7 +2258,7 @@ function TestRunDetail({ runId, initialTab }) {
                   <thead>
                     <tr>
                       <th>Severity <div className="col-rh" onMouseDown=${e=>startFindResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
-                      <th>OWASP <div className="col-rh" onMouseDown=${e=>startFindResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th>Source <div className="col-rh" onMouseDown=${e=>startFindResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
                       <th>Title <div className="col-rh" onMouseDown=${e=>startFindResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
                       <th># <div className="col-rh" onMouseDown=${e=>startFindResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
                       <th></th>
@@ -2269,7 +2269,7 @@ function TestRunDetail({ runId, initialTab }) {
                       <tr key=${g.title} className="finding-group-row"
                         onClick=${()=>toggleGroup(g.title)}>
                         <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
-                        <td><span className="owasp-badge">${g.owasp}</span></td>
+                        <td><span className="source-badge">${sourceLabel(g.source)}</span></td>
                         <td className="finding-title">
                           <span className="group-chevron">${expandedGroups.has(g.title)?"▾":"▸"}</span>
                           ${g.title}
@@ -3004,8 +3004,14 @@ const DEFAULT_BURP_REST_API_FORM = {
   enabled:false,
   api_url:"http://127.0.0.1:1337",
   api_key:"",
+  scan_configuration_name:"Audit checks - all except time-based detection methods",
   scan_sqli:true,
   scan_xss:true,
+  scan_command_injection:true,
+  scan_path_traversal:true,
+  scan_ssrf:true,
+  scan_xxe:true,
+  scan_ssti:true,
 };
 
 function burpRestApiToForm(cfg) {
@@ -3013,8 +3019,14 @@ function burpRestApiToForm(cfg) {
     enabled:cfg.enabled ?? false,
     api_url:cfg.api_url || DEFAULT_BURP_REST_API_FORM.api_url,
     api_key:cfg.api_key || "",
+    scan_configuration_name:cfg.scan_configuration_name || "",
     scan_sqli:cfg.scan_sqli ?? true,
     scan_xss:cfg.scan_xss ?? true,
+    scan_command_injection:cfg.scan_command_injection ?? true,
+    scan_path_traversal:cfg.scan_path_traversal ?? true,
+    scan_ssrf:cfg.scan_ssrf ?? true,
+    scan_xxe:cfg.scan_xxe ?? true,
+    scan_ssti:cfg.scan_ssti ?? true,
   } : {...DEFAULT_BURP_REST_API_FORM};
 }
 
@@ -3023,8 +3035,14 @@ function burpRestApiPayload(form) {
     enabled:!!form.enabled,
     api_url:form.api_url.trim(),
     api_key:form.api_key.trim() || null,
+    scan_configuration_name:form.scan_configuration_name.trim() || null,
     scan_sqli:!!form.scan_sqli,
     scan_xss:!!form.scan_xss,
+    scan_command_injection:!!form.scan_command_injection,
+    scan_path_traversal:!!form.scan_path_traversal,
+    scan_ssrf:!!form.scan_ssrf,
+    scan_xxe:!!form.scan_xxe,
+    scan_ssti:!!form.scan_ssti,
   };
 }
 
@@ -3078,9 +3096,15 @@ function BurpRestApiSettings() {
             onChange=${e=>upd({api_key:e.target.value})}/>
           <div className="field-hint">Set an API key in Burp REST API settings and paste it here for authentication.</div>
         </div>
+        <div className="field">
+          <label>Scan configuration <span className="subtle">(optional)</span></label>
+          <input type="text" value=${form.scan_configuration_name} placeholder="Audit checks - all except time-based detection methods"
+            onChange=${e=>upd({scan_configuration_name:e.target.value})}/>
+          <div className="field-hint">Only enter a named configuration that exists in your Burp project. Blank avoids Unknown configuration errors.</div>
+        </div>
         <div className="divider"/>
         <div className="form-section-title">Vulnerability Classes to Active Scan</div>
-        <div className="field-hint" style=${{marginBottom:"8px"}}>When the LLM identifies a finding matching an enabled class, Burp will actively scan that endpoint.</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>When the LLM investigates a selected vulnerability class on a URL, Burp will actively scan that endpoint.</div>
         <label className="toggle-row">
           <input type="checkbox" checked=${form.scan_sqli} onChange=${e=>upd({scan_sqli:e.target.checked})}/>
           <span>SQL Injection (A03)</span>
@@ -3088,6 +3112,26 @@ function BurpRestApiSettings() {
         <label className="toggle-row">
           <input type="checkbox" checked=${form.scan_xss} onChange=${e=>upd({scan_xss:e.target.checked})}/>
           <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_command_injection} onChange=${e=>upd({scan_command_injection:e.target.checked})}/>
+          <span>OS Command Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_path_traversal} onChange=${e=>upd({scan_path_traversal:e.target.checked})}/>
+          <span>Path Traversal / File Inclusion (A01/A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_ssrf} onChange=${e=>upd({scan_ssrf:e.target.checked})}/>
+          <span>Server-Side Request Forgery / SSRF (A10)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_xxe} onChange=${e=>upd({scan_xxe:e.target.checked})}/>
+          <span>XML External Entity / XXE (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_ssti} onChange=${e=>upd({scan_ssti:e.target.checked})}/>
+          <span>Server-Side Template Injection / SSTI (A03)</span>
         </label>
         <div className="divider"/>
         <div className="row spread">
@@ -3414,12 +3458,12 @@ function ExternalIntegrationsPage() {
     <div className="topbar">
       <div className="topbar-title">External Integrations</div>
     </div>
-    <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+    <div className="content" style=${{paddingLeft:16,paddingRight:0,paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
       <div className="tab-bar">
         <button className=${"tab-btn"+(tab==="burp"?" active":"")} onClick=${()=>setTab("burp")}>Burp Suite Integration</button>
         <button className=${"tab-btn"+(tab==="proxy"?" active":"")} onClick=${()=>setTab("proxy")}>Upstream Proxy</button>
       </div>
-      <div className="scroll-content" style=${{flex:1,paddingTop:16}}>
+      <div className="scroll-content" style=${{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",paddingTop:16,paddingBottom:28}}>
         ${tab==="burp"  && html`<${BurpRestApiSettings}/>`}
         ${tab==="proxy" && html`<${UpstreamProxySettings}/>`}
       </div>
@@ -3438,6 +3482,19 @@ function truncUrl(url, maxLen=40) {
     const s = u.hostname + u.pathname + u.hash;
     return s.length > maxLen ? s.slice(0, maxLen-1) + "…" : s;
   } catch { return url.slice(0, maxLen); }
+}
+
+function sourceLabel(source) {
+  const labels = {
+    dynamic_scan: "Dynamic",
+    burp_active_scan: "Burp",
+    burp_mcp: "Burp MCP",
+    deterministic_probe: "Deterministic",
+    structured_scan: "Structured",
+    manual_import: "Imported",
+    unknown: "Unknown",
+  };
+  return labels[source] || String(source || "Unknown").replace(/_/g, " ");
 }
 
 function apiTranscriptText(text) {
@@ -3518,6 +3575,7 @@ function findingsToMarkdown(findings, meta = {}) {
       "",
       `- Severity: ${markdownListValue(f.severity)}`,
       `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
       `- Validation: ${markdownListValue(f.validation_status)}`,
       `- Affected URL: ${markdownListValue(f.affected_url)}`,
       `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
@@ -3567,6 +3625,7 @@ function findingImportPayload(f) {
     evidence: f.evidence || "",
     request_evidence: f.request_evidence || "",
     response_evidence: f.response_evidence || "",
+    finding_source: f.finding_source || "manual_import",
     validation_status: f.validation_status || "unvalidated",
     validation_note: f.validation_note || null,
   };
@@ -3594,6 +3653,7 @@ function parseFindingsMarkdownSections(markdown) {
       title: match[1],
       severity: markdownBullet(block, "Severity"),
       owasp_category: markdownBullet(block, "OWASP"),
+      finding_source: markdownBullet(block, "Source") || "manual_import",
       validation_status: markdownBullet(block, "Validation"),
       affected_url: markdownBullet(block, "Affected URL"),
       cvss_score: cvssMatch ? parseFloat(cvssMatch[1]) : 0,

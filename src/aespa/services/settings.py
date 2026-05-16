@@ -224,8 +224,14 @@ def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfi
         enabled=cfg.enabled,
         api_url=cfg.api_url,
         api_key=cfg.api_key,
+        scan_configuration_name=cfg.scan_configuration_name,
         scan_sqli=cfg.scan_sqli,
         scan_xss=cfg.scan_xss,
+        scan_command_injection=cfg.scan_command_injection,
+        scan_path_traversal=cfg.scan_path_traversal,
+        scan_ssrf=cfg.scan_ssrf,
+        scan_xxe=cfg.scan_xxe,
+        scan_ssti=cfg.scan_ssti,
         updated_at=cfg.updated_at,
     )
 
@@ -245,8 +251,14 @@ def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) 
     cfg.enabled = payload.enabled
     cfg.api_url = payload.api_url
     cfg.api_key = payload.api_key
+    cfg.scan_configuration_name = payload.scan_configuration_name
     cfg.scan_sqli = payload.scan_sqli
     cfg.scan_xss = payload.scan_xss
+    cfg.scan_command_injection = payload.scan_command_injection
+    cfg.scan_path_traversal = payload.scan_path_traversal
+    cfg.scan_ssrf = payload.scan_ssrf
+    cfg.scan_xxe = payload.scan_xxe
+    cfg.scan_ssti = payload.scan_ssti
     cfg.updated_at = _utcnow()
 
     session.add(cfg)
