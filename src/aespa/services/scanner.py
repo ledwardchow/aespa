@@ -16,6 +16,7 @@ import logging
 import re
 import secrets
 import time
+from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -26,13 +27,30 @@ from sqlmodel import Session, select
 from aespa.db import get_engine
 from aespa.models import Credential, CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
+from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
+from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config
 
 log = logging.getLogger("aespa.scanner")
+
+_scanner_proxy_var: _ContextVar[str | None] = _ContextVar('_scanner_proxy', default=None)
+
+
+def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
+    kwargs.setdefault("verify", False)
+    if proxy := _scanner_proxy_var.get():
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
+
+
+def _playwright_proxy() -> dict:
+    if proxy := _scanner_proxy_var.get():
+        return {"proxy": {"server": proxy}}
+    return {}
+
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -46,6 +64,7 @@ _active_sessions: dict[int, dict[int, dict]] = {}  # run_id → cred_id → sess
 _thinking_stop_requested: set[int] = set()
 _thinking_tasks: dict[int, asyncio.Task] = {}
 _thinking_scan_status: dict[int, str] = {}  # run_id → idle|running|complete|stopped|failed
+_burp_active_scan_targets: set[tuple[int, str, str]] = set()
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -1540,6 +1559,7 @@ def _finding_from_llm(
         response_evidence=_response_evidence(response_evidence),
         evidence_json=evidence_json,
         screenshot_b64=matched.get("screenshot_b64"),
+        finding_source=str(raw.get("finding_source") or "dynamic_scan"),
         validation_status=validation_status,
         validation_note=validation_note,
         created_at=_utcnow(),
@@ -1563,6 +1583,80 @@ def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> in
             s.add(finding)
             saved += 1
         s.commit()
+    return saved
+
+
+def _deterministic_sessions_from_vault(
+    run_id: int,
+    session_vault: dict[str, dict],
+) -> dict[int, dict]:
+    """Return credential-shaped sessions for deterministic auth/IDOR modules."""
+    configured: dict[int, dict] = {}
+    synthetic_id = -1
+    for label, stored in (session_vault or {}).items():
+        if stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            key = credential_id
+        else:
+            while synthetic_id in configured:
+                synthetic_id -= 1
+            key = synthetic_id
+            synthetic_id -= 1
+        configured[key] = {
+            "label": stored.get("label") or label,
+            "username": stored.get("username") or label,
+            "credential_id": credential_id,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+            "source": stored.get("source") or "scanner_session",
+            "metadata": stored.get("metadata") or {},
+        }
+    return _merge_persisted_sessions(run_id, configured)
+
+
+def _run_deterministic_analysis_for_dynamic_results(
+    *,
+    run_id: int,
+    base_url: str,
+    pages_snapshot: list[dict],
+    first_page_id: int | None,
+    results: list[dict],
+) -> int:
+    """Persist deterministic findings from dynamic scan observations."""
+    if not results:
+        return 0
+
+    findings: list[ScanFinding] = []
+    with Session(get_engine()) as s:
+        for result in results:
+            affected = str(result.get("url") or base_url)
+            page_id = _dynamic_finding_page_id(
+                s,
+                run_id=run_id,
+                affected_url=affected,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+            )
+            findings.extend(_deterministic_findings_from_results(
+                run_id=run_id,
+                page_id=page_id or first_page_id,
+                page_url=affected,
+                results=[result],
+            ))
+
+    saved = _save_deterministic_findings(run_id, findings)
+    if saved:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "deterministic_analysis",
+            "status": "complete",
+            "message": f"{saved} deterministic finding(s) recorded from dynamic scan evidence.",
+            "data": {"finding_count": saved},
+        })
+        _emit_scan_update(run_id)
     return saved
 
 
@@ -1697,6 +1791,341 @@ def _finding_exists(
         )
         for f in existing
     )
+
+
+# ── Burp REST API helpers ──────────────────────────────────────────────────────
+
+_SQLI_TITLE_KEYWORDS = frozenset(["sql injection", "sql error", "blind sql", "sqli", "sql blind"])
+_XSS_TITLE_KEYWORDS = frozenset([
+    "xss", "cross-site scripting", "cross site scripting",
+    "reflected xss", "stored xss", "dom xss", "dom-based xss",
+])
+_COMMAND_INJECTION_KEYWORDS = frozenset([
+    "command injection", "os command", "shell injection", "shell command",
+    "rce", "remote code execution",
+])
+_PATH_TRAVERSAL_KEYWORDS = frozenset([
+    "path traversal", "directory traversal", "file traversal",
+    "local file inclusion", "remote file inclusion", "lfi", "rfi",
+])
+_SSRF_KEYWORDS = frozenset([
+    "ssrf", "server-side request forgery", "server side request forgery",
+])
+_XXE_KEYWORDS = frozenset([
+    "xxe", "xml external entity", "external entity",
+])
+_SSTI_KEYWORDS = frozenset([
+    "ssti", "server-side template injection", "server side template injection",
+    "template injection",
+])
+
+
+def _finding_triggers_burp_sqli(finding: ScanFinding) -> bool:
+    title = (finding.title or "").lower()
+    cat = (finding.owasp_category or "").lower()
+    return (
+        any(kw in title for kw in _SQLI_TITLE_KEYWORDS)
+        or ("sql" in title and "inject" in title)
+        or ("sql" in title and cat.startswith("a03"))
+    )
+
+
+def _finding_triggers_burp_xss(finding: ScanFinding) -> bool:
+    title = (finding.title or "").lower()
+    desc = (finding.description or "").lower()
+    return (
+        any(kw in title for kw in _XSS_TITLE_KEYWORDS)
+        or any(kw in desc for kw in _XSS_TITLE_KEYWORDS)
+        or "cross-site" in title
+    )
+
+
+def _finding_burp_vuln_class(finding: ScanFinding) -> str | None:
+    text = " ".join([
+        finding.title or "",
+        finding.description or "",
+        finding.owasp_category or "",
+    ])
+    return _burp_vuln_class_from_text(text)
+
+
+def _burp_vuln_class_from_text(text: str) -> str | None:
+    text = (text or "").lower()
+    if (
+        any(kw in text for kw in _SQLI_TITLE_KEYWORDS)
+        or ("sql" in text and "inject" in text)
+    ):
+        return "SQL Injection"
+    if any(kw in text for kw in _XSS_TITLE_KEYWORDS) or "cross-site" in text:
+        return "XSS"
+    if any(kw in text for kw in _COMMAND_INJECTION_KEYWORDS):
+        return "Command Injection"
+    if any(kw in text for kw in _PATH_TRAVERSAL_KEYWORDS):
+        return "Path Traversal"
+    if any(kw in text for kw in _SSRF_KEYWORDS):
+        return "SSRF"
+    if any(kw in text for kw in _XXE_KEYWORDS):
+        return "XXE"
+    if any(kw in text for kw in _SSTI_KEYWORDS):
+        return "SSTI"
+    return None
+
+
+def _burp_class_enabled(config, vuln_class: str) -> bool:
+    return {
+        "SQL Injection": config.scan_sqli,
+        "XSS": config.scan_xss,
+        "Command Injection": config.scan_command_injection,
+        "Path Traversal": config.scan_path_traversal,
+        "SSRF": config.scan_ssrf,
+        "XXE": config.scan_xxe,
+        "SSTI": config.scan_ssti,
+    }.get(vuln_class, False)
+
+
+def _burp_investigation_candidate(tool_input: dict, note: str) -> tuple[str, str] | None:
+    text = " ".join(
+        str(tool_input.get(key) or "")
+        for key in ("hypothesis", "payload_purpose", "observation", "url")
+    )
+    text = f"{note or ''} {text}"
+    vuln_class = _burp_vuln_class_from_text(text)
+    if not vuln_class:
+        return None
+    title = str(tool_input.get("hypothesis") or tool_input.get("payload_purpose") or note or vuln_class)
+    return vuln_class, title[:200]
+
+
+def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (cookies, extra_headers) from the first non-anonymous session found."""
+    for label, session in (session_vault or {}).items():
+        if session.get("kind") == "anonymous":
+            continue
+        cookies = dict(session.get("cookies") or {})
+        headers = dict(session.get("extra_headers") or {})
+        if cookies or headers:
+            return cookies, headers
+    return {}, {}
+
+
+async def _run_burp_active_scan_for_target(
+    run_id: int,
+    *,
+    url: str,
+    title: str,
+    vuln_class: str,
+    session_vault: dict,
+    finding_id: int | None = None,
+    page_id: int | None = None,
+) -> None:
+    """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
+    with Session(get_engine()) as s:
+        burp_cfg = get_burp_rest_api_config(s)
+
+    if not burp_cfg.enabled:
+        return
+
+    if not _burp_class_enabled(burp_cfg, vuln_class):
+        return
+
+    if not url.startswith(("http://", "https://")):
+        return
+    target_key = (run_id, vuln_class, url)
+    if target_key in _burp_active_scan_targets:
+        return
+    _burp_active_scan_targets.add(target_key)
+
+    log.info(
+        "burp_rest: scheduling active scan for %s url=%s",
+        vuln_class, url,
+    )
+    target_label = f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "start",
+        "message": (
+            f"Burp active scan triggered for {vuln_class} {target_label} — {url}"
+        ),
+        "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
+    })
+
+    cookies, extra_headers = _best_burp_auth(session_vault)
+    try:
+        task_id = await burp_rest_svc.launch_active_scan(
+            burp_cfg,
+            url,
+            cookies=cookies or None,
+            extra_headers=extra_headers or None,
+        )
+    except Exception as exc:
+        log.warning("burp_rest: failed to launch scan for %s %s: %s", vuln_class, url, exc)
+        _burp_active_scan_targets.discard(target_key)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "error",
+            "message": f"Burp active scan launch failed: {exc}",
+            "data": {"finding_id": finding_id, "url": url},
+        })
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "running",
+        "message": f"Burp active scan task {task_id} running for \"{title}\" — polling…",
+        "data": {"finding_id": finding_id, "task_id": task_id, "url": url},
+    })
+
+    try:
+        issues = await burp_rest_svc.wait_for_scan(burp_cfg, task_id)
+    except Exception as exc:
+        log.warning("burp_rest: scan task %d error: %s", task_id, exc)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "error",
+            "message": f"Burp active scan task {task_id} failed: {exc}",
+            "data": {"finding_id": finding_id, "task_id": task_id},
+        })
+        return
+
+    if not issues:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "complete",
+            "message": f"Burp active scan task {task_id} completed — no issues found.",
+            "data": {"finding_id": finding_id, "task_id": task_id, "issue_count": 0},
+        })
+        return
+
+    # Persist Burp findings as new ScanFinding rows
+    saved_count = 0
+    with Session(get_engine()) as s:
+        for issue in issues:
+            issue_url = issue.get("affected_url") or url
+            issue_title = f"[Burp] {issue.get('name') or 'Unknown issue'}"
+            owasp = "A03"  # Injection
+            severity = issue.get("severity") or "medium"
+            # Skip if already exists
+            if _finding_exists(s, run_id=run_id, title=issue_title, affected_url=issue_url, owasp_category=owasp):
+                continue
+            new_finding = ScanFinding(
+                test_run_id=run_id,
+                page_id=page_id,
+                owasp_category=owasp,
+                severity=severity,
+                title=issue_title,
+                description=issue.get("description") or "",
+                impact="",
+                likelihood=f"Confidence: {issue.get('confidence', 'unknown')}",
+                recommendation=issue.get("remediation") or "",
+                cvss_score=0.0,
+                cvss_vector="",
+                affected_url=issue_url,
+                evidence=f"Burp active scan task {task_id} identified: {issue.get('name')}",
+                request_evidence=issue.get("request_evidence") or "",
+                response_evidence=issue.get("response_evidence") or "",
+                evidence_json="[]",
+                screenshot_b64=None,
+                finding_source="burp_active_scan",
+                validation_status="confirmed",
+                validation_note=f"Confirmed by Burp active scanner (task {task_id}).",
+                created_at=_utcnow(),
+            )
+            s.add(new_finding)
+            saved_count += 1
+        if saved_count:
+            s.commit()
+
+    log.info(
+        "burp_rest: task %d saved %d finding(s) for run_id=%s url=%s",
+        task_id, saved_count, run_id, url,
+    )
+    if saved_count:
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "complete",
+        "message": (
+            f"Burp active scan task {task_id} complete — "
+            f"{len(issues)} issue(s) found, {saved_count} saved."
+        ),
+        "data": {
+            "finding_id": finding_id,
+            "task_id": task_id,
+            "url": url,
+            "issue_count": len(issues),
+            "saved_count": saved_count,
+        },
+    })
+
+
+async def _run_burp_active_scan_for_finding(
+    run_id: int,
+    finding: ScanFinding,
+    session_vault: dict,
+) -> None:
+    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
+    vuln_class = _finding_burp_vuln_class(finding)
+    if not vuln_class:
+        return
+    await _run_burp_active_scan_for_target(
+        run_id,
+        url=finding.affected_url or "",
+        title=finding.title or vuln_class,
+        vuln_class=vuln_class,
+        session_vault=session_vault,
+        finding_id=finding.id,
+        page_id=finding.page_id,
+    )
+
+
+def _schedule_burp_active_scan(
+    run_id: int,
+    finding: ScanFinding,
+    session_vault: dict,
+) -> None:
+    """Schedule a Burp active scan as a background asyncio task (non-blocking)."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            _run_burp_active_scan_for_finding(run_id, finding, session_vault)
+        )
+    except RuntimeError:
+        # No running event loop (e.g. during tests) — silently skip
+        pass
+
+
+def _schedule_burp_active_scan_for_investigation(
+    run_id: int,
+    tool_input: dict,
+    note: str,
+    session_vault: dict,
+) -> None:
+    candidate = _burp_investigation_candidate(tool_input, note)
+    if not candidate:
+        return
+    url = str(tool_input.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return
+    vuln_class, title = candidate
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            _run_burp_active_scan_for_target(
+                run_id,
+                url=url,
+                title=title,
+                vuln_class=vuln_class,
+                session_vault=session_vault,
+            )
+        )
+    except RuntimeError:
+        pass
 
 
 async def _persist_dynamic_finding(
@@ -2078,8 +2507,15 @@ async def _do_thinking_scan(run_id: int) -> None:
             for i in _intel_rows
         ]
 
+        upstream_proxy = get_upstream_proxy_config(s)
+        scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
+
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
+
+    _scanner_proxy_var.set(scanner_proxy_url)
+    llm_svc.set_llm_proxy(llm_proxy_url)
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -2160,7 +2596,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
         traffic_svc.setup_playwright_logging(browser_ctx, run_id)
         pw_page = await browser_ctx.new_page()
 
@@ -2281,7 +2717,17 @@ async def _do_thinking_scan(run_id: int) -> None:
             )
             crawl_context = f"{_cookie_alert}\n\n{crawl_context}"
 
-        async with httpx.AsyncClient(
+        deterministic_sessions = _deterministic_sessions_from_vault(run_id, session_vault)
+        _active_sessions[run_id] = deterministic_sessions
+        if run_id not in _thinking_stop_requested:
+            await _run_deterministic_site_modules(
+                run_id=run_id,
+                base_url=base_url,
+                cred_sessions=deterministic_sessions,
+                scanner_policy=scanner_policy,
+            )
+
+        async with _make_scanner_client(
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -2486,6 +2932,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
+                        _schedule_burp_active_scan(run_id, saved, session_vault)
                     events_svc.emit(run_id, {
                         "type": "scanner_phase",
                         "phase": "thinking_step",
@@ -3216,13 +3663,21 @@ async def _do_thinking_scan(run_id: int) -> None:
     if all_results:
         _thinking_scan_status[run_id] = "analysing"
         _emit_thinking_status(run_id)
+        deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
+            run_id=run_id,
+            base_url=base_url,
+            pages_snapshot=pages_snapshot,
+            first_page_id=first_page_id,
+            results=all_results,
+        )
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_analysis",
             "status": "start",
             "message": (
                 f"Analysing {len(all_results)} probe result(s); "
-                f"{progressive_findings_count} progressive finding(s) already recorded…"
+                f"{progressive_findings_count} progressive and "
+                f"{deterministic_saved} deterministic finding(s) already recorded…"
             ),
         })
         try:
@@ -3546,6 +4001,7 @@ async def _do_agentic_thinking_loop(
                 task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
+                _schedule_burp_active_scan(run_id, saved, session_vault)
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "thinking_step",
@@ -4077,6 +4533,9 @@ async def _do_agentic_thinking_loop(
                 "use_session": hr_use_session,
             },
         })
+        _schedule_burp_active_scan_for_investigation(
+            run_id, tool_input, note, session_vault
+        )
         hr_resp_status = 0
         hr_resp_headers: dict = {}
         hr_resp_body = ""
@@ -4277,7 +4736,7 @@ async def _export_cred_session(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
         page = await ctx.new_page()
         try:
             await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -4318,8 +4777,14 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
+        upstream_proxy = get_upstream_proxy_config(s)
+        scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
+
+    _scanner_proxy_var.set(scanner_proxy_url)
+    llm_svc.set_llm_proxy(llm_proxy_url)
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -4437,6 +4902,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
             ignore_https_errors=True,
+            **_playwright_proxy(),
         )
         traffic_svc.setup_playwright_logging(ctx, run_id)
         pw_page = await ctx.new_page()
@@ -4535,7 +5001,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             )
 
         # Build httpx client with exported auth state.
-        async with httpx.AsyncClient(
+        async with _make_scanner_client(
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s,
@@ -4820,7 +5286,7 @@ async def _fetch_matrix_url(
         cookies = session.get("cookies", {})
         actor = session.get("username") or "credential"
     try:
-        async with httpx.AsyncClient(
+        async with _make_scanner_client(
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,
@@ -4894,6 +5360,7 @@ def _auth_matrix_finding(
             summary=f"Actor `{actor}` received HTTP {result['status']} for a protected/sensitive endpoint.",
             status=result.get("status"),
         ),
+        finding_source="deterministic_probe",
         validation_status="confirmed",
         validation_note="Confirmed by deterministic auth matrix module.",
         created_at=_utcnow(),
@@ -4943,6 +5410,7 @@ def _idor_matrix_finding(
             status=result.get("status"),
             marker="protected object page content matched",
         ),
+        finding_source="deterministic_probe",
         validation_status="confirmed",
         validation_note="Confirmed by deterministic IDOR matrix module.",
         created_at=_utcnow(),
@@ -5387,7 +5855,7 @@ async def _run_bac_checks(
         hdrs     = {"User-Agent": _UA, **session.get("extra_headers", {})}
 
         try:
-            async with httpx.AsyncClient(
+            async with _make_scanner_client(
                 cookies=cookies, headers=hdrs,
                 follow_redirects=follow_redirects, verify=False, timeout=timeout,
             ) as client:
@@ -5531,7 +5999,7 @@ _SENSITIVE_FIELD_PATTERNS = (
 def _deterministic_findings_from_results(
     *,
     run_id: int,
-    page_id: int,
+    page_id: int | None,
     page_url: str,
     results: list[dict],
 ) -> list[ScanFinding]:
@@ -5576,6 +6044,7 @@ def _deterministic_findings_from_results(
                     marker=title,
                 ),
                 screenshot_b64=result.get("screenshot_b64"),
+                finding_source="deterministic_probe",
                 validation_status="confirmed",
                 validation_note="Confirmed by deterministic module.",
                 created_at=_utcnow(),
@@ -5862,7 +6331,7 @@ async def _run_http_probe(
 
     try:
         if session:
-            async with httpx.AsyncClient(
+            async with _make_scanner_client(
                 cookies=session["cookies"],
                 headers={"User-Agent": _UA, **session.get("extra_headers", {})},
                 timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -6316,7 +6785,7 @@ async def _run_form_probe(
     temp_ctx = None
     if session and browser:
         try:
-            temp_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+            temp_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
             cookie_list = [
                 {"name": k, "value": v, "url": url}
                 for k, v in session["cookies"].items()
@@ -6774,6 +7243,7 @@ async def _stored_xss_sweep(
                     marker=matched,
                 ),
                 screenshot_b64=None,
+                finding_source="deterministic_probe",
                 validation_status="confirmed",
                 validation_note=(
                     f"Canary pattern '{matched}' found in page response during post-scan sweep."
