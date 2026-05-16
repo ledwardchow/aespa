@@ -26,6 +26,7 @@ const api = {
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),
   upsertBurpRestApiConfig: (b)    => req("/api/settings/burp-rest-api", { method:"PUT", body:b }),
+  testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),
   getUpstreamProxy: ()            => req("/api/settings/upstream-proxy"),
   upsertUpstreamProxy: (b)        => req("/api/settings/upstream-proxy", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
@@ -3051,6 +3052,8 @@ function BurpRestApiSettings() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
+  const [connTest, setConnTest] = useState(null);
+  const [connTesting, setConnTesting] = useState(false);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
 
   useEffect(() => {
@@ -3067,6 +3070,14 @@ function BurpRestApiSettings() {
       setForm(burpRestApiToForm(savedConfig));
       setSaved(true);
     } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const onTestConnection = async () => {
+    setConnTest(null); setConnTesting(true);
+    try {
+      const result = await api.testBurpConnection();
+      setConnTest(result);
+    } catch(e) { setConnTest({ok:false, message:e.message}); } finally { setConnTesting(false); }
   };
 
   return html`
@@ -3134,8 +3145,14 @@ function BurpRestApiSettings() {
           <span>Server-Side Template Injection / SSTI (A03)</span>
         </label>
         <div className="divider"/>
+        ${connTest&&html`<div className=${"alert "+(connTest.ok?"success":"error")} style=${{marginBottom:"12px"}}>${connTest.message}</div>`}
         <div className="row spread">
-          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <div className="row" style=${{gap:"8px"}}>
+            ${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            <button type="button" className="btn secondary" disabled=${connTesting} onClick=${onTestConnection}>
+              ${connTesting?"Testing…":"Test Connection"}
+            </button>
+          </div>
           <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Burp Settings"}</button>
         </div>
       </form>`}`;

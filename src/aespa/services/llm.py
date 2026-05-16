@@ -757,6 +757,7 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             "bedrock-runtime",
             region_name=region,
             endpoint_url=config.base_url,
+            verify=not _proxy_url,
             **{"config": _boto_cfg} if _boto_cfg else {},
         )
         data = client.converse(
@@ -2295,6 +2296,7 @@ async def _call_with_tools(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
+                    verify=not _proxy_url,
                     **{"config": _boto_cfg} if _boto_cfg else {},
                 )
                 return client.converse(
