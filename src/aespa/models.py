@@ -100,6 +100,33 @@ class ScannerPolicy(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class BurpRestApiConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for Burp Suite REST API integration settings."""
+
+    __tablename__ = "burp_rest_api_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    enabled: bool = Field(default=False)
+    api_url: str = Field(default="http://127.0.0.1:1337")
+    api_key: Optional[str] = Field(default=None)
+    # Vulnerability classes to route to Burp active scan
+    scan_sqli: bool = Field(default=True)
+    scan_xss: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class UpstreamProxyConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for upstream proxy settings."""
+
+    __tablename__ = "upstream_proxy_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    proxy_url: Optional[str] = Field(default=None)
+    proxy_scanner: bool = Field(default=False)
+    proxy_llm: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Test runs ─────────────────────────────────────────────────────────────────
 
 class TestRunStatus(str, Enum):

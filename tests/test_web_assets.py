@@ -16,3 +16,22 @@ def test_static_assets_are_no_cache(client: TestClient):
 
     assert response.status_code == 200
     assert "no-store" in response.headers["cache-control"]
+
+
+def test_scan_buttons_are_available_after_failed_scan(client: TestClient):
+    response = client.get("/app.js")
+
+    assert response.status_code == 200
+    assert '"failed"' in response.text
+    assert "canShowScanStartButtons" in response.text
+    assert "Start Structured Scan" in response.text
+
+
+def test_run_topbar_has_clear_only_crawl_action(client: TestClient):
+    response = client.get("/app.js")
+
+    assert response.status_code == 200
+    assert "Clear crawl" in response.text
+    assert "Clear & restart" not in response.text
+    assert "clearCrawl" in response.text
+    assert 'btn sm secondary" title=${!graph||graph.nodes.length===0 ? "No site map yet' not in response.text

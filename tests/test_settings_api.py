@@ -27,6 +27,30 @@ def test_get_default_models(client: TestClient):
     ]
 
 
+def test_burp_rest_api_config_round_trip(client: TestClient):
+    r = client.get("/api/settings/burp-rest-api")
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+    assert r.json()["api_url"] == "http://127.0.0.1:1337"
+    assert r.json()["scan_sqli"] is True
+    assert r.json()["scan_xss"] is True
+
+    payload = {
+        "enabled": True,
+        "api_url": "http://127.0.0.1:1337",
+        "api_key": None,
+        "scan_sqli": False,
+        "scan_xss": True,
+    }
+    r = client.put("/api/settings/burp-rest-api", json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enabled"] is True
+    assert data["api_url"] == "http://127.0.0.1:1337"
+    assert data["scan_sqli"] is False
+    assert data["scan_xss"] is True
+
+
 def test_upsert_anthropic(client: TestClient):
     r = client.put("/api/settings/llm", json={
         "provider": "anthropic",

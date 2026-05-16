@@ -343,6 +343,58 @@ class RunScannerPolicyOut(ScannerPolicyBase):
     updated_at: datetime | None = None
 
 
+class UpstreamProxyConfigBase(BaseModel):
+    proxy_url: str | None = Field(default=None, max_length=500)
+    proxy_scanner: bool = False
+    proxy_llm: bool = False
+
+    @field_validator("proxy_url")
+    @classmethod
+    def _normalize_proxy_url(cls, v):
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("proxy_url must start with http:// or https://")
+        return v
+
+
+class UpstreamProxyConfigIn(UpstreamProxyConfigBase):
+    pass
+
+
+class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
+    updated_at: datetime
+
+
+class BurpRestApiConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = False
+    api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
+    api_key: str | None = None
+    scan_sqli: bool = True
+    scan_xss: bool = True
+
+    @field_validator("api_url")
+    @classmethod
+    def _normalize_api_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("api_url must start with http:// or https://")
+        return v
+
+
+class BurpRestApiConfigIn(BurpRestApiConfigBase):
+    pass
+
+
+class BurpRestApiConfigOut(BurpRestApiConfigBase):
+    updated_at: datetime
+
+
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 class TestRunCreate(BaseModel):

@@ -9,7 +9,14 @@
       "Bash(Format-Table -AutoSize)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/aespa/services/scanner.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c ' *)",
-      "Bash(uv run *)"
+      "Bash(uv run *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python3 -c ' *)",
+      "Bash(pyenv local *)",
+      "Bash(python -m py_compile src/aespa/models.py src/aespa/schemas.py src/aespa/db.py src/aespa/services/settings.py src/aespa/api/settings.py)",
+      "Bash(python -m py_compile src/aespa/services/llm.py src/aespa/services/scanner.py)",
+      "Bash(python3 -c \"import httpx; import inspect; sig = inspect.signature\\(httpx.AsyncClient.__init__\\); print\\([p for p in sig.parameters if 'proxy' in p.lower\\(\\)]\\)\")"
     ]
   }
 }
