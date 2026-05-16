@@ -24,7 +24,7 @@ from aespa.models import CrawledPage, PageCredentialView, PageLink, TargetIntelI
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config, get_llm_config_for_run
+from aespa.services.settings import get_llm_config, get_llm_config_for_run, get_upstream_proxy_config
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -118,9 +118,12 @@ async def _do_crawl(run_id: int) -> None:
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
         creds = list(site.credentials)
+        upstream_proxy = get_upstream_proxy_config(s)
+        crawl_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
+    _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
     base_url      = _site_base_url(site.base_url)
     login_url     = site.login_url or ""
     requires_auth = site.requires_auth
@@ -160,6 +163,7 @@ async def _do_crawl(run_id: int) -> None:
                 max_pages=max_pages, llm_cfg=llm_cfg,
                 base_netloc=base_netloc, base_path=base_path,
                 phase_idx=idx, total_phases=len(phases),
+                pw_proxy=_pw_proxy,
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -178,6 +182,7 @@ async def _do_crawl(run_id: int) -> None:
         login_url=login_url,
         requires_auth=requires_auth,
         llm_cfg=llm_cfg,
+        pw_proxy=_pw_proxy,
     )
 
     # OR-merge page categories from all credential views into each CrawledPage.
@@ -211,6 +216,7 @@ async def _crawl_as_credential(
     base_path: str,
     phase_idx: int,
     total_phases: int,
+    pw_proxy: dict,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -233,6 +239,7 @@ async def _crawl_as_credential(
         ctx = await browser.new_context(
             user_agent=_UA,
             ignore_https_errors=True,
+            **pw_proxy,
         )
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
@@ -1768,6 +1775,7 @@ async def _reconcile_direct_access(
     login_url: str,
     requires_auth: bool,
     llm_cfg,
+    pw_proxy: dict,
 ) -> None:
     """Mark pages as accessible when a credential can load a known URL directly.
 
@@ -1802,7 +1810,7 @@ async def _reconcile_direct_access(
                 if run_id in _stop_requested:
                     break
                 credential_login_url = _login_url_for_credential(login_url, cred)
-                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **pw_proxy)
                 traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
                 page = await ctx.new_page()
                 try:
