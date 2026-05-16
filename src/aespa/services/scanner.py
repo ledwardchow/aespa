@@ -16,6 +16,7 @@ import logging
 import re
 import secrets
 import time
+from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -26,13 +27,30 @@ from sqlmodel import Session, select
 from aespa.db import get_engine
 from aespa.models import Credential, CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
 from aespa.services import events as events_svc
+from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy
+from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config
 
 log = logging.getLogger("aespa.scanner")
+
+_scanner_proxy_var: _ContextVar[str | None] = _ContextVar('_scanner_proxy', default=None)
+
+
+def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
+    kwargs.setdefault("verify", False)
+    if proxy := _scanner_proxy_var.get():
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
+
+
+def _playwright_proxy() -> dict:
+    if proxy := _scanner_proxy_var.get():
+        return {"proxy": {"server": proxy}}
+    return {}
+
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -1773,6 +1791,213 @@ def _finding_exists(
     )
 
 
+# ── Burp REST API helpers ──────────────────────────────────────────────────────
+
+_SQLI_TITLE_KEYWORDS = frozenset(["sql injection", "sql error", "blind sql", "sqli", "sql blind"])
+_XSS_TITLE_KEYWORDS = frozenset([
+    "xss", "cross-site scripting", "cross site scripting",
+    "reflected xss", "stored xss", "dom xss", "dom-based xss",
+])
+
+
+def _finding_triggers_burp_sqli(finding: ScanFinding) -> bool:
+    title = (finding.title or "").lower()
+    cat = (finding.owasp_category or "").lower()
+    return (
+        any(kw in title for kw in _SQLI_TITLE_KEYWORDS)
+        or ("sql" in title and "inject" in title)
+        or ("sql" in title and cat.startswith("a03"))
+    )
+
+
+def _finding_triggers_burp_xss(finding: ScanFinding) -> bool:
+    title = (finding.title or "").lower()
+    desc = (finding.description or "").lower()
+    return (
+        any(kw in title for kw in _XSS_TITLE_KEYWORDS)
+        or any(kw in desc for kw in _XSS_TITLE_KEYWORDS)
+        or "cross-site" in title
+    )
+
+
+def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (cookies, extra_headers) from the first non-anonymous session found."""
+    for label, session in (session_vault or {}).items():
+        if session.get("kind") == "anonymous":
+            continue
+        cookies = dict(session.get("cookies") or {})
+        headers = dict(session.get("extra_headers") or {})
+        if cookies or headers:
+            return cookies, headers
+    return {}, {}
+
+
+async def _run_burp_active_scan_for_finding(
+    run_id: int,
+    finding: ScanFinding,
+    session_vault: dict,
+) -> None:
+    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
+    with Session(get_engine()) as s:
+        burp_cfg = get_burp_rest_api_config(s)
+
+    if not burp_cfg.enabled:
+        return
+
+    check_sqli = burp_cfg.scan_sqli and _finding_triggers_burp_sqli(finding)
+    check_xss = burp_cfg.scan_xss and _finding_triggers_burp_xss(finding)
+    if not (check_sqli or check_xss):
+        return
+
+    url = finding.affected_url or ""
+    if not url.startswith(("http://", "https://")):
+        return
+
+    vuln_class = "SQL Injection" if check_sqli else "XSS"
+    log.info(
+        "burp_rest: scheduling active scan for %s finding %d url=%s",
+        vuln_class, finding.id, url,
+    )
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "start",
+        "message": (
+            f"Burp active scan triggered for {vuln_class} finding "
+            f"\"{finding.title}\" — {url}"
+        ),
+        "data": {"finding_id": finding.id, "url": url, "vuln_class": vuln_class},
+    })
+
+    cookies, extra_headers = _best_burp_auth(session_vault)
+    try:
+        task_id = await burp_rest_svc.launch_active_scan(
+            burp_cfg,
+            url,
+            cookies=cookies or None,
+            extra_headers=extra_headers or None,
+        )
+    except Exception as exc:
+        log.warning("burp_rest: failed to launch scan for finding %d: %s", finding.id, exc)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "error",
+            "message": f"Burp active scan launch failed: {exc}",
+            "data": {"finding_id": finding.id, "url": url},
+        })
+        return
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "running",
+        "message": f"Burp active scan task {task_id} running for \"{finding.title}\" — polling…",
+        "data": {"finding_id": finding.id, "task_id": task_id, "url": url},
+    })
+
+    try:
+        issues = await burp_rest_svc.wait_for_scan(burp_cfg, task_id)
+    except Exception as exc:
+        log.warning("burp_rest: scan task %d error: %s", task_id, exc)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "error",
+            "message": f"Burp active scan task {task_id} failed: {exc}",
+            "data": {"finding_id": finding.id, "task_id": task_id},
+        })
+        return
+
+    if not issues:
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "burp_active_scan",
+            "status": "complete",
+            "message": f"Burp active scan task {task_id} completed — no issues found.",
+            "data": {"finding_id": finding.id, "task_id": task_id, "issue_count": 0},
+        })
+        return
+
+    # Persist Burp findings as new ScanFinding rows
+    saved_count = 0
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        for issue in issues:
+            issue_url = issue.get("affected_url") or url
+            issue_title = f"[Burp] {issue.get('name') or 'Unknown issue'}"
+            owasp = "A03"  # Injection
+            severity = issue.get("severity") or "medium"
+            # Skip if already exists
+            if _finding_exists(s, run_id=run_id, title=issue_title, affected_url=issue_url, owasp_category=owasp):
+                continue
+            new_finding = ScanFinding(
+                test_run_id=run_id,
+                page_id=finding.page_id,
+                owasp_category=owasp,
+                severity=severity,
+                title=issue_title,
+                description=issue.get("description") or "",
+                impact="",
+                likelihood=f"Confidence: {issue.get('confidence', 'unknown')}",
+                recommendation=issue.get("remediation") or "",
+                cvss_score=0.0,
+                cvss_vector="",
+                affected_url=issue_url,
+                evidence=f"Burp active scan task {task_id} identified: {issue.get('name')}",
+                request_evidence=issue.get("request_evidence") or "",
+                response_evidence=issue.get("response_evidence") or "",
+                evidence_json="[]",
+                screenshot_b64=None,
+                validation_status="confirmed",
+                validation_note=f"Confirmed by Burp active scanner (task {task_id}).",
+                created_at=_utcnow(),
+            )
+            s.add(new_finding)
+            saved_count += 1
+        if saved_count:
+            s.commit()
+
+    log.info(
+        "burp_rest: task %d saved %d finding(s) for run_id=%s url=%s",
+        task_id, saved_count, run_id, url,
+    )
+    if saved_count:
+        _emit_scan_update(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "burp_active_scan",
+        "status": "complete",
+        "message": (
+            f"Burp active scan task {task_id} complete — "
+            f"{len(issues)} issue(s) found, {saved_count} saved."
+        ),
+        "data": {
+            "finding_id": finding.id,
+            "task_id": task_id,
+            "url": url,
+            "issue_count": len(issues),
+            "saved_count": saved_count,
+        },
+    })
+
+
+def _schedule_burp_active_scan(
+    run_id: int,
+    finding: ScanFinding,
+    session_vault: dict,
+) -> None:
+    """Schedule a Burp active scan as a background asyncio task (non-blocking)."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            _run_burp_active_scan_for_finding(run_id, finding, session_vault)
+        )
+    except RuntimeError:
+        # No running event loop (e.g. during tests) — silently skip
+        pass
+
+
 async def _persist_dynamic_finding(
     *,
     run_id: int,
@@ -2152,8 +2377,15 @@ async def _do_thinking_scan(run_id: int) -> None:
             for i in _intel_rows
         ]
 
+        upstream_proxy = get_upstream_proxy_config(s)
+        scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
+
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
+
+    _scanner_proxy_var.set(scanner_proxy_url)
+    llm_svc.set_llm_proxy(llm_proxy_url)
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -2234,7 +2466,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
         traffic_svc.setup_playwright_logging(browser_ctx, run_id)
         pw_page = await browser_ctx.new_page()
 
@@ -2365,7 +2597,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 scanner_policy=scanner_policy,
             )
 
-        async with httpx.AsyncClient(
+        async with _make_scanner_client(
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -2570,6 +2802,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
+                        _schedule_burp_active_scan(run_id, saved, session_vault)
                     events_svc.emit(run_id, {
                         "type": "scanner_phase",
                         "phase": "thinking_step",
@@ -3638,6 +3871,7 @@ async def _do_agentic_thinking_loop(
                 task_graph_svc.mark_related_hypothesis_confirmed(run_id, active_task_id)
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
+                _schedule_burp_active_scan(run_id, saved, session_vault)
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "thinking_step",
@@ -4369,7 +4603,7 @@ async def _export_cred_session(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+        ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
         page = await ctx.new_page()
         try:
             await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
@@ -4410,8 +4644,14 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
+        upstream_proxy = get_upstream_proxy_config(s)
+        scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
+
+    _scanner_proxy_var.set(scanner_proxy_url)
+    llm_svc.set_llm_proxy(llm_proxy_url)
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -4529,6 +4769,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
             ignore_https_errors=True,
+            **_playwright_proxy(),
         )
         traffic_svc.setup_playwright_logging(ctx, run_id)
         pw_page = await ctx.new_page()
@@ -4627,7 +4868,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
             )
 
         # Build httpx client with exported auth state.
-        async with httpx.AsyncClient(
+        async with _make_scanner_client(
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s,
@@ -4912,7 +5153,7 @@ async def _fetch_matrix_url(
         cookies = session.get("cookies", {})
         actor = session.get("username") or "credential"
     try:
-        async with httpx.AsyncClient(
+        async with _make_scanner_client(
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,
@@ -5479,7 +5720,7 @@ async def _run_bac_checks(
         hdrs     = {"User-Agent": _UA, **session.get("extra_headers", {})}
 
         try:
-            async with httpx.AsyncClient(
+            async with _make_scanner_client(
                 cookies=cookies, headers=hdrs,
                 follow_redirects=follow_redirects, verify=False, timeout=timeout,
             ) as client:
@@ -5954,7 +6195,7 @@ async def _run_http_probe(
 
     try:
         if session:
-            async with httpx.AsyncClient(
+            async with _make_scanner_client(
                 cookies=session["cookies"],
                 headers={"User-Agent": _UA, **session.get("extra_headers", {})},
                 timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -6408,7 +6649,7 @@ async def _run_form_probe(
     temp_ctx = None
     if session and browser:
         try:
-            temp_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+            temp_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
             cookie_list = [
                 {"name": k, "value": v, "url": url}
                 for k, v in session["cookies"].items()

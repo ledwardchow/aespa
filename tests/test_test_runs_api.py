@@ -1,7 +1,7 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa.db import get_session
 from aespa.models import ScannerSession, TargetIntelItem
@@ -842,6 +842,99 @@ def test_list_pages_empty(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}/pages")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_clear_crawl_resets_run_without_restarting(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.main import create_app
+    from aespa.models import (
+        CrawledPage,
+        PageCredentialView,
+        PageLink,
+        ScanFinding,
+        Site,
+        TestRun,
+        TestRunStatus,
+    )
+    from aespa.services import crawler as crawler_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    started: list[int] = []
+
+    async def fake_start_crawl(run_id: int) -> None:
+        started.append(run_id)
+
+    monkeypatch.setattr(crawler_svc, "start_crawl", fake_start_crawl)
+
+    def _override_session():
+        with Session(engine) as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+                pages_discovered=1,
+                current_url="https://target.local/account",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            page = CrawledPage(test_run_id=run.id, url="https://target.local/account")
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+            session.add(PageLink(test_run_id=run.id, source_page_id=page.id, target_url="https://target.local/next"))
+            session.add(PageCredentialView(test_run_id=run.id, page_id=page.id, username="alice"))
+            session.add(TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account"))
+            finding = ScanFinding(
+                test_run_id=run.id,
+                page_id=page.id,
+                owasp_category="A01",
+                severity="medium",
+                title="Finding",
+                description="Desc",
+            )
+            session.add(finding)
+            session.commit()
+            run_id = run.id
+            finding_id = finding.id
+
+        with TestClient(app, raise_server_exceptions=True) as api_client:
+            response = api_client.post(f"/api/test-runs/{run_id}/crawl/clear")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "pending"
+        assert data["pages_discovered"] == 0
+        assert data["current_url"] is None
+        assert started == []
+
+        with Session(engine) as session:
+            assert session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all() == []
+            assert session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all() == []
+            assert session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all() == []
+            assert session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all() == []
+            finding_after = session.get(ScanFinding, finding_id)
+            assert finding_after is not None
+            assert finding_after.page_id is None
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 # ── Cascaded delete when site is deleted ──────────────────────────────────────

@@ -1,7 +1,8 @@
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import ScanFinding
+from aespa.models import CrawledPage, ScanFinding, Site, TrafficEntry
+from aespa.models import TestRun as RunModel
 from aespa.services import scanner
 
 
@@ -203,3 +204,4 @@ def test_dynamic_page_assignment_returns_none_for_non_page_finding():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+

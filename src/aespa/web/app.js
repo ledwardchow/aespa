@@ -24,6 +24,10 @@ const api = {
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
+  getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),
+  upsertBurpRestApiConfig: (b)    => req("/api/settings/burp-rest-api", { method:"PUT", body:b }),
+  getUpstreamProxy: ()            => req("/api/settings/upstream-proxy"),
+  upsertUpstreamProxy: (b)        => req("/api/settings/upstream-proxy", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -32,6 +36,7 @@ const api = {
   startRun:         (id)          => req(`/api/test-runs/${id}/start`,   { method:"POST" }),
   stopRun:          (id)          => req(`/api/test-runs/${id}/stop`,    { method:"POST" }),
   restartRun:       (id)          => req(`/api/test-runs/${id}/restart`, { method:"POST" }),
+  clearCrawl:       (id)          => req(`/api/test-runs/${id}/crawl/clear`, { method:"POST" }),
   getGraph:         (id)          => req(`/api/test-runs/${id}/graph`),
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
@@ -45,6 +50,7 @@ const api = {
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
+  startBurpScan:    (id)          => req(`/api/test-runs/${id}/burp-scan/start`,          { method:"POST" }),
   startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
   stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
@@ -107,10 +113,12 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)\/edit$/)))       return { name: "site-edit",   id: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)\/runs\/new$/)))  return { name: "run-new",     siteId: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
+  if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
+  if (hash === "#/external-integrations")                return { name: "external-integrations" };
 
   return { name: "list" };
 }
@@ -256,6 +264,7 @@ function App() {
   const onActiveJobs = route.name === "active-jobs";
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
+  const onExternalIntegrations = route.name === "external-integrations";
   const [appVersion, setAppVersion] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
@@ -286,6 +295,9 @@ function App() {
           <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Scan Policy">
             <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Scan Policy"}
           </a>
+          <a href="#/external-integrations" className=${"nav-item"+(onExternalIntegrations?" active":"")} title="External Integrations">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " External Integrations"}
+          </a>
         </nav>
         <div className="sidebar-footer">
           <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
@@ -302,9 +314,10 @@ function App() {
         ${route.name==="site-detail" && html`<${SiteDetail} key=${route.id} siteId=${route.id}/>`}
         ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
-        ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id}/>`}
+        ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
+        ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
       </div>
     </div>
   `;
@@ -854,7 +867,33 @@ const workflowBadge = (run, opts = {}) => {
   return html`<span className=${"badge " + st.key}>${st.label}</span>`;
 };
 
-function TestRunDetail({ runId }) {
+// ── Column resize hook ────────────────────────────────────────────────────────
+function useColResize(storageKey, defaults) {
+  const [widths, setWidths] = useState(() => {
+    try { const s = localStorage.getItem(storageKey); if (s) return JSON.parse(s); } catch (_) {}
+    return defaults;
+  });
+  const startResize = useCallback((idx, e) => {
+    e.preventDefault(); e.stopPropagation();
+    const startX = e.clientX;
+    const th = e.currentTarget.closest("th");
+    const startW = widths[idx] ?? (th ? th.offsetWidth : 100);
+    const onMove = ev => {
+      const newW = Math.max(36, startW + ev.clientX - startX);
+      setWidths(prev => { const n = [...prev]; n[idx] = newW; return n; });
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      setWidths(prev => { try { localStorage.setItem(storageKey, JSON.stringify(prev)); } catch (_) {} return prev; });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [storageKey, widths]);
+  return [widths, startResize];
+}
+
+function TestRunDetail({ runId, initialTab }) {
   const [run, setRun]           = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
@@ -863,7 +902,7 @@ function TestRunDetail({ runId }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState("sitemap");
+  const [activeTab, setActiveTab] = useState(initialTab || "sitemap");
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
@@ -917,6 +956,9 @@ function TestRunDetail({ runId }) {
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
   const prevGraphKeyRef                     = useRef("");
+
+  const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -1618,14 +1660,14 @@ function TestRunDetail({ runId }) {
       setError(e.message);
     }
   };
-  const onRestart = async () => {
-    if (!confirm("Delete all crawled pages for this run and start fresh?")) return;
+  const onClearCrawl = async () => {
+    if (!confirm("Clear all crawled pages for this run?")) return;
     try {
       setCrawlStopRequested(false);
       setScanStopRequested(false);
       setGraph({nodes:[], links:[]});
-      const r = await api.restartRun(runId);
-      setRun({...r, status: "running", per_user_progress: {}});
+      const r = await api.clearCrawl(runId);
+      setRun({...r, status: "pending", per_user_progress: null});
     } catch(e) { setError(e.message); }
   };
 
@@ -1650,11 +1692,12 @@ function TestRunDetail({ runId }) {
     danger:"var(--danger)",
   };
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
-  const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
+  const canClearCrawl = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
   const canStopScan = effectiveScanStatus === "running";
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !isDynamicScanActive(effectiveThinkingStatus);
+  const canShowScanStartButtons = ["idle","complete","stopped","failed"].includes(effectiveScanStatus) || effectiveScanStatus == null;
 
   return html`
     <div className="topbar">
@@ -1666,11 +1709,14 @@ function TestRunDetail({ runId }) {
           ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
         </div>
         ${run && run.llm_config_id && runProfiles.length > 0 && html`
-          <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
+        <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
             LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
           </div>`}
       </div>
       <div className="topbar-actions">
+        ${canStart && html`<button className="btn sm" onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
+        ${!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
+          <button className="btn sm" title="Run the adaptive Pentest" onClick=${onStartThinkingScan}><${IconPlay}/> Start Pentest</button>`}
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
         ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop Structured Scan"}</button>`}
@@ -1683,34 +1729,37 @@ function TestRunDetail({ runId }) {
 
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
-          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
+          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
-          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
+          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); nav(`#/runs/${runId}/scan`); }}>Structured Scan</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
-          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
-          Activity${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
+          Pentest Activity Log${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
-          onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); nav(`#/runs/${runId}/intelligence`); }}>
           Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="tasks"?" active":"")}
-          onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); nav(`#/runs/${runId}/tasks`); }}>
           Task Graph${taskGraph?.counts?.tasks>0 ? html` <span className="traffic-count">${taskGraph.counts.tasks}</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="sessions"?" active":"")}
-          onClick=${()=>{ setActiveTab("sessions"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("sessions"); setSelNode(null); nav(`#/runs/${runId}/sessions`); }}>
           Sessions${scannerSessions?.counts?.total>0 ? html` <span className="traffic-count">${scannerSessions.counts.total}</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
-          onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("findings"); setSelNode(null); nav(`#/runs/${runId}/findings`); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
         </button>
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
-          onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
           Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
+        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && canShowScanStartButtons && html`
+          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title=${!graph||graph.nodes.length===0 ? "No site map yet — crawl first" : "Run the Structured Scan page-by-page scanner"} onClick=${onStartScan} disabled=${!graph||graph.nodes.length===0}><${IconPlay}/> Start Structured Scan</button>`}
+        ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
         ${(activeTab==="sitemap"||activeTab==="scan") && run?.credentials?.length > 1 && html`
           <div className="view-toggle" style=${{margin:"auto 8px auto 0"}}>
             <button className=${"btn ghost sm"+(graphView==="scope"?" active":"")}
@@ -1718,20 +1767,6 @@ function TestRunDetail({ runId }) {
             <button className=${"btn ghost sm"+(graphView==="user"?" active":"")}
               onClick=${()=>setGraphView("user")}>By User</button>
           </div>`}
-        ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
-        ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
-        ${activeTab==="scan" && effectiveScanStatus==="running" && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop Structured Scan"}
-          </button>`}
-        ${activeTab==="scan" && canStopThinking && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
-            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop Dynamic Scan"}
-          </button>`}
-        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title=${!graph||graph.nodes.length===0 ? "No site map yet — crawl first" : "Run the Structured Scan page-by-page scanner"} onClick=${onStartScan} disabled=${!graph||graph.nodes.length===0}><${IconPlay}/> Start Structured Scan</button>`}
-        ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the adaptive Dynamic Scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>`}
       </div>
 
       ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
@@ -2219,13 +2254,14 @@ function TestRunDetail({ runId }) {
                 const fpRows = renderStatusRows(fpGroups, "fp");
                 return html`
                 <table className="findings-table">
+                  <colgroup>${findColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
                   <thead>
                     <tr>
-                      <th style=${{width:80}}>Severity</th>
-                      <th style=${{width:52}}>OWASP</th>
-                      <th>Title</th>
-                      <th style=${{width:28}}>#</th>
-                      <th style=${{width:60}}></th>
+                      <th>Severity <div className="col-rh" onMouseDown=${e=>startFindResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th>OWASP <div className="col-rh" onMouseDown=${e=>startFindResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th>Title <div className="col-rh" onMouseDown=${e=>startFindResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th># <div className="col-rh" onMouseDown=${e=>startFindResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2456,16 +2492,17 @@ function TestRunDetail({ runId }) {
 
           <div className="traffic-table-wrap" ref=${trafficTableRef}>
             <table className="traffic-table">
+              <colgroup>${trafficColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
               <thead>
                 <tr>
-                  <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}</th>
-                  <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}</th>
-                  <th className="sortable" style=${{width:80}} onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}</th>
-                  <th className="sortable" style=${{width:90}} onClick=${()=>onTrafficSort("username")}>User${sortArrow("username")}</th>
-                  <th className="sortable" style=${{width:60}} onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}</th>
-                  <th className="sortable" style=${{width:54}} onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}</th>
-                  <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}</th>
-                  <th className="sortable tr-dur" onClick=${()=>onTrafficSort("duration_ms")}>Duration${sortArrow("duration_ms")}</th>
+                  <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("username")}>User${sortArrow("username")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(6,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable tr-dur" onClick=${()=>onTrafficSort("duration_ms")}>Duration${sortArrow("duration_ms")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(7,e)} onClick=${e=>e.stopPropagation()}/></th>
                 </tr>
               </thead>
               <tbody>
@@ -2507,6 +2544,7 @@ function TestRunDetail({ runId }) {
 }
 
 function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear, clearing }) {
+  const [intelColW, startIntelResize] = useColResize("colw:intel", [116, 86, 120, null, 130, 82]);
   const counts = data?.counts || {};
   const items = data?.items || [];
   const kinds = ["", ...Object.keys(counts).sort()];
@@ -2557,14 +2595,15 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear,
 
       <div className="intel-table-wrap">
         <table className="intel-table">
+          <colgroup>${intelColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
           <thead>
             <tr>
-              <th style=${{width:116}}>Kind</th>
-              <th style=${{width:86}}>Method</th>
-              <th>Key</th>
-              <th>Value</th>
-              <th style=${{width:130}}>Source</th>
-              <th style=${{width:82}}>Conf.</th>
+              <th>Kind <div className="col-rh" onMouseDown=${e=>startIntelResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Method <div className="col-rh" onMouseDown=${e=>startIntelResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Key <div className="col-rh" onMouseDown=${e=>startIntelResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Value <div className="col-rh" onMouseDown=${e=>startIntelResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Source <div className="col-rh" onMouseDown=${e=>startIntelResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Conf. <div className="col-rh" onMouseDown=${e=>startIntelResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
             </tr>
           </thead>
           <tbody>
@@ -2593,6 +2632,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear,
 }
 
 function ScannerSessionsPanel({ runId, data, refresh }) {
+  const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
   const kinds = Object.entries(counts)
@@ -2643,15 +2683,16 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
 
       <div className="intel-table-wrap">
         <table className="intel-table scanner-session-table">
+          <colgroup>${sessColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
           <thead>
             <tr>
-              <th style=${{width:150}}>Label</th>
-              <th style=${{width:100}}>Kind</th>
-              <th style=${{width:130}}>User</th>
-              <th>Auth material</th>
-              <th style=${{width:180}}>Source</th>
-              <th style=${{width:170}}>Updated</th>
-              <th style=${{width:150}}></th>
+              <th>Label <div className="col-rh" onMouseDown=${e=>startSessResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Kind <div className="col-rh" onMouseDown=${e=>startSessResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>User <div className="col-rh" onMouseDown=${e=>startSessResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Auth material <div className="col-rh" onMouseDown=${e=>startSessResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Source <div className="col-rh" onMouseDown=${e=>startSessResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Updated <div className="col-rh" onMouseDown=${e=>startSessResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -2689,6 +2730,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
 }
 
 function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
+  const [taskColW, startTaskResize] = useColResize("colw:tasks", [88, 84, null, 86, 200]);
   const hypotheses = data?.hypotheses || [];
   const tasks = data?.tasks || [];
   const counts = data?.counts || {};
@@ -2755,14 +2797,15 @@ function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
               <div className="hypothesis-rationale">${h.rationale || h.description}</div>
               ${groupedTasks.length > 0 && html`
                 <div className="task-table-wrap">
-                  <table className="task-table">
+                  <table className="task-table" style=${{tableLayout:"fixed"}}>
+                    <colgroup>${taskColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
                     <thead>
                       <tr>
-                        <th style=${{width:88}}>Status</th>
-                        <th style=${{width:84}}>Type</th>
-                        <th>Task</th>
-                        <th style=${{width:86}}>Method</th>
-                        <th>Target</th>
+                        <th>Status <div className="col-rh" onMouseDown=${e=>startTaskResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Type <div className="col-rh" onMouseDown=${e=>startTaskResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Task <div className="col-rh" onMouseDown=${e=>startTaskResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Method <div className="col-rh" onMouseDown=${e=>startTaskResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Target <div className="col-rh" onMouseDown=${e=>startTaskResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2896,6 +2939,160 @@ function ScannerPolicySettings() {
         <div className="row spread">
           <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
           <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save policy"}</button>
+        </div>
+      </form>`}`;
+}
+
+function UpstreamProxySettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(await api.getUpstreamProxy()); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const saved = await api.upsertUpstreamProxy({
+        proxy_url: form.proxy_scanner || form.proxy_llm ? (form.proxy_url||"").trim()||null : null,
+        proxy_scanner: !!form.proxy_scanner,
+        proxy_llm: !!form.proxy_llm,
+      });
+      setForm(saved);
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const anyProxy = form && (form.proxy_scanner || form.proxy_llm);
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Upstream Proxy</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${!!form.proxy_scanner} onChange=${e=>upd({proxy_scanner:e.target.checked})}/>
+          <span>Send target requests through an upstream proxy</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${!!form.proxy_llm} onChange=${e=>upd({proxy_llm:e.target.checked})}/>
+          <span>Send LLM requests through the upstream proxy</span>
+        </label>
+        ${anyProxy&&html`
+          <div className="field">
+            <label>Proxy URL</label>
+            <input type="url" required value=${form.proxy_url||""} placeholder="http://127.0.0.1:8080" onChange=${e=>upd({proxy_url:e.target.value})}/>
+          </div>
+        `}
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save"}</button>
+        </div>
+      </form>`}`;
+}
+
+const DEFAULT_BURP_REST_API_FORM = {
+  enabled:false,
+  api_url:"http://127.0.0.1:1337",
+  api_key:"",
+  scan_sqli:true,
+  scan_xss:true,
+};
+
+function burpRestApiToForm(cfg) {
+  return cfg ? {
+    enabled:cfg.enabled ?? false,
+    api_url:cfg.api_url || DEFAULT_BURP_REST_API_FORM.api_url,
+    api_key:cfg.api_key || "",
+    scan_sqli:cfg.scan_sqli ?? true,
+    scan_xss:cfg.scan_xss ?? true,
+  } : {...DEFAULT_BURP_REST_API_FORM};
+}
+
+function burpRestApiPayload(form) {
+  return {
+    enabled:!!form.enabled,
+    api_url:form.api_url.trim(),
+    api_key:form.api_key.trim() || null,
+    scan_sqli:!!form.scan_sqli,
+    scan_xss:!!form.scan_xss,
+  };
+}
+
+function BurpRestApiSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(burpRestApiToForm(await api.getBurpRestApiConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertBurpRestApiConfig(burpRestApiPayload(form));
+      setForm(burpRestApiToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Burp Suite Active Scan</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable Burp Suite active scan integration</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, the scanner automatically triggers Burp Suite active scans for
+          enabled vulnerability classes as the LLM discovers candidate endpoints.
+          Requires Burp Suite Professional with the REST API enabled (Burp menu → Settings → Suite → REST API).
+        </div>
+        <div className="field">
+          <label>REST API URL</label>
+          <input type="url" required value=${form.api_url} placeholder="http://127.0.0.1:1337"
+            onChange=${e=>upd({api_url:e.target.value})}/>
+          <div className="field-hint">Default: http://127.0.0.1:1337. Configure under Burp → Settings → Suite → REST API.</div>
+        </div>
+        <div className="field">
+          <label>API key <span className="subtle">(optional)</span></label>
+          <input type="password" value=${form.api_key} placeholder="Leave blank if not configured"
+            onChange=${e=>upd({api_key:e.target.value})}/>
+          <div className="field-hint">Set an API key in Burp REST API settings and paste it here for authentication.</div>
+        </div>
+        <div className="divider"/>
+        <div className="form-section-title">Vulnerability Classes to Active Scan</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>When the LLM identifies a finding matching an enabled class, Burp will actively scan that endpoint.</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_sqli} onChange=${e=>upd({scan_sqli:e.target.checked})}/>
+          <span>SQL Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_xss} onChange=${e=>upd({scan_xss:e.target.checked})}/>
+          <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Burp Settings"}</button>
         </div>
       </form>`}`;
 }
@@ -3208,6 +3405,24 @@ function ScanPolicyPage() {
     <div className="topbar"><div className="topbar-title">Scan Policy</div></div>
     <div className="content scroll-content">
       <${ScannerPolicySettings}/>
+    </div>`;
+}
+
+function ExternalIntegrationsPage() {
+  const [tab, setTab] = useState("burp");
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">External Integrations</div>
+    </div>
+    <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(tab==="burp"?" active":"")} onClick=${()=>setTab("burp")}>Burp Suite Integration</button>
+        <button className=${"tab-btn"+(tab==="proxy"?" active":"")} onClick=${()=>setTab("proxy")}>Upstream Proxy</button>
+      </div>
+      <div className="scroll-content" style=${{flex:1,paddingTop:16}}>
+        ${tab==="burp"  && html`<${BurpRestApiSettings}/>`}
+        ${tab==="proxy" && html`<${UpstreamProxySettings}/>`}
+      </div>
     </div>`;
 }
 
