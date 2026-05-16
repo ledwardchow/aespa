@@ -775,6 +775,7 @@ def test_deterministic_result_analysis_detects_sql_error():
 
     assert len(findings) == 1
     assert findings[0].title == "SQL injection error disclosure"
+    assert findings[0].finding_source == "deterministic_probe"
     assert findings[0].validation_status == "confirmed"
 
 
@@ -858,6 +859,7 @@ def test_dynamic_deterministic_analysis_persists_findings(monkeypatch):
         assert saved == 1
         assert len(findings) == 1
         assert findings[0].title == "SQL injection error disclosure"
+        assert findings[0].finding_source == "deterministic_probe"
         assert findings[0].page_id == page_id
     finally:
         SQLModel.metadata.drop_all(engine)
