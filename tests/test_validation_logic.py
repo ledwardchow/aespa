@@ -775,6 +775,7 @@ def test_deterministic_result_analysis_detects_sql_error():
 
     assert len(findings) == 1
     assert findings[0].title == "SQL injection error disclosure"
+    assert findings[0].finding_source == "deterministic_probe"
     assert findings[0].validation_status == "confirmed"
 
 
@@ -798,6 +799,104 @@ def test_deterministic_result_analysis_detects_reflected_xss():
     assert len(findings) == 1
     assert findings[0].title == "Reflected cross-site scripting"
     assert findings[0].owasp_category == "A03"
+
+
+def test_dynamic_deterministic_analysis_persists_findings(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/search",
+                status="crawled",
+                in_scope=True,
+            )
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+
+            run_id = run.id
+            page_id = page.id
+
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+        monkeypatch.setattr(scanner.events_svc, "emit", lambda *args, **kwargs: None)
+
+        saved = scanner._run_deterministic_analysis_for_dynamic_results(
+            run_id=run_id,
+            base_url="https://target.local",
+            pages_snapshot=[{"id": page_id, "url": "https://target.local/search"}],
+            first_page_id=page_id,
+            results=[{
+                "desc": "SQLi in param 'q': ' OR '1'='1",
+                "url": "https://target.local/search?q=%27",
+                "status": 500,
+                "headers": {"content-type": "text/html"},
+                "body": "SQL syntax error near unexpected quote",
+                "request_evidence": "GET /search?q='",
+                "response_evidence": "HTTP/1.1 500\nSQL syntax error",
+            }],
+        )
+
+        with Session(engine) as session:
+            findings = session.exec(select(ScanFinding)).all()
+
+        assert saved == 1
+        assert len(findings) == 1
+        assert findings[0].title == "SQL injection error disclosure"
+        assert findings[0].finding_source == "deterministic_probe"
+        assert findings[0].page_id == page_id
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_deterministic_sessions_from_vault_merges_non_anonymous_sessions(monkeypatch):
+    monkeypatch.setattr(
+        scanner,
+        "_merge_persisted_sessions",
+        lambda run_id, sessions: sessions,
+    )
+
+    sessions = scanner._deterministic_sessions_from_vault(
+        1,
+        {
+            "anonymous": {"kind": "anonymous", "cookies": {"a": "1"}},
+            "configured_primary": {
+                "kind": "cookie",
+                "username": "alice",
+                "credential_id": 42,
+                "cookies": {"sid": "abc"},
+                "extra_headers": {},
+            },
+            "registered_user": {
+                "kind": "bearer",
+                "username": "bob",
+                "extra_headers": {"Authorization": "Bearer token"},
+            },
+        },
+    )
+
+    assert 42 in sessions
+    assert sessions[42]["username"] == "alice"
+    synthetic = [key for key in sessions if key < 0]
+    assert len(synthetic) == 1
+    assert sessions[synthetic[0]]["username"] == "bob"
 
 
 def test_thinking_action_log_message_describes_investigation_and_payload():
