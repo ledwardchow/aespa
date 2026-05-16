@@ -16,6 +16,7 @@ from aespa.schemas import (
     UpstreamProxyConfigOut,
 )
 from aespa.services import settings as settings_service
+from aespa.services import burp_rest as burp_rest_svc
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -110,6 +111,15 @@ def upsert_burp_rest_api_config(
     session: Session = Depends(get_session),
 ) -> BurpRestApiConfigOut:
     return settings_service.upsert_burp_rest_api_config(session, payload)
+
+
+@router.post("/burp-rest-api/test-connection")
+async def test_burp_rest_api_connection(
+    session: Session = Depends(get_session),
+) -> dict:
+    cfg = settings_service.get_burp_rest_api_config(session)
+    ok, message = await burp_rest_svc.test_connection(cfg)
+    return {"ok": ok, "message": message}
 
 
 @router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)

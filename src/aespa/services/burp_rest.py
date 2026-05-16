@@ -181,21 +181,44 @@ async def launch_active_scan(
     )
     endpoint = f"{config.api_url}/v0.1/scan"
     log.info("burp_rest: launching active scan url=%s endpoint=%s", url, endpoint)
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-        resp = await client.post(endpoint, json=body, headers=_headers(config))
+    async with httpx.AsyncClient(timeout=30.0, verify=False, trust_env=False) as client:
+        try:
+            resp = await client.post(endpoint, json=body, headers=_headers(config))
+        except httpx.ConnectError as exc:
+            raise BurpRestApiError(
+                f"Cannot connect to Burp REST API at {endpoint} — "
+                f"check that Burp Suite is running and the REST API is enabled "
+                f"(Burp → Settings → Suite → REST API): {exc}"
+            ) from exc
         if resp.status_code not in {200, 201}:
             raise BurpRestApiError(
                 f"Burp REST API error {resp.status_code} launching scan: {resp.text[:500]}"
             )
-        data = resp.json()
 
-    task_id = data.get("task_id") or data.get("id")
+        # Burp returns 201 with Location: /v0.1/scan/{id} and an empty body.
+        # Fall back to JSON body parsing for any proxy/wrapper that includes it.
+        task_id: int | None = None
+        location = resp.headers.get("location", "")
+        if location:
+            try:
+                task_id = int(location.rstrip("/").rsplit("/", 1)[-1])
+            except (ValueError, IndexError):
+                pass
+        if task_id is None and resp.content:
+            try:
+                data = resp.json()
+                raw = data.get("task_id") or data.get("id")
+                if raw is not None:
+                    task_id = int(raw)
+            except Exception:
+                pass
+
     if task_id is None:
         raise BurpRestApiError(
-            f"Burp REST API did not return a task_id; response: {str(data)[:300]}"
+            f"Burp REST API did not return a task_id (Location: {location!r})"
         )
     log.info("burp_rest: scan launched task_id=%s url=%s", task_id, url)
-    return int(task_id)
+    return task_id
 
 
 async def get_scan_status(config: BurpRestApiConfigOut, task_id: int) -> dict:
@@ -205,7 +228,7 @@ async def get_scan_status(config: BurpRestApiConfigOut, task_id: int) -> dict:
     ``issue_events``.
     """
     endpoint = f"{config.api_url}/v0.1/scan/{task_id}"
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+    async with httpx.AsyncClient(timeout=30.0, verify=False, trust_env=False) as client:
         resp = await client.get(endpoint, headers=_headers(config))
         if resp.status_code == 404:
             raise BurpRestApiError(f"Burp REST API: scan task {task_id} not found")
@@ -254,3 +277,29 @@ async def wait_for_scan(
 
         interval = _poll_interval(elapsed)
         await asyncio.sleep(interval)
+
+
+async def test_connection(config: BurpRestApiConfigOut) -> tuple[bool, str]:
+    """Probe the Burp REST API with a GET /v0.1/scan/0 and return (ok, message).
+
+    Uses the same client settings as the live scan path so the result is
+    representative.  A 404 from Burp counts as success — it means the server
+    is up and reachable; the scan ID just doesn't exist.
+    """
+    endpoint = f"{config.api_url}/v0.1/scan/0"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=False, trust_env=False) as client:
+            resp = await client.get(endpoint, headers=_headers(config))
+        if resp.status_code in {200, 400, 404}:
+            return True, f"Connected to Burp REST API at {config.api_url}"
+        return False, f"Burp REST API at {config.api_url} returned HTTP {resp.status_code}: {resp.text[:200]}"
+    except httpx.ConnectError:
+        return False, (
+            f"Cannot connect to Burp REST API at {config.api_url}. "
+            "Check that Burp Suite is running and the REST API is enabled "
+            "(Burp → Settings → Suite → REST API)."
+        )
+    except httpx.TimeoutException:
+        return False, f"Connection to Burp REST API at {config.api_url} timed out."
+    except Exception as exc:
+        return False, f"Unexpected error testing Burp REST API at {config.api_url}: {exc}"
