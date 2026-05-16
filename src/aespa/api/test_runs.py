@@ -12,6 +12,7 @@ from aespa.models import (
     PageLink,
     PentestHypothesis,
     PentestTask,
+    ScanFinding,
     ScannerSession,
     TargetIntelItem,
     TestRun,
@@ -146,6 +147,34 @@ def _auto_name(session: Session, site_id: int) -> str:
         select(TestRun).where(TestRun.site_id == site_id)
     ).all()
     return f"Run #{len(existing) + 1}"
+
+
+def _clear_crawl_state(session: Session, run: TestRun) -> None:
+    run_id = run.id
+    if run_id is None:
+        return
+
+    for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
+        if finding.page_id is not None:
+            finding.page_id = None
+            session.add(finding)
+    for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
+        session.delete(lnk)
+    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
+        session.delete(view)
+    for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
+        session.delete(item)
+    for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
+        session.delete(pg)
+
+    run.status = TestRunStatus.pending
+    run.pages_discovered = 0
+    run.started_at = None
+    run.completed_at = None
+    run.error_message = None
+    run.current_url = None
+    run.per_user_progress = None
+    session.add(run)
 
 
 # ── Per-site: create / list ───────────────────────────────────────────────────
@@ -360,29 +389,27 @@ async def restart_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
-    # Wipe existing results
-    for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
-        session.delete(lnk)
-    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
-        session.delete(view)
-    for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
-        session.delete(item)
-    for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
-        session.delete(pg)
-    # Reset run state
-    run.status = TestRunStatus.pending
-    run.pages_discovered = 0
-    run.started_at = None
-    run.completed_at = None
-    run.error_message = None
-    run.current_url = None
-    run.per_user_progress = None
-    session.add(run)
+    _clear_crawl_state(session, run)
     session.commit()
     session.refresh(run)
     summary = _run_summary(run, session)
     await crawler_svc.start_crawl(run_id)
     return summary
+
+
+@router.post("/api/test-runs/{run_id}/crawl/clear", response_model=TestRunSummary)
+def clear_test_run_crawl(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> TestRunSummary:
+    """Wipe crawled pages/links for this run without starting a new crawl."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Stop the run before clearing crawl data.")
+    _clear_crawl_state(session, run)
+    session.commit()
+    session.refresh(run)
+    return _run_summary(run, session)
 
 
 @router.post("/api/test-runs/{run_id}/stop", response_model=TestRunSummary)

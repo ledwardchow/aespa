@@ -271,6 +271,7 @@ def import_findings(
             request_evidence=item.request_evidence,
             response_evidence=item.response_evidence,
             evidence_json=json.dumps(item.evidence_items),
+            finding_source=(item.finding_source or "manual_import").strip()[:64],
             validation_status=import_validation_status,
             validation_note=item.validation_note,
         )
