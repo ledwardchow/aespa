@@ -16,7 +16,9 @@
       "Bash(pyenv local *)",
       "Bash(python -m py_compile src/aespa/models.py src/aespa/schemas.py src/aespa/db.py src/aespa/services/settings.py src/aespa/api/settings.py)",
       "Bash(python -m py_compile src/aespa/services/llm.py src/aespa/services/scanner.py)",
-      "Bash(python3 -c \"import httpx; import inspect; sig = inspect.signature\\(httpx.AsyncClient.__init__\\); print\\([p for p in sig.parameters if 'proxy' in p.lower\\(\\)]\\)\")"
+      "Bash(python3 -c \"import httpx; import inspect; sig = inspect.signature\\(httpx.AsyncClient.__init__\\); print\\([p for p in sig.parameters if 'proxy' in p.lower\\(\\)]\\)\")",
+      "Bash(gh pr *)",
+      "Bash(python3 -c \"import json,sys; prs=json.load\\(sys.stdin\\); [print\\(f'PR#{p[\\\\\"number\\\\\"]} [{p[\\\\\"mergedAt\\\\\"]}] {p[\\\\\"headRefName\\\\\"]}: {p[\\\\\"title\\\\\"]}'\\) for p in prs]\")"
     ]
   }
 }

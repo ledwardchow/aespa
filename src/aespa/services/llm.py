@@ -969,6 +969,22 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
 
     return "\n\n".join(sections) if sections else ""
 
+_SEVERITY_CALIBRATION = """\
+Severity calibration:
+- Rate generic server or framework version disclosure as info by default, or low if the
+  disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
+- Rate verbose stack traces, file paths, class names, and framework error pages as low by
+  default. Raise to medium only when the response exposes secrets, credentials, tokens,
+  exploitable SQL details, or sensitive user/business data.
+- Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
+  as low by default unless a browser-based proof shows sensitive authenticated data can be
+  read cross-origin. Raise only when the evidence demonstrates real data exposure or account
+  impact, not merely permissive headers.
+- Do not rate informational disclosure as medium or high solely because it is remotely
+  reachable. Severity should follow demonstrated impact, not theoretical chaining.
+"""
+
+
 _ANALYSE_PROMPT = """\
 You are a web application penetration tester reviewing probe results for OWASP vulnerabilities.
 
@@ -1011,6 +1027,8 @@ Write each finding using the report headings represented by these JSON fields:
 Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
 Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
 medium 4.0-6.9, low 0.1-3.9, info 0.0.
+
+{severity_calibration}
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
@@ -1151,7 +1169,11 @@ async def _analyse_probe_batch(
     result_texts: list[str],
 ) -> list[dict]:
     results_text = "\n\n".join(result_texts)
-    prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
+    prompt = _ANALYSE_PROMPT.format(
+        url=url,
+        results=results_text,
+        severity_calibration=_SEVERITY_CALIBRATION,
+    )
     raw = await _call(config, prompt, None)
     try:
         findings = _extract_json(raw or "", expect=list)
@@ -1692,7 +1714,9 @@ Constraint: limit to echo/sleep/id/whoami — no reverse shells, no rm/del.""",
     "cors": r"""─── CORS (WSTG-CLNT-07) ─────────────────────────────────────────────────────────
 Test on every API endpoint that returns user data. Add `Origin: https://evil.com` to the request.
 Vulnerable: response contains `Access-Control-Allow-Origin: https://evil.com`.
-Critical: also has `Access-Control-Allow-Credentials: true`.
+Default severity is low, including when `Access-Control-Allow-Credentials: true` is present.
+Escalate only with browser-enforceable proof that sensitive authenticated data is readable
+cross-origin, or when the permissive policy directly enables a confirmed account-impacting flow.
 Also test: `Origin: null` (sandbox), `Origin: https://evil.target.com` (subdomain trust),
   `Origin: http://target.com` (scheme downgrade on HTTPS site).""",
 
@@ -2804,6 +2828,8 @@ Think like a human tester:
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
 
+{severity_calibration}
+
 Return ONLY valid JSON (no markdown, no prose):
 
 To fetch targeted scanner context without issuing a target request:
@@ -3107,6 +3133,7 @@ async def thinking_next_action(
         max_steps=max_steps,
         pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
         history_text=history_text,
+        severity_calibration=_SEVERITY_CALIBRATION,
     )
     if emit_fn:
         try:
