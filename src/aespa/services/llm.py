@@ -750,10 +750,14 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         profile = os.getenv("AWS_PROFILE")
         session_kwargs = {"profile_name": profile} if profile else {}
         session = boto3.Session(**session_kwargs)
+        from botocore.config import Config as _BotocoreConfig
+        _proxy_url = _llm_proxy_var.get()
+        _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
         client = session.client(
             "bedrock-runtime",
             region_name=region,
             endpoint_url=config.base_url,
+            **{"config": _boto_cfg} if _boto_cfg else {},
         )
         data = client.converse(
             modelId=config.model,
@@ -1898,7 +1902,7 @@ _THINKING_AGENT_SYSTEM = (
     "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
     "No duplicates.\n"
-    "- done: end the assessment when key areas are covered or steps are exhausted.\n"
+    "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
     "attack surface.\n"
@@ -2271,8 +2275,12 @@ async def _call_with_tools(
                 data = _resp.json()
         else:
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
+            # Capture proxy URL now — ContextVar values are not inherited by threads.
+            _proxy_url = _llm_proxy_var.get()
+
             def _run_converse():
                 import boto3
+                from botocore.config import Config as _BotocoreConfig
 
                 region = (
                     os.getenv("AWS_REGION")
@@ -2282,10 +2290,12 @@ async def _call_with_tools(
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
+                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
+                    **{"config": _boto_cfg} if _boto_cfg else {},
                 )
                 return client.converse(
                     modelId=config.model,

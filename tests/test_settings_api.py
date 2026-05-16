@@ -32,23 +32,41 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert r.status_code == 200
     assert r.json()["enabled"] is False
     assert r.json()["api_url"] == "http://127.0.0.1:1337"
+    assert r.json()["scan_configuration_name"] == "Audit checks - all except time-based detection methods"
     assert r.json()["scan_sqli"] is True
     assert r.json()["scan_xss"] is True
+    assert r.json()["scan_command_injection"] is True
+    assert r.json()["scan_path_traversal"] is True
+    assert r.json()["scan_ssrf"] is True
+    assert r.json()["scan_xxe"] is True
+    assert r.json()["scan_ssti"] is True
 
     payload = {
         "enabled": True,
         "api_url": "http://127.0.0.1:1337",
         "api_key": None,
+        "scan_configuration_name": "Fast audit",
         "scan_sqli": False,
         "scan_xss": True,
+        "scan_command_injection": False,
+        "scan_path_traversal": True,
+        "scan_ssrf": False,
+        "scan_xxe": True,
+        "scan_ssti": True,
     }
     r = client.put("/api/settings/burp-rest-api", json=payload)
     assert r.status_code == 200
     data = r.json()
     assert data["enabled"] is True
     assert data["api_url"] == "http://127.0.0.1:1337"
+    assert data["scan_configuration_name"] == "Fast audit"
     assert data["scan_sqli"] is False
     assert data["scan_xss"] is True
+    assert data["scan_command_injection"] is False
+    assert data["scan_path_traversal"] is True
+    assert data["scan_ssrf"] is False
+    assert data["scan_xxe"] is True
+    assert data["scan_ssti"] is True
 
 
 def test_upsert_anthropic(client: TestClient):

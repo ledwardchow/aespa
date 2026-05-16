@@ -109,9 +109,17 @@ class BurpRestApiConfig(SQLModel, table=True):
     enabled: bool = Field(default=False)
     api_url: str = Field(default="http://127.0.0.1:1337")
     api_key: Optional[str] = Field(default=None)
+    scan_configuration_name: Optional[str] = Field(
+        default="Audit checks - all except time-based detection methods"
+    )
     # Vulnerability classes to route to Burp active scan
     scan_sqli: bool = Field(default=True)
     scan_xss: bool = Field(default=True)
+    scan_command_injection: bool = Field(default=True)
+    scan_path_traversal: bool = Field(default=True)
+    scan_ssrf: bool = Field(default=True)
+    scan_xxe: bool = Field(default=True)
+    scan_ssti: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -354,6 +362,7 @@ class ScanFinding(SQLModel, table=True):
     response_evidence: str = Field(default="")
     evidence_json: str = Field(default="[]")
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
+    finding_source: str = Field(default="unknown", index=True)
     # Validation fields
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
