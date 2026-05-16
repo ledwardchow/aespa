@@ -14,6 +14,8 @@ Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparis
 
 See [Architecture](docs/architecture.md).
 
+Also, the [changelog](docs/CHANGELOG.md).
+
 ## Requirements
 
 - Python 3.12+
@@ -91,9 +93,6 @@ Crawler:
 
 Intelligence Log (populated by crawler and scanners):
 ![Screenshot](docs/images/intelligence.png)
-
-Structured scan in progress:
-![Screenshot](docs/images/scanprogress.png)
 
 Dynamic scan in progress:
 ![Screenshot](docs/images/activitylog.png)
