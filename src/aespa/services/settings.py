@@ -7,8 +7,17 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from aespa.models import LLMConfig, ScannerPolicy, TestRun
-from aespa.schemas import LLMConfigIn, RunScannerPolicyOut, ScannerPolicyIn, ScannerPolicyOut
+from aespa.models import BurpRestApiConfig, LLMConfig, ScannerPolicy, TestRun, UpstreamProxyConfig
+from aespa.schemas import (
+    BurpRestApiConfigIn,
+    BurpRestApiConfigOut,
+    LLMConfigIn,
+    RunScannerPolicyOut,
+    ScannerPolicyIn,
+    ScannerPolicyOut,
+    UpstreamProxyConfigIn,
+    UpstreamProxyConfigOut,
+)
 
 _SINGLETON_ID = 1
 
@@ -182,3 +191,65 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
     policy = get_scanner_policy(session)
     return RunScannerPolicyOut(**policy.model_dump(exclude={"updated_at"}), source="global_default", updated_at=policy.updated_at)
+
+
+def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
+    cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
+    if cfg is None:
+        return UpstreamProxyConfigOut(**UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow())
+    return UpstreamProxyConfigOut(
+        proxy_url=cfg.proxy_url,
+        proxy_scanner=cfg.proxy_scanner,
+        proxy_llm=cfg.proxy_llm,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_upstream_proxy_config(session: Session, payload: UpstreamProxyConfigIn) -> UpstreamProxyConfigOut:
+    cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
+    cfg.proxy_url = payload.proxy_url
+    cfg.proxy_scanner = payload.proxy_scanner
+    cfg.proxy_llm = payload.proxy_llm
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_upstream_proxy_config(session)
+
+
+def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfigOut:
+    return BurpRestApiConfigOut(
+        enabled=cfg.enabled,
+        api_url=cfg.api_url,
+        api_key=cfg.api_key,
+        scan_sqli=cfg.scan_sqli,
+        scan_xss=cfg.scan_xss,
+        updated_at=cfg.updated_at,
+    )
+
+
+def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
+    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
+    if cfg is None:
+        return BurpRestApiConfigOut(**BurpRestApiConfigIn().model_dump(), updated_at=_utcnow())
+    return _burp_rest_api_config_from_model(cfg)
+
+
+def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) -> BurpRestApiConfigOut:
+    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = BurpRestApiConfig(id=_SINGLETON_ID)
+
+    cfg.enabled = payload.enabled
+    cfg.api_url = payload.api_url
+    cfg.api_key = payload.api_key
+    cfg.scan_sqli = payload.scan_sqli
+    cfg.scan_xss = payload.scan_xss
+    cfg.updated_at = _utcnow()
+
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return _burp_rest_api_config_from_model(cfg)

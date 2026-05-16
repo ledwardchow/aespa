@@ -2,16 +2,38 @@
 from __future__ import annotations
 
 import base64
+import httpx
 import json
 import logging
 import os
 import re
+from contextvars import ContextVar
 from typing import Any, Optional
 from urllib.parse import quote
 
 from aespa.models import LLMConfig
 
 log = logging.getLogger("aespa.llm")
+
+_llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
+
+
+def set_llm_proxy(url: str | None) -> None:
+    _llm_proxy_var.set(url)
+
+
+def _llm_client_kwargs() -> dict:
+    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
+    proxy = _llm_proxy_var.get()
+    return {"http_client": httpx.AsyncClient(verify=False, **{"proxy": proxy} if proxy else {})}
+
+
+def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
+    """Creates an httpx client for direct LLM calls, always with verify=False."""
+    kwargs.setdefault("verify", False)
+    if proxy := _llm_proxy_var.get():
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 ANALYSE_RESULTS_TEXT_BUDGET = 80_000
@@ -455,7 +477,7 @@ def _extract_first_choice_text(resp: Any) -> str:
 async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     import anthropic as _ant
 
-    client = _ant.AsyncAnthropic(api_key=config.api_key)
+    client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
     content: list = []
     if screenshot_b64:
         content.append({
@@ -507,6 +529,7 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         if not base.endswith("/v1"):
             base += "/v1"
         kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
     client = AsyncOpenAI(**kwargs)
 
     if screenshot_b64:
@@ -531,7 +554,8 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
 async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=config.api_key, base_url=OPENROUTER_BASE_URL)
+    _or_kwargs: dict = {"api_key": config.api_key, "base_url": OPENROUTER_BASE_URL, **_llm_client_kwargs()}
+    client = AsyncOpenAI(**_or_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -555,11 +579,13 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
 async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     from openai import AsyncAzureOpenAI
 
-    client = AsyncAzureOpenAI(
-        api_key=config.api_key,
-        azure_endpoint=config.base_url,
-        api_version="2024-12-01-preview",
-    )
+    _az_kwargs: dict = {
+        "api_key": config.api_key,
+        "azure_endpoint": config.base_url,
+        "api_version": "2024-12-01-preview",
+        **_llm_client_kwargs(),
+    }
+    client = AsyncAzureOpenAI(**_az_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -597,10 +623,12 @@ async def _azure_foundry_openai(
     """Azure AI Foundry deployments that expose the OpenAI v1 chat completions API."""
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(
-        api_key=config.api_key,
-        base_url=_azure_foundry_openai_base_url(config.base_url or ""),
-    )
+    _afo_kwargs: dict = {
+        "api_key": config.api_key,
+        "base_url": _azure_foundry_openai_base_url(config.base_url or ""),
+        **_llm_client_kwargs(),
+    }
+    client = AsyncOpenAI(**_afo_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -667,7 +695,7 @@ async def _azure_foundry_anthropic(
         "anthropic-version": "2023-06-01",
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_llm_http_client(timeout=120) as client:
         resp = await client.post(
             _azure_foundry_anthropic_messages_url(config.base_url or ""),
             headers=headers,
@@ -691,8 +719,6 @@ def _bedrock_region_from_url(base_url: str) -> str:
 
 
 async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    import httpx
-
     if not config.base_url:
         raise ValueError("Amazon Bedrock Runtime endpoint is required")
 
@@ -744,7 +770,7 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         "Accept": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_llm_http_client(timeout=120) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         return _extract_bedrock_text(resp.json())
@@ -2096,7 +2122,7 @@ async def _call_with_tools(
     if config.provider == "anthropic":
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key)
+        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
         resp = await client.messages.create(
             model=config.model,
             max_tokens=config.max_tokens,
@@ -2119,8 +2145,6 @@ async def _call_with_tools(
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
     if config.provider == "azure_foundry_anthropic":
-        import httpx as _httpx
-
         payload = {
             "model": config.model,
             "max_tokens": config.max_tokens,
@@ -2135,7 +2159,7 @@ async def _call_with_tools(
             "x-api-key": config.api_key or "",
             "anthropic-version": "2023-06-01",
         }
-        async with _httpx.AsyncClient(timeout=120) as client:
+        async with _make_llm_http_client(timeout=120) as client:
             resp = await client.post(
                 _azure_foundry_anthropic_messages_url(config.base_url or ""),
                 headers=hdrs,
@@ -2225,8 +2249,6 @@ async def _call_with_tools(
         if config.api_key:
             # Bearer-token path (SAML / federated credentials stored as api_key).
             # Uses the same HTTP endpoint as _bedrock() so SAML token users work.
-            import httpx as _httpx
-
             model_id = quote(config.model, safe="")
             url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse"
             payload: dict = {
@@ -2243,7 +2265,7 @@ async def _call_with_tools(
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            async with _httpx.AsyncClient(timeout=120) as _hx:
+            async with _make_llm_http_client(timeout=120) as _hx:
                 _resp = await _hx.post(url, headers=headers, json=payload)
                 _resp.raise_for_status()
                 data = _resp.json()
@@ -2386,7 +2408,7 @@ async def _call_with_tools(
             if not base.endswith("/v1"):
                 base += "/v1"
             client_kwargs["base_url"] = base
-
+        client_kwargs.update(_llm_client_kwargs())
         oai_client = AsyncOpenAI(**client_kwargs)
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
