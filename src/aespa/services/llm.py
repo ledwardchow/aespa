@@ -1653,6 +1653,15 @@ UNION: find column count with `' ORDER BY N--`; find reflected column with
 Constraint: never DROP/INSERT/UPDATE/DELETE; limit to version/DB name for PoC.""",
 
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
+Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
+  and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
+  evidence=code_context showing the unsanitized innerHTML assignment. For each sink:
+    a. Find the write endpoint: call target_inventory with kind="input" and filter by
+       the same field name (key) to get the URL and method that accepts that field.
+    b. POST a payload to that write endpoint as the attacker session.
+    c. Log in as a different user (victim session) and navigate to the page that loads
+       the JS file identified in the sink item — verify execution via browser DOM check.
+  This step finds cross-user stored XSS that generic fuzzing misses.
 Step 1 — inject a unique canary string; check if it appears in the response.
 Step 2 — identify rendering context, then use a context-matched payload:
   HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>

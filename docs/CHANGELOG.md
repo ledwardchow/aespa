@@ -4,6 +4,20 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [develop] JS Sink Analysis + Cross-User Stored XSS Detection
+**Branch:** `develop`
+
+Adds a deterministic JS source analysis phase that identifies unsanitized `innerHTML` sinks before dynamic testing begins, and extends the stored XSS canary sweep to confirm cross-user exploitation when multiple credentials are configured.
+
+- **JS sink analysis phase** (`_analyse_js_sinks`) — fetches every discovered JS file and regex-scans for `innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML` assignments lacking a sanitizer call (`escapeHtml`, `DOMPurify`, etc.); saves `TargetIntelItem(kind=xss_sink)` per unique unsanitized sink
+- **Info-severity findings** — one `ScanFinding(severity=info)` per identified sink written immediately to the findings panel, before dynamic confirmation
+- **Cross-user canary sweep** — second pass in `_stored_xss_sweep` that POSTs the canary to each sink's write endpoint (resolved via `kind=input` intel items), then re-fetches render pages as a victim session; any unescaped canary in the victim view produces a confirmed high-severity finding with cross-user evidence
+- **Thinking-scan bootstrap** — `_analyse_js_sinks` runs at the start of `_do_thinking_scan` so `xss_sink` items are available in `target_inventory` before the LLM loop begins
+- **WSTG XSS skill updated** — new Step 0 in the XSS skill block instructs the agent to consult `target_inventory` for `xss_sink` items, resolve their write endpoints via `kind=input` intel, and confirm with a victim-session browser check
+- **Architecture docs updated** — `architecture.md` updated to document the new scan phases, `xss_sink` intel kind, and cross-user sweep
+
+---
+
 ## [PR #65] Burp Integration + Credential Persistence
 **Merged:** 2026-05-16 21:03 AEST | Branch: `develop`
 
