@@ -1,12 +1,14 @@
 """Abstract LLM client wrappers for configured provider APIs."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import httpx
 import json
 import logging
 import os
 import re
+import time
 from contextvars import ContextVar
 from typing import Any, Optional
 from urllib.parse import quote
@@ -2637,9 +2639,30 @@ async def thinking_agentic_loop(
                     })
                 except Exception:
                     pass
-            content_blocks, stop_reason, raw_content = await _call_with_tools(
-                config, system_message, messages
+            _step_no = tool_call_count + 1
+            _t_llm = time.monotonic()
+            _llm_fut = asyncio.ensure_future(
+                _call_with_tools(config, system_message, messages)
             )
+            while True:
+                _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
+                if _done:
+                    break
+                _elapsed = int(time.monotonic() - _t_llm)
+                if emit_fn:
+                    try:
+                        emit_fn({
+                            "type": "scanner_phase",
+                            "phase": "llm_heartbeat",
+                            "status": "pending",
+                            "message": (
+                                f"Step {_step_no}: waiting for LLM response "
+                                f"({_elapsed}s elapsed)\u2026"
+                            ),
+                        })
+                    except Exception:
+                        pass
+            content_blocks, stop_reason, raw_content = _llm_fut.result()
         except Exception as exc:
             log.error(
                 "thinking_agentic_loop: API error at step %d: %s",

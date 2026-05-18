@@ -7542,7 +7542,7 @@ async def _analyse_js_sinks(
             log.info("JS sink analysis: unsanitized %s for field '%s' in %s", m.group(1).strip(), field_name, js_url)
 
             _si(
-                run_id,
+                run_id=run_id,
                 kind="xss_sink",
                 key=field_name,
                 value=js_url,
