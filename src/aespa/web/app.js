@@ -2424,6 +2424,7 @@ function TestRunDetail({ runId, initialTab }) {
                 sweep:              { label: "Sweep",     cls: "phase-sweep" },
                 llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
                 llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
+                llm_heartbeat:      { label: "LLM ⟳",     cls: "phase-llm-wait" },
                 credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
                 thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
               };
