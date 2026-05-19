@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from aespa.db import get_session
 from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import (
+    ScanCheckpointStatusOut,
     ScanFindingDeduplicationResult,
     ScanFindingImportIn,
     ScanFindingImportResult,
@@ -21,6 +22,7 @@ from aespa.schemas import (
 from aespa.services import findings as findings_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
+from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["scan"])
@@ -70,6 +72,36 @@ def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> 
 @router.get("/api/test-runs/{run_id}/thinking-scan/status")
 def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+@router.get(
+    "/api/test-runs/{run_id}/thinking-scan/checkpoint",
+    response_model=ScanCheckpointStatusOut,
+)
+def thinking_scan_checkpoint_status(
+    run_id: int, session: Session = Depends(get_session)
+) -> ScanCheckpointStatusOut:
+    """Return whether a resumable checkpoint exists for this run."""
+    _get_run_or_404(session, run_id)
+    status = checkpoint_svc.checkpoint_status(run_id)
+    return ScanCheckpointStatusOut(**status)
+
+
+@router.post("/api/test-runs/{run_id}/thinking-scan/resume")
+async def resume_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    """Resume an interrupted dynamic scan from the last saved checkpoint."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+    if scanner_svc.is_running(run_id):
+        raise HTTPException(status_code=409, detail="Scan already running")
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+    status = checkpoint_svc.checkpoint_status(run_id)
+    if not status["exists"]:
+        raise HTTPException(status_code=404, detail="No checkpoint found for this run")
+    await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
