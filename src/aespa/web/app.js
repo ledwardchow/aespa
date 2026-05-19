@@ -53,8 +53,10 @@ const api = {
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
   startBurpScan:    (id)          => req(`/api/test-runs/${id}/burp-scan/start`,          { method:"POST" }),
   startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  resumeThinkingScan:(id)         => req(`/api/test-runs/${id}/thinking-scan/resume`,     { method:"POST" }),
   stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
+  getCheckpointStatus:(id)        => req(`/api/test-runs/${id}/thinking-scan/checkpoint`),
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
@@ -934,6 +936,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [thinkingStatus, setThinkingStatus]         = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
+  const [checkpointStatus, setCheckpointStatus]     = useState(null);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
   const [dedupeBusy, setDedupeBusy]         = useState(false);
@@ -968,6 +971,7 @@ function TestRunDetail({ runId, initialTab }) {
       setRun(r); setGraph(g);
       api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
+      api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
       api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
@@ -1113,7 +1117,12 @@ function TestRunDetail({ runId, initialTab }) {
       api.getThinkingStatus(runId).then(s => {
         setThinkingStatus(s);
         if (thinkingStopRequested && !isDynamicScanActive(s.status)) setThinkingStopReq(false);
-        if (!isDynamicScanActive(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
+        if (!isDynamicScanActive(s.status)) {
+          api.getFindings(runId).then(setFindings).catch(() => {});
+          // Refresh checkpoint status once the scan finishes so the Resume button
+          // appears/disappears correctly without a page reload.
+          api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(() => {});
+        }
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
@@ -1595,7 +1604,17 @@ function TestRunDetail({ runId, initialTab }) {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({ status: "running" });
+      setCheckpointStatus(null);
       const s = await api.startThinkingScan(runId);
+      setThinkingStatus(s);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
+  const onResumeThinkingScan = async () => {
+    try {
+      setThinkingStopReq(false);
+      setThinkingStatus({ status: "running" });
+      const s = await api.resumeThinkingScan(runId);
       setThinkingStatus(s);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
@@ -1699,6 +1718,7 @@ function TestRunDetail({ runId, initialTab }) {
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !isDynamicScanActive(effectiveThinkingStatus);
   const canShowScanStartButtons = ["idle","complete","stopped","failed"].includes(effectiveScanStatus) || effectiveScanStatus == null;
+  const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
 
   return html`
     <div className="topbar">
@@ -1718,6 +1738,8 @@ function TestRunDetail({ runId, initialTab }) {
         ${canStart && html`<button className="btn sm" onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
           <button className="btn sm" title="Run the adaptive Pentest" onClick=${onStartThinkingScan}><${IconPlay}/> Start Pentest</button>`}
+        ${hasCheckpoint && html`
+          <button className="btn sm" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} title=${`Resume scan from step ${checkpointStatus.step_count}`} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest</button>`}
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
         ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop Structured Scan"}</button>`}
@@ -1920,6 +1942,8 @@ function TestRunDetail({ runId, initialTab }) {
                     <button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>
                     <span className="subtle" style=${{fontSize:12}}>or</span>
                     <button className="btn" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>
+                    ${hasCheckpoint && html`
+                      <button className="btn" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest (step ${checkpointStatus.step_count})</button>`}
                   </div>`
                 : html`<span>No pages discovered yet.</span>`}
             </div>`}
@@ -2424,6 +2448,7 @@ function TestRunDetail({ runId, initialTab }) {
                 sweep:              { label: "Sweep",     cls: "phase-sweep" },
                 llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
                 llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
+                llm_heartbeat:      { label: "LLM ⟳",     cls: "phase-llm-wait" },
                 credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
                 thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
               };

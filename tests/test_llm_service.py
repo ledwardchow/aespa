@@ -431,6 +431,7 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert "/api/health" in captured["prompt"]
     assert "jwt_secret" in captured["prompt"]
     assert "CORS" in captured["prompt"]
+    assert "Rate CORS arbitrary Origin reflection" in captured["prompt"]
     assert "loan/account creation rules" in captured["prompt"]
     assert '"action": "browser"' in captured["prompt"]
     assert '"action": "jwt"' in captured["prompt"]
@@ -1032,6 +1033,9 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert findings[0]["cvss_score"] == 6.1
     assert "description" in captured["prompt"]
     assert "CVSS v3.1" in captured["prompt"]
+    assert "Rate generic server or framework version disclosure as info" in captured["prompt"]
+    assert "Rate verbose stack traces" in captured["prompt"]
+    assert "Rate CORS arbitrary Origin reflection" in captured["prompt"]
     assert "GET /search" in captured["prompt"]
     assert "HTTP/1.1 200" in captured["prompt"]
 

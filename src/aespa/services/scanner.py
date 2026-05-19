@@ -32,6 +32,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
+from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config
 
 log = logging.getLogger("aespa.scanner")
@@ -2263,9 +2264,27 @@ async def start_thinking_scan(run_id: int) -> None:
     """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
     if run_id in _thinking_tasks:
         return
+    # Clear any stale checkpoint so the scan starts fresh.
+    checkpoint_svc.clear_checkpoint(run_id)
     task = asyncio.create_task(
         _thinking_scan_task(run_id),
         name=f"thinking-scan-{run_id}",
+    )
+    _thinking_tasks[run_id] = task
+    task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
+
+
+async def start_thinking_scan_resume(run_id: int) -> None:
+    """Resume an interrupted LLM-directed scan from the last saved checkpoint.
+
+    Unlike ``start_thinking_scan``, this does NOT clear the checkpoint so that
+    ``_do_thinking_scan`` can detect it and restore the LLM conversation.
+    """
+    if run_id in _thinking_tasks:
+        return
+    task = asyncio.create_task(
+        _thinking_scan_task(run_id),
+        name=f"thinking-scan-resume-{run_id}",
     )
     _thinking_tasks[run_id] = task
     task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
@@ -2524,6 +2543,35 @@ async def _do_thinking_scan(run_id: int) -> None:
     log.info("=== Thinking scan start: run_id=%s base_url=%s ===", run_id, base_url)
     # Status is set to "running" by the task wrapper before calling this function.
 
+    # ── Resume detection ──────────────────────────────────────────────────────
+    # If a checkpoint was saved from a previous run, restore it so the agentic
+    # loop continues the exact same LLM conversation.  On a fresh start the
+    # caller must call checkpoint_svc.clear_checkpoint(run_id) first.
+    _resume_checkpoint = checkpoint_svc.load_checkpoint(run_id)
+    resuming = _resume_checkpoint is not None
+    if resuming:
+        log.info(
+            "Resuming thinking scan for run_id=%s from step %s",
+            run_id,
+            _resume_checkpoint.get("step_count", "?"),
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_scan",
+            "status": "resuming",
+            "message": (
+                f"Resuming scan from step {_resume_checkpoint.get('step_count', '?')} "
+                f"({len(_resume_checkpoint.get('history') or [])} prior actions in context)."
+            ),
+        })
+
+    if not resuming:
+        # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
+        # loop starts. The thinking-scan agent can then find them via target_inventory
+        # without re-fetching and re-parsing JS source itself.
+        async with _make_scanner_client(verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
+            await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
+
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
     # are available through context tools so they are only sent when needed.
     crawl_context = _build_compact_thinking_context(
@@ -2551,7 +2599,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             ", ".join(sorted(_selected_skills)),
         )
 
-    seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id) if not resuming else {}
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
             "type": "task_graph_update",
@@ -2747,6 +2795,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     scanner_policy=scanner_policy,
                     hx=hx, browser_ctx=browser_ctx, pw_page=pw_page,
                     history=history, all_results=all_results,
+                    resume_from=_resume_checkpoint,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -3790,14 +3839,42 @@ async def _do_agentic_thinking_loop(
     pw_page,
     history: list[dict],
     all_results: list[dict],
+    resume_from: dict | None = None,
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
     Maintains a growing messages list so the model reads its own prior reasoning
     verbatim.  Returns progressive_findings_count.
+
+    resume_from: optional checkpoint dict returned by ``checkpoint_svc.load_checkpoint``.
+        When provided, the loop restores history, blocked URLs, and counters from
+        the checkpoint and passes the persisted messages list to thinking_agentic_loop
+        so the LLM continues the exact same conversation.
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+
+    # ── Restore state from checkpoint (resume path) ───────────────────────────
+    resume_messages: list[dict] | None = None
+    if resume_from:
+        history.extend(resume_from.get("history") or [])
+        _blocked: set[str] = resume_from.get("blocked_urls") or set()
+        _failed: dict[str, int] = resume_from.get("failed_url_counts") or {}
+        progressive_findings_count = resume_from.get("progressive_findings_count") or 0
+        _consecutive_ctx_tools[0] = resume_from.get("consecutive_context_tools") or 0
+        resume_messages = resume_from.get("messages") or None
+        log.info(
+            "Resuming agentic loop for run_id=%s from step %s (%d history entries, "
+            "%d messages in LLM context)",
+            run_id,
+            resume_from.get("step_count", "?"),
+            len(history),
+            len(resume_messages) if resume_messages else 0,
+        )
+    else:
+        _blocked: set[str] = set()
+        _failed: dict[str, int] = {}
+
     pending_session_labels: set[str] = set()
 
     def _mark_session_pending(label: str | None) -> None:
@@ -4711,6 +4788,19 @@ async def _do_agentic_thinking_loop(
         )
 
     # ── Run the loop ──────────────────────────────────────────────────────────
+    async def _on_checkpoint_callback(messages: list[dict]) -> None:
+        """Persist the full loop state after each completed LLM turn."""
+        checkpoint_svc.save_checkpoint(
+            run_id,
+            messages=messages,
+            history=history,
+            blocked_urls=_blocked,
+            failed_url_counts=_failed,
+            step_count=len(messages),
+            progressive_findings_count=progressive_findings_count,
+            consecutive_context_tools=_consecutive_ctx_tools[0],
+        )
+
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
         system_message=llm_svc._THINKING_AGENT_SYSTEM,
@@ -4719,6 +4809,8 @@ async def _do_agentic_thinking_loop(
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
         done_check=_agentic_done_check,
+        resume_messages=resume_messages,
+        on_checkpoint=_on_checkpoint_callback,
     )
     return progressive_findings_count
 
@@ -5020,6 +5112,13 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                                  site_context=site_context,
                                  xss_canary=xss_canary)
 
+            # ── JS sink analysis ──────────────────────────────────────────────────
+            # Statically identify unsanitized innerHTML sinks before the dynamic sweep.
+            # Results are stored as TargetIntelItem(kind='xss_sink') so they are also
+            # available to the thinking-scan agent via target_inventory.
+            if run_id not in _stop_requested:
+                await _analyse_js_sinks(run_id, hx, scanner_policy=scanner_policy)
+
             # ── Stored XSS sweep ───────────────────────────────────────────────────
             # Re-fetch every crawled page and look for the canary appearing unescaped.
             # This catches stored XSS where the injection and the rendering sink are
@@ -5028,6 +5127,7 @@ async def _do_scan(run_id: int, page_ids: list[int] | None = None) -> None:
                 await _stored_xss_sweep(
                     run_id, hx, xss_canary,
                     scanner_policy=scanner_policy,
+                    victim_sessions=list(cred_sessions.values())[1:],
                 )
 
     stopped = run_id in _stop_requested
@@ -7118,6 +7218,7 @@ async def _stored_xss_sweep(
     hx: httpx.AsyncClient,
     canary: str,
     scanner_policy=None,
+    victim_sessions: list[dict] | None = None,
 ) -> None:
     """Re-fetch every crawled page and check for the XSS canary appearing unescaped.
 
@@ -7130,6 +7231,12 @@ async def _stored_xss_sweep(
         &lt;canary&gt; and NOT match the raw string, so any raw match is conclusive.
       - Also look for alert('canary') / alert("canary") to catch LLM-generated probes
         that used the canary as the alert argument rather than wrapping it in a tag.
+
+    Second pass (sink-targeted cross-user probes):
+      When victim_sessions is provided, each xss_sink intel item is used to POST the
+      canary directly into the identified write endpoint, then crawled pages are re-fetched
+      as a victim session to catch cross-user stored XSS that the first pass (which only
+      re-fetches as the attacker) cannot see.
     """
     timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
 
@@ -7263,6 +7370,168 @@ async def _stored_xss_sweep(
             s.commit()
         log.info("Stored XSS sweep: %d finding(s) saved", len(findings_to_save))
         _emit_scan_update(run_id)
+
+    # \u2500\u2500 Second pass: sink-targeted cross-user probes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # For each statically-identified xss_sink item, POST the canary to the write
+    # endpoint (as the primary/attacker session on hx), then re-fetch crawled pages
+    # as victim sessions and look for the canary rendered unescaped.
+    if victim_sessions and run_id not in _stop_requested:
+        with Session(get_engine()) as s:
+            sink_items = s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "xss_sink")
+            ).all()
+            input_items = s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "input")
+            ).all()
+            pages_for_sweep = [(p.id, p.url) for p in s.exec(
+                select(CrawledPage)
+                .where(CrawledPage.test_run_id == run_id)
+                .where(CrawledPage.in_scope != False)  # noqa: E712
+            ).all()]
+
+        # Build a field-name \u2192 write-endpoint lookup from input intel items
+        field_to_endpoint: dict[str, tuple[str, str]] = {}
+        for inp in input_items:
+            if inp.key and inp.url and inp.url not in field_to_endpoint.get(inp.key, ("",))[0:1]:
+                field_to_endpoint[inp.key] = (inp.url, (inp.method or "POST").upper())
+
+        for sink in sink_items:
+            if run_id in _stop_requested:
+                break
+            if sink.key not in field_to_endpoint:
+                log.debug("Sink-targeted sweep: no write endpoint found for field '%s', skipping", sink.key)
+                continue
+
+            write_url, write_method = field_to_endpoint[sink.key]
+            inject_payload = {sink.key: f"<{canary}>"}
+            inject_req_evidence = (
+                f"{write_method} {write_url}\n"
+                f"Body: {inject_payload}\n"
+                f"(Sink-targeted XSS probe \u2014 field '{sink.key}' from {sink.value})"
+            )
+            try:
+                if write_method in ("POST", "PUT", "PATCH"):
+                    await hx.request(write_method, write_url, json=inject_payload, timeout=timeout)
+                else:
+                    await hx.request(write_method, write_url, params=inject_payload, timeout=timeout)
+                log.info("Sink-targeted sweep: injected canary into '%s' via %s %s", sink.key, write_method, write_url)
+            except Exception as exc:
+                log.debug("Sink-targeted sweep: injection to %s failed: %s", write_url, exc)
+                continue
+
+            await sleep_between_probes(scanner_policy)
+
+            # Re-fetch render pages as each victim session
+            for vsession in victim_sessions:
+                vcookies = vsession.get("cookies", {})
+                vheaders = {"User-Agent": _UA, **vsession.get("extra_headers", {})}
+                victim_label = vsession.get("username") or vsession.get("label") or "victim"
+                async with _make_scanner_client(
+                    cookies=vcookies,
+                    headers=vheaders,
+                    follow_redirects=True,
+                    verify=False,
+                    timeout=timeout,
+                ) as victim_hx:
+                    for page_id, page_url in pages_for_sweep:
+                        if run_id in _stop_requested:
+                            break
+                        if page_url in already_reported:
+                            continue
+                        try:
+                            vresp = await victim_hx.get(page_url, timeout=timeout)
+                            if vresp.status_code != 200:
+                                continue
+                            vbody = vresp.text
+                            matched = next((p for p in detect_patterns if p in vbody), None)
+                            if matched is None:
+                                continue
+
+                            already_reported.add(page_url)
+                            idx = vbody.find(matched)
+                            snippet = vbody[max(0, idx - 150): idx + len(matched) + 150]
+                            log.info(
+                                "Sink-targeted sweep: cross-user canary found on %s for field '%s' (victim: %s)",
+                                page_url, sink.key, victim_label,
+                            )
+
+                            resp_evidence = (
+                                f"HTTP/1.1 {vresp.status_code} (fetched as victim: {victim_label})\n\n"
+                                f"Matched pattern: {matched!r}\n"
+                                f"Context (\u00b1150 chars):\n...{snippet}..."
+                            )
+                            evidence = _combined_evidence(
+                                inject_req_evidence, resp_evidence,
+                                f"XSS canary injected into '{sink.key}' via {write_url} was found "
+                                f"rendered unescaped in {page_url} when loaded as a different user "
+                                f"({victim_label}). Sink identified via static analysis of {sink.value}.",
+                            )
+                            findings_to_save.append(ScanFinding(
+                                test_run_id=run_id,
+                                page_id=page_id,
+                                owasp_category="A03",
+                                severity="high",
+                                title=f"Stored Cross-Site Scripting (XSS) via {sink.key} field",
+                                description=(
+                                    f"The '{sink.key}' field accepted via {write_url} is stored "
+                                    f"without sanitization and rendered directly into innerHTML in "
+                                    f"{sink.value}. A canary payload injected by an attacker-controlled "
+                                    f"account appeared unescaped in {page_url} when loaded as a separate "
+                                    f"victim session ({victim_label}), confirming cross-user stored XSS."
+                                ),
+                                impact=(
+                                    "An attacker can send a payload to any victim by writing to the "
+                                    f"'{sink.key}' field. When the victim views {page_url}, the payload "
+                                    "executes in their browser. Since JWTs are often stored in "
+                                    "localStorage, this enables full session token exfiltration."
+                                ),
+                                likelihood=(
+                                    "High. Confirmed via canary injection and cross-user rendering."
+                                ),
+                                recommendation=(
+                                    f"Apply escapeHtml() or textContent (instead of innerHTML) to the "
+                                    f"'{sink.key}' field in {sink.value}. Add a strict Content-Security-Policy."
+                                ),
+                                cvss_score=8.7,
+                                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:L/A:N",
+                                affected_url=page_url,
+                                evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
+                                request_evidence=_request_evidence(inject_req_evidence),
+                                response_evidence=_response_evidence(resp_evidence),
+                                evidence_json=_http_evidence_items_json(
+                                    inject_req_evidence,
+                                    resp_evidence,
+                                    summary=(
+                                        f"Canary injected via '{sink.key}' field rendered unescaped "
+                                        f"in victim session on {page_url}."
+                                    ),
+                                    status=vresp.status_code,
+                                    marker=matched,
+                                ),
+                                finding_source="deterministic_probe",
+                                validation_status="confirmed",
+                                validation_note=(
+                                    f"Canary pattern '{matched}' confirmed rendered in victim session "
+                                    f"({victim_label}) on {page_url}. Sink: {sink.value} field '{sink.key}'."
+                                ),
+                                created_at=_utcnow(),
+                            ))
+                        except Exception as exc:
+                            log.debug("Sink-targeted sweep: render check error on %s: %s", page_url, exc)
+                        await sleep_between_probes(scanner_policy)
+
+        if findings_to_save:
+            with Session(get_engine()) as s:
+                for f in findings_to_save:
+                    s.add(f)
+                s.commit()
+            log.info("Sink-targeted XSS sweep: %d additional finding(s) saved", len(findings_to_save))
+            _emit_scan_update(run_id)
+
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "sweep",
@@ -7274,6 +7543,156 @@ async def _stored_xss_sweep(
         ),
         "data": {"findings_count": len(findings_to_save)},
     })
+
+
+async def _analyse_js_sinks(
+    run_id: int,
+    hx: httpx.AsyncClient,
+    scanner_policy=None,
+) -> list[dict]:
+    """Fetch every JS file discovered during crawling and grep for unsanitized innerHTML sinks.
+
+    For each match where no sanitizer call (escapeHtml, DOMPurify, etc.) wraps the value:
+    - Saves a TargetIntelItem(kind='xss_sink') so the thinking-scan agent can find it.
+    - Saves an info-severity ScanFinding so the user sees it in the findings panel
+      before dynamic confirmation runs.
+    - Emits scanner_phase events at start and completion.
+
+    Returns a list of sink dicts (field, js_file, snippet) for the completion event payload.
+    """
+    timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+
+    with Session(get_engine()) as s:
+        script_items = s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind == "script")
+        ).all()
+
+    if not script_items:
+        return []
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "js_sink_analysis",
+        "status": "start",
+        "message": f"JS sink analysis: scanning {len(script_items)} script file(s) for unsanitized innerHTML sinks…",
+    })
+
+    _SINK_RE = re.compile(
+        r'(\.innerHTML\s*[+=]|\.outerHTML\s*[+=]|document\.write\s*\(|insertAdjacentHTML\s*\()',
+        re.MULTILINE,
+    )
+    _SANITIZER_RE = re.compile(
+        r'escapeHtml|DOMPurify|sanitize|htmlEncode|encodeHtml|\.escape\(',
+        re.IGNORECASE,
+    )
+    # Extract a dotted field name from the sink context, e.g. "tx.description"
+    _FIELD_RE = re.compile(r'\b(?:tx|item|entry|row|data|msg|rec|obj|comment|result)\s*\.\s*([a-zA-Z_]\w*)')
+
+    from aespa.services.crawler import _save_intel_item as _si
+
+    found_sinks: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for script_item in script_items:
+        js_url = script_item.value or script_item.url or script_item.key
+        if not js_url:
+            continue
+        try:
+            resp = await hx.get(js_url, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            body = resp.text
+        except Exception as exc:
+            log.debug("JS sink analysis: failed to fetch %s: %s", js_url, exc)
+            continue
+
+        for m in _SINK_RE.finditer(body):
+            ctx_start = max(0, m.start() - 200)
+            ctx_end   = min(len(body), m.end() + 200)
+            context   = body[ctx_start:ctx_end]
+
+            if _SANITIZER_RE.search(context):
+                continue
+
+            field_m    = _FIELD_RE.search(context)
+            field_name = field_m.group(1) if field_m else m.group(1).strip().rstrip("(= ")
+
+            dedup = (js_url, field_name)
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+
+            snippet = context.replace("\n", " ").strip()[:400]
+            log.info("JS sink analysis: unsanitized %s for field '%s' in %s", m.group(1).strip(), field_name, js_url)
+
+            _si(
+                run_id=run_id,
+                kind="xss_sink",
+                key=field_name,
+                value=js_url,
+                url=js_url,
+                method="GET",
+                source="js_sink_analysis",
+                confidence=0.85,
+                evidence=snippet,
+                metadata={"js_file": js_url, "pattern": m.group(1).strip()},
+            )
+            found_sinks.append({"field": field_name, "js_file": js_url, "snippet": snippet[:200]})
+
+    if found_sinks:
+        info_findings: list[ScanFinding] = []
+        for sink in found_sinks:
+            info_findings.append(ScanFinding(
+                test_run_id=run_id,
+                owasp_category="A03",
+                severity="info",
+                title=f"Potential stored XSS sink identified in JS source: {sink['field']}",
+                description=(
+                    f"Static analysis of {sink['js_file']} found an unsanitized innerHTML "
+                    f"assignment using the field '{sink['field']}'. No escapeHtml(), DOMPurify, "
+                    f"or equivalent sanitizer call was found in the surrounding context.\n\n"
+                    f"Code context:\n{sink['snippet']}"
+                ),
+                impact=(
+                    "If an attacker controls the value of this field via any writable API "
+                    "endpoint, the payload will execute as JavaScript in every user's browser "
+                    "that renders this view."
+                ),
+                likelihood=(
+                    "Unconfirmed — this is a static finding. Requires dynamic confirmation "
+                    "that the field is writable and that the rendered output reaches this sink."
+                ),
+                recommendation=(
+                    "Wrap all user-supplied values rendered via innerHTML with escapeHtml() or "
+                    "equivalent HTML encoding. Prefer textContent over innerHTML for plain-text "
+                    "values. Add a strict Content-Security-Policy as defence-in-depth."
+                ),
+                cvss_score=0.0,
+                affected_url=sink["js_file"],
+                finding_source="deterministic_probe",
+                validation_status="unvalidated",
+                created_at=_utcnow(),
+            ))
+        with Session(get_engine()) as s:
+            for f in info_findings:
+                s.add(f)
+            s.commit()
+        _emit_scan_update(run_id)
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "js_sink_analysis",
+        "status": "complete",
+        "message": (
+            f"JS sink analysis: found {len(found_sinks)} unsanitized innerHTML sink(s)"
+            if found_sinks else
+            "JS sink analysis: no unsanitized innerHTML sinks found"
+        ),
+        "sinks": found_sinks,
+    })
+    return found_sinks
 
 
 def _applicable_checks(categories: dict) -> list[str]:
