@@ -15,11 +15,11 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web appl
 7. [Structured Scan](#7-structured-scan)
 8. [Dynamic Scan (Thinking Mode)](#8-dynamic-scan-thinking-mode)
 9. [LLM Integration](#9-llm-integration)
-10. [Findings & Validation](#10-findings--validation)
-11. [API Layer](#11-api-layer)
-12. [Frontend & Real-time Events](#12-frontend--real-time-events)
-13. [Concurrency & State Management](#13-concurrency--state-management)
-14. [Security Controls](#14-security-controls)
+10. [Burp Suite Integration](#10-burp-suite-integration)
+11. [Findings & Validation](#11-findings--validation)
+12. [API Layer](#12-api-layer)
+13. [Frontend & Real-time Events](#13-frontend--real-time-events)
+14. [Concurrency & State Management](#14-concurrency--state-management)
 
 ---
 
@@ -37,20 +37,21 @@ src/aespa/
 │   ├── scan.py            # /api/test-runs/{id}/scan/* & thinking-scan/*
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM & policy configuration
+│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy config
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   └── events.py          # WebSocket event stream
 └── services/
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Structured scan + dynamic (agentic) scan
     ├── llm.py             # Multi-provider LLM client abstractions
+    ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── findings.py        # Deduplication, grouping, reporting
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── task_graph.py      # Pentest hypothesis & task tracking
     ├── validator.py       # LLM-assisted finding validation
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── events.py          # WebSocket event emission
-    └── settings.py        # LLM config / scanner policy service layer
+    └── settings.py        # LLM config / scanner policy / Burp / proxy service layer
 ```
 
 ---
@@ -92,19 +93,20 @@ AESPA_PORT         = 8000
 │  crawler    │◄──────│   Bedrock / Azure / OpenRouter)     │
 │  scanner    │       └─────────────────────────────────────┘
 │  findings   │
-│  validator  │
-│  task_graph │
-│  traffic    │
+│  validator  │       ┌─────────────────────────────────────┐
+│  task_graph │       │  Burp Suite Professional            │
+│  burp_rest  │──────►│  REST API  (default :1337)          │
+│  traffic    │       └─────────────────────────────────────┘
 │  events     │
 └──────┬──────┘
-       │
+       │                  (optional upstream proxy)
        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  SQLite database  (aespa.db — via SQLModel / SQLAlchemy)    │
 │  Sites · Credentials · TestRuns · CrawledPages · PageLinks  │
 │  TrafficEntries · ScanFindings · ScannerSessions            │
 │  TargetIntelItems · PentestHypotheses · PentestTasks        │
-│  ScanLogs                                                   │
+│  ScanLogs · BurpRestApiConfig · UpstreamProxyConfig         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -139,6 +141,34 @@ A **test run** is the central unit of work. It ties together a target site, its 
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
 
+### Burp Suite REST API Config (`BurpRestApiConfig` model)
+
+Singleton row (id = 1). Configures the optional Burp Suite Professional active-scan integration.
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable Burp integration |
+| `api_url` | `http://127.0.0.1:1337` | Burp REST API base URL |
+| `api_key` | — | Bearer token for the Burp REST API (optional) |
+| `scan_configuration_name` | `Audit checks - all except time-based detection methods` | Named Burp scan config to apply |
+| `scan_sqli` | `true` | Route SQLi findings to Burp active scan |
+| `scan_xss` | `true` | Route XSS findings to Burp active scan |
+| `scan_command_injection` | `true` | Route command injection findings |
+| `scan_path_traversal` | `true` | Route path traversal findings |
+| `scan_ssrf` | `true` | Route SSRF findings |
+| `scan_xxe` | `true` | Route XXE findings |
+| `scan_ssti` | `true` | Route SSTI findings |
+
+### Upstream Proxy Config (`UpstreamProxyConfig` model)
+
+Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HTTP proxy (e.g. Burp Suite's proxy listener or a corporate proxy).
+
+| Field | Default | Description |
+|---|---|---|
+| `proxy_url` | — | `http://host:port` proxy URL |
+| `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
+| `proxy_llm` | `false` | Route LLM API calls through proxy |
+
 ---
 
 ## 5. Data Models
@@ -153,13 +183,15 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
 | `LLMConfig` | LLM provider settings for a test run |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
+| `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
+| `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
 | `TestRun` | A single scan session; owns all scan artefacts |
 | `CrawledPage` | A discovered page/endpoint with LLM-assigned flags |
 | `PageLink` | Directed edge between two `CrawledPage` nodes (site map graph) |
 | `TrafficEntry` | A captured HTTP request/response pair |
 | `ScanFinding` | A discovered vulnerability with evidence and CVSS score |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
-| `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script) |
+| `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
 | `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
@@ -184,6 +216,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `affected_url` | Specific URL where the issue was found |
 | `evidence_json` | Structured request/response pairs |
 | `screenshot_b64` | Base64 PNG (form-based probes) |
+| `finding_source` | Origin of the finding: `aespa_scanner` · `burp_active_scan` · `manual_import` · `unknown` |
 | `validation_status` | `unvalidated` · `validating` · `confirmed` · `unconfirmed` · `false_positive` |
 
 ---
@@ -193,27 +226,33 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 **File**: `src/aespa/services/crawler.py`  
 **Entry point**: `async start_crawl(run_id)`
 
-The crawler performs a **multi-user, LLM-guided BFS** across the target site using Playwright browser instances.
+The crawler performs a **multi-phase, multi-user, LLM-guided BFS** across the target site using Playwright browser instances.
 
 ### Process
 
 ```
 start_crawl(run_id)
   └─ _do_crawl(run_id)
-       1. Load site config & credentials
-       2. Authenticate via Playwright (manual login flow or scripted)
-       3. Export auth cookies → ScannerSession
-       4. Spawn N parallel browser workers (_CrawlShared state)
-       └─ Per worker, BFS loop:
-            a. Load page in Playwright, intercept network traffic
-            b. Extract page text, links, forms, inputs
-            c. Send page content to LLM → analyse flags (req_auth, takes_input, etc.)
-            d. Ask LLM "where next?" → ranked link suggestions
-            e. Enqueue new URLs (in-scope, within depth/page limits)
-            f. Persist CrawledPage + PageLinks + TrafficEntries
-       5. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
-       6. Update TestRun status → crawled
+       1. Load site config, credentials, and upstream proxy settings
+       2. Build crawl phases:
+            • Phase 0 — always unauthenticated (even if credentials exist)
+            • Phase 1..N — one phase per stored Credential
+       └─ Per phase:
+            a. Authenticate via Playwright (or skip for unauthenticated phase)
+            b. Export auth cookies → ScannerSession
+            c. Spawn N parallel browser workers (_CrawlShared state)
+            └─ Per worker, BFS loop:
+                 i.   Load page in Playwright, intercept network traffic
+                 ii.  Extract page text, links, forms, inputs
+                 iii. Send page content to LLM → analyse flags (req_auth, takes_input, etc.)
+                 iv.  Ask LLM "where next?" → ranked link suggestions
+                 v.   Enqueue new URLs (in-scope, within depth/page limits)
+                 vi.  Persist CrawledPage + PageLinks + TrafficEntries
+       3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
+       4. Update TestRun status → crawled
 ```
+
+The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
 ### LLM involvement
 
@@ -248,6 +287,29 @@ start_scan(run_id)
          4. Analyse: send probe responses to LLM
                      LLM returns ScanFinding (or null)
          5. Persist: store finding with evidence, screenshots, traffic
+
+       After all pages:
+         6. JS sink analysis (_analyse_js_sinks)
+              - Fetch each discovered JS file (TargetIntelItem kind=script)
+              - Regex-scan for innerHTML / outerHTML / document.write /
+                insertAdjacentHTML assignments lacking a sanitizer call
+                (escapeHtml, DOMPurify, etc.) in the surrounding context
+              - Save TargetIntelItem(kind=xss_sink) per unique unsanitized sink
+              - Save info-severity ScanFinding per sink (visible immediately
+                in the findings panel before dynamic confirmation)
+              - Emit scanner_phase events so the UI shows progress and the
+                full list of identified sinks
+
+         7. Stored XSS canary sweep (_stored_xss_sweep)
+              First pass — re-fetch every crawled page as the authenticated
+              attacker; look for the injected canary unescaped in the HTML.
+              Second pass (sink-targeted, cross-user) — when a second
+              credential is configured:
+              - POST the canary to each sink's write endpoint (identified
+                via TargetIntelItem kind=input matching the sink field name)
+              - Re-fetch crawled pages as a victim session
+              - Any unescaped canary in the victim's view → confirmed
+                high-severity Stored XSS finding with cross-user evidence
 ```
 
 ### Probe types
@@ -275,10 +337,14 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Authenticate → ScannerSession
-       3. Seed PentestHypotheses + PentestTasks from intel
-       4. Build compact crawl summary (context for LLM)
-       5. Detect auth cookies for boundary checks
+       2. Run JS sink analysis (_analyse_js_sinks) — populates
+          TargetIntelItem(kind=xss_sink) rows before the LLM loop
+          starts so the agent can find them via target_inventory
+          without re-fetching JS source itself
+       3. Authenticate → ScannerSession
+       4. Seed PentestHypotheses + PentestTasks from intel
+       5. Build compact crawl summary (context for LLM)
+       6. Detect auth cookies for boundary checks
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
 
@@ -323,7 +389,7 @@ targeted scan round will change the next action.
 | `page_detail` | Full metadata, flags, text for a page |
 | `history_search` | Query prior HTTP requests/responses by keyword |
 | `finding_list` | Already-confirmed findings |
-| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts |
+| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and pre-identified `xss_sink` items (unsanitized innerHTML sinks found by static JS analysis) |
 | `traffic_search` | Search the HTTP traffic log |
 | `endpoint_detail` | Combined page + intel + traffic for a URL |
 | `compare_responses` | Diff two prior responses |
@@ -362,9 +428,56 @@ All structured outputs (probe lists, finding objects, page analysis) are produce
 
 Vision support (when `enable_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
 
+### Prompt caching
+
+The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). This significantly reduces token usage on multi-step dynamic scans where the same context is sent across many loop iterations.
+
+### Upstream proxy
+
+All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. SSL verification is disabled globally when a proxy is active to support HTTPS interception setups (e.g. Burp Suite's proxy listener).
+
 ---
 
-## 10. Findings & Validation
+## 10. Burp Suite Integration
+
+**File**: `src/aespa/services/burp_rest.py`
+
+When enabled, aespa can hand off targeted active scans to **Burp Suite Professional** via its REST API (default `http://127.0.0.1:1337`). This augments aespa's own probing with Burp's full active-scan engine for injection-class vulnerabilities.
+
+### Workflow
+
+```
+Finding written by aespa scanner
+  └─ _finding_burp_vuln_class(finding)
+       • Maps finding to a Burp vulnerability class (sqli, xss, cmdi, etc.)
+       • Checks BurpRestApiConfig to see if that class is enabled
+  └─ _run_burp_active_scan_for_target(run_id, url, vuln_class)
+       1. burp_rest.launch_active_scan(config, url, cookies=..., extra_headers=...)
+            POST /v0.1/scan  →  returns integer task_id
+       2. burp_rest.wait_for_scan(config, task_id)
+            Polls GET /v0.1/scan/{task_id} with adaptive back-off:
+              • 0–60 s  →  every 5 s
+              • 60–180 s →  every 15 s
+              • 180–600 s → every 30 s
+            Returns when status ∈ {succeeded, failed, cancelled}
+       3. Normalised Burp issues → ScanFinding rows (finding_source = "burp_active_scan")
+```
+
+### Scope pinning
+
+Each Burp scan is scoped to the exact URL path prefix being tested so Burp does not re-crawl the whole site. Cookies and bearer tokens from the active `ScannerSession` are forwarded to Burp as custom headers so authenticated endpoints are tested with valid sessions.
+
+### Per-class routing
+
+Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.g. enable only SQLi and SSRF, skip XSS). The scanner also deduplicates Burp targets: if a `(run_id, url, vuln_class)` triple has already been dispatched in the current run, a second Burp scan is not launched.
+
+### Connection test
+
+`POST /api/settings/burp-rest-api/test-connection` probes `GET /v0.1/scan/0` and returns `{ok, message}`. A 404 from Burp counts as success (server is reachable; the scan ID just doesn't exist).
+
+---
+
+## 11. Findings & Validation
 
 **Files**: `src/aespa/services/findings.py`, `src/aespa/services/validator.py`
 
@@ -379,11 +492,20 @@ Each finding starts with `validation_status = unvalidated`. The validator servic
 - **unconfirmed** — could not be reproduced
 - **false_positive** — LLM determines finding was incorrect
 
+All findings carry a `finding_source` field that records their origin:
+
+| Value | Source |
+|---|---|
+| `aespa_scanner` | Discovered by aespa's own structured or dynamic scan |
+| `burp_active_scan` | Imported from a Burp Suite active scan triggered by aespa |
+| `manual_import` | Imported via the findings import API |
+| `unknown` | Legacy / untagged |
+
 External findings can be imported via `POST /api/test-runs/{run_id}/findings/import`.
 
 ---
 
-## 11. API Layer
+## 12. API Layer
 
 **Files**: `src/aespa/api/`
 
@@ -394,7 +516,11 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | Prefix | Router | Responsibility |
 |---|---|---|
 | `/api/sites/` | `sites.py` | CRUD for target sites and credentials |
-| `/api/settings/` | `settings.py` | Get/set LLM config and scanner policy |
+| `/api/settings/llm-config` | `settings.py` | Get/set LLM provider config |
+| `/api/settings/scanner-policy` | `settings.py` | Get/set scanner policy |
+| `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
+| `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
+| `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
 | `/api/test-runs/` | `test_runs.py` | Create runs, check status, retrieve site map graph |
 | `/api/test-runs/{id}/scan/` | `scan.py` | Start/stop/status for structured scan |
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status for dynamic scan |
@@ -404,7 +530,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 
 ---
 
-## 12. Frontend & Real-time Events
+## 13. Frontend & Real-time Events
 
 The web UI is a **single-page application** served from `src/aespa/web/`. It communicates with the backend over:
 - **REST** for CRUD and control operations
@@ -419,6 +545,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - Thinking-scan step (action taken, tool called, finding written)
 - Finding created / updated
 - Task graph changes (hypothesis seeded, task status update)
+- `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-run the crawl with the new account
 - Error events
 
 ### UI panels
@@ -427,14 +554,14 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 |---|---|
 | Activity log | Timestamped crawl/scan events |
 | Site map | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
-| Intelligence log | `TargetIntelItems` — endpoints, forms, inputs, IDs |
+| Intelligence log | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, xss_sinks |
 | Task graph | `PentestHypothesis` tree with `PentestTask` leaves |
 | Traffic log | All `TrafficEntry` records (request + response) |
 | Findings | `ScanFinding` list sorted by severity, with CVSS and evidence |
 
 ---
 
-## 13. Concurrency & State Management
+## 14. Concurrency & State Management
 
 - **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
