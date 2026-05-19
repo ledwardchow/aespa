@@ -32,6 +32,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
+from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config
 
 log = logging.getLogger("aespa.scanner")
@@ -2263,9 +2264,27 @@ async def start_thinking_scan(run_id: int) -> None:
     """Start an LLM-directed (thinking) scan that dynamically decides what to test."""
     if run_id in _thinking_tasks:
         return
+    # Clear any stale checkpoint so the scan starts fresh.
+    checkpoint_svc.clear_checkpoint(run_id)
     task = asyncio.create_task(
         _thinking_scan_task(run_id),
         name=f"thinking-scan-{run_id}",
+    )
+    _thinking_tasks[run_id] = task
+    task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
+
+
+async def start_thinking_scan_resume(run_id: int) -> None:
+    """Resume an interrupted LLM-directed scan from the last saved checkpoint.
+
+    Unlike ``start_thinking_scan``, this does NOT clear the checkpoint so that
+    ``_do_thinking_scan`` can detect it and restore the LLM conversation.
+    """
+    if run_id in _thinking_tasks:
+        return
+    task = asyncio.create_task(
+        _thinking_scan_task(run_id),
+        name=f"thinking-scan-resume-{run_id}",
     )
     _thinking_tasks[run_id] = task
     task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
@@ -2524,11 +2543,34 @@ async def _do_thinking_scan(run_id: int) -> None:
     log.info("=== Thinking scan start: run_id=%s base_url=%s ===", run_id, base_url)
     # Status is set to "running" by the task wrapper before calling this function.
 
-    # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM loop
-    # starts. The thinking-scan agent can then find them via target_inventory without
-    # re-fetching and re-parsing JS source itself.
-    async with _make_scanner_client(verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
-        await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
+    # ── Resume detection ──────────────────────────────────────────────────────
+    # If a checkpoint was saved from a previous run, restore it so the agentic
+    # loop continues the exact same LLM conversation.  On a fresh start the
+    # caller must call checkpoint_svc.clear_checkpoint(run_id) first.
+    _resume_checkpoint = checkpoint_svc.load_checkpoint(run_id)
+    resuming = _resume_checkpoint is not None
+    if resuming:
+        log.info(
+            "Resuming thinking scan for run_id=%s from step %s",
+            run_id,
+            _resume_checkpoint.get("step_count", "?"),
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "thinking_scan",
+            "status": "resuming",
+            "message": (
+                f"Resuming scan from step {_resume_checkpoint.get('step_count', '?')} "
+                f"({len(_resume_checkpoint.get('history') or [])} prior actions in context)."
+            ),
+        })
+
+    if not resuming:
+        # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
+        # loop starts. The thinking-scan agent can then find them via target_inventory
+        # without re-fetching and re-parsing JS source itself.
+        async with _make_scanner_client(verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
+            await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
     # are available through context tools so they are only sent when needed.
@@ -2557,7 +2599,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             ", ".join(sorted(_selected_skills)),
         )
 
-    seeded_task_graph = task_graph_svc.seed_task_graph(run_id)
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id) if not resuming else {}
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
             "type": "task_graph_update",
@@ -2753,6 +2795,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     scanner_policy=scanner_policy,
                     hx=hx, browser_ctx=browser_ctx, pw_page=pw_page,
                     history=history, all_results=all_results,
+                    resume_from=_resume_checkpoint,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -3796,14 +3839,42 @@ async def _do_agentic_thinking_loop(
     pw_page,
     history: list[dict],
     all_results: list[dict],
+    resume_from: dict | None = None,
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
     Maintains a growing messages list so the model reads its own prior reasoning
     verbatim.  Returns progressive_findings_count.
+
+    resume_from: optional checkpoint dict returned by ``checkpoint_svc.load_checkpoint``.
+        When provided, the loop restores history, blocked URLs, and counters from
+        the checkpoint and passes the persisted messages list to thinking_agentic_loop
+        so the LLM continues the exact same conversation.
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+
+    # ── Restore state from checkpoint (resume path) ───────────────────────────
+    resume_messages: list[dict] | None = None
+    if resume_from:
+        history.extend(resume_from.get("history") or [])
+        _blocked: set[str] = resume_from.get("blocked_urls") or set()
+        _failed: dict[str, int] = resume_from.get("failed_url_counts") or {}
+        progressive_findings_count = resume_from.get("progressive_findings_count") or 0
+        _consecutive_ctx_tools[0] = resume_from.get("consecutive_context_tools") or 0
+        resume_messages = resume_from.get("messages") or None
+        log.info(
+            "Resuming agentic loop for run_id=%s from step %s (%d history entries, "
+            "%d messages in LLM context)",
+            run_id,
+            resume_from.get("step_count", "?"),
+            len(history),
+            len(resume_messages) if resume_messages else 0,
+        )
+    else:
+        _blocked: set[str] = set()
+        _failed: dict[str, int] = {}
+
     pending_session_labels: set[str] = set()
 
     def _mark_session_pending(label: str | None) -> None:
@@ -4717,6 +4788,19 @@ async def _do_agentic_thinking_loop(
         )
 
     # ── Run the loop ──────────────────────────────────────────────────────────
+    async def _on_checkpoint_callback(messages: list[dict]) -> None:
+        """Persist the full loop state after each completed LLM turn."""
+        checkpoint_svc.save_checkpoint(
+            run_id,
+            messages=messages,
+            history=history,
+            blocked_urls=_blocked,
+            failed_url_counts=_failed,
+            step_count=len(messages),
+            progressive_findings_count=progressive_findings_count,
+            consecutive_context_tools=_consecutive_ctx_tools[0],
+        )
+
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
         system_message=llm_svc._THINKING_AGENT_SYSTEM,
@@ -4725,6 +4809,8 @@ async def _do_agentic_thinking_loop(
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
         done_check=_agentic_done_check,
+        resume_messages=resume_messages,
+        on_checkpoint=_on_checkpoint_callback,
     )
     return progressive_findings_count
 
