@@ -361,6 +361,7 @@ class ScanFinding(SQLModel, table=True):
     request_evidence: str = Field(default="")
     response_evidence: str = Field(default="")
     evidence_json: str = Field(default="[]")
+    merged_instances: str = Field(default="[]")  # JSON list of consolidated cross-URL instances
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     finding_source: str = Field(default="unknown", index=True)
     # Validation fields
