@@ -782,3 +782,12 @@ class ScanStatusOut(BaseModel):
     pages_done: int
     findings_count: int
     status: str   # idle | running | complete | stopped | failed
+
+
+class ScanCheckpointStatusOut(BaseModel):
+    """Returned by GET /thinking-scan/checkpoint to tell the UI whether a
+    resumable checkpoint exists for this run."""
+
+    exists: bool
+    step_count: int | None = None
+    updated_at: datetime | None = None

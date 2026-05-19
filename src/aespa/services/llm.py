@@ -1,12 +1,14 @@
 """Abstract LLM client wrappers for configured provider APIs."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import httpx
 import json
 import logging
 import os
 import re
+import time
 from contextvars import ContextVar
 from typing import Any, Optional
 from urllib.parse import quote
@@ -1653,6 +1655,15 @@ UNION: find column count with `' ORDER BY N--`; find reflected column with
 Constraint: never DROP/INSERT/UPDATE/DELETE; limit to version/DB name for PoC.""",
 
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
+Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
+  and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
+  evidence=code_context showing the unsanitized innerHTML assignment. For each sink:
+    a. Find the write endpoint: call target_inventory with kind="input" and filter by
+       the same field name (key) to get the URL and method that accepts that field.
+    b. POST a payload to that write endpoint as the attacker session.
+    c. Log in as a different user (victim session) and navigate to the page that loads
+       the JS file identified in the sink item — verify execution via browser DOM check.
+  This step finds cross-user stored XSS that generic fuzzing misses.
 Step 1 — inject a unique canary string; check if it appears in the response.
 Step 2 — identify rendering context, then use a context-matched payload:
   HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>
@@ -2574,6 +2585,8 @@ async def thinking_agentic_loop(
     emit_fn=None,
     stop_check=None,
     done_check=None,
+    resume_messages: list[dict] | None = None,
+    on_checkpoint=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -2581,9 +2594,21 @@ async def thinking_agentic_loop(
     verbatim instead of from a lossy reconstructed summary.
 
     tool_executor: async (tool_name: str, tool_input: dict, step: int) -> str
+
+    resume_messages: if provided, the loop restores this conversation history
+        instead of building a fresh one from initial_user_message.  Used when
+        resuming an interrupted scan.
+
+    on_checkpoint: optional async callable ``(messages: list[dict]) -> None``
+        invoked after every completed LLM turn so the caller can persist the
+        current conversation state to durable storage.
+
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
-    messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    if resume_messages is not None:
+        messages: list[dict] = resume_messages
+    else:
+        messages: list[dict] = [{"role": "user", "content": initial_user_message}]
     tool_call_count = 0
     final_summary = ""
     consecutive_text_only_turns = 0
@@ -2628,9 +2653,30 @@ async def thinking_agentic_loop(
                     })
                 except Exception:
                     pass
-            content_blocks, stop_reason, raw_content = await _call_with_tools(
-                config, system_message, messages
+            _step_no = tool_call_count + 1
+            _t_llm = time.monotonic()
+            _llm_fut = asyncio.ensure_future(
+                _call_with_tools(config, system_message, messages)
             )
+            while True:
+                _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
+                if _done:
+                    break
+                _elapsed = int(time.monotonic() - _t_llm)
+                if emit_fn:
+                    try:
+                        emit_fn({
+                            "type": "scanner_phase",
+                            "phase": "llm_heartbeat",
+                            "status": "pending",
+                            "message": (
+                                f"Step {_step_no}: waiting for LLM response "
+                                f"({_elapsed}s elapsed)\u2026"
+                            ),
+                        })
+                    except Exception:
+                        pass
+            content_blocks, stop_reason, raw_content = _llm_fut.result()
         except Exception as exc:
             log.error(
                 "thinking_agentic_loop: API error at step %d: %s",
@@ -2766,6 +2812,12 @@ async def thinking_agentic_loop(
 
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
+
+        if on_checkpoint:
+            try:
+                await on_checkpoint(messages)
+            except Exception:
+                pass  # checkpoint write failures must never abort the scan
 
         if session_done:
             break

@@ -191,7 +191,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `TrafficEntry` | A captured HTTP request/response pair |
 | `ScanFinding` | A discovered vulnerability with evidence and CVSS score |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
-| `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script) |
+| `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
 | `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
@@ -287,6 +287,29 @@ start_scan(run_id)
          4. Analyse: send probe responses to LLM
                      LLM returns ScanFinding (or null)
          5. Persist: store finding with evidence, screenshots, traffic
+
+       After all pages:
+         6. JS sink analysis (_analyse_js_sinks)
+              - Fetch each discovered JS file (TargetIntelItem kind=script)
+              - Regex-scan for innerHTML / outerHTML / document.write /
+                insertAdjacentHTML assignments lacking a sanitizer call
+                (escapeHtml, DOMPurify, etc.) in the surrounding context
+              - Save TargetIntelItem(kind=xss_sink) per unique unsanitized sink
+              - Save info-severity ScanFinding per sink (visible immediately
+                in the findings panel before dynamic confirmation)
+              - Emit scanner_phase events so the UI shows progress and the
+                full list of identified sinks
+
+         7. Stored XSS canary sweep (_stored_xss_sweep)
+              First pass — re-fetch every crawled page as the authenticated
+              attacker; look for the injected canary unescaped in the HTML.
+              Second pass (sink-targeted, cross-user) — when a second
+              credential is configured:
+              - POST the canary to each sink's write endpoint (identified
+                via TargetIntelItem kind=input matching the sink field name)
+              - Re-fetch crawled pages as a victim session
+              - Any unescaped canary in the victim's view → confirmed
+                high-severity Stored XSS finding with cross-user evidence
 ```
 
 ### Probe types
@@ -314,10 +337,14 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Authenticate → ScannerSession
-       3. Seed PentestHypotheses + PentestTasks from intel
-       4. Build compact crawl summary (context for LLM)
-       5. Detect auth cookies for boundary checks
+       2. Run JS sink analysis (_analyse_js_sinks) — populates
+          TargetIntelItem(kind=xss_sink) rows before the LLM loop
+          starts so the agent can find them via target_inventory
+          without re-fetching JS source itself
+       3. Authenticate → ScannerSession
+       4. Seed PentestHypotheses + PentestTasks from intel
+       5. Build compact crawl summary (context for LLM)
+       6. Detect auth cookies for boundary checks
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
 
@@ -362,7 +389,7 @@ targeted scan round will change the next action.
 | `page_detail` | Full metadata, flags, text for a page |
 | `history_search` | Query prior HTTP requests/responses by keyword |
 | `finding_list` | Already-confirmed findings |
-| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts |
+| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and pre-identified `xss_sink` items (unsanitized innerHTML sinks found by static JS analysis) |
 | `traffic_search` | Search the HTTP traffic log |
 | `endpoint_detail` | Combined page + intel + traffic for a URL |
 | `compare_responses` | Diff two prior responses |
@@ -527,7 +554,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 |---|---|
 | Activity log | Timestamped crawl/scan events |
 | Site map | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
-| Intelligence log | `TargetIntelItems` — endpoints, forms, inputs, IDs |
+| Intelligence log | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, xss_sinks |
 | Task graph | `PentestHypothesis` tree with `PentestTask` leaves |
 | Traffic log | All `TrafficEntry` records (request + response) |
 | Findings | `ScanFinding` list sorted by severity, with CVSS and evidence |
