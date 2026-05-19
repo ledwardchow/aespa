@@ -7,6 +7,20 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+
+def _parse_datetimes(data: dict, *fields: str) -> dict:
+    """Return *data* with ISO-string values for *fields* converted to datetime objects.
+
+    JSON serialisation turns datetime → str; SQLite requires real datetime objects
+    when inserting via SQLAlchemy, so we convert them back here at import time.
+    ``None`` values are left as-is; strings are parsed with ``datetime.fromisoformat``.
+    """
+    for field in fields:
+        value = data.get(field)
+        if isinstance(value, str):
+            data[field] = datetime.fromisoformat(value)
+    return data
+
 from sqlmodel import Session, select
 
 from aespa.models import Credential, PageCredentialView, Site
@@ -298,6 +312,7 @@ def import_site(session: Session, bundle: dict) -> Site:
                     if k not in ("id",)}
         run_data["site_id"] = new_site_id
         run_data["llm_config_id"] = None  # cannot map across installations
+        _parse_datetimes(run_data, "created_at", "started_at", "completed_at")
 
         run = TestRun(**run_data)
         session.add(run)
@@ -310,6 +325,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             p = dict(p)
             old_pid = p.pop("id")
             p["test_run_id"] = new_run_id
+            _parse_datetimes(p, "discovered_at")
             page = CrawledPage(**p)
             session.add(page)
             session.flush()
@@ -333,6 +349,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             t = dict(t)
             t.pop("id")
             t["test_run_id"] = new_run_id
+            _parse_datetimes(t, "created_at")
             session.add(TrafficEntry(**t))
 
         # ── ScannerSessions ─────────────────────────────────────────────────
@@ -343,6 +360,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_cid = s.get("credential_id")
             if old_cid is not None:
                 s["credential_id"] = cred_id_map.get(old_cid)
+            _parse_datetimes(s, "created_at", "updated_at")
             session.add(ScannerSession(**s))
 
         # ── PageCredentialViews ─────────────────────────────────────────────
@@ -363,6 +381,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             i = dict(i)
             i.pop("id")
             i["test_run_id"] = new_run_id
+            _parse_datetimes(i, "discovered_at")
             session.add(TargetIntelItem(**i))
 
         # ── PentestHypotheses ───────────────────────────────────────────────
@@ -371,6 +390,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             h = dict(h)
             old_hid = h.pop("id")
             h["test_run_id"] = new_run_id
+            _parse_datetimes(h, "created_at", "updated_at")
             hyp = PentestHypothesis(**h)
             session.add(hyp)
             session.flush()
@@ -384,6 +404,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_hid = t.get("hypothesis_id")
             if old_hid is not None:
                 t["hypothesis_id"] = hyp_id_map.get(old_hid)
+            _parse_datetimes(t, "created_at", "updated_at")
             session.add(PentestTask(**t))
 
         # ── ScanFindings ────────────────────────────────────────────────────
@@ -394,6 +415,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_pid = f.get("page_id")
             if old_pid is not None:
                 f["page_id"] = page_id_map.get(old_pid)
+            _parse_datetimes(f, "created_at")
             session.add(ScanFinding(**f))
 
         # ── ScanLogs ────────────────────────────────────────────────────────
@@ -401,6 +423,7 @@ def import_site(session: Session, bundle: dict) -> Site:
             sl = dict(sl)
             sl.pop("id")
             sl["test_run_id"] = new_run_id
+            _parse_datetimes(sl, "created_at")
             session.add(ScanLog(**sl))
 
     session.commit()
