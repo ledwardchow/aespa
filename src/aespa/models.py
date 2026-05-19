@@ -390,3 +390,31 @@ class ScanLog(SQLModel, table=True):
     message: str = Field(default="")
     page_url: Optional[str] = Field(default=None)
     data_json: Optional[str] = Field(default=None)  # JSON blob for extra phase data
+
+
+class ScanCheckpoint(SQLModel, table=True):
+    """Persisted snapshot of the agentic loop state so an interrupted dynamic
+    scan can be resumed exactly where it left off.
+
+    One row per test_run (unique on test_run_id).  Upserted after every LLM
+    turn so a crash loses at most one turn of work.
+    """
+
+    __tablename__ = "scan_checkpoint"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True, unique=True)
+    # Full Anthropic multi-turn messages list serialised as JSON.
+    messages_json: str = Field(default="[]")
+    # Action-trace history list used by history_search / endpoint_detail context tools.
+    history_json: str = Field(default="[]")
+    # Serialised set of URLs that have failed 3+ times.
+    blocked_urls_json: str = Field(default="[]")
+    # Serialised dict of "METHOD:url" → failure count.
+    failed_url_counts_json: str = Field(default="{}")
+    # Scalar counters so the loop can resume with identical budget tracking.
+    step_count: int = Field(default=0)
+    progressive_findings_count: int = Field(default=0)
+    consecutive_context_tools: int = Field(default=0)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
