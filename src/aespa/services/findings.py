@@ -1,6 +1,7 @@
 """Finding management helpers."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -113,6 +114,14 @@ async def deduplicate_findings(
                     findings=[_finding_summary(finding) for finding in bucket],
                 )
             )
+        if len(findings) >= 2:
+            llm_used = True
+            duplicate_id_groups.extend(
+                await llm_svc.global_deduplicate_findings(
+                    llm_cfg,
+                    findings=[_compact_finding_summary(f) for f in findings],
+                )
+            )
 
     groups = _merge_duplicate_id_groups(findings, duplicate_id_groups)
     deduped_groups: list[DeduplicationGroup] = []
@@ -120,6 +129,24 @@ async def deduplicate_findings(
         kept = min(group, key=_retention_rank)
         removed = [f for f in group if f.id != kept.id]
         removed_ids = [f.id for f in removed if f.id is not None]
+
+        # Distinguish cross-URL consolidation from same-URL true deduplication.
+        targets = {_canonical_target(f.affected_url) for f in group}
+        if len(targets) > 1:
+            # Different URLs: preserve the removed findings as merged instances on the
+            # keeper so the vulnerability appears once with all affected URLs listed.
+            existing: list[dict] = json.loads(kept.merged_instances or "[]")
+            for finding in removed:
+                existing.append({
+                    "url": finding.affected_url,
+                    "title": finding.title,
+                    "evidence": finding.evidence,
+                    "request_evidence": finding.request_evidence,
+                    "response_evidence": finding.response_evidence,
+                })
+            kept.merged_instances = json.dumps(existing)
+            session.add(kept)
+
         for finding in removed:
             session.delete(finding)
         deduped_groups.append(
@@ -165,19 +192,22 @@ def _heuristic_duplicate_groups(findings: list[ScanFinding]) -> list[list[int]]:
 def _llm_candidate_buckets(
     findings: list[ScanFinding],
 ) -> list[tuple[str, list[ScanFinding]]]:
-    by_target: dict[str, list[ScanFinding]] = {}
+    # Bucket by (host, owasp_category) so the LLM sees same-class vulnerabilities
+    # across different paths on the same host, not just findings on one canonical URL.
+    by_bucket: dict[tuple[str, str], list[ScanFinding]] = {}
     for finding in findings:
-        target = _canonical_target(finding.affected_url)
-        by_target.setdefault(target, []).append(finding)
+        host = _host_from_url(finding.affected_url)
+        category = (finding.owasp_category or "").strip().lower()
+        by_bucket.setdefault((host, category), []).append(finding)
 
     buckets: list[tuple[str, list[ScanFinding]]] = []
-    for target, items in by_target.items():
+    for (host, category), items in by_bucket.items():
         if len(items) < 2:
             continue
+        label = f"{host} [{category.upper() or 'UNKNOWN'}]"
         sorted_items = sorted(
             items,
             key=lambda f: (
-                (f.owasp_category or "").lower(),
                 _normalise_text(f.title or ""),
                 f.id or 0,
             ),
@@ -185,7 +215,7 @@ def _llm_candidate_buckets(
         for start in range(0, len(sorted_items), 40):
             chunk = sorted_items[start : start + 40]
             if len(chunk) >= 2:
-                buckets.append((target, chunk))
+                buckets.append((label, chunk))
     return buckets
 
 
@@ -237,6 +267,24 @@ def _finding_summary(finding: ScanFinding) -> dict:
     }
 
 
+def _compact_finding_summary(finding: ScanFinding) -> dict:
+    """Minimal per-finding dict for the global cross-target LLM consolidation pass."""
+    url = finding.affected_url or ""
+    parsed = urlparse(url)
+    path = (parsed.path or url)[:120]
+    return {
+        "id": finding.id,
+        "severity": finding.severity,
+        "owasp": finding.owasp_category,
+        "url": path,
+        # canonical_target is used post-LLM to prevent cross-URL deletion;
+        # it is not rendered in the LLM prompt text.
+        "canonical_target": _canonical_target(url),
+        "title": finding.title,
+        "desc": str(finding.description or "")[:200],
+    }
+
+
 def _is_substantially_same(a: ScanFinding, b: ScanFinding) -> bool:
     if not _category_compatible(a.owasp_category, b.owasp_category):
         return False
@@ -273,6 +321,14 @@ def _canonical_target(url: str) -> str:
         return f"{host}{path}?{query}" if query else f"{host}{path}"
 
     return _normalise_dynamic_tokens(raw.lower())
+
+
+def _host_from_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    return parsed.netloc.lower() if parsed.netloc else raw.split("/")[0].lower()
 
 
 def _canonical_path(path: str) -> str:

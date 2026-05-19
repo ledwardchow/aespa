@@ -2255,6 +2255,22 @@ function TestRunDetail({ runId, initialTab }) {
                             <img src=${"data:image/png;base64,"+f.screenshot_b64}
                               className="finding-screenshot" alt="proof screenshot"/>
                           </div>`}
+                        ${(()=>{
+                          const instances = (()=>{ try { return JSON.parse(f.merged_instances||"[]"); } catch(_){return [];} })();
+                          if (!instances.length) return null;
+                          return html`
+                            <div style=${{marginTop:12}}>
+                              <strong>Additional Affected Instances (${instances.length})</strong>
+                              ${instances.map((inst,idx)=>html`
+                                <div key=${idx} style=${{marginTop:8,paddingLeft:12,borderLeft:"2px solid var(--border,#ccc)"}}>
+                                  <div className="finding-affected-label">Instance ${idx+2}</div>
+                                  <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${inst.url||"\u2014"}</span>
+                                  ${inst.request_evidence && html`<pre className="finding-evidence" style=${{marginTop:4}}>REQUEST:\n${inst.request_evidence}</pre>`}
+                                  ${inst.response_evidence && html`<pre className="finding-evidence">RESPONSE:\n${inst.response_evidence}</pre>`}
+                                  ${!inst.request_evidence && !inst.response_evidence && inst.evidence && html`<pre className="finding-evidence">${inst.evidence}</pre>`}
+                                </div>`)}
+                            </div>`;
+                        })()}
                       </td>
                     </tr>`}
                 `;
@@ -3647,6 +3663,18 @@ function findingsToMarkdown(findings, meta = {}) {
     if (f.validation_note) {
       lines.push("### Validation Note", markdownListValue(f.validation_note), "");
     }
+    const mergedInstances = (() => {
+      try { return JSON.parse(f.merged_instances || "[]"); } catch (_) { return []; }
+    })();
+    if (mergedInstances.length > 0) {
+      lines.push("### Additional Instances", "");
+      mergedInstances.forEach((inst, idx) => {
+        lines.push(`- **Instance ${idx + 2}:** \`${inst.url || "\u2014"}\``);
+        const ev = inst.request_evidence || inst.evidence;
+        if (ev) lines.push("", markdownCodeBlock(ev), "");
+      });
+      lines.push("");
+    }
   });
 
   return lines.join("\n");
@@ -3670,6 +3698,7 @@ function findingImportPayload(f) {
     finding_source: f.finding_source || "manual_import",
     validation_status: f.validation_status || "unvalidated",
     validation_note: f.validation_note || null,
+    merged_instances: f.merged_instances || "[]",
   };
 }
 
