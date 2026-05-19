@@ -2585,6 +2585,8 @@ async def thinking_agentic_loop(
     emit_fn=None,
     stop_check=None,
     done_check=None,
+    resume_messages: list[dict] | None = None,
+    on_checkpoint=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -2592,9 +2594,21 @@ async def thinking_agentic_loop(
     verbatim instead of from a lossy reconstructed summary.
 
     tool_executor: async (tool_name: str, tool_input: dict, step: int) -> str
+
+    resume_messages: if provided, the loop restores this conversation history
+        instead of building a fresh one from initial_user_message.  Used when
+        resuming an interrupted scan.
+
+    on_checkpoint: optional async callable ``(messages: list[dict]) -> None``
+        invoked after every completed LLM turn so the caller can persist the
+        current conversation state to durable storage.
+
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
-    messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    if resume_messages is not None:
+        messages: list[dict] = resume_messages
+    else:
+        messages: list[dict] = [{"role": "user", "content": initial_user_message}]
     tool_call_count = 0
     final_summary = ""
     consecutive_text_only_turns = 0
@@ -2798,6 +2812,12 @@ async def thinking_agentic_loop(
 
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
+
+        if on_checkpoint:
+            try:
+                await on_checkpoint(messages)
+            except Exception:
+                pass  # checkpoint write failures must never abort the scan
 
         if session_done:
             break
