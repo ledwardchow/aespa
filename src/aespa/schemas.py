@@ -709,6 +709,7 @@ class ScanFindingOut(BaseModel):
     finding_source: str = "unknown"
     validation_status: str
     validation_note: str | None
+    merged_instances: str = "[]"
     created_at: datetime
 
 
@@ -730,6 +731,7 @@ class ScanFindingImportIn(BaseModel):
     finding_source: str = "manual_import"
     validation_status: str = "unvalidated"
     validation_note: str | None = None
+    merged_instances: str = "[]"
 
 
 class ScanFindingImportResult(BaseModel):

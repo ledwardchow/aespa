@@ -1443,14 +1443,53 @@ async def normalize_finding_titles(
         return new_findings
 
 
+def _format_findings_as_text(findings: list[dict]) -> str:
+    """Format findings as structured text sorted by severity for LLM input.
+
+    Works with both full _finding_summary dicts and compact _compact_finding_summary
+    dicts, so it can be used in both the per-bucket and global deduplication prompts.
+    """
+    _sev = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    ordered = sorted(
+        findings,
+        key=lambda f: (_sev.get(str(f.get("severity") or "").lower(), 5), f.get("id") or 0),
+    )
+    parts = []
+    for f in ordered:
+        header = (
+            f"### [{(f.get('severity') or 'unknown').upper()}] "
+            f"Finding {f.get('id')} \u2014 {f.get('title') or '(untitled)'}"
+        )
+        lines = [
+            header,
+            f"OWASP: {f.get('owasp_category') or f.get('owasp') or 'unknown'}",
+            f"URL: {f.get('affected_url') or f.get('url') or 'unknown'}",
+        ]
+        for key in ("description", "desc"):
+            if v := str(f.get(key) or "").strip():
+                lines.append(f"Description: {v}")
+                break
+        for key, label in (
+            ("impact", "Impact"),
+            ("likelihood", "Likelihood"),
+            ("recommendation", "Recommendation"),
+            ("evidence", "Evidence"),
+        ):
+            if v := str(f.get(key) or "").strip():
+                lines.append(f"{label}: {v}")
+        parts.append("\n".join(lines))
+    return "\n\n---\n\n".join(parts)
+
+
 _DEDUPLICATE_FINDINGS_PROMPT = """\
 You are de-duplicating security findings from a web application penetration test.
 
-Findings below are candidate duplicates because they affect the same normalized target:
-{target}
+Findings below are candidate duplicates because they share the same vulnerability
+class and host target: {target}
 
-Candidate findings:
-{findings_json}
+Candidate findings (sorted by severity):
+
+{findings_text}
 
 Decide which findings are substantially the same issue in substance and target.
 
@@ -1461,6 +1500,9 @@ Rules:
   duplicates when the vulnerability/root cause and target functionality are the same.
 - Titles and writeups may differ; judge by vulnerability class, root cause, affected
   functionality, impact, and recommended fix.
+- Do NOT group findings that affect different URL paths or parameters — XSS on
+  /search and XSS on /login are separate vulnerable endpoints that must remain as
+  separate findings even if they share the same vulnerability class.
 - Do NOT group findings that are different vulnerability classes, different target
   functionality, or require meaningfully different remediation.
 - Only include groups with at least two finding ids.
@@ -1484,24 +1526,24 @@ async def deduplicate_finding_groups(
     if len(findings) < 2:
         return []
 
-    compact = []
+    truncated = []
     for finding in findings[:40]:
-        compact.append({
+        truncated.append({
             "id": finding.get("id"),
             "owasp_category": finding.get("owasp_category"),
             "severity": finding.get("severity"),
             "affected_url": finding.get("affected_url"),
             "title": finding.get("title"),
-            "description": str(finding.get("description") or "")[:700],
-            "impact": str(finding.get("impact") or "")[:400],
-            "likelihood": str(finding.get("likelihood") or "")[:300],
-            "recommendation": str(finding.get("recommendation") or "")[:400],
-            "evidence": str(finding.get("evidence") or "")[:500],
+            "description": str(finding.get("description") or "")[:1200],
+            "impact": str(finding.get("impact") or "")[:600],
+            "likelihood": str(finding.get("likelihood") or "")[:400],
+            "recommendation": str(finding.get("recommendation") or "")[:600],
+            "evidence": str(finding.get("evidence") or "")[:800],
         })
 
     prompt = _DEDUPLICATE_FINDINGS_PROMPT.format(
         target=target or "(unknown target)",
-        findings_json=json.dumps(compact, indent=2),
+        findings_text=_format_findings_as_text(truncated),
     )
     try:
         raw = await _call(config, prompt, None)
@@ -1527,6 +1569,93 @@ async def deduplicate_finding_groups(
         return result
     except Exception as exc:
         log.warning("deduplicate_finding_groups failed: %s", exc)
+        return []
+
+
+_FINGERPRINT_PROMPT = """\
+You are classifying security findings from a web application penetration test.
+
+For each finding below, assign a short canonical "vulnerability fingerprint" that
+captures:
+  1. Vulnerability CLASS  (e.g. xss, sqli, idor, csrf, ssrf, broken-auth, ssti, xxe)
+  2. Root-cause MECHANISM (e.g. reflection, stored, blind, missing-check, misconfig)
+  3. Affected FUNCTIONALITY (e.g. login, search, user-profile, file-upload, admin-panel)
+
+Findings that represent the SAME underlying vulnerability — even when found on
+different URLs or paths — MUST receive IDENTICAL fingerprints.
+
+For example, reflected XSS found on /search and on /login should both get
+"xss:reflection:user-input" if the root cause is the same unescaped reflection.
+
+Findings (sorted by severity):
+
+{findings_text}
+
+Return ONLY valid JSON:
+{{
+  "fingerprints": [
+    {{"id": 1, "fingerprint": "xss:reflection:user-input"}},
+    {{"id": 2, "fingerprint": "xss:reflection:user-input"}},
+    {{"id": 3, "fingerprint": "sqli:error-based:login-form"}}
+  ]
+}}
+"""
+
+
+async def global_deduplicate_findings(
+    config: "LLMConfig",
+    *,
+    findings: list[dict],
+) -> list[list[int]]:
+    """Two-phase global cross-target consolidation pass.
+
+    Phase 1 — the LLM assigns a canonical vulnerability fingerprint to every finding.
+    Phase 2 — findings that share an identical fingerprint are grouped deterministically
+               without a second LLM call.
+    """
+    if len(findings) < 2:
+        return []
+
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: (
+            sev_order.get(str(f.get("severity") or "").lower(), 5),
+            f.get("id") or 0,
+        ),
+    )
+    batch = sorted_findings[:120]
+
+    prompt = _FINGERPRINT_PROMPT.format(
+        findings_text=_format_findings_as_text(batch),
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        data = _extract_json(raw or "", expect=dict)
+        fp_list = data.get("fingerprints") if isinstance(data, dict) else None
+        if not isinstance(fp_list, list):
+            return []
+        allowed_ids = {
+            int(f["id"])
+            for f in findings
+            if isinstance(f.get("id"), int)
+        }
+        # Phase 2: group by fingerprint.
+        # Cross-URL groups are safe here — the merge step in deduplicate_findings
+        # will consolidate different-URL instances into merged_instances rather than
+        # deleting them, so all instance data is preserved.
+        by_fp: dict[str, list[int]] = {}
+        for entry in fp_list:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            fp = str(entry.get("fingerprint") or "").strip().lower()
+            if not fp or not isinstance(raw_id, int) or raw_id not in allowed_ids:
+                continue
+            by_fp.setdefault(fp, []).append(raw_id)
+        return [ids for ids in by_fp.values() if len(ids) >= 2]
+    except Exception as exc:
+        log.warning("global_deduplicate_findings failed: %s", exc)
         return []
 
 

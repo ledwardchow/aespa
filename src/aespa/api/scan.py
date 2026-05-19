@@ -306,6 +306,7 @@ def import_findings(
             finding_source=(item.finding_source or "manual_import").strip()[:64],
             validation_status=import_validation_status,
             validation_note=item.validation_note,
+            merged_instances=item.merged_instances,
         )
         session.add(finding)
         session.flush()
