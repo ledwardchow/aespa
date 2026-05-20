@@ -664,6 +664,19 @@ def seed_task_graph(
     return task_graph_svc.get_task_graph(run_id, session=session)
 
 
+@router.get("/api/test-runs/{run_id}/recon-summary")
+def get_recon_summary(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return the stored attack-surface summary for this run, or 404 if not yet built."""
+    run = _get_run_or_404(session, run_id)
+    if not run.recon_summary:
+        raise HTTPException(status_code=404, detail="Recon summary not yet available for this run.")
+    import json as _json
+    return _json.loads(run.recon_summary)
+
+
 # ── Scope management ──────────────────────────────────────────────────────────
 
 @router.patch("/api/test-runs/{run_id}/pages/{page_id}/scope")
