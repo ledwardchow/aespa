@@ -1348,6 +1348,21 @@ legend {
 .phase-llm-wait  { background:rgba(34,211,238,0.12);  color:#22d3ee; animation:llm-wait-pulse 2s ease-in-out infinite; }
 @keyframes llm-wait-pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .phase-thinking  { background:rgba(251,191,36,0.12);  color:#fbbf24; }
+.phase-reporting { background:rgba(139,92,246,0.15);  color:#a78bfa; }
+/* Token counter bar (replaces old activity-toolbar) */
+.activity-token-bar { display:flex; align-items:center; gap:7px; padding:6px 14px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; min-height:34px; }
+.token-bar-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-right:2px; }
+.token-bar-in  { font-size:12px; font-weight:600; color:#34d399; font-variant-numeric:tabular-nums; }
+.token-bar-out { font-size:12px; font-weight:600; color:#60a5fa; font-variant-numeric:tabular-nums; }
+.token-bar-sep { color:var(--muted); font-size:12px; }
+.token-bar-empty { font-size:11px; color:var(--muted); font-style:italic; }
+.token-breakdown { background:var(--panel); border-bottom:1px solid var(--border); padding:6px 14px 8px; flex-shrink:0; }
+.token-breakdown-row { display:flex; align-items:center; gap:8px; padding:2px 0; }
+.token-model-name { font-size:11px; color:var(--text-2); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.token-in  { font-size:11px; color:#34d399; font-variant-numeric:tabular-nums; min-width:56px; text-align:right; }
+.token-out { font-size:11px; color:#60a5fa; font-variant-numeric:tabular-nums; min-width:56px; text-align:right; }
+/* Log sub-tab mini toolbar */
+.activity-log-toolbar { display:flex; align-items:center; gap:8px; padding:5px 14px; border-bottom:1px solid var(--border); background:var(--bg,#141519); flex-shrink:0; }
 .activity-toolbar { display:flex; align-items:center; gap:8px; padding:7px 16px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; }
 .activity-count-label { font-size:11px; color:var(--muted); margin-right:auto; }
 .activity-mode-badge { font-size:10px; font-weight:600; padding:1px 7px; border-radius:4px; background:rgba(139,92,246,0.15); color:#a78bfa; letter-spacing:0.03em; }
@@ -1385,11 +1400,11 @@ legend {
 .agent-badge-complete { background:rgba(255,255,255,0.06); color:var(--muted); }
 .agent-current-task { font-size:11px; color:var(--text-2); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-top:2px; }
 .agent-task-history { grid-column:1/-1; margin:6px 0 2px 26px; padding:6px 8px; display:flex; flex-direction:column; gap:3px; max-height:180px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; background:var(--panel-2); }
-.agent-history-entry { display:flex; align-items:baseline; gap:8px; font-size:11px; }
+.agent-history-entry { display:grid; grid-template-columns:64px minmax(0,1fr) auto; align-items:baseline; gap:8px; font-size:11px; }
 .agent-history-entry--crawl { display:grid; grid-template-columns:64px 120px minmax(0,1fr); align-items:baseline; }
 .agent-history-user { color:var(--text); font-weight:700; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.agent-history-task { color:var(--text-2); flex:1; min-width:0; }
-.agent-history-outcome { flex-shrink:0; font-size:10px; font-weight:600; color:var(--muted); }
+.agent-history-task { color:var(--text-2); min-width:0; line-height:1.35; }
+.agent-history-outcome { grid-column:2/-1; font-size:10px; font-weight:600; color:var(--muted); line-height:1.35; }
 
 /* ── Target intelligence tab ─────────────────────────────────────────────── */
 .intel-panel { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; margin:0 -28px; }
