@@ -151,6 +151,15 @@ async def _do_crawl(run_id: int) -> None:
                 completed_at=None, error_message=None,
                 pages_discovered=shared.pages_done, current_url=base_url,
                 per_user_progress=None)
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Scanner",
+        "status": "active",
+        "current_task": "Crawling application…",
+        "outcome": None,
+        "_persist": True,
+    })
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
@@ -196,6 +205,15 @@ async def _do_crawl(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "run_update", "status": final_status,
         "pages_discovered": shared.pages_done, "current_url": None,
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Scanner",
+        "status": "complete",
+        "current_task": "Crawl complete",
+        "outcome": f"{shared.pages_done} page(s) discovered",
+        "_persist": True,
     })
 
 

@@ -140,6 +140,15 @@ async def validate_finding_inline(
         "validation_status": "validating",
         "validation_note": "Validation running.",
     })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": f"validator-{finding_id}",
+        "role": "Validator",
+        "status": "active",
+        "current_task": "Validating finding…",
+        "outcome": None,
+        "_persist": True,
+    })
 
     if llm_cfg is None:
         await _persist_verdict(
@@ -230,6 +239,15 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
             "type": "finding_validation_update",
             "finding_id": f.id,
             "validation_status": "validating",
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": f"validator-{f.id}",
+            "role": "Validator",
+            "status": "active",
+            "current_task": f"Validating: {f.title[:80]}",
+            "outcome": None,
+            "_persist": True,
         })
 
     # Bootstrap sessions (reuse from active scan if possible).
@@ -474,6 +492,21 @@ async def _persist_verdict(
         "validation_note": reasoning,
         "evidence_json": evidence_json,
         "evidence_items": _evidence_items_from_json(evidence_json),
+    })
+    # Emit agent_status complete for this validator agent.
+    outcome_map = {
+        "confirmed": "Confirmed",
+        "false_positive": "False positive",
+        "unconfirmed": "Unconfirmed",
+    }
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": f"validator-{finding_id}",
+        "role": "Validator",
+        "status": "complete",
+        "current_task": f"Verdict: {verdict}",
+        "outcome": outcome_map.get(verdict, verdict),
+        "_persist": True,
     })
 
 
