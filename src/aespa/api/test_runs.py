@@ -13,11 +13,14 @@ from aespa.models import (
     PageLink,
     PentestHypothesis,
     PentestTask,
+    ScanCheckpoint,
     ScanFinding,
+    ScanLog,
     ScannerSession,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
+    TrafficEntry,
 )
 from aespa.schemas import (
     ActiveJobSummary,
@@ -165,6 +168,8 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
         session.delete(view)
     for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
         session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
     for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
         session.delete(pg)
 
@@ -310,9 +315,23 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     intel = session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all()
     for item in intel:
         session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
+    for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
+        session.delete(finding)
+    for log_entry in session.exec(select(ScanLog).where(ScanLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
+    for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
+        session.delete(ckpt)
+    for ss in session.exec(select(ScannerSession).where(ScannerSession.test_run_id == run_id)).all():
+        session.delete(ss)
+    for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
+        session.delete(hyp)
+    for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
+        session.delete(task)
     for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
         session.delete(log_entry)
     session.delete(run)
