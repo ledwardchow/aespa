@@ -72,6 +72,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "merged_instances", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
+    _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")

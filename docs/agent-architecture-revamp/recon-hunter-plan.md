@@ -83,11 +83,209 @@ events and appear as rows in the new Agents UI tab.
    timestamp exists. Needs a DB migration to track in future runs.
 
 ### Phase 1 — Recon output contract `[TODO]`
-2. Formalise what `seed_task_graph()` in `src/aespa/services/task_graph.py` produces:
-   a structured attack-surface summary (trust boundaries, entry points, interesting attack
-   classes, `has_business_logic` pages called out explicitly) alongside the existing
-   prioritised `PentestTask` queue. This summary becomes the thinking scan's opening
-   context, replacing the current ad-hoc compact context build.
+
+**Goal:** The thinking scan currently opens with an ad-hoc compact context string built
+from raw crawl data (`_build_compact_thinking_context` + `_build_target_intelligence_context`
+in `scanner.py`). Replace this with a structured, persisted **attack-surface summary** that
+gives the scanner — and later the Specialist agents — a reasoned picture of the target
+before the first LLM turn.
+
+#### 1a. What to produce
+
+`seed_task_graph()` in `task_graph.py` already generates the *work queue* (prioritised
+`PentestTask` records). Phase 1 adds a companion function `build_recon_summary(run_id)`
+that produces a **`ReconSummary`** — a structured document describing the attack surface.
+These two functions are called together at the same point in `_do_thinking_scan`:
+
+```
+Crawl completes
+  └── task_graph.build_recon_summary(run_id)   ← NEW  stores to TestRun.recon_summary
+  └── task_graph.seed_task_graph(run_id)       ← EXISTING  populates PentestTask queue
+  └── scanner opens thinking-scan LLM with recon_summary as opening context  ← CHANGED
+```
+
+#### 1b. Where does the user see the summary?
+
+The UI already has seven tabs: **Status · Site Map · Intelligence · Tasks · Sessions · Findings · Traffic**.
+The **Tasks** tab currently shows `PentestHypothesis` and `PentestTask` records from
+`seed_task_graph()`. The recon summary belongs here — it is the higher-level picture that
+those tasks are derived from.
+
+**Decision: add a two-sub-tab bar to the Tasks tab — "Attack Surface" (summary) and
+"Task Queue" (existing hypotheses + tasks, unchanged).**
+
+This co-locates the "why" (attack surface analysis) with the "what has been done" (task
+progress), reuses the established sub-tab pattern already present in the Activity tab, and
+does not add an eighth top-level tab.
+
+The Attack Surface panel renders the `ReconSummary` JSON as three collapsible sections:
+
+```
+▸ Trust zones       PUBLIC (3)  USER (12)  ADMIN (8)
+▾ Attack classes    [P10] Auth bypass  [P9] IDOR  [P8] SQLi  [P7] XSS ...
+    [P10] auth_bypass — JWT secret exposed at /api/health (unauthenticated)
+          Entry points: /api/health, /api/auth/login
+    ...
+▸ Tech stack / credentials
+```
+
+It is populated on mount via a new `GET /api/test-runs/{id}/recon-summary` endpoint and
+requires no SSE — it is static after the crawl completes.
+
+#### 1c. Does the recon summary make the task graph redundant?
+
+**No, but it clarifies the division of labour.**
+
+| | Recon summary | Task graph |
+|---|---|---|
+| Type | Immutable document — written once at crawl completion | Mutable work queue |
+| Consumed by | LLM opening context; Attack Surface UI panel; Specialist agent briefing | `build_task_graph_context` (LLM mid-scan); Task Queue UI panel |
+| Updated during scan | Never | Continuously — task statuses change as the LLM works |
+| Granularity | Attack-surface categories (trust zones, attack classes) | Individual testable actions (one per URL/param pair) |
+| Tracks "what has been done" | No | Yes |
+
+The task graph adds two things the summary cannot: **runtime progress tracking** (which
+tasks are queued/running/complete) and **mid-scan LLM guidance** (`build_task_graph_context`
+is re-injected during the agentic loop to keep the scanner on track). These are genuinely
+different from the static attack surface picture.
+
+**However**, the `PentestHypothesis` layer is now largely a duplication of `attack_classes`
+in the summary. For Phase 1 keep both, with `seed_task_graph()` deriving hypotheses
+directly from the summary's `attack_classes` rather than re-deriving them independently.
+The option to eliminate `PentestHypothesis` and link `PentestTask` directly to
+`attack_class` strings in the summary is noted as a simplification to revisit after Phase 1
+is proven — it is not in scope here.
+
+The summary **influences** how the task graph is seeded (the `attack_classes` it identifies
+become `PentestHypothesis.attack_area` and `owasp_category`), but it is not itself a node
+in the queue. Mixing them would conflate "what the target looks like" with "what to test next".
+
+#### 1c. `ReconSummary` schema
+
+Persisted as a JSON blob in a new `recon_summary` TEXT column on `TestRun`.
+
+```json
+{
+  "trust_zones": {
+    "public":            ["/api/health", "/banking/", ...],
+    "authenticated_user": ["/api/profile", "/api/accounts", ...],
+    "admin":             ["/api/admin/customers", "/api/admin/system/reset", ...]
+  },
+  "entry_points": [
+    {"url": "/api/auth/login",     "method": "POST",  "params": ["email", "password"]},
+    {"url": "/api/admin/customers","method": "GET",   "params": ["search"]},
+    ...
+  ],
+  "attack_classes": [
+    {
+      "class":       "idor",
+      "rationale":   "Object-reference IDs in /api/transfers/external (from_account_id), /api/transactions/{id}",
+      "priority":    9,
+      "entry_points": ["/api/transfers/external", "/api/transactions/{id}"]
+    },
+    {
+      "class":       "auth_bypass",
+      "rationale":   "JWT issued by /api/auth/login; /api/health exposes jwt_secret unauthenticated",
+      "priority":    10,
+      "entry_points": ["/api/health", "/api/auth/login"]
+    },
+    ...
+  ],
+  "business_logic_pages": ["/api/transfers/external", "/api/fx/rates", "/api/transfers/check"],
+  "tech_stack": {"server": "Apache/2.4.58", "language": "PHP 8.3", "db": "MySQL"},
+  "credential_roles": [
+    {"role": "user",  "source": "registration", "count": 1},
+    {"role": "admin", "source": "login_endpoint", "count": 1}
+  ]
+}
+```
+
+`attack_classes` values are drawn from a fixed vocabulary aligned with WSTG skill keys so
+they can be directly cross-referenced: `idor`, `auth_bypass`, `sqli`, `xss`, `business_logic`,
+`ssrf`, `path_traversal`, `cors`, `crypto`, `config`.
+
+#### 1d. How the task graph is seeded from it
+
+`seed_task_graph()` is called *after* `build_recon_summary()` and accepts the summary as
+an optional argument. Each `attack_class` entry maps to one or more `PentestHypothesis`
+records, with `attack_area` = the class string and `rationale` drawn from the summary's
+`rationale` field. This replaces the current purely heuristic hypothesis generation.
+
+The `entry_points` list in each attack class seeds `PentestTask` records, replacing
+ad-hoc `TaskSeed` generation in `_build_seed_specs()`. The task graph output doesn't
+change shape — only the *quality* of hypotheses and tasks improves.
+
+#### 1e. Thinking scan context change
+
+In `_do_thinking_scan` (scanner.py lines ~2707–2714), replace:
+
+```python
+crawl_context = _build_compact_thinking_context(base_url, pages_snapshot, findings_snapshot)
+intel_context = _build_target_intelligence_context(run_id)
+if intel_context:
+    crawl_context = f"{crawl_context}\n\n{intel_context}"
+```
+
+with:
+
+```python
+crawl_context = _build_thinking_context_from_recon_summary(run_id, base_url, findings_snapshot)
+```
+
+`_build_thinking_context_from_recon_summary` reads `TestRun.recon_summary` if present and
+renders it as a structured LLM prompt block. If `recon_summary` is absent (old runs,
+in-progress resumes), it falls back to the existing `_build_compact_thinking_context` path —
+no regression on existing runs.
+
+The rendered context prioritises **attack classes** and **trust zones** over the raw
+page-count summary the current function produces, giving the scanner an analyst-quality
+briefing rather than a stat dump:
+
+```
+Target: http://192.168.3.101  (Apache/2.4.58, PHP 8.3, MySQL)
+
+Trust zones:
+  PUBLIC (no auth): /api/health, /banking/, /admin/ — note: health endpoint exposes jwt_secret
+  USER (JWT): /api/profile, /api/accounts, /api/transfers/*, /api/transactions/*
+  ADMIN (separate JWT, iss=BankOfEdAdmin): /api/admin/*
+
+High-priority attack classes:
+  [P10] auth_bypass — JWT issued by /api/auth/login; /api/health exposes jwt_secret unauthenticated
+  [P9]  idor        — Object-reference IDs in /api/transfers/external, /api/transactions/{id}
+  [P8]  sqli        — Search parameter at /api/admin/customers; sort param at /api/transactions
+  ...
+
+Business logic pages: /api/transfers/external, /api/fx/rates, /api/transfers/check
+
+Use context tools for full endpoint details.
+```
+
+#### 1f. Implementation steps
+
+1. **DB migration**: add `recon_summary: str | None = None` (TEXT) to `TestRun` in `models.py`.
+2. **`task_graph.py`**: add `build_recon_summary(run_id, pages, intel_items) -> dict`.
+   - Derives trust zones from `CrawledPage.requires_auth` + URL-pattern heuristics.
+   - Derives entry points from `CrawledPage.takes_input == True` + `TargetIntelItem` records.
+   - Derives `attack_classes` from heuristic rules (same logic currently scattered across
+     `_build_seed_specs`; consolidate here).
+   - Persists JSON blob to `TestRun.recon_summary`.
+3. **`task_graph.py`**: update `seed_task_graph()` to accept `summary: dict | None = None`;
+   derive hypotheses from `summary["attack_classes"]` instead of re-running independent
+   heuristics. Fall back to current logic if summary absent (backward-compat for old runs).
+4. **`scanner.py`**: add `_build_thinking_context_from_recon_summary(run_id, base_url, findings_snapshot)`.
+   Reads `TestRun.recon_summary` if present; falls back to `_build_compact_thinking_context`
+   if absent — no regression on existing runs.
+5. **`scanner.py`**: in `_do_thinking_scan`, call `build_recon_summary()` then `seed_task_graph(summary=...)`,
+   then use the new context builder.
+6. **`api/test_runs.py`** (or `api/scan.py`): add `GET /api/test-runs/{id}/recon-summary`
+   endpoint returning `TestRun.recon_summary` (parsed JSON, or 404 if absent).
+7. **`app.js`**: Tasks tab gets a sub-tab bar — "Attack Surface" (new) and "Task Queue"
+   (existing content, unchanged). Attack Surface panel fetches from the new endpoint on mount
+   and renders trust zones, attack classes, and tech stack. No SSE required.
+8. **Unit tests**: `build_recon_summary` produces correct trust zones and attack classes for
+   a Bank of Ed-style page set; `_build_thinking_context_from_recon_summary` falls back
+   correctly when summary absent; `seed_task_graph` driven by summary produces expected
+   hypothesis `attack_area` values.
 
 ### Phase 2 — Specialist agents *(bolt-on, Burp-style)* `[TODO]`
 3. *Depends on 1.* When the thinking scan encounters a strong lead (e.g. a suspicious
@@ -244,16 +442,16 @@ After existing `.activity-*` rules (~`styles.css` line 1089):
 | File | Changes | Status |
 |---|---|---|
 | `src/aespa/services/crawler.py` | Emit `agent_status` at crawl start/complete | DONE |
-| `src/aespa/services/task_graph.py` | Formalise recon output contract; richer attack-surface summary | TODO |
-| `src/aespa/services/scanner.py` | Add `agent_dispatch` action type; spawn specialist agents; emit `agent_status` per step | Partial — `agent_status` done; `agent_dispatch` TODO |
+| `src/aespa/services/task_graph.py` | Add `build_recon_summary()`; update `seed_task_graph()` to accept summary and drive hypothesis generation from it | TODO |
+| `src/aespa/services/scanner.py` | Add `_build_thinking_context_from_recon_summary()`; update `_do_thinking_scan`; add `agent_dispatch` action type; spawn specialist agents; emit `agent_status` per step | Partial — `agent_status` done; recon context + `agent_dispatch` TODO |
 | `src/aespa/services/validator.py` | Full rework as adversarial agent; emit `agent_status` | Partial — `agent_status` done; adversarial rework TODO |
 | `src/aespa/services/burp_rest.py` | Emit `agent_status` on scan start and on each poll completion | DONE |
 | `src/aespa/services/findings.py` | Tag `finding_source = "specialist_agent"` | TODO |
 | `src/aespa/services/events.py` | No changes — `agent_status` uses existing `emit()`/`stream()` | DONE |
-| `src/aespa/api/scan.py` | Add `/agent-log` endpoint | DONE |
-| `src/aespa/models.py` | Add `AgentLog` table; optional `AgentRoleConfig` | Partial — `AgentLog` done; `AgentRoleConfig` TODO |
-| `src/aespa/web/app.js` | Sub-tab bar; agents state; SSE handler; agents panel render | DONE |
-| `src/aespa/web/styles.css` | Agents panel and sub-tab bar CSS | DONE |
+| `src/aespa/api/test_runs.py` | Add `GET /recon-summary` endpoint; add `/agent-log` endpoint | Partial — `/agent-log` done; `/recon-summary` TODO |
+| `src/aespa/models.py` | Add `recon_summary` column to `TestRun`; add `AgentLog` table; optional `AgentRoleConfig` | Partial — `AgentLog` done; `recon_summary` + `AgentRoleConfig` TODO |
+| `src/aespa/web/app.js` | Tasks tab: add "Attack Surface" / "Task Queue" sub-tab bar; Attack Surface panel; sub-tab bar; agents state; SSE handler; agents panel render | Partial — agents panel done; Tasks sub-tabs TODO |
+| `src/aespa/web/styles.css` | Attack Surface panel CSS; agents panel and sub-tab bar CSS | Partial — agents CSS done; attack surface CSS TODO |
 
 ---
 
