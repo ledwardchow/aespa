@@ -23,6 +23,7 @@ from aespa.services import findings as findings_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
 from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import llm as llm_svc
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["scan"])
@@ -546,6 +547,16 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         lines += ["---", ""]
 
     return "\n".join(lines)
+
+
+@router.get("/api/test-runs/{run_id}/token-usage")
+def get_token_usage(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return accumulated LLM token usage for this run (in-process memory only)."""
+    _get_run_or_404(session, run_id)
+    return llm_svc.get_run_token_usage(run_id)
 
 
 @router.get("/api/test-runs/{run_id}/thinking-log/export")
