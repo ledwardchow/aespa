@@ -61,6 +61,7 @@ const api = {
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
+  getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -72,6 +73,7 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
+  getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
@@ -906,7 +908,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "sitemap"));
+  const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "activity"));
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
@@ -937,6 +939,8 @@ function TestRunDetail({ runId, initialTab }) {
   const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
+  const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
@@ -959,6 +963,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter]   = useState("");
   const [autoScroll, setAutoScroll]         = useState(true);
+  const [trafficTotal, setTrafficTotal]     = useState(0);
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
@@ -967,6 +972,7 @@ function TestRunDetail({ runId, initialTab }) {
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
   const prevGraphKeyRef                     = useRef("");
+  const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
   const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
@@ -989,6 +995,18 @@ function TestRunDetail({ runId, initialTab }) {
     if (agent?.id === "scanner") return "Test Lead";
     return agent?.role || "Agent";
   };
+  const normalizeAgentForRun = (agent) => {
+    if (agent?.id !== "crawler") return agent;
+    if (run?.status === "running") return { ...agent, status: "active" };
+    if (Date.now() - lastRunPollOkRef.current > 10000) {
+      return { ...agent, status: "idle", currentTask: "Crawler connection stale" };
+    }
+    return {
+      ...agent,
+      status: agent.status === "failed" ? "failed" : "idle",
+      currentTask: agent.currentTask || "Crawl is not running",
+    };
+  };
   const defaultAgentRoster = () => [
     {
       id: "crawler",
@@ -1005,12 +1023,19 @@ function TestRunDetail({ runId, initialTab }) {
     { id: "specialist", role: "Specialist", status: "idle", currentTask: "No specialist dispatched" },
     { id: "burp", role: "Burp", status: "idle", currentTask: "No active scan dispatched" },
     { id: "validator", role: "Validator", status: "idle", currentTask: "No validation running" },
+    {
+      id: "reporting",
+      role: "Reporting",
+      status: thinkingStatus?.status === "analysing" ? "active" : "idle",
+      currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by",
+    },
   ];
   const representsAgent = (agent, placeholder) => {
     if (agent.id === placeholder.id) return true;
     if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
     if (placeholder.id === "validator") return agent.role === "Validator" || agent.id?.startsWith("validator-");
     if (placeholder.id === "specialist") return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "reporting") return agent.role === "Reporting" || agent.id === "reporting";
     return false;
   };
   const fmtEventTime = (value) => {
@@ -1054,16 +1079,81 @@ function TestRunDetail({ runId, initialTab }) {
       ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun())
       : []
   );
+  const compactAgentText = (value, max=180) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  };
+  const thinkingStepTitle = (entry) => {
+    const step = entry.data?.step;
+    const prefix = step ? `Step ${step}` : "Step";
+    const message = String(entry.message || "").replace(/^Step\s+\d+:\s*/i, "").trim();
+    const isDuplicateStep = (value) => (
+      !value || /^Step\s+\d+$/i.test(String(value).trim())
+    );
+    let detail = (
+      entry.data?.payload_purpose ||
+      entry.data?.hypothesis ||
+      entry.data?.observation ||
+      entry.data?.payload_summary ||
+      message
+    );
+    if (isDuplicateStep(detail)) {
+      if (entry.data?.tool) {
+        detail = `Context tool: ${entry.data.tool}`;
+      } else if (entry.data?.method && entry.data?.url) {
+        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
+      } else if (message && !isDuplicateStep(message)) {
+        detail = message;
+      } else if (entry.status === "deciding") {
+        detail = "LLM deciding next action";
+      } else {
+        detail = "Reviewing scan state";
+      }
+    }
+    const cleaned = compactAgentText(detail || "Reviewing next action");
+    return `${prefix}: ${cleaned}`;
+  };
+  const thinkingStepOutcome = (entry) => {
+    const parts = [];
+    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
+    if (entry.data?.method && entry.data?.url) parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
+    if (entry.data?.observation) parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
+    if (entry.data?.hypothesis) parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
+    if (entry.data?.payload_purpose) parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
+    if (entry.data?.payload_summary) parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
+    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
+    return parts.join(" · ");
+  };
+  const testLeadHistory = () => activityLog
+    .filter(entry => entry.phase === "thinking_step")
+    .map(entry => ({
+      ts: entry._ts || "--:--:--",
+      task: thinkingStepTitle(entry),
+      outcome: thinkingStepOutcome(entry),
+    }));
+  const agentTaskHistory = (agent) => (
+    agent?.id === "scanner" && testLeadHistory().length
+      ? testLeadHistory()
+      : (agent?.taskHistory || [])
+  );
   const agentCurrentTask = (agent) => {
+    agent = normalizeAgentForRun(agent);
     const crawlEvents = agentCrawlEvents(agent);
     if (agent?.id === "crawler" && crawlEvents.length) {
-      if (agent.status === "complete" && agent.currentTask) {
-        return agent.outcome ? `${agent.currentTask} · ${agent.outcome}` : agent.currentTask;
+      if (agent.status !== "active") {
+        const label = run?.status === "failed" ? "Crawl failed" :
+          run?.status === "stopped" ? "Crawl stopped" :
+          run?.status === "complete" ? "Crawl complete" :
+          "Crawl is not running";
+        return agent.outcome ? `${label} · ${agent.outcome}` : label;
       }
       const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
       const latest = active || crawlEvents[crawlEvents.length - 1];
       if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
       return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+    }
+    if (agent?.id === "scanner" && testLeadHistory().length) {
+      return testLeadHistory()[testLeadHistory().length - 1].task;
     }
     return agent?.currentTask || "Waiting for work";
   };
@@ -1135,6 +1225,12 @@ function TestRunDetail({ runId, initialTab }) {
       setAgents([...agentsMap.values()]);
     }).catch(() => {});
   }, [runId]);
+
+  // Load token usage from the API on mount (in-process memory, best effort).
+  useEffect(() => {
+    api.getTokenUsage(runId).then(d => { if (d) setTokenUsage(d); }).catch(() => {});
+  }, [runId]);
+
   // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
     const es = new EventSource(`/api/test-runs/${runId}/events`);
@@ -1247,6 +1343,8 @@ function TestRunDetail({ runId, initialTab }) {
             outcome: evt.outcome,
           }, histEntry);
         });
+      } else if (evt.type === "token_usage_update") {
+        setTokenUsage(evt.totals);
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -1259,9 +1357,23 @@ function TestRunDetail({ runId, initialTab }) {
     if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
       api.getRun(runId).then(r => {
+        lastRunPollOkRef.current = Date.now();
         setRun(r);
+        if (r.status !== "running") {
+          setAgents(prev => prev.map(a => (
+            a.id === "crawler" && a.status === "active"
+              ? { ...a, status: "idle", currentTask: "Crawl is not running" }
+              : a
+          )));
+        }
         if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
-      }).catch(() => {});
+      }).catch(() => {
+        setAgents(prev => prev.map(a => (
+          a.id === "crawler" && a.status === "active"
+            ? { ...a, status: "idle", currentTask: "Crawler connection stale" }
+            : a
+        )));
+      });
     }, 2000);
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
@@ -1360,6 +1472,10 @@ function TestRunDetail({ runId, initialTab }) {
     return () => clearInterval(iv);
   }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
 
+  useEffect(() => {
+    api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
+  }, [runId]);
+
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
     const poll = async () => {
@@ -1373,6 +1489,9 @@ function TestRunDetail({ runId, initialTab }) {
             const next = [...prev, ...stamped];
             return next.length > 2000 ? next.slice(-2000) : next;
           });
+        }
+        if (activeTab === "traffic" || entries.length > 0) {
+          api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
         }
       } catch(_) {}
     };
@@ -1927,12 +2046,12 @@ function TestRunDetail({ runId, initialTab }) {
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
 
       <div className="tab-bar">
-        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
-          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
-          Pentest Activity Log${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Status${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
+          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
           onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); nav(`#/runs/${runId}/intelligence`); }}>
           Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
@@ -1951,7 +2070,7 @@ function TestRunDetail({ runId, initialTab }) {
         </button>
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
           onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
-          Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
+          Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
         ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && canShowScanStartButtons && html`
@@ -2573,31 +2692,52 @@ function TestRunDetail({ runId, initialTab }) {
         <div className="activity-panel">
           ${(() => {
             const isAgentic = activityLog.some(e => e.data?.mode === "agentic");
+            const fmtTok = (n) => n >= 1_000_000 ? (n/1_000_000).toFixed(1)+"M" : n >= 1_000 ? (n/1_000).toFixed(1)+"K" : String(n||0);
+            const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
             return html`
-              <div className="activity-toolbar">
-                <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
-                ${isAgentic && html`<span className="activity-mode-badge">Continuous session</span>`}
-                <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
-                ${activityLog.length>0 && html`
-                  <button className="btn danger-outline sm"
-                    disabled=${clearBusy==="activity"}
-                    onClick=${async()=>{
-                      if (!confirm("Clear all activity log entries for this run?")) return;
-                      setClearBusy("activity"); setClearError(null);
-                      try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); }
-                      catch(e) { setClearError(e.message); }
-                      finally { setClearBusy(""); }
-                    }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+              <div className="activity-token-bar" onClick=${hasTokens ? ()=>setTokenExpanded(p=>!p) : undefined}
+                   style=${{cursor: hasTokens ? "pointer" : "default"}}>
+                ${hasTokens ? html`
+                  <span className="token-bar-label">Tokens</span>
+                  <span className="token-bar-in" title="Input tokens">↑${fmtTok(tokenUsage.total_input)} in</span>
+                  <span className="token-bar-sep">·</span>
+                  <span className="token-bar-out" title="Output tokens">↓${fmtTok(tokenUsage.total_output)} out</span>
+                  <span className="activity-expand-chevron" style=${{marginLeft:4}}>${tokenExpanded?"▲":"▼"}</span>
+                ` : html`<span className="token-bar-empty">No token data yet</span>`}
               </div>
+              ${tokenExpanded && hasTokens && html`
+                <div className="token-breakdown">
+                  ${Object.entries(tokenUsage.by_model||{}).map(([model, v]) => html`
+                    <div key=${model} className="token-breakdown-row">
+                      <span className="token-model-name">${model}</span>
+                      <span className="token-in">↑${fmtTok(v.input)}</span>
+                      <span className="token-out">↓${fmtTok(v.output)}</span>
+                    </div>`)}
+                </div>`}
               <div className="activity-sub-tab-bar">
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
-                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.some(a=>a.status==="active")?" ●":""}</button>
+                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.map(normalizeAgentForRun).some(a=>a.status==="active")?" ●":""}</button>
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
                   onClick=${()=>setActivitySubTab("log")}>Log</button>
               </div>`;
           })()}
           ${activitySubTab==="log" && html`
           <div className="activity-feed" ref=${activityFeedRef}>
+            <div className="activity-log-toolbar">
+              <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
+              ${activityLog.some(e => e.data?.mode === "agentic") && html`<span className="activity-mode-badge">Continuous session</span>`}
+              <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
+              ${activityLog.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="activity"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all activity log entries for this run?")) return;
+                    setClearBusy("activity"); setClearError(null);
+                    try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); setTokenUsage(null); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+            </div>
             ${sitePlanData && html`
               <div className="site-plan-card">
                 <div className="site-plan-header">
@@ -2648,6 +2788,10 @@ function TestRunDetail({ runId, initialTab }) {
                 llm_heartbeat:      { label: "LLM ⟳",     cls: "phase-llm-wait" },
                 credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
                 thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
+                thinking_analysis:  { label: "Report",    cls: "phase-reporting" },
+                reporting_turn:     { label: "Turn",      cls: entry.data?.findings_this_turn > 0 ? "phase-finding" : "phase-ok" },
+                post_scan_review:   { label: "Review",    cls: "phase-reporting" },
+                post_review_turn:   { label: "Review",    cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok" },
               };
               const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
               const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : "";
@@ -2661,7 +2805,8 @@ function TestRunDetail({ runId, initialTab }) {
                 entry.data?.observation || entry.data?.hypothesis ||
                 entry.data?.payload_purpose || entry.data?.payload_summary
               );
-              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail);
+              const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
               const isExpanded = expandedLogIds.has(entry._id);
               return html`
                 <div key=${entry._id}>
@@ -2694,6 +2839,11 @@ function TestRunDetail({ runId, initialTab }) {
                         ${entry.data?.payload_summary && html`
                           <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
                           <pre>${entry.data.payload_summary}</pre>`}`}
+                      ${(entry.phase === "reporting_turn" && entry.data?.titles?.length > 0) && html`
+                        <div className="activity-payload-label">Issues identified this turn</div>
+                        <ul style=${{margin:"4px 0 0 0",paddingLeft:18}}>
+                          ${entry.data.titles.map((t,i) => html`<li key=${i}>${t}</li>`)}
+                        </ul>`}
                     </div>`}
                 </div>`;
             })}
@@ -2701,16 +2851,16 @@ function TestRunDetail({ runId, initialTab }) {
           ${activitySubTab==="agents" && html`
           <div className="agents-panel">
             ${(()=>{
-              const placeholders = defaultAgentRoster().filter(p => !agents.some(a => representsAgent(a, p)));
-              const shownAgents = [...placeholders, ...agents];
-              const active = shownAgents.filter(a=>a.status==="active");
-              const done   = shownAgents.filter(a=>a.status!=="active");
+              const roster = defaultAgentRoster();
+              const rosterAgents = roster.map(p => agents.find(a => representsAgent(a, p)) || p);
+              const extras = agents.filter(a => !roster.some(p => representsAgent(a, p)));
+              const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
               const renderRow = (a) => {
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
                 const currentTask = agentCurrentTask(a);
                 const crawlEvents = agentCrawlEvents(a);
-                const taskHistory = a.taskHistory || [];
+                const taskHistory = agentTaskHistory(a);
                 const canExpand = (a.id === "crawler" && crawlEvents.length > 0) ||
                   taskHistory.length > 1 ||
                   taskHistory.some(h => h.outcome);
@@ -2750,9 +2900,7 @@ function TestRunDetail({ runId, initialTab }) {
                   </div>`;
               };
               return html`
-                ${active.map(renderRow)}
-                ${active.length>0 && done.length>0 && html`<div className="agents-divider"/>`}
-                ${done.map(renderRow)}`;
+                ${shownAgents.map(renderRow)}`;
             })()}
           </div>`}
         </div>`}
@@ -2762,7 +2910,7 @@ function TestRunDetail({ runId, initialTab }) {
           <div className="traffic-toolbar">
             <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…"
               value=${trafficFilter} onInput=${e=>setTrafficFilter(e.target.value)}/>
-            <span className="traffic-count-label">${filteredTraffic.length} request${filteredTraffic.length!==1?"s":""}</span>
+            <span className="traffic-count-label">${filteredTraffic.length} shown${trafficTotal>filteredTraffic.length ? ` of ${trafficTotal}` : ""}</span>
             <label className="traffic-autoscroll">
               <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
               Auto-scroll

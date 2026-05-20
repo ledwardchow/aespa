@@ -2436,11 +2436,19 @@ async def _run_post_scan_llm_review(
     if not candidates:
         return
 
+    total_review_batches = (len(candidates) + 9) // 10
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "post_scan_review",
         "status": "start",
-        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s)…",
+        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s) across {total_review_batches} turn(s)…",
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "reporting",
+        "role": "Reporting",
+        "status": "active",
+        "current_task": f"Pre-screening {len(candidates)} finding(s) for false positives…",
     })
 
     BATCH = 10
@@ -2449,6 +2457,7 @@ async def _run_post_scan_llm_review(
 
     for batch_start in range(0, len(candidates), BATCH):
         batch = candidates[batch_start : batch_start + BATCH]
+        turn_num = batch_start // BATCH + 1
         batch_lines = []
         for f in batch:
             ep = f.affected_url or "(no URL)"
@@ -2474,10 +2483,18 @@ async def _run_post_scan_llm_review(
             "  <ID> | LOW_CONFIDENCE:<short reason>\n"
             "Do NOT include any other text."
         )
+        batch_low_confidence: list[int] = []
         try:
             verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
         except Exception as exc:
             log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "post_review_turn",
+                "status": "complete",
+                "message": f"Turn {turn_num}/{total_review_batches}: review failed — {exc}",
+                "data": {"turn": turn_num, "total_turns": total_review_batches, "error": str(exc)},
+            })
             continue
 
         for line in verdict_text.strip().splitlines():
@@ -2496,7 +2513,35 @@ async def _run_post_scan_llm_review(
                     else "Pre-screen: low confidence"
                 )
                 low_confidence_ids.append(fid)
+                batch_low_confidence.append(fid)
                 reasons[fid] = reason
+
+        accepted_this_batch = len(batch) - len(batch_low_confidence)
+        batch_msg = (
+            f"Turn {turn_num}/{total_review_batches}: reviewed {len(batch)} finding(s)"
+            f" → {accepted_this_batch} accepted"
+            + (f", {len(batch_low_confidence)} flagged low confidence" if batch_low_confidence else "")
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "post_review_turn",
+            "status": "complete",
+            "message": batch_msg,
+            "data": {
+                "turn": turn_num,
+                "total_turns": total_review_batches,
+                "batch_size": len(batch),
+                "accepted": accepted_this_batch,
+                "low_confidence": len(batch_low_confidence),
+            },
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            "status": "active",
+            "current_task": batch_msg,
+        })
 
     if low_confidence_ids:
         with Session(get_engine()) as s:
@@ -2516,14 +2561,24 @@ async def _run_post_scan_llm_review(
             })
 
     accepted = len(candidates) - len(low_confidence_ids)
+    review_complete_msg = (
+        f"Pre-screen complete: {accepted} accepted, "
+        f"{len(low_confidence_ids)} flagged as low confidence."
+    )
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "post_scan_review",
         "status": "complete",
-        "message": (
-            f"Pre-screen complete: {accepted} accepted, "
-            f"{len(low_confidence_ids)} flagged as low confidence."
-        ),
+        "message": review_complete_msg,
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "reporting",
+        "role": "Reporting",
+        "status": "complete",
+        "current_task": "Pre-screen complete",
+        "outcome": review_complete_msg,
+        "_persist": True,
     })
     log.info(
         "Post-scan review run_id=%s: %d accepted, %d low_confidence",
@@ -2609,6 +2664,7 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     _scanner_proxy_var.set(scanner_proxy_url)
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -3801,6 +3857,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             first_page_id=first_page_id,
             results=all_results,
         )
+        total_batches = len(llm_svc._chunk_probe_results(all_results))
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_analysis",
@@ -3811,8 +3868,50 @@ async def _do_thinking_scan(run_id: int) -> None:
                 f"{deterministic_saved} deterministic finding(s) already recorded…"
             ),
         })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            "status": "active",
+            "current_task": f"Analysing {len(all_results)} probe result(s) across {total_batches} LLM turn(s)…",
+        })
         try:
-            raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
+            _reporting_batch_findings: list[dict] = []
+
+            async def _on_batch_complete(turn_num: int, batch_size: int, batch_findings: list[dict]) -> None:
+                _reporting_batch_findings.extend(batch_findings)
+                found = len(batch_findings)
+                cumulative = len(_reporting_batch_findings)
+                msg = (
+                    f"Turn {turn_num}/{total_batches}: analysed {batch_size} probe(s)"
+                    + (f" → {found} finding(s) identified" if found else " → no new findings")
+                    + (f" ({cumulative} total so far)" if cumulative and turn_num < total_batches else "")
+                )
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "reporting_turn",
+                    "status": "complete",
+                    "message": msg,
+                    "data": {
+                        "turn": turn_num,
+                        "total_turns": total_batches,
+                        "batch_size": batch_size,
+                        "findings_this_turn": found,
+                        "findings_cumulative": cumulative,
+                        "titles": [f.get("title", "Untitled") for f in batch_findings],
+                    },
+                })
+                events_svc.emit(run_id, {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "active",
+                    "current_task": msg,
+                })
+
+            raw_findings = await llm_svc.analyse_probes(
+                llm_cfg, base_url, all_results, on_batch_complete=_on_batch_complete
+            )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.
             if raw_findings:
@@ -3874,6 +3973,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "status": "complete",
                 "message": message,
             })
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "complete",
+                "current_task": "Probe analysis complete",
+                "outcome": message,
+            })
         except Exception as exc:
             log.warning("Thinking scan analysis failed: %s", exc)
 
@@ -3900,6 +4007,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         "outcome": f"{_finding_count} finding(s) recorded",
         "_persist": True,
     })
+    llm_svc.clear_run_context()
 
 
 # ── Agentic loop helper ───────────────────────────────────────────────────────

@@ -18,6 +18,65 @@ from aespa.models import LLMConfig
 log = logging.getLogger("aespa.llm")
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
+_run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
+_emit_fn_var: ContextVar[Any | None] = ContextVar('_emit_fn', default=None)
+
+# Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N}}}
+_run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
+
+
+def set_run_context(run_id: int, emit_fn: Any) -> None:
+    """Set the current run context so LLM calls track token usage automatically."""
+    _run_id_var.set(run_id)
+    _emit_fn_var.set(emit_fn)
+
+
+def clear_run_context() -> None:
+    _run_id_var.set(None)
+    _emit_fn_var.set(None)
+
+
+def _record_usage(model: str, input_tokens: int, output_tokens: int) -> None:
+    """Accumulate token counts for the active run and fire a SSE event."""
+    run_id = _run_id_var.get()
+    if run_id is None:
+        return
+    bucket = _run_token_usage.setdefault(run_id, {})
+    entry = bucket.setdefault(model, {"input": 0, "output": 0})
+    entry["input"] += input_tokens
+    entry["output"] += output_tokens
+    emit_fn = _emit_fn_var.get()
+    if emit_fn:
+        try:
+            total_in = sum(v["input"] for v in bucket.values())
+            total_out = sum(v["output"] for v in bucket.values())
+            emit_fn({
+                "type": "token_usage_update",
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "totals": {
+                    "input": total_in,
+                    "output": total_out,
+                    "by_model": {m: dict(v) for m, v in bucket.items()},
+                },
+            })
+        except Exception:
+            pass
+
+
+def get_run_token_usage(run_id: int) -> dict:
+    """Return accumulated token usage for a run (used by the API endpoint)."""
+    bucket = _run_token_usage.get(run_id, {})
+    return {
+        "total_input": sum(v["input"] for v in bucket.values()),
+        "total_output": sum(v["output"] for v in bucket.values()),
+        "by_model": {m: dict(v) for m, v in bucket.items()},
+    }
+
+
+def clear_run_token_usage(run_id: int) -> None:
+    _run_token_usage.pop(run_id, None)
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -493,6 +552,9 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
         temperature=config.temperature,
         messages=[{"role": "user", "content": content}],
     )
+    _record_usage(config.model,
+                  getattr(resp.usage, "input_tokens", 0),
+                  getattr(resp.usage, "output_tokens", 0))
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
@@ -517,6 +579,10 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
             temperature=config.temperature,
         ),
     )
+    _um = getattr(resp, "usage_metadata", None)
+    _record_usage(config.model,
+                  getattr(_um, "prompt_token_count", 0) if _um else 0,
+                  getattr(_um, "candidates_token_count", 0) if _um else 0)
     return resp.text or ""
 
 
@@ -550,6 +616,10 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -575,6 +645,10 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -605,6 +679,10 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -648,6 +726,10 @@ async def _azure_foundry_openai(
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -705,6 +787,8 @@ async def _azure_foundry_anthropic(
         )
         resp.raise_for_status()
         data = resp.json()
+    _af_u = data.get("usage", {})
+    _record_usage(config.model, _af_u.get("input_tokens", 0), _af_u.get("output_tokens", 0))
     return "".join(_content_part_text(block) for block in (data.get("content") or [])).strip()
 
 
@@ -767,6 +851,8 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             messages=payload["messages"],
             inferenceConfig=payload["inferenceConfig"],
         )
+        _bd_u = data.get("usage", {})
+        _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0))
         return _extract_bedrock_text(data)
 
     model_id = quote(config.model, safe="")
@@ -780,7 +866,10 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
     async with _make_llm_http_client(timeout=120) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
-        return _extract_bedrock_text(resp.json())
+        _resp_data = resp.json()
+    _bd_u2 = _resp_data.get("usage", {})
+    _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0))
+    return _extract_bedrock_text(_resp_data)
 
 
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
@@ -1116,14 +1205,23 @@ async def analyse_probes(
     config: LLMConfig,
     url: str,
     results: list[dict],
+    on_batch_complete=None,
 ) -> list[dict]:
-    """Ask the LLM to analyse probe results and return a list of findings."""
+    """Ask the LLM to analyse probe results and return a list of findings.
+
+    on_batch_complete: optional async callable(turn_num, batch_size, batch_findings)
+        called after each LLM batch completes.
+    """
     if not results:
         return []
 
     findings: list[dict] = []
-    for batch in _chunk_probe_results(results):
-        findings.extend(await _analyse_probe_batch(config, url, batch))
+    batches = _chunk_probe_results(results)
+    for turn_num, batch in enumerate(batches, start=1):
+        batch_findings = await _analyse_probe_batch(config, url, batch)
+        findings.extend(batch_findings)
+        if on_batch_complete is not None:
+            await on_batch_complete(turn_num, len(batch), batch_findings)
     return findings
 
 
@@ -2310,6 +2408,9 @@ async def _call_with_tools(
             }
             for b in (resp.content or [])
         ]
+        _record_usage(config.model,
+                      getattr(resp.usage, "input_tokens", 0),
+                      getattr(resp.usage, "output_tokens", 0))
         return blocks, resp.stop_reason or "end_turn", resp.content
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
@@ -2347,6 +2448,8 @@ async def _call_with_tools(
             }
             for b in content
         ]
+        _cwt_u = data.get("usage", {})
+        _record_usage(config.model, _cwt_u.get("input_tokens", 0), _cwt_u.get("output_tokens", 0))
         return blocks, data.get("stop_reason") or "end_turn", content
 
     # ── AWS Bedrock (Converse API with toolConfig) ────────────────────────────
@@ -2498,6 +2601,8 @@ async def _call_with_tools(
             }}
             for b in blocks
         ]
+        _bdt_u = data.get("usage", {})
+        _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0))
         return blocks, stop_reason, raw_content_ant
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
@@ -2616,6 +2721,10 @@ async def _call_with_tools(
                 "text": None,
             })
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
+        _oai_u = getattr(resp, "usage", None)
+        _record_usage(config.model,
+                      getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0)
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
@@ -2700,6 +2809,10 @@ async def _call_with_tools(
             if any(b["type"] == "tool_use" for b in blocks)
             else "end_turn"
         )
+        _g_um = getattr(g_resp, "usage_metadata", None)
+        _record_usage(config.model,
+                      getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
+                      getattr(_g_um, "candidates_token_count", 0) if _g_um else 0)
         return blocks, stop_reason, blocks
 
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")

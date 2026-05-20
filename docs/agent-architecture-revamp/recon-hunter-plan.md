@@ -1,4 +1,18 @@
-﻿# Specialist Agents, Adversarial Validator + Agents UI
+# Specialist Agents, Adversarial Validator + Agents UI
+
+## Progress
+
+| Phase | Description | Status |
+|---|---|---|
+| 0 | Baseline metrics | **DONE** |
+| 1 | Recon output contract | TODO |
+| 2 | Specialist (hunter) agents | TODO |
+| 3 | Adversarial validator | TODO |
+| 4 | Agents UI | **DONE** |
+| 5 | Role-specific LLM profiles *(optional)* | TODO |
+| 6 | Rollout | TODO |
+
+---
 
 ## Background
 
@@ -6,12 +20,12 @@ The [Cloudflare Project Glasswing post](https://blog.cloudflare.com/cyber-fronti
 describes a multi-stage vulnerability-discovery harness. The two insights most applicable
 to AESPA are:
 
-1. **Adversarial validation** â€” *"putting two agents in deliberate disagreement is way more
+1. **Adversarial validation** — *"putting two agents in deliberate disagreement is way more
    effective than telling one agent to be careful."* An independent agent that actively tries
    to disprove a finding eliminates far more noise than having the same agent double-check
    its own work.
 
-2. **Specialist depth on confirmed leads** â€” when something interesting is found, narrow
+2. **Specialist depth on confirmed leads** — when something interesting is found, narrow
    scope and focused context produce better follow-up than asking one broad agent to do
    everything. This is structurally identical to how Burp active scans are dispatched today.
 
@@ -25,42 +39,60 @@ section at the bottom for the analysis.
 ### Architecture
 
 ```
-Crawl  (recon output contract â†’ attack-surface summary + PentestTask queue)
-  â””â”€â”€ Thinking scan  (unchanged â€” single agent, full context, unbounded steps)
-        â”‚
-        â”œâ”€â”€ On interesting lead â”€â”€â†’  Specialist Agent
-        â”‚                            (narrow scope, inherits session vault,
-        â”‚                             short-lived, like Burp active scan dispatch)
-        â”‚
-        â””â”€â”€ On finding written â”€â”€â†’  Adversarial Validator Agent
+Crawl  (recon output contract → attack-surface summary + PentestTask queue)
+  └── Thinking scan  (unchanged — single agent, full context, unbounded steps)
+        │
+        ├── On interesting lead ——→  Specialist Agent
+        │                            (narrow scope, inherits session vault,
+        │                             short-lived, like Burp active scan dispatch)
+        │
+        └── On finding written ——→  Adversarial Validator Agent
                                      (mandate to disprove, different model/prompt,
                                       cannot create new findings)
 
 Burp active scans  (existing dispatch, now surfaced in Agents UI)
 ```
 
-All four agent types â€” Scanner, Specialist, Burp, Validator â€” emit `agent_status` SSE
+All four agent types — Scanner, Specialist, Burp, Validator — emit `agent_status` SSE
 events and appear as rows in the new Agents UI tab.
 
 ---
 
 ## Phases
 
-### Phase 0 â€“ Baseline
+### Phase 0 — Baseline `[DONE]`
 1. Record baseline metrics (findings/run, confirmed-rate, false-positive-rate,
    duplicate-rate, time-to-confirmation) from existing run artifacts before any changes.
 
-### Phase 1 â€“ Recon output contract
+   **Status:** Complete. See [`docs/phase0-baseline.md`](phase0-baseline.md).
+
+   Key numbers from two Bank of Ed runs (pre-improvement):
+
+   | Metric | Run 1 (05-16) | Run 2 (05-18) | Combined |
+   |---|---|---|---|
+   | Findings/run | 60 | 35 | 47.5 avg |
+   | Confirmed rate | 15.0% | 28.6% | — |
+   | False-positive rate | 0.0% | 0.0% | 0% (no FP verdicts recorded) |
+   | Low-confidence rate | 1.7% | 25.7% | — |
+   | Still-unresolved | 83.3% | 45.7% | 67.1% combined |
+   | Within-run duplicate titles | 37 | 15 | — |
+   | Cross-run repeat rate | — | — | 7.5% |
+   | Unique vulnerabilities (combined) | — | — | 40 |
+
+   Time-to-confirmation is not measurable from export artifacts — no `confirmed_at`
+   timestamp exists. Needs a DB migration to track in future runs.
+
+### Phase 1 — Recon output contract `[TODO]`
 2. Formalise what `seed_task_graph()` in `src/aespa/services/task_graph.py` produces:
    a structured attack-surface summary (trust boundaries, entry points, interesting attack
    classes, `has_business_logic` pages called out explicitly) alongside the existing
    prioritised `PentestTask` queue. This summary becomes the thinking scan's opening
    context, replacing the current ad-hoc compact context build.
 
-### Phase 2 â€“ Specialist agents *(bolt-on, Burp-style)*
+### Phase 2 — Specialist agents *(bolt-on, Burp-style)* `[TODO]`
 3. *Depends on 1.* When the thinking scan encounters a strong lead (e.g. a suspicious
    parameter, anomalous response, confirmed primitive that warrants deeper investigation),
-   it can dispatch a **Specialist Agent** â€” a short-lived, narrow-scope LLM session focused
+   it can dispatch a **Specialist Agent** — a short-lived, narrow-scope LLM session focused
    on that specific lead.
 
    Dispatch mechanism mirrors the existing Burp active scan path in `burp_rest.py`:
@@ -76,12 +108,12 @@ events and appear as rows in the new Agents UI tab.
    Specialist agents are always sequential within a run (one at a time, like Burp scans),
    so no concurrent session, rate-limit, or DB contention problems arise.
 
-### Phase 3 â€“ Adversarial validator
+### Phase 3 — Adversarial validator `[TODO]`
 4. Rework `src/aespa/services/validator.py` from a probe-generation-and-check model into
    a proper adversarial agent.
 
-   **Current behaviour:** LLM generates targeted probes â†’ execute â†’ LLM reviews results
-   â†’ verdict.
+   **Current behaviour:** LLM generates targeted probes → execute → LLM reviews results
+   → verdict.
 
    **New behaviour:** An independent LLM agent receives the finding + all evidence and is
    given an explicit mandate to *disprove* it. It has access to a subset of the thinking
@@ -94,14 +126,16 @@ events and appear as rows in the new Agents UI tab.
    - The validator's output handler only permits writing to `validation_status` and
      `validation_note`. It cannot call any code path that creates a `ScanFinding`.
    - A different system prompt and (optionally) a different model from the main scanner.
-   - The validator's LLM conversation is fresh per finding â€” it has no knowledge of other
+   - The validator's LLM conversation is fresh per finding — it has no knowledge of other
      findings, so it cannot be biased by patterns from the main scan.
 
-### Phase 4 â€“ Agents UI
-5. *Depends on 2, 3.* Add `agent_status` SSE events across all agent types and build the
+### Phase 4 — Agents UI `[DONE]`
+5. ~~*Depends on 2, 3.*~~ Add `agent_status` SSE events across all agent types and build the
    Agents sub-tab in the Activity panel.
 
-#### 5a. Backend â€” `agent_status` SSE events
+   **Status:** Fully implemented ahead of Phases 2 and 3. All sub-items below are complete.
+
+#### 5a. Backend — `agent_status` SSE events `[DONE]`
 
 Emit from `crawler.py`, `scanner.py`, `validator.py`, and `burp_rest.py`. All flow
 through the existing `events.emit()` / `events.stream()` path unchanged.
@@ -125,21 +159,21 @@ Event shape:
 | `"Burp"` | Each Burp active scan start / completion (from `burp_rest.py` poll loop) | `"burp-{url_slug}"` |
 | `"Validator"` | Each finding validation start / verdict | `"validator-{finding_id}"` |
 
-`outcome` is populated on `status: "complete"` â€” e.g. `"Confirmed"`, `"False positive"`,
+`outcome` is populated on `status: "complete"` — e.g. `"Confirmed"`, `"False positive"`,
 `"2 new findings"`.
 
 Agent history is persisted to a new `AgentLog` DB table (analogous to `ScanLog`) so the
 Agents list survives page refreshes. An `/api/test-runs/{id}/agent-log` endpoint hydrates
 it on mount.
 
-#### 5b. Frontend â€” Activity sub-tab bar
+#### 5b. Frontend — Activity sub-tab bar `[DONE]`
 
 When `activeTab === "activity"` (around `app.js` line 3634), render a
 `.activity-sub-tab-bar` with two buttons: **Log** (existing content, unchanged) and
 **Agents**. Add `activitySubTab` state (default `"log"`). URL routing
 (`#/runs/{id}/activity`) is unchanged.
 
-#### 5c. Frontend â€” Agents panel state
+#### 5c. Frontend — Agents panel state `[DONE]`
 
 - `agents`: array of `{id, role, status, currentTask, taskHistory: [{ts, task, outcome}]}`
 - `expandedAgentIds`: Set
@@ -147,19 +181,19 @@ When `activeTab === "activity"` (around `app.js` line 3634), render a
   `agent_id`, appending each event as a new `taskHistory` entry.
 - On mount: hydrate `agents` from `/api/test-runs/{id}/agent-log`.
 
-#### 5d. Frontend â€” Agents panel render
+#### 5d. Frontend — Agents panel render `[DONE]`
 
 Active agents appear before complete agents (CSS `order: 0` vs `order: 1` on a flex
-column). On `active â†’ complete`, badge swaps, animation removed, row reflows to bottom.
+column). On `active → complete`, badge swaps, animation removed, row reflows to bottom.
 
 ```
-â— Scanner        [ACTIVE  ]  Step 47: Testing IDOR on /api/orders/{id}
-â— Specialist:    [ACTIVE  ]  Probing JWT forgery variants on /api/auth
+● Scanner        [ACTIVE  ]  Step 47: Testing IDOR on /api/orders/{id}
+● Specialist:    [ACTIVE  ]  Probing JWT forgery variants on /api/auth
   JWT Forgery
-â— Validator:     [ACTIVE  ]  Trying to disprove: Stored XSS in /comments
+● Validator:     [ACTIVE  ]  Trying to disprove: Stored XSS in /comments
   Stored XSS
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  Burp:          [COMPLETE]  Active scan: /api/search â€” 3 issues
+────────────────────────────────────────────────────────────────────────────
+  Burp:          [COMPLETE]  Active scan: /api/search — 3 issues
   /api/search
   Validator:     [COMPLETE]  Confirmed: IDOR in /api/orders/{id}
   IDOR orders
@@ -169,15 +203,15 @@ column). On `active â†’ complete`, badge swaps, animation removed, row refl
 
 Expanded row (click to toggle):
 ```
-â— Validator:     [ACTIVE  ]  Trying to disprove: Stored XSS in /comments  â–¼
+● Validator:     [ACTIVE  ]  Trying to disprove: Stored XSS in /comments  ▼
   Stored XSS
-  14:03:01  Received finding â€” evidence: 2 request/response pairs
-  14:03:04  Fetched /comments as anonymous user â€” XSS payload absent
-  14:03:09  Re-submitted payload with content-type variation â€” reflected
-  14:03:14  Cannot disprove â€” marking confirmed  â† current
+  14:03:01  Received finding — evidence: 2 request/response pairs
+  14:03:04  Fetched /comments as anonymous user — XSS payload absent
+  14:03:09  Re-submitted payload with content-type variation — reflected
+  14:03:14  Cannot disprove — marking confirmed  ← current
 ```
 
-#### 5e. Frontend â€” CSS additions
+#### 5e. Frontend — CSS additions `[DONE]`
 
 After existing `.activity-*` rules (~`styles.css` line 1089):
 
@@ -187,46 +221,46 @@ After existing `.activity-*` rules (~`styles.css` line 1089):
 | `.activity-sub-tab-btn[.active]` | Sub-tab button + active underline state |
 | `.agents-panel` | Panel container (flex column) |
 | `.agent-row[--active\|--complete]` | Individual agent row with modifier states |
-| `.agent-role-name` | Role text; `@keyframes pulse-opacity` (opacity 1â†’0.5â†’1, 0.9s ease-in-out infinite) via `--active` modifier only |
+| `.agent-role-name` | Role text; `@keyframes pulse-opacity` (opacity 1→0.5→1, 0.9s ease-in-out infinite) via `--active` modifier only |
 | `.agent-badge-active` | Pulsing accent badge |
 | `.agent-badge-complete` | Static `var(--text-2)` badge |
 | `.agent-current-task` | Inline task description |
 | `.agent-task-history` | Expanded history container |
 | `.agent-history-entry` | Single timestamped history row |
 
-### Phase 5 â€“ Role-specific LLM profiles *(optional)*
+### Phase 5 — Role-specific LLM profiles *(optional)* `[TODO]`
 6. *Depends on 3.* Add optional separate model/prompt settings for Scanner, Specialist,
    and Validator roles, while preserving the current single-config default. Cheaper/faster
    model for specialists on well-defined leads; conservative model for the validator.
    Implemented as a new `AgentRoleConfig` join table or extended `LLMConfig`.
 
-### Phase 6 â€“ Rollout
-7. *Depends on 1â€“6.* Canary on selected runs; compare metrics against Phase 0 baseline.
+### Phase 6 — Rollout `[TODO]`
+7. *Depends on 1–6.* Canary on selected runs; compare metrics against Phase 0 baseline.
 
 ---
 
 ## Relevant Files
 
-| File | Changes |
-|---|---|
-| `src/aespa/services/crawler.py` | Emit `agent_status` at crawl start/complete |
-| `src/aespa/services/task_graph.py` | Formalise recon output contract; richer attack-surface summary |
-| `src/aespa/services/scanner.py` | Add `agent_dispatch` action type; spawn specialist agents; emit `agent_status` per step |
-| `src/aespa/services/validator.py` | Full rework as adversarial agent; emit `agent_status` |
-| `src/aespa/services/burp_rest.py` | Emit `agent_status` on scan start and on each poll completion |
-| `src/aespa/services/findings.py` | Tag `finding_source = "specialist_agent"` |
-| `src/aespa/services/events.py` | No changes â€” `agent_status` uses existing `emit()`/`stream()` |
-| `src/aespa/api/scan.py` | Add `/agent-log` endpoint |
-| `src/aespa/models.py` | Add `AgentLog` table; optional `AgentRoleConfig` |
-| `src/aespa/web/app.js` | Sub-tab bar; agents state; SSE handler; agents panel render |
-| `src/aespa/web/styles.css` | Agents panel and sub-tab bar CSS |
+| File | Changes | Status |
+|---|---|---|
+| `src/aespa/services/crawler.py` | Emit `agent_status` at crawl start/complete | DONE |
+| `src/aespa/services/task_graph.py` | Formalise recon output contract; richer attack-surface summary | TODO |
+| `src/aespa/services/scanner.py` | Add `agent_dispatch` action type; spawn specialist agents; emit `agent_status` per step | Partial — `agent_status` done; `agent_dispatch` TODO |
+| `src/aespa/services/validator.py` | Full rework as adversarial agent; emit `agent_status` | Partial — `agent_status` done; adversarial rework TODO |
+| `src/aespa/services/burp_rest.py` | Emit `agent_status` on scan start and on each poll completion | DONE |
+| `src/aespa/services/findings.py` | Tag `finding_source = "specialist_agent"` | TODO |
+| `src/aespa/services/events.py` | No changes — `agent_status` uses existing `emit()`/`stream()` | DONE |
+| `src/aespa/api/scan.py` | Add `/agent-log` endpoint | DONE |
+| `src/aespa/models.py` | Add `AgentLog` table; optional `AgentRoleConfig` | Partial — `AgentLog` done; `AgentRoleConfig` TODO |
+| `src/aespa/web/app.js` | Sub-tab bar; agents state; SSE handler; agents panel render | DONE |
+| `src/aespa/web/styles.css` | Agents panel and sub-tab bar CSS | DONE |
 
 ---
 
 ## Verification
 
 1. **Regression tests:** existing crawl, structured scan, and thinking scan behaviour
-   unchanged â€” specialist dispatch and adversarial validator are additive.
+   unchanged — specialist dispatch and adversarial validator are additive.
 2. **Unit tests:** adversarial validator cannot write `ScanFinding` records; specialist
    agent inherits session vault correctly.
 3. **Integration tests:** specialist dispatch from thinking scan action; Burp `agent_status`
@@ -235,7 +269,7 @@ After existing `.activity-*` rules (~`styles.css` line 1089):
    all four role types appear correctly; pulsing animation on active rows only; task history
    expands on click; list persists after page refresh.
 5. **Benchmark runs:** confirmed-rate, false-positive-rate, and duplicate-rate vs. Phase 0
-   baseline â€” primary target is false-positive-rate reduction from the adversarial validator.
+   baseline — primary target is false-positive-rate reduction from the adversarial validator.
 6. **Manual replay:** verify adversarial validator marks a known false positive correctly;
    verify specialist agent surfaces a deeper finding on a confirmed lead.
 
@@ -246,14 +280,14 @@ After existing `.activity-*` rules (~`styles.css` line 1089):
 - **Included:** recon output contract, specialist agent dispatch (bolt-on, Burp-style),
   adversarial validator, Agents UI with persistent agent history for all four agent types.
 - **Excluded:** parallel hunter workers, task claim/lease, global rate semaphore,
-  multi-worker checkpoint redesign â€” see *Rejected* section below.
+  multi-worker checkpoint redesign — see *Rejected* section below.
 - **Specialist agents run sequentially** (one at a time per run), matching the existing
   Burp active scan pattern. No concurrent session, rate-limit, or DB contention problems.
 - **Adversarial validator** is structurally prohibited from creating findings; it receives
   a fresh LLM conversation per finding with no knowledge of other findings.
 - **Burp active scans** gain `agent_status` visibility in the Agents UI with no change
-  to their dispatch logic â€” only `burp_rest.py`'s poll loop gains `events.emit()` calls.
-- **`agent_status` SSE** reuses existing `events.emit()` / `events.stream()` â€” no new
+  to their dispatch logic — only `burp_rest.py`'s poll loop gains `events.emit()` calls.
+- **`agent_status` SSE** reuses existing `events.emit()` / `events.stream()` — no new
   transport infrastructure.
 - **URL routing:** sub-tab bar is inside the `activity` block; `#/runs/{id}/activity`
   URL is unchanged.
@@ -266,25 +300,24 @@ A full recon-hunter architecture with concurrent narrow workers was evaluated ag
 Cloudflare model and rejected for this project. The analysis identified four hard
 prerequisites that must be in place before multi-worker runs are reliable:
 
-1. **Shared auth session vault + re-auth coordination** â€” each worker bootstrapping auth
+1. **Shared auth session vault + re-auth coordination** — each worker bootstrapping auth
    independently creates N Playwright login flows per credential, and a session expiry in
    one worker is invisible to others (they silently receive 401s that look like no finding).
-2. **Global request rate semaphore** â€” `sleep_between_probes()` is per-worker; 5 concurrent
-   workers Ã— the same `min_delay` means 5Ã— the aggregate request rate against the target,
+2. **Global request rate semaphore** — `sleep_between_probes()` is per-worker; 5 concurrent
+   workers × the same `min_delay` means 5× the aggregate request rate against the target,
    which reliably trips WAF / rate-limit thresholds and silences all workers at once.
-3. **Atomic task claim with `BEGIN IMMEDIATE`** â€” the `PentestTask` claim/lease pattern
+3. **Atomic task claim with `BEGIN IMMEDIATE`** — the `PentestTask` claim/lease pattern
    is a read-then-write race condition on the current SQLModel session pattern; two workers
    can both read `claimed_by IS NULL` and both claim the same task.
-4. **Per-worker checkpoint rows** â€” `ScanCheckpoint` has one row per `run_id`; a
+4. **Per-worker checkpoint rows** — `ScanCheckpoint` has one row per `run_id`; a
    multi-worker resume would silently drop all but one worker's LLM conversation state.
 
 Beyond the prerequisites, a pure narrow-hunter model also threatens business logic
 coverage: `_do_thinking_scan()` relies on unified cross-endpoint context, the WSTG
 `workflow` skill injected across the whole session, and confirmed findings fed back as
-stepping stones â€” all of which are broken when context is siloed by attack class.
+stepping stones — all of which are broken when context is siloed by attack class.
 
 The engineering cost of these prerequisites solves a throughput problem AESPA does not
 have (it scans one target at a time). The specialist-agent approach delivers the
 highest-value Cloudflare insights (adversarial validation, specialist depth on leads)
 without any of these costs.
-
