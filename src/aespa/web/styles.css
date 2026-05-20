@@ -1385,11 +1385,11 @@ legend {
 .agent-badge-complete { background:rgba(255,255,255,0.06); color:var(--muted); }
 .agent-current-task { font-size:11px; color:var(--text-2); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-top:2px; }
 .agent-task-history { grid-column:1/-1; margin:6px 0 2px 26px; padding:6px 8px; display:flex; flex-direction:column; gap:3px; max-height:180px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; background:var(--panel-2); }
-.agent-history-entry { display:flex; align-items:baseline; gap:8px; font-size:11px; }
+.agent-history-entry { display:grid; grid-template-columns:64px minmax(0,1fr) auto; align-items:baseline; gap:8px; font-size:11px; }
 .agent-history-entry--crawl { display:grid; grid-template-columns:64px 120px minmax(0,1fr); align-items:baseline; }
 .agent-history-user { color:var(--text); font-weight:700; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.agent-history-task { color:var(--text-2); flex:1; min-width:0; }
-.agent-history-outcome { flex-shrink:0; font-size:10px; font-weight:600; color:var(--muted); }
+.agent-history-task { color:var(--text-2); min-width:0; line-height:1.35; }
+.agent-history-outcome { grid-column:2/-1; font-size:10px; font-weight:600; color:var(--muted); line-height:1.35; }
 
 /* ── Target intelligence tab ─────────────────────────────────────────────── */
 .intel-panel { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; margin:0 -28px; }
