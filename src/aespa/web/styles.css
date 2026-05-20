@@ -1357,6 +1357,33 @@ legend {
 .activity-payload pre { margin:0; font-size:11px; font-family:monospace; white-space:pre-wrap; word-break:break-all; max-height:380px; overflow-y:auto; color:var(--text-2); background:rgba(0,0,0,0.25); padding:8px 10px; border-radius:5px; border:1px solid var(--border); }
 .activity-payload-label { font-size:10px; font-weight:700; text-transform:uppercase; color:var(--muted); margin-bottom:3px; letter-spacing:0.4px; }
 
+/* ── Activity sub-tabs + Agents panel ────────────────────────────────────── */
+.activity-sub-tab-bar { display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; padding:0 10px; }
+.activity-sub-tab-btn { background:none; border:none; border-bottom:2px solid transparent; color:var(--muted); cursor:pointer; font-size:12px; font-weight:600; padding:7px 10px; margin-bottom:-1px; transition:color 0.15s,border-color 0.15s; }
+.activity-sub-tab-btn:hover { color:var(--text); }
+.activity-sub-tab-btn.active { color:var(--text); border-bottom-color:var(--accent,#5b8def); }
+
+.agents-panel { flex:1; overflow-y:auto; padding:8px 0 16px; display:flex; flex-direction:column; }
+.agents-divider { height:1px; background:var(--border); margin:6px 16px; flex-shrink:0; }
+.agent-row { display:grid; grid-template-columns:18px 130px auto 1fr auto; align-items:start; gap:8px; padding:8px 16px; cursor:pointer; border-bottom:1px solid transparent; flex-shrink:0; }
+.agent-row:hover { background:var(--hover,rgba(255,255,255,0.03)); }
+.agent-row--active { order:0; }
+.agent-row--complete { order:1; }
+.agent-dot { font-size:10px; margin-top:2px; color:var(--muted); }
+.agent-dot--active { color:var(--accent,#5b8def); animation:pulse-opacity 0.9s ease-in-out infinite; }
+@keyframes pulse-opacity { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.agent-role-name { font-size:12px; font-weight:700; color:var(--text); line-height:1.3; }
+.agent-role-name--pulse { animation:pulse-opacity 0.9s ease-in-out infinite; }
+.agent-role-sub { font-size:10px; font-weight:600; color:var(--muted); text-transform:capitalize; }
+.agent-badge { flex-shrink:0; font-size:9px; font-weight:800; padding:2px 6px; border-radius:4px; letter-spacing:0.5px; text-transform:uppercase; margin-top:2px; }
+.agent-badge-active { background:rgba(91,141,239,0.18); color:#7aa8f5; animation:pulse-opacity 0.9s ease-in-out infinite; }
+.agent-badge-complete { background:rgba(255,255,255,0.06); color:var(--muted); }
+.agent-current-task { font-size:11px; color:var(--text-2); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-top:2px; }
+.agent-task-history { grid-column:1/-1; padding:6px 0 2px 26px; display:flex; flex-direction:column; gap:3px; }
+.agent-history-entry { display:flex; align-items:baseline; gap:8px; font-size:11px; }
+.agent-history-task { color:var(--text-2); flex:1; min-width:0; }
+.agent-history-outcome { flex-shrink:0; font-size:10px; font-weight:600; color:var(--muted); }
+
 /* ── Target intelligence tab ─────────────────────────────────────────────── */
 .intel-panel { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; margin:0 -28px; }
 .intel-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 16px; border-bottom:1px solid var(--border); background:var(--panel); }

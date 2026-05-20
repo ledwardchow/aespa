@@ -419,3 +419,22 @@ class ScanCheckpoint(SQLModel, table=True):
     consecutive_context_tools: int = Field(default=0)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class AgentLog(SQLModel, table=True):
+    """Persisted agent_status event so the Agents panel survives page navigation.
+
+    One row per emitted agent_status event that has ``_persist=True``.
+    Analogous to ScanLog for scanner_phase events.
+    """
+
+    __tablename__ = "agent_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    agent_id: str = Field(index=True)   # e.g. "scanner", "validator-42", "burp-api-login"
+    role: str                            # Scanner | Specialist | Burp | Validator
+    status: str                          # active | complete | failed
+    current_task: str = Field(default="")
+    outcome: Optional[str] = Field(default=None)

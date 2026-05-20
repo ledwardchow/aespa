@@ -9,7 +9,7 @@ from fastapi.responses import Response as HTTPResponse
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
+from aespa.models import AgentLog, CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import (
     ScanCheckpointStatusOut,
     ScanFindingDeduplicationResult,
@@ -416,6 +416,44 @@ def get_scan_log(
             "page_url": e.page_url,
             "data": json.loads(e.data_json) if e.data_json else None,
             "_persisted_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
+@router.delete("/api/test-runs/{run_id}/agent-log", status_code=204)
+def clear_agent_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all persisted agent log entries for this run."""
+    _get_run_or_404(session, run_id)
+    for entry in session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id)
+    ).all():
+        session.delete(entry)
+    session.commit()
+
+
+@router.get("/api/test-runs/{run_id}/agent-log")
+def get_agent_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .order_by(AgentLog.id)
+    ).all()
+    return [
+        {
+            "agent_id": e.agent_id,
+            "role": e.role,
+            "status": e.status,
+            "current_task": e.current_task,
+            "outcome": e.outcome,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
         }
         for e in entries
     ]
