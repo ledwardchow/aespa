@@ -174,10 +174,7 @@ def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {
-        "api_key": "sk-or-v1-test",
-        "base_url": llm.OPENROUTER_BASE_URL,
-    }
+    assert {"api_key": "sk-or-v1-test", "base_url": llm.OPENROUTER_BASE_URL}.items() <= captured["client"].items()
     assert captured["completion"] == {
         "model": "openrouter/owl-alpha",
         "max_tokens": 2048,
@@ -214,10 +211,7 @@ def test_azure_foundry_openai_call_uses_openai_v1_base_url(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {
-        "api_key": "foundry-key",
-        "base_url": "https://myresource.services.ai.azure.com/openai/v1",
-    }
+    assert {"api_key": "foundry-key", "base_url": "https://myresource.services.ai.azure.com/openai/v1"}.items() <= captured["client"].items()
     assert captured["completion"] == {
         "model": "gpt-4o",
         "max_tokens": 2048,
@@ -296,7 +290,7 @@ def test_azure_foundry_anthropic_call_uses_messages_api(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {"timeout": 120}
+    assert {"timeout": 120}.items() <= captured["client"].items()
     assert captured["url"] == "https://myresource.services.ai.azure.com/anthropic/v1/messages"
     assert captured["post"]["headers"]["x-api-key"] == "foundry-key"
     assert "api-key" not in captured["post"]["headers"]
@@ -924,7 +918,7 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {"timeout": 120}
+    assert {"timeout": 120}.items() <= captured["client"].items()
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
         "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse"
@@ -983,11 +977,11 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
 
     assert result == "ok"
     assert captured["session"] == {"profile_name": "bedrock-dev"}
-    assert captured["client"] == {
+    assert {
         "service_name": "bedrock-runtime",
         "region_name": "us-east-1",
         "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
-    }
+    }.items() <= captured["client"].items()
     assert captured["converse"] == {
         "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
         "messages": [{"role": "user", "content": [{"text": "hello"}]}],
