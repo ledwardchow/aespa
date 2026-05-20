@@ -170,6 +170,8 @@ class TestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     # Optional per-run LLM profile override (null = use the globally active one)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # JSON blob produced by build_recon_summary() at the end of the crawl phase
+    recon_summary: Optional[str] = Field(default=None)
 
 
 class CrawledPage(SQLModel, table=True):

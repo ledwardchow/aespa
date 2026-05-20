@@ -625,6 +625,83 @@ def _build_compact_thinking_context(
     return "\n\n".join(sections)
 
 
+def _build_thinking_context_from_recon_summary(
+    run_id: int,
+    base_url: str,
+    findings_snapshot: list[dict[str, Any]],
+) -> str:
+    """Build the LLM opening context from the stored recon summary.
+
+    Falls back to :func:`_build_compact_thinking_context` (with an empty
+    pages_snapshot) when no summary is present, so old runs are unaffected.
+    """
+    import json as _json
+    from aespa.models import TestRun as _TestRun
+
+    with Session(get_engine()) as s:
+        run = s.get(_TestRun, run_id)
+        raw = run.recon_summary if run else None
+
+    if not raw:
+        # No summary yet — fall back to minimal compact context
+        return _build_compact_thinking_context(base_url, [], findings_snapshot)
+
+    try:
+        summary = _json.loads(raw)
+    except Exception:
+        return _build_compact_thinking_context(base_url, [], findings_snapshot)
+
+    trust_zones: dict = summary.get("trust_zones") or {}
+    attack_classes: list[dict] = summary.get("attack_classes") or []
+    tech_stack: list[str] = summary.get("tech_stack") or []
+    credential_roles: list[str] = summary.get("credential_roles") or []
+    entry_points: list[dict] = summary.get("entry_points") or []
+    business_logic: list[str] = summary.get("business_logic_pages") or []
+
+    zone_counts = {z: len(v) for z, v in trust_zones.items() if v}
+    zone_str = "  ".join(f"{z.upper()}={n}" for z, n in zone_counts.items())
+    ep_total = len(entry_points)
+
+    sections = [
+        f"Target: {base_url}",
+        (
+            "Attack surface snapshot:  "
+            + zone_str
+            + f"  entry_points={ep_total}"
+            + (f"  business_logic={len(business_logic)}" if business_logic else "")
+            + (f"\nTech stack: {', '.join(tech_stack)}" if tech_stack else "")
+            + (f"\nCredential roles: {', '.join(credential_roles)}" if credential_roles else "")
+        ),
+        "Use context tools for page-level details instead of assuming full crawl data is inline.",
+    ]
+
+    if attack_classes:
+        ac_lines = ["Identified attack classes (work through these in priority order):"]
+        for cls in attack_classes:
+            urls = cls.get("entry_point_urls") or []
+            url_sample = ", ".join(urls[:4]) + ("…" if len(urls) > 4 else "")
+            ac_lines.append(
+                f"  [{cls['owasp']} P{cls['priority']}] {cls['id']} — {cls['rationale'][:160]}"
+                + (f"\n    entry points: {url_sample}" if url_sample else "")
+            )
+        sections.append("\n".join(ac_lines))
+
+    if findings_snapshot:
+        lines = [
+            f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
+            for f in findings_snapshot
+        ]
+        sections.append(
+            "CONFIRMED VULNERABILITIES — already proven, do NOT re-test:\n"
+            "You may USE a confirmed exploit capability (e.g. a known JWT secret or admin "
+            "password) only as a stepping stone to reach NEW endpoints. Do not spend steps "
+            "re-proving issues already in this list.\n"
+            + "\n".join(lines)
+        )
+
+    return "\n\n".join(sections)
+
+
 def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
     with Session(get_engine()) as s:
         items = s.exec(
@@ -2704,9 +2781,13 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
     # are available through context tools so they are only sent when needed.
-    crawl_context = _build_compact_thinking_context(
+    recon_summary: dict | None = None
+    if not resuming:
+        recon_summary = task_graph_svc.build_recon_summary(run_id)
+
+    crawl_context = _build_thinking_context_from_recon_summary(
+        run_id,
         base_url,
-        pages_snapshot,
         findings_snapshot,
     )
     intel_context = _build_target_intelligence_context(run_id)
@@ -2729,7 +2810,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             ", ".join(sorted(_selected_skills)),
         )
 
-    seeded_task_graph = task_graph_svc.seed_task_graph(run_id) if not resuming else {}
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id, summary=recon_summary) if not resuming else {}
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
             "type": "task_graph_update",
