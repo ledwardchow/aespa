@@ -72,6 +72,7 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
+  getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
@@ -959,6 +960,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter]   = useState("");
   const [autoScroll, setAutoScroll]         = useState(true);
+  const [trafficTotal, setTrafficTotal]     = useState(0);
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
@@ -967,6 +969,7 @@ function TestRunDetail({ runId, initialTab }) {
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
   const prevGraphKeyRef                     = useRef("");
+  const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
   const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
@@ -988,6 +991,18 @@ function TestRunDetail({ runId, initialTab }) {
     if (agent?.id === "crawler") return "Crawler";
     if (agent?.id === "scanner") return "Test Lead";
     return agent?.role || "Agent";
+  };
+  const normalizeAgentForRun = (agent) => {
+    if (agent?.id !== "crawler") return agent;
+    if (run?.status === "running") return { ...agent, status: "active" };
+    if (Date.now() - lastRunPollOkRef.current > 10000) {
+      return { ...agent, status: "idle", currentTask: "Crawler connection stale" };
+    }
+    return {
+      ...agent,
+      status: agent.status === "failed" ? "failed" : "idle",
+      currentTask: agent.currentTask || "Crawl is not running",
+    };
   };
   const defaultAgentRoster = () => [
     {
@@ -1054,16 +1069,81 @@ function TestRunDetail({ runId, initialTab }) {
       ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun())
       : []
   );
+  const compactAgentText = (value, max=180) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  };
+  const thinkingStepTitle = (entry) => {
+    const step = entry.data?.step;
+    const prefix = step ? `Step ${step}` : "Step";
+    const message = String(entry.message || "").replace(/^Step\s+\d+:\s*/i, "").trim();
+    const isDuplicateStep = (value) => (
+      !value || /^Step\s+\d+$/i.test(String(value).trim())
+    );
+    let detail = (
+      entry.data?.payload_purpose ||
+      entry.data?.hypothesis ||
+      entry.data?.observation ||
+      entry.data?.payload_summary ||
+      message
+    );
+    if (isDuplicateStep(detail)) {
+      if (entry.data?.tool) {
+        detail = `Context tool: ${entry.data.tool}`;
+      } else if (entry.data?.method && entry.data?.url) {
+        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
+      } else if (message && !isDuplicateStep(message)) {
+        detail = message;
+      } else if (entry.status === "deciding") {
+        detail = "LLM deciding next action";
+      } else {
+        detail = "Reviewing scan state";
+      }
+    }
+    const cleaned = compactAgentText(detail || "Reviewing next action");
+    return `${prefix}: ${cleaned}`;
+  };
+  const thinkingStepOutcome = (entry) => {
+    const parts = [];
+    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
+    if (entry.data?.method && entry.data?.url) parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
+    if (entry.data?.observation) parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
+    if (entry.data?.hypothesis) parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
+    if (entry.data?.payload_purpose) parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
+    if (entry.data?.payload_summary) parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
+    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
+    return parts.join(" · ");
+  };
+  const testLeadHistory = () => activityLog
+    .filter(entry => entry.phase === "thinking_step")
+    .map(entry => ({
+      ts: entry._ts || "--:--:--",
+      task: thinkingStepTitle(entry),
+      outcome: thinkingStepOutcome(entry),
+    }));
+  const agentTaskHistory = (agent) => (
+    agent?.id === "scanner" && testLeadHistory().length
+      ? testLeadHistory()
+      : (agent?.taskHistory || [])
+  );
   const agentCurrentTask = (agent) => {
+    agent = normalizeAgentForRun(agent);
     const crawlEvents = agentCrawlEvents(agent);
     if (agent?.id === "crawler" && crawlEvents.length) {
-      if (agent.status === "complete" && agent.currentTask) {
-        return agent.outcome ? `${agent.currentTask} · ${agent.outcome}` : agent.currentTask;
+      if (agent.status !== "active") {
+        const label = run?.status === "failed" ? "Crawl failed" :
+          run?.status === "stopped" ? "Crawl stopped" :
+          run?.status === "complete" ? "Crawl complete" :
+          "Crawl is not running";
+        return agent.outcome ? `${label} · ${agent.outcome}` : label;
       }
       const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
       const latest = active || crawlEvents[crawlEvents.length - 1];
       if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
       return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+    }
+    if (agent?.id === "scanner" && testLeadHistory().length) {
+      return testLeadHistory()[testLeadHistory().length - 1].task;
     }
     return agent?.currentTask || "Waiting for work";
   };
@@ -1259,9 +1339,23 @@ function TestRunDetail({ runId, initialTab }) {
     if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
       api.getRun(runId).then(r => {
+        lastRunPollOkRef.current = Date.now();
         setRun(r);
+        if (r.status !== "running") {
+          setAgents(prev => prev.map(a => (
+            a.id === "crawler" && a.status === "active"
+              ? { ...a, status: "idle", currentTask: "Crawl is not running" }
+              : a
+          )));
+        }
         if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
-      }).catch(() => {});
+      }).catch(() => {
+        setAgents(prev => prev.map(a => (
+          a.id === "crawler" && a.status === "active"
+            ? { ...a, status: "idle", currentTask: "Crawler connection stale" }
+            : a
+        )));
+      });
     }, 2000);
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
@@ -1360,6 +1454,10 @@ function TestRunDetail({ runId, initialTab }) {
     return () => clearInterval(iv);
   }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
 
+  useEffect(() => {
+    api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
+  }, [runId]);
+
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
     const poll = async () => {
@@ -1373,6 +1471,9 @@ function TestRunDetail({ runId, initialTab }) {
             const next = [...prev, ...stamped];
             return next.length > 2000 ? next.slice(-2000) : next;
           });
+        }
+        if (activeTab === "traffic" || entries.length > 0) {
+          api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
         }
       } catch(_) {}
     };
@@ -1951,7 +2052,7 @@ function TestRunDetail({ runId, initialTab }) {
         </button>
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
           onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
-          Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
+          Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
         ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && canShowScanStartButtons && html`
@@ -2591,7 +2692,7 @@ function TestRunDetail({ runId, initialTab }) {
               </div>
               <div className="activity-sub-tab-bar">
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
-                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.some(a=>a.status==="active")?" ●":""}</button>
+                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.map(normalizeAgentForRun).some(a=>a.status==="active")?" ●":""}</button>
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
                   onClick=${()=>setActivitySubTab("log")}>Log</button>
               </div>`;
@@ -2701,16 +2802,16 @@ function TestRunDetail({ runId, initialTab }) {
           ${activitySubTab==="agents" && html`
           <div className="agents-panel">
             ${(()=>{
-              const placeholders = defaultAgentRoster().filter(p => !agents.some(a => representsAgent(a, p)));
-              const shownAgents = [...placeholders, ...agents];
-              const active = shownAgents.filter(a=>a.status==="active");
-              const done   = shownAgents.filter(a=>a.status!=="active");
+              const roster = defaultAgentRoster();
+              const rosterAgents = roster.map(p => agents.find(a => representsAgent(a, p)) || p);
+              const extras = agents.filter(a => !roster.some(p => representsAgent(a, p)));
+              const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
               const renderRow = (a) => {
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
                 const currentTask = agentCurrentTask(a);
                 const crawlEvents = agentCrawlEvents(a);
-                const taskHistory = a.taskHistory || [];
+                const taskHistory = agentTaskHistory(a);
                 const canExpand = (a.id === "crawler" && crawlEvents.length > 0) ||
                   taskHistory.length > 1 ||
                   taskHistory.some(h => h.outcome);
@@ -2750,9 +2851,7 @@ function TestRunDetail({ runId, initialTab }) {
                   </div>`;
               };
               return html`
-                ${active.map(renderRow)}
-                ${active.length>0 && done.length>0 && html`<div className="agents-divider"/>`}
-                ${done.map(renderRow)}`;
+                ${shownAgents.map(renderRow)}`;
             })()}
           </div>`}
         </div>`}
@@ -2762,7 +2861,7 @@ function TestRunDetail({ runId, initialTab }) {
           <div className="traffic-toolbar">
             <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…"
               value=${trafficFilter} onInput=${e=>setTrafficFilter(e.target.value)}/>
-            <span className="traffic-count-label">${filteredTraffic.length} request${filteredTraffic.length!==1?"s":""}</span>
+            <span className="traffic-count-label">${filteredTraffic.length} shown${trafficTotal>filteredTraffic.length ? ` of ${trafficTotal}` : ""}</span>
             <label className="traffic-autoscroll">
               <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
               Auto-scroll
