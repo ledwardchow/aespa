@@ -2367,7 +2367,7 @@ async def _thinking_scan_task(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "agent_status",
         "agent_id": "scanner",
-        "role": "Scanner",
+        "role": "Test Lead",
         "status": "active",
         "current_task": "Dynamic scan started",
         "outcome": None,
@@ -2382,7 +2382,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         events_svc.emit(run_id, {
             "type": "agent_status",
             "agent_id": "scanner",
-            "role": "Scanner",
+            "role": "Test Lead",
             "status": "complete",
             "current_task": "Scan stopped",
             "outcome": "Stopped by user",
@@ -2396,7 +2396,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         events_svc.emit(run_id, {
             "type": "agent_status",
             "agent_id": "scanner",
-            "role": "Scanner",
+            "role": "Test Lead",
             "status": "failed",
             "current_task": "Scan failed",
             "outcome": str(exc)[:200],
@@ -2890,7 +2890,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 events_svc.emit(run_id, {
                     "type": "agent_status",
                     "agent_id": "scanner",
-                    "role": "Scanner",
+                    "role": "Test Lead",
                     "status": "active",
                     "current_task": f"Step {step}: deciding next action…",
                     "outcome": None,
@@ -3894,7 +3894,7 @@ async def _do_thinking_scan(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "agent_status",
         "agent_id": "scanner",
-        "role": "Scanner",
+        "role": "Test Lead",
         "status": "complete",
         "current_task": "Scan complete",
         "outcome": f"{_finding_count} finding(s) recorded",
@@ -4052,7 +4052,7 @@ async def _do_agentic_thinking_loop(
         events_svc.emit(run_id, {
             "type": "agent_status",
             "agent_id": "scanner",
-            "role": "Scanner",
+            "role": "Test Lead",
             "status": "active",
             "current_task": f"Step {step}: {note}",
             "outcome": None,
