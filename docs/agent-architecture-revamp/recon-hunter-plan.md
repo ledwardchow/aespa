@@ -4,7 +4,7 @@
 
 | Phase | Description | Status |
 |---|---|---|
-| 0 | Baseline metrics | TODO |
+| 0 | Baseline metrics | **DONE** |
 | 1 | Recon output contract | TODO |
 | 2 | Specialist (hunter) agents | TODO |
 | 3 | Adversarial validator | TODO |
@@ -60,9 +60,27 @@ events and appear as rows in the new Agents UI tab.
 
 ## Phases
 
-### Phase 0 — Baseline `[TODO]`
+### Phase 0 — Baseline `[DONE]`
 1. Record baseline metrics (findings/run, confirmed-rate, false-positive-rate,
    duplicate-rate, time-to-confirmation) from existing run artifacts before any changes.
+
+   **Status:** Complete. See [`docs/phase0-baseline.md`](phase0-baseline.md).
+
+   Key numbers from two Bank of Ed runs (pre-improvement):
+
+   | Metric | Run 1 (05-16) | Run 2 (05-18) | Combined |
+   |---|---|---|---|
+   | Findings/run | 60 | 35 | 47.5 avg |
+   | Confirmed rate | 15.0% | 28.6% | — |
+   | False-positive rate | 0.0% | 0.0% | 0% (no FP verdicts recorded) |
+   | Low-confidence rate | 1.7% | 25.7% | — |
+   | Still-unresolved | 83.3% | 45.7% | 67.1% combined |
+   | Within-run duplicate titles | 37 | 15 | — |
+   | Cross-run repeat rate | — | — | 7.5% |
+   | Unique vulnerabilities (combined) | — | — | 40 |
+
+   Time-to-confirmation is not measurable from export artifacts — no `confirmed_at`
+   timestamp exists. Needs a DB migration to track in future runs.
 
 ### Phase 1 — Recon output contract `[TODO]`
 2. Formalise what `seed_task_graph()` in `src/aespa/services/task_graph.py` produces:
