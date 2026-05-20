@@ -47,6 +47,7 @@ const api = {
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
+  getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
@@ -913,6 +914,8 @@ function TestRunDetail({ runId, initialTab }) {
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
   const [taskGraph, setTaskGraph]           = useState(null);
+  const [reconSummary, setReconSummary]     = useState(null);
+  const [tasksSubTab, setTasksSubTab]       = useState("attack-surface"); // "attack-surface" | "task-queue"
   const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
   const [clearBusy, setClearBusy]           = useState(""); // which section is clearing
@@ -1456,6 +1459,7 @@ function TestRunDetail({ runId, initialTab }) {
     if (!active) return;
     const loadTasks = () => api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{});
     loadTasks();
+    api.getReconSummary(runId).then(setReconSummary).catch(()=>{});
     if (!isDynamicScanActive(thinkingStatus?.status)) return;
     const iv = setInterval(loadTasks, 4000);
     return () => clearInterval(iv);
@@ -2669,6 +2673,9 @@ function TestRunDetail({ runId, initialTab }) {
       ${activeTab==="tasks" && html`
         <${TaskGraphPanel}
           data=${taskGraph}
+          reconSummary=${reconSummary}
+          subTab=${tasksSubTab}
+          onSubTab=${setTasksSubTab}
           refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
           seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
           onClear=${async()=>{
@@ -3157,7 +3164,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     </div>`;
 }
 
-function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
+function TaskGraphPanel({ data, reconSummary, subTab, onSubTab, refresh, seed, onClear, clearing }) {
   const [taskColW, startTaskResize] = useColResize("colw:tasks", [88, 84, null, 86, 200]);
   const hypotheses = data?.hypotheses || [];
   const tasks = data?.tasks || [];
@@ -3173,8 +3180,23 @@ function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
     .filter(([, count]) => count > 0);
   const orphanTasks = tasksByHypothesis.none || [];
   const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+  const activeSubTab = subTab || "attack-surface";
   return html`
     <div className="task-panel">
+      <div className="tasks-subtab-bar">
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="attack-surface"?" active":"")}
+          onClick=${()=>onSubTab("attack-surface")}>
+          Attack Surface${reconSummary?.attack_classes?.length>0 ? html` <span className="traffic-count">${reconSummary.attack_classes.length}</span>` : ""}
+        </button>
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="task-queue"?" active":"")}
+          onClick=${()=>onSubTab("task-queue")}>
+          Task Queue${counts.tasks>0 ? html` <span className="traffic-count">${counts.tasks}</span>` : ""}
+        </button>
+      </div>
+
+      ${activeSubTab==="attack-surface" && html`<${AttackSurfacePanel} summary=${reconSummary}/>`}
+
+      ${activeSubTab==="task-queue" && html`
       <div className="intel-toolbar">
         <div className="intel-title">
           <span>Hypothesis & Task Graph</span>
@@ -3270,7 +3292,100 @@ function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
               </table>
             </div>
           </div>`}
-      </div>
+      </div>`}
+    </div>`;
+}
+
+function AttackSurfacePanel({ summary }) {
+  const [expanded, setExpanded] = useState({ trust_zones: true, attack_classes: true, meta: false });
+  const toggle = (key) => setExpanded(prev => ({...prev, [key]: !prev[key]}));
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+
+  if (!summary) {
+    return html`
+      <div className="attack-surface-empty">
+        <span className="subtle">No attack surface summary yet. Run a Dynamic Scan to generate one.</span>
+      </div>`;
+  }
+
+  const { trust_zones = {}, attack_classes = [], tech_stack = [], credential_roles = [], entry_points = [] } = summary;
+  const zoneEntries = Object.entries(trust_zones).filter(([,urls]) => urls?.length > 0);
+
+  return html`
+    <div className="attack-surface-panel">
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("trust_zones")}>
+            <span className="attack-surface-toggle">${expanded.trust_zones ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Trust Zones</span>
+            ${zoneEntries.map(([zone, urls]) => html`
+              <span key=${zone} className=${"zone-badge zone-"+zone}>${zone.toUpperCase()} (${urls.length})</span>`)}
+          </div>
+          ${expanded.trust_zones && html`
+            <div className="attack-surface-body">
+              ${zoneEntries.map(([zone, urls]) => html`
+                <div key=${zone} className="trust-zone-group">
+                  <div className=${"trust-zone-label zone-"+zone}>${zone.toUpperCase()}</div>
+                  <div className="trust-zone-urls">
+                    ${urls.slice(0,8).map(url => html`<div key=${url} className="mono trust-zone-url" title=${url}>${truncUrl(url,90)}</div>`)}
+                    ${urls.length > 8 && html`<div className="subtle">+${urls.length - 8} more</div>`}
+                  </div>
+                </div>`)}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("attack_classes")}>
+            <span className="attack-surface-toggle">${expanded.attack_classes ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Attack Classes</span>
+            <span className="subtle">${attack_classes.length} identified</span>
+          </div>
+          ${expanded.attack_classes && html`
+            <div className="attack-surface-body">
+              ${attack_classes.map(cls => {
+                const urls = cls.entry_point_urls || [];
+                return html`
+                  <div key=${cls.id} className="attack-class-card">
+                    <div className="attack-class-head">
+                      <span className=${"task-priority "+priorityTone(cls.priority)}>P${cls.priority}</span>
+                      <span className="owasp-badge">${cls.owasp}</span>
+                      <span className="attack-class-id">${cls.id?.replace(/_/g," ")}</span>
+                    </div>
+                    <div className="attack-class-rationale">${cls.rationale}</div>
+                    ${urls.length > 0 && html`
+                      <div className="attack-class-urls">
+                        ${urls.slice(0,4).map(url => html`<span key=${url} className="mono attack-class-url" title=${url}>${truncUrl(url,70)}</span>`)}
+                        ${urls.length > 4 && html`<span className="subtle">+${urls.length-4} more</span>`}
+                      </div>`}
+                  </div>`;
+              })}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("meta")}>
+            <span className="attack-surface-toggle">${expanded.meta ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Tech Stack & Credentials</span>
+          </div>
+          ${expanded.meta && html`
+            <div className="attack-surface-body">
+              ${tech_stack.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Tech stack:</span>
+                  ${tech_stack.map(t => html`<span key=${t} className="intel-kind">${t}</span>`)}
+                </div>`}
+              ${credential_roles.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Credential roles:</span>
+                  ${credential_roles.map(r => html`<span key=${r} className="intel-kind">${r}</span>`)}
+                </div>`}
+              <div className="meta-row">
+                <span className="meta-label">Entry points:</span>
+                <span>${entry_points.length} total</span>
+              </div>
+            </div>`}
+        </div>
+
     </div>`;
 }
 
