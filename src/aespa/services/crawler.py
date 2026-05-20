@@ -154,7 +154,7 @@ async def _do_crawl(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "agent_status",
         "agent_id": "crawler",
-        "role": "Scanner",
+        "role": "Crawler",
         "status": "active",
         "current_task": "Crawling application…",
         "outcome": None,
@@ -209,7 +209,7 @@ async def _do_crawl(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "agent_status",
         "agent_id": "crawler",
-        "role": "Scanner",
+        "role": "Crawler",
         "status": "complete",
         "current_task": "Crawl complete",
         "outcome": f"{shared.pages_done} page(s) discovered",
@@ -560,6 +560,7 @@ async def _crawl_as_credential(
 
         await browser.close()
 
+    _update_credential_progress(run_id, username, None, local_pages, done=True)
     events_svc.emit(run_id, {
         "type": "crawl_progress",
         "username": username,
@@ -2105,7 +2106,12 @@ def _update_run(run_id: int, **kwargs) -> None:
 
 
 def _update_credential_progress(
-    run_id: int, username: Optional[str], current_url: str, pages_visited: int
+    run_id: int,
+    username: Optional[str],
+    current_url: str | None,
+    pages_visited: int,
+    *,
+    done: bool = False,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -2115,7 +2121,12 @@ def _update_credential_progress(
         if run is None:
             return
         progress = json.loads(run.per_user_progress or "{}")
-        progress[username] = {"current_url": current_url, "pages_visited": pages_visited}
+        progress[username] = {
+            "current_url": current_url,
+            "pages_visited": pages_visited,
+            "done": done,
+            "updated_at": _utcnow().isoformat(),
+        }
         run.per_user_progress = json.dumps(progress)
         s.add(run)
         s.commit()

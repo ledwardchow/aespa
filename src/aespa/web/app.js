@@ -906,7 +906,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState(initialTab || "sitemap");
+  const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "sitemap"));
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
@@ -931,10 +931,10 @@ function TestRunDetail({ runId, initialTab }) {
   const toggleLogId = (id) => setExpandedLogIds(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
   });
-  const [activitySubTab, setActivitySubTab] = useState("log");
+  const [activitySubTab, setActivitySubTab] = useState("agents");
   const [agents, setAgents]                = useState([]);
-  const [expandedAgentIds, setExpandedAgentIds] = useState(new Set());
-  const toggleAgentId = (aid) => setExpandedAgentIds(prev => {
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
   const [sitePlanData, setSitePlanData]     = useState(null);
@@ -984,6 +984,119 @@ function TestRunDetail({ runId, initialTab }) {
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  const agentRoleLabel = (agent) => {
+    if (agent?.id === "crawler") return "Crawler";
+    if (agent?.id === "scanner") return "Test Lead";
+    return agent?.role || "Agent";
+  };
+  const defaultAgentRoster = () => [
+    {
+      id: "crawler",
+      role: "Crawler",
+      status: run?.status === "running" ? "active" : "idle",
+      currentTask: run?.status === "running" ? "" : "Waiting for crawl",
+    },
+    {
+      id: "scanner",
+      role: "Test Lead",
+      status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
+      currentTask: isDynamicScanActive(thinkingStatus?.status) ? "Coordinating pentest" : "Standing by",
+    },
+    { id: "specialist", role: "Specialist", status: "idle", currentTask: "No specialist dispatched" },
+    { id: "burp", role: "Burp", status: "idle", currentTask: "No active scan dispatched" },
+    { id: "validator", role: "Validator", status: "idle", currentTask: "No validation running" },
+  ];
+  const representsAgent = (agent, placeholder) => {
+    if (agent.id === placeholder.id) return true;
+    if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
+    if (placeholder.id === "validator") return agent.role === "Validator" || agent.id?.startsWith("validator-");
+    if (placeholder.id === "specialist") return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    return false;
+  };
+  const fmtEventTime = (value) => {
+    if (!value) return "--:--:--";
+    try {
+      return new Date(value).toLocaleTimeString("en-US", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return "--:--:--";
+    }
+  };
+  const crawlEventsFromRun = () => {
+    const progress = run?.per_user_progress || {};
+    const labelByUsername = new Map((run?.credentials || []).map(c => [c.username, c.label || c.username]));
+    return Object.entries(progress)
+      .filter(([, p]) => p && (p.current_url || p.done || p.pages_visited))
+      .map(([username, p]) => ({
+        ts: fmtEventTime(p.updated_at),
+        username: labelByUsername.get(username) || username || "anonymous",
+        url: p.current_url || "",
+        pagesVisited: p.pages_visited || 0,
+        done: !!p.done,
+      }));
+  };
+  const mergeCrawlEvents = (liveEvents, threadEvents) => {
+    const seen = new Set();
+    return [...(liveEvents || []), ...threadEvents]
+      .filter((event) => {
+        const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.done ? 1 : 0}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+  const agentCrawlEvents = (agent) => (
+    agent?.id === "crawler"
+      ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun())
+      : []
+  );
+  const agentCurrentTask = (agent) => {
+    const crawlEvents = agentCrawlEvents(agent);
+    if (agent?.id === "crawler" && crawlEvents.length) {
+      if (agent.status === "complete" && agent.currentTask) {
+        return agent.outcome ? `${agent.currentTask} · ${agent.outcome}` : agent.currentTask;
+      }
+      const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
+      const latest = active || crawlEvents[crawlEvents.length - 1];
+      if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
+      return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+    }
+    return agent?.currentTask || "Waiting for work";
+  };
+  const agentStatusLabel = (agent) => {
+    if (agent?.status === "active") return "ACTIVE";
+    if (agent?.status === "idle") return "IDLE";
+    if (agent?.status === "failed") return "FAILED";
+    return "COMPLETE";
+  };
+  const upsertAgent = (items, patch, histEntry = null) => {
+    const normalized = {
+      ...patch,
+      role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role,
+    };
+    const idx = items.findIndex(a => a.id === normalized.id);
+    if (idx === -1) {
+      return [...items, {
+        ...normalized,
+        taskHistory: histEntry ? [histEntry] : [],
+        crawlEvents: normalized.crawlEvents || [],
+      }];
+    }
+    const updated = [...items];
+    const prev = updated[idx];
+    updated[idx] = {
+      ...prev,
+      ...normalized,
+      taskHistory: histEntry ? [...(prev.taskHistory || []), histEntry].slice(-200) : (prev.taskHistory || []),
+      crawlEvents: normalized.crawlEvents || prev.crawlEvents || [],
+    };
+    return updated;
+  };
+
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {
     api.getScanLog(runId).then(entries => {
@@ -1011,8 +1124,10 @@ function TestRunDetail({ runId, initialTab }) {
         const ts = e.created_at
           ? new Date(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
           : "--:--:--";
-        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role: e.role, status: e.status, currentTask: e.current_task, taskHistory: [] };
+        const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
         existing.status = e.status;
+        existing.role = role;
         existing.currentTask = e.current_task;
         existing.taskHistory.push({ ts, task: e.current_task, outcome: e.outcome });
         agentsMap.set(e.agent_id, existing);
@@ -1020,6 +1135,7 @@ function TestRunDetail({ runId, initialTab }) {
       setAgents([...agentsMap.values()]);
     }).catch(() => {});
   }, [runId]);
+  // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
     const es = new EventSource(`/api/test-runs/${runId}/events`);
     es.onmessage = (msg) => {
@@ -1044,6 +1160,30 @@ function TestRunDetail({ runId, initialTab }) {
         if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const username = evt.username || "anonymous";
+          const crawlEvent = {
+            ts,
+            username,
+            url: evt.current_url || "",
+            pagesVisited: evt.pages_visited || 0,
+            done: !!evt.done,
+          };
+          const idx = prev.findIndex(a => a.id === "crawler");
+          const existingEvents = idx >= 0 ? (prev[idx].crawlEvents || []) : [];
+          const crawlEvents = [...existingEvents, crawlEvent].slice(-200);
+          const currentTask = evt.done
+            ? `Completed crawl as ${username} (${evt.pages_visited || 0} pg)`
+            : `Crawling ${truncUrl(evt.current_url || "", 88)} as ${username}`;
+          return upsertAgent(prev, {
+            id: "crawler",
+            role: "Crawler",
+            status: "active",
+            currentTask,
+            crawlEvents,
+          });
+        });
         // crawl_progress is still used for the done flag
         if (evt.username && evt.done) {
           setRun(prev => {
@@ -1098,14 +1238,14 @@ function TestRunDetail({ runId, initialTab }) {
       } else if (evt.type === "agent_status") {
         const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
         setAgents(prev => {
-          const idx = prev.findIndex(a => a.id === evt.agent_id);
           const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
-          if (idx === -1) {
-            return [...prev, { id: evt.agent_id, role: evt.role, status: evt.status, currentTask: evt.current_task, taskHistory: [histEntry] }];
-          }
-          const updated = [...prev];
-          updated[idx] = { ...updated[idx], status: evt.status, currentTask: evt.current_task, taskHistory: [...updated[idx].taskHistory, histEntry] };
-          return updated;
+          return upsertAgent(prev, {
+            id: evt.agent_id,
+            role: evt.role,
+            status: evt.status,
+            currentTask: evt.current_task,
+            outcome: evt.outcome,
+          }, histEntry);
         });
       }
     };
@@ -1789,8 +1929,6 @@ function TestRunDetail({ runId, initialTab }) {
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
-          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); nav(`#/runs/${runId}/scan`); }}>Structured Scan</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
           Pentest Activity Log${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
@@ -2452,10 +2590,10 @@ function TestRunDetail({ runId, initialTab }) {
                     }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
               </div>
               <div className="activity-sub-tab-bar">
-                <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
-                  onClick=${()=>setActivitySubTab("log")}>Log</button>
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
                   onClick=${()=>setActivitySubTab("agents")}>Agents${agents.some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
+                  onClick=${()=>setActivitySubTab("log")}>Log</button>
               </div>`;
           })()}
           ${activitySubTab==="log" && html`
@@ -2562,34 +2700,52 @@ function TestRunDetail({ runId, initialTab }) {
           </div>`}
           ${activitySubTab==="agents" && html`
           <div className="agents-panel">
-            ${agents.length===0 && html`
-              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No agents active yet. Start a scan to see agent activity.</div>`}
             ${(()=>{
-              const active = agents.filter(a=>a.status==="active");
-              const done   = agents.filter(a=>a.status!=="active");
+              const placeholders = defaultAgentRoster().filter(p => !agents.some(a => representsAgent(a, p)));
+              const shownAgents = [...placeholders, ...agents];
+              const active = shownAgents.filter(a=>a.status==="active");
+              const done   = shownAgents.filter(a=>a.status!=="active");
               const renderRow = (a) => {
                 const isActive = a.status==="active";
-                const isExpanded = expandedAgentIds.has(a.id);
+                const roleLabel = agentRoleLabel(a);
+                const currentTask = agentCurrentTask(a);
+                const crawlEvents = agentCrawlEvents(a);
+                const taskHistory = a.taskHistory || [];
+                const canExpand = (a.id === "crawler" && crawlEvents.length > 0) ||
+                  taskHistory.length > 1 ||
+                  taskHistory.some(h => h.outcome);
+                const isExpanded = canExpand && !collapsedAgentIds.has(a.id);
                 return html`
-                  <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")}
-                       onClick=${()=>toggleAgentId(a.id)}>
-                    <span className=${"agent-dot"+(isActive?" agent-dot--active":"")}>${isActive?"●":"○"}</span>
+                  <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                       onClick=${canExpand ? ()=>toggleAgentId(a.id) : undefined}>
+                    <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
                     <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>
-                      ${a.role}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
+                      ${roleLabel}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
                     </span>
                     <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
-                      ${isActive?"ACTIVE":"COMPLETE"}
+                      ${agentStatusLabel(a)}
                     </span>
-                    <span className="agent-current-task">${a.currentTask}</span>
-                    ${a.taskHistory.length>1 && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
-                    ${isExpanded && html`
+                    <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                    ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                    ${canExpand && isExpanded && html`
                       <div className="agent-task-history">
-                        ${a.taskHistory.map((h,i)=>html`
-                          <div key=${i} className="agent-history-entry">
-                            <span className="activity-ts">${h.ts}</span>
-                            <span className="agent-history-task">${h.task}</span>
-                            ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
-                          </div>`)}
+                        ${a.id === "crawler" && crawlEvents.length > 0 ? html`
+                          ${crawlEvents.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry agent-history-entry--crawl">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-user">${h.username || "anonymous"}</span>
+                              <span className="agent-history-task mono" title=${h.url || ""}>
+                                ${h.done ? `Finished (${h.pagesVisited || 0} pg)` : truncUrl(h.url || "", 112)}
+                              </span>
+                            </div>`)}
+                        ` : html`
+                          ${taskHistory.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-task">${h.task}</span>
+                              ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                            </div>`)}
+                        `}
                       </div>`}
                   </div>`;
               };
