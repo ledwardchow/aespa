@@ -1941,6 +1941,8 @@ async def _run_burp_active_scan_for_target(
         vuln_class, url,
     )
     target_label = f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
+    # Stable agent_id for this Burp scan (URL slug, truncated).
+    _burp_agent_id = "burp-" + re.sub(r"[^a-z0-9]+", "-", url.lower())[:50].strip("-")
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "burp_active_scan",
@@ -1949,6 +1951,15 @@ async def _run_burp_active_scan_for_target(
             f"Burp active scan triggered for {vuln_class} {target_label} — {url}"
         ),
         "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": _burp_agent_id,
+        "role": "Burp",
+        "status": "active",
+        "current_task": f"Active scan: {url} ({vuln_class})",
+        "outcome": None,
+        "_persist": True,
     })
 
     cookies, extra_headers = _best_burp_auth(session_vault)
@@ -1968,6 +1979,15 @@ async def _run_burp_active_scan_for_target(
             "status": "error",
             "message": f"Burp active scan launch failed: {exc}",
             "data": {"finding_id": finding_id, "url": url},
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "failed",
+            "current_task": "Launch failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
         })
         return
 
@@ -1990,6 +2010,15 @@ async def _run_burp_active_scan_for_target(
             "message": f"Burp active scan task {task_id} failed: {exc}",
             "data": {"finding_id": finding_id, "task_id": task_id},
         })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "failed",
+            "current_task": f"Scan task {task_id} failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
+        })
         return
 
     if not issues:
@@ -1999,6 +2028,15 @@ async def _run_burp_active_scan_for_target(
             "status": "complete",
             "message": f"Burp active scan task {task_id} completed — no issues found.",
             "data": {"finding_id": finding_id, "task_id": task_id, "issue_count": 0},
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "complete",
+            "current_task": f"Active scan: {url}",
+            "outcome": "No issues found",
+            "_persist": True,
         })
         return
 
@@ -2062,6 +2100,15 @@ async def _run_burp_active_scan_for_target(
             "issue_count": len(issues),
             "saved_count": saved_count,
         },
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": _burp_agent_id,
+        "role": "Burp",
+        "status": "complete",
+        "current_task": f"Active scan: {url}",
+        "outcome": f"{len(issues)} issue(s), {saved_count} saved",
+        "_persist": True,
     })
 
 
@@ -2317,17 +2364,44 @@ def _emit_thinking_status(run_id: int) -> None:
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
     _emit_thinking_status(run_id)
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Scanner",
+        "status": "active",
+        "current_task": "Dynamic scan started",
+        "outcome": None,
+        "_persist": True,
+    })
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
         _emit_thinking_status(run_id)
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Scanner",
+            "status": "complete",
+            "current_task": "Scan stopped",
+            "outcome": "Stopped by user",
+            "_persist": True,
+        })
         raise
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
         _emit_thinking_status(run_id)
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Scanner",
+            "status": "failed",
+            "current_task": "Scan failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
+        })
     finally:
         _thinking_stop_requested.discard(run_id)
 
@@ -2812,6 +2886,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "status": "deciding",
                     "message": f"Step {step}: LLM deciding next action…",
                     "data": {"step": step},
+                })
+                events_svc.emit(run_id, {
+                    "type": "agent_status",
+                    "agent_id": "scanner",
+                    "role": "Scanner",
+                    "status": "active",
+                    "current_task": f"Step {step}: deciding next action…",
+                    "outcome": None,
                 })
 
                 # Ask the LLM what to do next.
@@ -3804,6 +3886,20 @@ async def _do_thinking_scan(run_id: int) -> None:
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
+    # Count findings created during this scan for the agent outcome summary.
+    with Session(get_engine()) as _s:
+        _finding_count = len(_s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all())
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Scanner",
+        "status": "complete",
+        "current_task": "Scan complete",
+        "outcome": f"{_finding_count} finding(s) recorded",
+        "_persist": True,
+    })
 
 
 # ── Agentic loop helper ───────────────────────────────────────────────────────
@@ -3951,6 +4047,16 @@ async def _do_agentic_thinking_loop(
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         nonlocal progressive_findings_count
         note = str(tool_input.get("note") or f"Step {step}")
+
+        # Emit live agent_status update for every agentic step (SSE only, not persisted).
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Scanner",
+            "status": "active",
+            "current_task": f"Step {step}: {note}",
+            "outcome": None,
+        })
 
         # ── context_tool ──────────────────────────────────────────────────────
         if tool_name == "context_tool":
