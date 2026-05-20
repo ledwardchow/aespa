@@ -60,6 +60,7 @@ const api = {
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
+  getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -930,6 +931,12 @@ function TestRunDetail({ runId, initialTab }) {
   const toggleLogId = (id) => setExpandedLogIds(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
   });
+  const [activitySubTab, setActivitySubTab] = useState("log");
+  const [agents, setAgents]                = useState([]);
+  const [expandedAgentIds, setExpandedAgentIds] = useState(new Set());
+  const toggleAgentId = (aid) => setExpandedAgentIds(prev => {
+    const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
+  });
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
@@ -995,7 +1002,24 @@ function TestRunDetail({ runId, initialTab }) {
     }).catch(() => {});
   }, [runId]);
 
-  // SSE: receive incremental graph + status updates — no graph polling needed
+  // Seed agents panel from persisted DB entries on mount.
+  useEffect(() => {
+    api.getAgentLog(runId).then(entries => {
+      if (!entries || entries.length === 0) return;
+      const agentsMap = new Map();
+      for (const e of entries) {
+        const ts = e.created_at
+          ? new Date(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+          : "--:--:--";
+        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role: e.role, status: e.status, currentTask: e.current_task, taskHistory: [] };
+        existing.status = e.status;
+        existing.currentTask = e.current_task;
+        existing.taskHistory.push({ ts, task: e.current_task, outcome: e.outcome });
+        agentsMap.set(e.agent_id, existing);
+      }
+      setAgents([...agentsMap.values()]);
+    }).catch(() => {});
+  }, [runId]);
   useEffect(() => {
     const es = new EventSource(`/api/test-runs/${runId}/events`);
     es.onmessage = (msg) => {
@@ -1071,6 +1095,18 @@ function TestRunDetail({ runId, initialTab }) {
         ));
         // Refresh validation status summary when an individual finding resolves.
         api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
+      } else if (evt.type === "agent_status") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const idx = prev.findIndex(a => a.id === evt.agent_id);
+          const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
+          if (idx === -1) {
+            return [...prev, { id: evt.agent_id, role: evt.role, status: evt.status, currentTask: evt.current_task, taskHistory: [histEntry] }];
+          }
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], status: evt.status, currentTask: evt.current_task, taskHistory: [...updated[idx].taskHistory, histEntry] };
+          return updated;
+        });
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -2414,8 +2450,15 @@ function TestRunDetail({ runId, initialTab }) {
                       catch(e) { setClearError(e.message); }
                       finally { setClearBusy(""); }
                     }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+              </div>
+              <div className="activity-sub-tab-bar">
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
+                  onClick=${()=>setActivitySubTab("log")}>Log</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
+                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.some(a=>a.status==="active")?" ●":""}</button>
               </div>`;
           })()}
+          ${activitySubTab==="log" && html`
           <div className="activity-feed" ref=${activityFeedRef}>
             ${sitePlanData && html`
               <div className="site-plan-card">
@@ -2516,7 +2559,46 @@ function TestRunDetail({ runId, initialTab }) {
                     </div>`}
                 </div>`;
             })}
-          </div>
+          </div>`}
+          ${activitySubTab==="agents" && html`
+          <div className="agents-panel">
+            ${agents.length===0 && html`
+              <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No agents active yet. Start a scan to see agent activity.</div>`}
+            ${(()=>{
+              const active = agents.filter(a=>a.status==="active");
+              const done   = agents.filter(a=>a.status!=="active");
+              const renderRow = (a) => {
+                const isActive = a.status==="active";
+                const isExpanded = expandedAgentIds.has(a.id);
+                return html`
+                  <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")}
+                       onClick=${()=>toggleAgentId(a.id)}>
+                    <span className=${"agent-dot"+(isActive?" agent-dot--active":"")}>${isActive?"●":"○"}</span>
+                    <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>
+                      ${a.role}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
+                    </span>
+                    <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${isActive?"ACTIVE":"COMPLETE"}
+                    </span>
+                    <span className="agent-current-task">${a.currentTask}</span>
+                    ${a.taskHistory.length>1 && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                    ${isExpanded && html`
+                      <div className="agent-task-history">
+                        ${a.taskHistory.map((h,i)=>html`
+                          <div key=${i} className="agent-history-entry">
+                            <span className="activity-ts">${h.ts}</span>
+                            <span className="agent-history-task">${h.task}</span>
+                            ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                          </div>`)}
+                      </div>`}
+                  </div>`;
+              };
+              return html`
+                ${active.map(renderRow)}
+                ${active.length>0 && done.length>0 && html`<div className="agents-divider"/>`}
+                ${done.map(renderRow)}`;
+            })()}
+          </div>`}
         </div>`}
 
       ${activeTab==="traffic" && html`

@@ -27,6 +27,9 @@ def emit(run_id: int, event: dict) -> None:
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)
 
+    if event.get("type") == "agent_status" and event.get("_persist"):
+        _persist_agent_status_event(run_id, event)
+
 
 def _persist_phase_event(run_id: int, event: dict) -> None:
     """Write a scanner_phase event to scan_log (best-effort, never raises)."""
@@ -43,6 +46,28 @@ def _persist_phase_event(run_id: int, event: dict) -> None:
             message=str(event.get("message") or ""),
             page_url=event.get("page_url") or None,
             data_json=json.dumps(data) if data is not None else None,
+        )
+        with Session(get_engine()) as s:
+            s.add(entry)
+            s.commit()
+    except Exception:
+        pass  # never let persistence failures break the scan
+
+
+def _persist_agent_status_event(run_id: int, event: dict) -> None:
+    """Write an agent_status event to agent_log (best-effort, never raises)."""
+    try:
+        from aespa.db import get_engine
+        from aespa.models import AgentLog
+        from sqlmodel import Session
+
+        entry = AgentLog(
+            test_run_id=run_id,
+            agent_id=str(event.get("agent_id") or ""),
+            role=str(event.get("role") or ""),
+            status=str(event.get("status") or ""),
+            current_task=str(event.get("current_task") or ""),
+            outcome=event.get("outcome") or None,
         )
         with Session(get_engine()) as s:
             s.add(entry)

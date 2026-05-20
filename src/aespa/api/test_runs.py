@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import (
+    AgentLog,
     CrawledPage,
     PageCredentialView,
     PageLink,
@@ -312,6 +313,8 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
+    for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
     session.delete(run)
     session.commit()
 
