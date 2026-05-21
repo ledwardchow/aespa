@@ -22,6 +22,7 @@ class Site(SQLModel, table=True):
     requires_auth: bool = Field(default=False)
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -135,6 +136,53 @@ class UpstreamProxyConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class SpecialistAgentConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for specialist agent dispatch settings."""
+
+    __tablename__ = "specialist_agent_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    enabled: bool = Field(default=True)
+    max_concurrent: int = Field(default=5)
+    max_steps: int = Field(default=30)
+    min_priority: int = Field(default=7)
+    # Per attack-class dispatch toggles
+    dispatch_idor: bool = Field(default=True)
+    dispatch_auth_bypass: bool = Field(default=True)
+    dispatch_sqli: bool = Field(default=True)
+    dispatch_xss: bool = Field(default=True)
+    dispatch_business_logic: bool = Field(default=True)
+    dispatch_ssrf: bool = Field(default=True)
+    dispatch_path_traversal: bool = Field(default=True)
+    dispatch_cors: bool = Field(default=False)
+    dispatch_crypto: bool = Field(default=True)
+    dispatch_config: bool = Field(default=False)
+    trigger_specialist_on_burp: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class AdversarialValidatorConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for adversarial validator settings."""
+
+    __tablename__ = "adversarial_validator_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # Global switch — False falls back to the legacy static-probe mode.
+    enabled: bool = Field(default=True)
+    # Step budget per finding in adversarial mode.
+    max_steps: int = Field(default=20)
+    # Skip validation for findings below this severity: critical|high|medium|low|info
+    min_severity: str = Field(default="low")
+    # When True, automatically validate each finding immediately after it is written
+    # during a dynamic scan.  When False, validation is only triggered manually.
+    auto_validate_inline: bool = Field(default=True)
+    # When True (strict mode), only return a false_positive verdict when the validator
+    # finds a *concrete* innocent explanation.  When False (lenient), failure to
+    # reproduce the finding is treated as a false positive.
+    require_concrete_disproof: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Test runs ─────────────────────────────────────────────────────────────────
 
 class TestRunStatus(str, Enum):
@@ -170,6 +218,10 @@ class TestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     # Optional per-run LLM profile override (null = use the globally active one)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # JSON blob produced by build_recon_summary() at the end of the crawl phase
+    recon_summary: Optional[str] = Field(default=None)
+    # Persisted token usage: {model: {input, output, cache_read, cache_write}}
+    token_usage_json: Optional[str] = Field(default=None)
 
 
 class CrawledPage(SQLModel, table=True):
@@ -361,6 +413,7 @@ class ScanFinding(SQLModel, table=True):
     request_evidence: str = Field(default="")
     response_evidence: str = Field(default="")
     evidence_json: str = Field(default="[]")
+    merged_instances: str = Field(default="[]")  # JSON list of consolidated cross-URL instances
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     finding_source: str = Field(default="unknown", index=True)
     # Validation fields
@@ -418,3 +471,22 @@ class ScanCheckpoint(SQLModel, table=True):
     consecutive_context_tools: int = Field(default=0)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class AgentLog(SQLModel, table=True):
+    """Persisted agent_status event so the Agents panel survives page navigation.
+
+    One row per emitted agent_status event that has ``_persist=True``.
+    Analogous to ScanLog for scanner_phase events.
+    """
+
+    __tablename__ = "agent_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+    agent_id: str = Field(index=True)   # e.g. "scanner", "validator-42", "burp-api-login"
+    role: str                            # Scanner | Specialist | Burp | Validator
+    status: str                          # active | complete | failed
+    current_task: str = Field(default="")
+    outcome: Optional[str] = Field(default=None)

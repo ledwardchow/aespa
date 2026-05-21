@@ -66,14 +66,18 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
         engine.dispose()
 
 
-def test_migrate_makes_scan_finding_page_id_nullable():
+def test_migrate_makes_scan_finding_page_id_nullable_and_preserves_new_columns():
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
         with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE scan_finding RENAME TO scan_finding_old"))
             conn.execute(text("""
                 CREATE TABLE scan_finding (
                     id INTEGER PRIMARY KEY,
@@ -108,9 +112,10 @@ def test_migrate_makes_scan_finding_page_id_nullable():
                     'description', 'evidence', '2026-05-10 00:00:00'
                 )
             """))
+            conn.execute(text("DROP TABLE scan_finding_old"))
             conn.commit()
 
-        db._ensure_scan_finding_page_id_nullable(engine)
+        db._migrate(engine)
 
         with engine.connect() as conn:
             columns = {
@@ -130,7 +135,13 @@ def test_migrate_makes_scan_finding_page_id_nullable():
             conn.commit()
 
         assert int(columns["page_id"][3]) == 0
+        assert {
+            "evidence_json",
+            "merged_instances",
+            "finding_source",
+        } <= set(columns)
     finally:
+        SQLModel.metadata.drop_all(engine)
         engine.dispose()
 
 

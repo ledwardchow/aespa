@@ -12,8 +12,12 @@ from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
     ScannerPolicyIn,
     ScannerPolicyOut,
+    SpecialistAgentConfigIn,
+    SpecialistAgentConfigOut,
     UpstreamProxyConfigIn,
     UpstreamProxyConfigOut,
+    ValidatorConfigIn,
+    ValidatorConfigOut,
 )
 from aespa.services import settings as settings_service
 from aespa.services import burp_rest as burp_rest_svc
@@ -133,3 +137,33 @@ def upsert_upstream_proxy_config(
     session: Session = Depends(get_session),
 ) -> UpstreamProxyConfigOut:
     return settings_service.upsert_upstream_proxy_config(session, payload)
+
+
+@router.get("/specialist-agent-config", response_model=SpecialistAgentConfigOut)
+def get_specialist_agent_config(
+    session: Session = Depends(get_session),
+) -> SpecialistAgentConfigOut:
+    return settings_service.get_specialist_agent_config(session)
+
+
+@router.put("/specialist-agent-config", response_model=SpecialistAgentConfigOut)
+def upsert_specialist_agent_config(
+    payload: SpecialistAgentConfigIn,
+    session: Session = Depends(get_session),
+) -> SpecialistAgentConfigOut:
+    return settings_service.upsert_specialist_agent_config(session, payload)
+
+
+@router.get("/adversarial-validator-config", response_model=ValidatorConfigOut)
+def get_adversarial_validator_config(
+    session: Session = Depends(get_session),
+) -> ValidatorConfigOut:
+    return settings_service.get_adversarial_validator_config(session)
+
+
+@router.put("/adversarial-validator-config", response_model=ValidatorConfigOut)
+def upsert_adversarial_validator_config(
+    payload: ValidatorConfigIn,
+    session: Session = Depends(get_session),
+) -> ValidatorConfigOut:
+    return settings_service.upsert_adversarial_validator_config(session, payload)
