@@ -67,6 +67,7 @@ _thinking_stop_requested: set[int] = set()
 _thinking_tasks: dict[int, asyncio.Task] = {}
 _thinking_scan_status: dict[int, str] = {}  # run_id → idle|running|complete|stopped|failed
 _burp_active_scan_targets: set[tuple[int, str, str]] = set()
+_persist_write_locks: dict[int, asyncio.Lock] = {}
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -2803,38 +2804,40 @@ async def _persist_dynamic_finding(
     except Exception as exc:
         log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
 
-    with Session(get_engine()) as s:
-        page_id = _dynamic_finding_page_id(
-            s,
-            run_id=run_id,
-            affected_url=affected,
-            base_url=base_url,
-            pages_snapshot=pages_snapshot,
-            first_page_id=first_page_id,
-        )
+    lock = _persist_write_locks.setdefault(run_id, asyncio.Lock())
+    async with lock:
+        with Session(get_engine()) as s:
+            page_id = _dynamic_finding_page_id(
+                s,
+                run_id=run_id,
+                affected_url=affected,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+            )
 
-        if _dynamic_finding_exists(
-            s,
-            run_id=run_id,
-            title=str(raw.get("title") or "Untitled finding"),
-            affected_url=affected,
-            owasp_category=str(raw.get("owasp_category") or "A00"),
-        ):
-            return None
+            if _dynamic_finding_exists(
+                s,
+                run_id=run_id,
+                title=str(raw.get("title") or "Untitled finding"),
+                affected_url=affected,
+                owasp_category=str(raw.get("owasp_category") or "A00"),
+            ):
+                return None
 
-        finding = _finding_from_llm(
-            run_id=run_id,
-            page_id=page_id,
-            page_url=affected,
-            raw=raw,
-            result_by_url=result_by_url,
-            validation_status="unvalidated",
-            validation_note=None,
-        )
-        s.add(finding)
-        s.commit()
-        s.refresh(finding)
-        return finding
+            finding = _finding_from_llm(
+                run_id=run_id,
+                page_id=page_id,
+                page_url=affected,
+                raw=raw,
+                result_by_url=result_by_url,
+                validation_status="unvalidated",
+                validation_note=None,
+            )
+            s.add(finding)
+            s.commit()
+            s.refresh(finding)
+            return finding
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
