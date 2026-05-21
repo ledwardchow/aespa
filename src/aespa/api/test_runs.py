@@ -7,16 +7,20 @@ from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import (
+    AgentLog,
     CrawledPage,
     PageCredentialView,
     PageLink,
     PentestHypothesis,
     PentestTask,
+    ScanCheckpoint,
     ScanFinding,
+    ScanLog,
     ScannerSession,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
+    TrafficEntry,
 )
 from aespa.schemas import (
     ActiveJobSummary,
@@ -66,6 +70,8 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     policy = settings_service.get_run_scanner_policy(session, run)
     s.scanner_policy = policy.model_dump(mode="json")
     s.scan_mode = policy.scan_mode
+    import json as _json
+    s.scope_hosts = _json.loads(site.scope_hosts or "[]") if site else []
     scan_pages = session.exec(
         select(CrawledPage)
         .where(CrawledPage.test_run_id == run.id)
@@ -164,6 +170,8 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
         session.delete(view)
     for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
         session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
     for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
         session.delete(pg)
 
@@ -309,9 +317,25 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     intel = session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all()
     for item in intel:
         session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
+    for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
+        session.delete(finding)
+    for log_entry in session.exec(select(ScanLog).where(ScanLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
+    for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
+        session.delete(ckpt)
+    for ss in session.exec(select(ScannerSession).where(ScannerSession.test_run_id == run_id)).all():
+        session.delete(ss)
+    for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
+        session.delete(hyp)
+    for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
+        session.delete(task)
+    for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
     session.delete(run)
     session.commit()
 
@@ -640,6 +664,19 @@ def seed_task_graph(
             "data": result,
         })
     return task_graph_svc.get_task_graph(run_id, session=session)
+
+
+@router.get("/api/test-runs/{run_id}/recon-summary")
+def get_recon_summary(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return the stored attack-surface summary for this run, or 404 if not yet built."""
+    run = _get_run_or_404(session, run_id)
+    if not run.recon_summary:
+        raise HTTPException(status_code=404, detail="Recon summary not yet available for this run.")
+    import json as _json
+    return _json.loads(run.recon_summary)
 
 
 # ── Scope management ──────────────────────────────────────────────────────────

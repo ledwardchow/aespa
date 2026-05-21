@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from aespa.models import BurpRestApiConfig, LLMConfig, ScannerPolicy, TestRun, UpstreamProxyConfig
+from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, LLMConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
@@ -15,8 +15,12 @@ from aespa.schemas import (
     RunScannerPolicyOut,
     ScannerPolicyIn,
     ScannerPolicyOut,
+    SpecialistAgentConfigIn,
+    SpecialistAgentConfigOut,
     UpstreamProxyConfigIn,
     UpstreamProxyConfigOut,
+    ValidatorConfigIn,
+    ValidatorConfigOut,
 )
 
 _SINGLETON_ID = 1
@@ -243,6 +247,58 @@ def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
     return _burp_rest_api_config_from_model(cfg)
 
 
+def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
+    cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
+    if cfg is None:
+        return SpecialistAgentConfigOut(**SpecialistAgentConfigIn().model_dump(), updated_at=_utcnow())
+    return SpecialistAgentConfigOut(
+        enabled=cfg.enabled,
+        max_concurrent=cfg.max_concurrent,
+        max_steps=cfg.max_steps,
+        min_priority=cfg.min_priority,
+        dispatch_idor=cfg.dispatch_idor,
+        dispatch_auth_bypass=cfg.dispatch_auth_bypass,
+        dispatch_sqli=cfg.dispatch_sqli,
+        dispatch_xss=cfg.dispatch_xss,
+        dispatch_business_logic=cfg.dispatch_business_logic,
+        dispatch_ssrf=cfg.dispatch_ssrf,
+        dispatch_path_traversal=cfg.dispatch_path_traversal,
+        dispatch_cors=cfg.dispatch_cors,
+        dispatch_crypto=cfg.dispatch_crypto,
+        dispatch_config=cfg.dispatch_config,
+        trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_specialist_agent_config(
+    session: Session, payload: SpecialistAgentConfigIn
+) -> SpecialistAgentConfigOut:
+    cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = SpecialistAgentConfig(id=_SINGLETON_ID)
+    cfg.enabled = payload.enabled
+    cfg.max_concurrent = payload.max_concurrent
+    cfg.max_steps = payload.max_steps
+    cfg.min_priority = payload.min_priority
+    cfg.dispatch_idor = payload.dispatch_idor
+    cfg.dispatch_auth_bypass = payload.dispatch_auth_bypass
+    cfg.dispatch_sqli = payload.dispatch_sqli
+    cfg.dispatch_xss = payload.dispatch_xss
+    cfg.dispatch_business_logic = payload.dispatch_business_logic
+    cfg.dispatch_ssrf = payload.dispatch_ssrf
+    cfg.dispatch_path_traversal = payload.dispatch_path_traversal
+    cfg.dispatch_cors = payload.dispatch_cors
+    cfg.dispatch_crypto = payload.dispatch_crypto
+    cfg.dispatch_config = payload.dispatch_config
+    cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_specialist_agent_config(session)
+
+
 def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) -> BurpRestApiConfigOut:
     cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
     if cfg is None:
@@ -265,3 +321,35 @@ def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) 
     session.commit()
     session.refresh(cfg)
     return _burp_rest_api_config_from_model(cfg)
+
+
+def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
+    cfg = session.get(AdversarialValidatorConfig, _SINGLETON_ID)
+    if cfg is None:
+        return ValidatorConfigOut(**ValidatorConfigIn().model_dump(), updated_at=_utcnow())
+    return ValidatorConfigOut(
+        enabled=cfg.enabled,
+        max_steps=cfg.max_steps,
+        min_severity=cfg.min_severity,
+        auto_validate_inline=cfg.auto_validate_inline,
+        require_concrete_disproof=cfg.require_concrete_disproof,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_adversarial_validator_config(
+    session: Session, payload: ValidatorConfigIn
+) -> ValidatorConfigOut:
+    cfg = session.get(AdversarialValidatorConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = AdversarialValidatorConfig(id=_SINGLETON_ID)
+    cfg.enabled = payload.enabled
+    cfg.max_steps = payload.max_steps
+    cfg.min_severity = payload.min_severity
+    cfg.auto_validate_inline = payload.auto_validate_inline
+    cfg.require_concrete_disproof = payload.require_concrete_disproof
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_adversarial_validator_config(session)

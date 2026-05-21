@@ -41,6 +41,7 @@ def init_db() -> None:
 
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
+    _ensure_column(engine, "site", "scope_hosts", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
@@ -69,8 +70,11 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "finding_source", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
+    _ensure_column(engine, "scan_finding", "merged_instances", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
+    _ensure_column(engine, "test_run", "recon_summary", "TEXT")
+    _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
@@ -307,6 +311,50 @@ def _migrate(engine: Engine) -> None:
                 f"ON scanner_session ({column})"
             ))
         conn.commit()
+    # specialist_agent_config — singleton settings for specialist agent dispatch.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS specialist_agent_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                max_concurrent INTEGER NOT NULL DEFAULT 5,
+                max_steps INTEGER NOT NULL DEFAULT 30,
+                min_priority INTEGER NOT NULL DEFAULT 7,
+                dispatch_idor INTEGER NOT NULL DEFAULT 1,
+                dispatch_auth_bypass INTEGER NOT NULL DEFAULT 1,
+                dispatch_sqli INTEGER NOT NULL DEFAULT 1,
+                dispatch_xss INTEGER NOT NULL DEFAULT 1,
+                dispatch_business_logic INTEGER NOT NULL DEFAULT 1,
+                dispatch_ssrf INTEGER NOT NULL DEFAULT 1,
+                dispatch_path_traversal INTEGER NOT NULL DEFAULT 1,
+                dispatch_cors INTEGER NOT NULL DEFAULT 0,
+                dispatch_crypto INTEGER NOT NULL DEFAULT 1,
+                dispatch_config INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+    # adversarial_validator_config — singleton settings for the adversarial validator.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS adversarial_validator_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                max_steps INTEGER NOT NULL DEFAULT 20,
+                min_severity TEXT NOT NULL DEFAULT 'low',
+                auto_validate_inline INTEGER NOT NULL DEFAULT 1,
+                require_concrete_disproof INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    _ensure_column(
+        engine,
+        "specialist_agent_config",
+        "trigger_specialist_on_burp",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
@@ -348,7 +396,10 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
         "evidence",
         "request_evidence",
         "response_evidence",
+        "evidence_json",
+        "merged_instances",
         "screenshot_b64",
+        "finding_source",
         "validation_status",
         "validation_note",
         "created_at",
@@ -379,7 +430,10 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
                 evidence TEXT NOT NULL,
                 request_evidence TEXT NOT NULL DEFAULT '',
                 response_evidence TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                merged_instances TEXT NOT NULL DEFAULT '[]',
                 screenshot_b64 TEXT,
+                finding_source TEXT NOT NULL DEFAULT 'unknown',
                 validation_status TEXT NOT NULL DEFAULT 'unvalidated',
                 validation_note TEXT,
                 created_at DATETIME NOT NULL
