@@ -10,6 +10,8 @@ Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparis
 * Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
 * Claude Code + Qwen3.6-35b-A3b (Abliterated)
 
+And a [comparison](docs/vuln-scanner-comparison.md) of a single vs multi-agent scan. A single-agent scan on Bank of Ed costs ~$15 USD with Sonnet 4.6, and a multi-agent scan costs ~$50 USD. The result is better, but not worth additional cost? 
+
 ## How does it work?
 
 See [Architecture](docs/architecture.md).
