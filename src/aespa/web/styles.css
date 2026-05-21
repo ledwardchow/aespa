@@ -1355,12 +1355,16 @@ legend {
 .token-bar-in  { font-size:12px; font-weight:600; color:#34d399; font-variant-numeric:tabular-nums; }
 .token-bar-out { font-size:12px; font-weight:600; color:#60a5fa; font-variant-numeric:tabular-nums; }
 .token-bar-sep { color:var(--muted); font-size:12px; }
+.token-bar-cache-read  { font-size:12px; font-weight:600; color:#f59e0b; font-variant-numeric:tabular-nums; }
+.token-bar-cache-write { font-size:12px; font-weight:600; color:#a78bfa; font-variant-numeric:tabular-nums; }
 .token-bar-empty { font-size:11px; color:var(--muted); font-style:italic; }
 .token-breakdown { background:var(--panel); border-bottom:1px solid var(--border); padding:6px 14px 8px; flex-shrink:0; }
 .token-breakdown-row { display:flex; align-items:center; gap:8px; padding:2px 0; }
 .token-model-name { font-size:11px; color:var(--text-2); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .token-in  { font-size:11px; color:#34d399; font-variant-numeric:tabular-nums; min-width:56px; text-align:right; }
 .token-out { font-size:11px; color:#60a5fa; font-variant-numeric:tabular-nums; min-width:56px; text-align:right; }
+.token-cache-read  { font-size:11px; color:#f59e0b; font-variant-numeric:tabular-nums; min-width:50px; text-align:right; }
+.token-cache-write { font-size:11px; color:#a78bfa; font-variant-numeric:tabular-nums; min-width:50px; text-align:right; }
 /* Log sub-tab mini toolbar */
 .activity-log-toolbar { display:flex; align-items:center; gap:8px; padding:5px 14px; border-bottom:1px solid var(--border); background:var(--bg,#141519); flex-shrink:0; }
 .activity-toolbar { display:flex; align-items:center; gap:8px; padding:7px 16px; border-bottom:1px solid var(--border); background:var(--panel); flex-shrink:0; }
@@ -1405,6 +1409,17 @@ legend {
 .agent-history-user { color:var(--text); font-weight:700; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-history-task { color:var(--text-2); min-width:0; line-height:1.35; }
 .agent-history-outcome { grid-column:2/-1; font-size:10px; font-weight:600; color:var(--muted); line-height:1.35; }
+
+/* ── Specialist agent thread sub-rows ────────────────────────────────────── */
+.agent-thread-row { grid-column:1/-1; display:grid; grid-template-columns:20px auto auto minmax(0,1fr) auto; align-items:center; gap:6px; padding:5px 8px 5px 16px; border-radius:5px; cursor:default; font-size:11px; border:1px solid transparent; margin-top:3px; }
+.agent-thread-row--active { background:rgba(91,141,239,0.07); border-color:rgba(91,141,239,0.18); }
+.agent-thread-row--expandable { cursor:pointer; }
+.agent-thread-row--expandable:hover { background:rgba(255,255,255,0.04); }
+.agent-thread-id { font-weight:700; color:var(--text); font-size:11px; white-space:nowrap; text-transform:capitalize; }
+.agent-badge--sm { font-size:8px; padding:1px 4px; }
+.agent-dot--sm { width:6px; height:6px; }
+.agent-step-history { grid-column:1/-1; margin:5px 0 2px 22px; padding:5px 8px; display:flex; flex-direction:column; gap:3px; max-height:140px; overflow-y:auto; border:1px solid var(--border); border-radius:5px; background:var(--bg); }
+.agent-step-method { font-family:ui-monospace,"SF Mono",monospace; font-size:10px; color:var(--text-2); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ── Target intelligence tab ─────────────────────────────────────────────── */
 .intel-panel { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; margin:0 -28px; }
@@ -1497,3 +1512,69 @@ legend {
 .attack-class-url { font-size:10px; color:var(--muted); background:var(--panel); border:1px solid var(--border); padding:1px 6px; border-radius:4px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .meta-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; }
 .meta-label { color:var(--muted); font-size:11px; font-weight:600; }
+.scope-hosts-panel {
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 38px;
+}
+.scope-hosts-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.scope-hosts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  align-items: center;
+}
+.scope-hosts-empty {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+.scope-host-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-muted, rgba(99,102,241,.12));
+  color: var(--accent, #6366f1);
+  border-radius: 4px;
+  padding: 2px 6px 2px 8px;
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.scope-host-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: .6;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.scope-host-remove:hover { opacity: 1; }
+.scope-hosts-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.scope-hosts-input {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  width: 180px;
+}
