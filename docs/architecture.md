@@ -1,6 +1,6 @@
 # AESPA — Architecture & Internal Workings
 
-AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web application security scanner. It discovers endpoints through an intelligent crawl, then probes them for vulnerabilities using two complementary scan modes: a **structured scan** (LLM plans deterministic probes page-by-page) and a **dynamic/thinking scan** (the LLM acts as an autonomous agent, deciding what to attack next in a loop).
+AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web application security scanner. It discovers endpoints through an intelligent crawl, then probes them for vulnerabilities through an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads.
 
 ---
 
@@ -12,8 +12,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web appl
 4. [Configuration](#4-configuration)
 5. [Data Models](#5-data-models)
 6. [Crawling](#6-crawling)
-7. [Structured Scan](#7-structured-scan)
-8. [Dynamic Scan (Thinking Mode)](#8-dynamic-scan-thinking-mode)
+7. [Dynamic Scan (Thinking Mode)](#7-dynamic-scan-thinking-mode)
+8. [Multi-Agent System](#8-multi-agent-system)
 9. [LLM Integration](#9-llm-integration)
 10. [Burp Suite Integration](#10-burp-suite-integration)
 11. [Findings & Validation](#11-findings--validation)
@@ -34,24 +34,26 @@ src/aespa/
 ├── schemas.py             # Pydantic schemas for API I/O
 ├── db.py                  # Database engine, session factory, migrations
 ├── api/
-│   ├── scan.py            # /api/test-runs/{id}/scan/* & thinking-scan/*
+│   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy config
+│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   └── events.py          # WebSocket event stream
 └── services/
     ├── crawler.py         # LLM-guided parallel web crawl
-    ├── scanner.py         # Structured scan + dynamic (agentic) scan
-    ├── llm.py             # Multi-provider LLM client abstractions
+    ├── scanner.py         # Dynamic (agentic) scan + specialist agent dispatch
+    ├── llm.py             # Multi-provider LLM client, agent tools, WSTG skills
     ├── burp_rest.py       # Burp Suite Professional REST API client
-    ├── findings.py        # Deduplication, grouping, reporting
+    ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
+    ├── findings.py        # Deduplication, grouping, post-scan LLM pre-screen
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
-    ├── task_graph.py      # Pentest hypothesis & task tracking
-    ├── validator.py       # LLM-assisted finding validation
+    ├── scope.py           # Scan scope boundaries and out-of-scope filtering
+    ├── task_graph.py      # Recon summary, pentest hypothesis & task tracking
+    ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── events.py          # WebSocket event emission
-    └── settings.py        # LLM config / scanner policy / Burp / proxy service layer
+    └── settings.py        # LLM config / scanner policy / Burp / proxy / specialist config
 ```
 
 ---
@@ -169,6 +171,40 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HT
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
+### Specialist Agent Config (`SpecialistAgentConfig` model)
+
+Singleton row (id = 1). Controls when and how Specialist Agents are dispatched during a dynamic scan.
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Master switch — disable to suppress all specialist dispatch |
+| `max_concurrent` | `5` | Maximum simultaneously-running specialists per scan |
+| `max_steps` | `30` | Step budget per specialist agent |
+| `min_priority` | `7` | Minimum recon-summary `attack_class` priority to trigger dispatch |
+| `dispatch_idor` | `true` | Dispatch specialists for IDOR leads |
+| `dispatch_auth_bypass` | `true` | Dispatch specialists for auth bypass leads |
+| `dispatch_sqli` | `true` | Dispatch specialists for SQLi leads |
+| `dispatch_xss` | `true` | Dispatch specialists for XSS leads |
+| `dispatch_business_logic` | `true` | Dispatch specialists for business logic leads |
+| `dispatch_ssrf` | `true` | Dispatch specialists for SSRF leads |
+| `dispatch_path_traversal` | `true` | Dispatch specialists for path traversal leads |
+| `dispatch_cors` | `false` | Dispatch specialists for CORS leads |
+| `dispatch_crypto` | `true` | Dispatch specialists for cryptography/secrets leads |
+| `dispatch_config` | `false` | Dispatch specialists for misconfiguration leads |
+| `trigger_specialist_on_burp` | `false` | Also dispatch a specialist alongside each Burp active scan |
+
+### Adversarial Validator Config (`AdversarialValidatorConfig` model)
+
+Singleton row (id = 1). Controls the adversarial validation agent that attempts to disprove each finding.
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Use adversarial agent mode; `false` falls back to legacy static-probe validation |
+| `max_steps` | `20` | Step budget per validation pass |
+| `min_severity` | `low` | Skip validation for findings below this severity (`critical`\|`high`\|`medium`\|`low`\|`info`) |
+| `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written during a dynamic scan |
+| `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when the validator finds a concrete innocent explanation; when `false`, failure to reproduce counts as false positive |
+
 ---
 
 ## 5. Data Models
@@ -264,67 +300,7 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
 
 ---
 
-## 7. Structured Scan
-
-**File**: `src/aespa/services/scanner.py`  
-**Entry point**: `async start_scan(run_id, page_ids=None)`
-
-The structured scan works **page-by-page**: for each crawled page the LLM plans a set of probes, those probes are executed, and the responses are fed back to the LLM for analysis.
-
-### Process
-
-```
-start_scan(run_id)
-  └─ _do_scan(run_id)
-       For each CrawledPage:
-         1. Auth: export cookies/tokens from ScannerSession
-         2. Plan:  send page metadata + intel to LLM
-                   LLM returns a list of ProbeSpec objects
-         3. Execute probes:
-              - http   → direct httpx request (injection, SSRF, auth bypass)
-              - form   → Playwright form submission (CSRF, state manipulation)
-              - idor   → expand IDOR markers into concrete ID ranges
-         4. Analyse: send probe responses to LLM
-                     LLM returns ScanFinding (or null)
-         5. Persist: store finding with evidence, screenshots, traffic
-
-       After all pages:
-         6. JS sink analysis (_analyse_js_sinks)
-              - Fetch each discovered JS file (TargetIntelItem kind=script)
-              - Regex-scan for innerHTML / outerHTML / document.write /
-                insertAdjacentHTML assignments lacking a sanitizer call
-                (escapeHtml, DOMPurify, etc.) in the surrounding context
-              - Save TargetIntelItem(kind=xss_sink) per unique unsanitized sink
-              - Save info-severity ScanFinding per sink (visible immediately
-                in the findings panel before dynamic confirmation)
-              - Emit scanner_phase events so the UI shows progress and the
-                full list of identified sinks
-
-         7. Stored XSS canary sweep (_stored_xss_sweep)
-              First pass — re-fetch every crawled page as the authenticated
-              attacker; look for the injected canary unescaped in the HTML.
-              Second pass (sink-targeted, cross-user) — when a second
-              credential is configured:
-              - POST the canary to each sink's write endpoint (identified
-                via TargetIntelItem kind=input matching the sink field name)
-              - Re-fetch crawled pages as a victim session
-              - Any unescaped canary in the victim's view → confirmed
-                high-severity Stored XSS finding with cross-user evidence
-```
-
-### Probe types
-
-| Type | Mechanism | Typical targets |
-|---|---|---|
-| `http` | Direct httpx request | Auth bypass, header injection, SSRF, SQLi, parameter tampering |
-| `form` | Playwright browser submission | CSRF, business-logic, state manipulation |
-| `idor` | Enumerate ID variants (±500 range around known IDs) | Broken object-level access control |
-
-The LLM-generated `ProbeSpec` specifies method, URL, headers, body, and the intended hypothesis. The scanner enforces `ScannerPolicy` limits (blocked headers, allowed methods, body size cap) before sending any request.
-
----
-
-## 8. Dynamic Scan (Thinking Mode)
+## 7. Dynamic Scan (Thinking Mode)
 
 **File**: `src/aespa/services/scanner.py`  
 **Entry point**: `async start_thinking_scan(run_id)`
@@ -337,16 +313,24 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Run JS sink analysis (_analyse_js_sinks) — populates
-          TargetIntelItem(kind=xss_sink) rows before the LLM loop
-          starts so the agent can find them via target_inventory
-          without re-fetching JS source itself
+       2. Run JS sink analysis (_analyse_js_sinks) — fetches each
+          discovered JS file (TargetIntelItem kind=script), regex-scans
+          for unsanitized innerHTML/outerHTML/document.write sinks,
+          saves TargetIntelItem(kind=xss_sink) and info-severity findings
        3. Authenticate → ScannerSession
-       4. Seed PentestHypotheses + PentestTasks from intel
-       5. Build compact crawl summary (context for LLM)
-       6. Detect auth cookies for boundary checks
+       4. Build recon summary (_build_thinking_context_from_recon_summary)
+          — structures crawl data into trust zones, entry points, and
+          prioritised attack classes; stored on TestRun.recon_summary
+       5. Seed PentestHypotheses + PentestTasks from recon summary
+       6. Build LLM opening context from recon summary
+       7. Detect auth cookies for boundary checks
+       8. Restore checkpoint if this is a resumed scan
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
+
+### Scan resume
+
+The checkpoint service (`services/checkpoint.py`) serialises the LLM conversation history to the database at regular intervals. If a scan is interrupted (server restart, user stop) it can be resumed with `start_thinking_scan_resume(run_id)`, which restores the conversation at the last saved checkpoint rather than starting over.
 
 ### Agentic loop
 
@@ -373,6 +357,7 @@ The loop terminates when:
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a login URL with candidate credentials |
 | `finding_write` | Record a confirmed vulnerability |
+| `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a high-confidence lead (see §8) |
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
 
@@ -404,7 +389,98 @@ The `PentestHypothesis` / `PentestTask` graph (managed in `services/task_graph.p
 - **Hypothesis**: a high-level attack theory (e.g. "IDOR on /api/orders/{id}")
 - **Task**: a concrete attempt under a hypothesis (target URL, method, status: pending → in_progress → completed/failed)
 
-The LLM seeds hypotheses from the crawl intelligence and updates task statuses as it works.
+Hypotheses are derived from the `attack_classes` in the recon summary so the task queue is directly grounded in the attack surface analysis.
+
+---
+
+## 8. Multi-Agent System
+
+**File**: `src/aespa/services/scanner.py`, `src/aespa/services/validator.py`
+
+Every agent type — Test Lead, Specialist, Burp, Validator, Reporting — emits `agent_status` SSE events and appears as a row in the **Agents** panel in the UI.
+
+### Agent types
+
+```
+Dynamic scan
+  └── Test Lead agent  (scanner.py — single continuous session, full context)
+        │
+        ├── On high-confidence lead ──→  Specialist Agent
+        │                                (narrow scope, focused mission,
+        │                                 runs concurrently via asyncio.Task,
+        │                                 cannot dispatch further specialists)
+        │
+        └── On finding written ────────→  Adversarial Validator Agent
+                                           (mandate to disprove the finding;
+                                            different system prompt;
+                                            cannot create new findings)
+
+Burp active scans  (dispatched from scanner, surfaced in Agents panel)
+Reporting agent    (post-scan LLM pre-screen pass over new findings)
+```
+
+### Specialist agents
+
+The Test Lead calls `agent_dispatch` when it has a strong, specific lead it wants to pursue concurrently (e.g. a suspected IDOR on a particular endpoint). The scanner dispatches `_run_specialist_agent` as a background `asyncio.Task`.
+
+**Dispatch flow:**
+
+```
+Test Lead calls agent_dispatch
+  └─ _should_dispatch_specialist(attack_class, priority, config)
+       • checks SpecialistAgentConfig (enabled, min_priority, per-class toggles)
+       • checks _specialist_at_capacity(run_id)  ← max_concurrent gate
+  └─ _run_specialist_agent(
+         agent_id, attack_class, target_url, rationale,
+         recon_summary_entry, session_vault, llm_cfg, max_steps
+     )
+       1. Build opening brief from dispatch payload + recon summary entry
+       2. Run focused agentic loop using SPECIALIST_AGENT_TOOLS
+          (no agent_dispatch — no recursive dispatch; no JWT/register tools)
+       3. Write findings directly to DB under the same run_id
+       4. Emit specialist_step + agent_status events throughout
+```
+
+Specialists can also be triggered alongside Burp active scans via the `trigger_specialist_on_burp` config flag.
+
+**`SpecialistAgentConfig` fields:**
+
+See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` field reference.
+
+### Adversarial validator
+
+After any finding is written, the validator service (`validator.py`) can run an independent **adversarial validation** pass. The validator agent is given a different system prompt with an explicit mandate to disprove the finding — it re-runs the probe and looks for counter-evidence. This reduces false positives more effectively than self-review by the same agent.
+
+Validation outcomes:
+- **confirmed** — vulnerability is reproducible and real
+- **unconfirmed** — could not be reproduced
+- **false_positive** — validator determines finding was incorrect
+- **low_confidence** — post-scan pre-screen flagged the finding as likely noise
+
+### Post-scan review (Reporting agent)
+
+After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_scan_llm_review`) reviews all `unvalidated` findings created in the current run in batches of 10. Findings where the evidence is too vague, the payload is reflected as plain text without execution, or the response status contradicts the claim are moved to `low_confidence`. This is a lightweight pre-screen; per-finding adversarial validation runs separately.
+
+### Recon summary
+
+`task_graph.build_recon_summary(run_id)` generates a structured `ReconSummary` from crawl data at the start of the dynamic scan. It is stored on `TestRun.recon_summary` and used in three places:
+
+1. **LLM opening context** — the Test Lead receives the attack surface picture as its first message
+2. **Specialist briefing** — when dispatching a specialist, its `recon_summary_entry` provides the relevant `attack_class` rationale and entry points
+3. **Attack Surface UI panel** — rendered in the Tasks tab (Attack Surface sub-tab)
+
+The `ReconSummary` schema:
+
+```json
+{
+  "trust_zones":     { "public": [...], "authenticated_user": [...], "admin": [...] },
+  "entry_points":    [ {"url": "...", "method": "POST", "params": ["email", "password"]}, ... ],
+  "attack_classes":  [ {"class": "idor", "rationale": "...", "priority": 9, "entry_points": [...]}, ... ],
+  "business_logic_pages": [...],
+  "tech_stack":      { "server": "Apache/2.4.58", "language": "PHP 8.3", "db": "MySQL" },
+  "credential_roles": [ {"role": "user", "source": "registration", "count": 1}, ... ]
+}
+```
 
 ---
 
@@ -425,6 +501,18 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `openrouter` | `openai` SDK with OpenRouter base URL |
 
 All structured outputs (probe lists, finding objects, page analysis) are produced via **JSON mode** or tool-use — the LLM is never asked to produce free-form text that is parsed by regex.
+
+### Agent tool sets
+
+Different agent roles receive different tool sets:
+
+- **Test Lead** — full tool set including `agent_dispatch`, `jwt`, `credential_check`, `browser`, `http`, all context tools
+- **Specialist** — `SPECIALIST_AGENT_TOOLS`: `http`, `browser`, context tools; no `agent_dispatch` (prevents recursive dispatch), no JWT/credential/register tools (specialist is narrowly focused)
+- **Adversarial validator** — purpose-built prompt and tool set focused on re-running and disproving a specific finding
+
+### WSTG skills
+
+The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and injects them into the Test Lead's system prompt. This gives the scanner domain-specific testing guidance without overloading the context with irrelevant techniques.
 
 Vision support (when `enable_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
 
@@ -483,14 +571,14 @@ Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.
 
 ### Deduplication
 
-After the scan, `findings.py` groups findings that are likely duplicates (same vulnerability on different parameter names, for example). The grouping is LLM-assisted: findings are compared by title, OWASP category, affected URL pattern, and evidence similarity. Duplicates are merged into the same heading (each instance is kept by URL/param.)
+`findings.py` runs two deduplication passes:
+
+1. **Title normalisation** — the LLM rewrites finding titles to a canonical form so near-identical findings (same vulnerability class, different parameter name) get the same heading
+2. **Global deduplication** — findings are grouped by vulnerability class and host; the LLM identifies which are true duplicates and which are distinct instances
 
 ### Validation
 
-Each finding starts with `validation_status = unvalidated`. The validator service (`validator.py`) can be invoked to re-run the probe and confirm the finding is reproducible. The LLM then rechecks the response:
-- **confirmed** — vulnerability is reproducible and real
-- **unconfirmed** — could not be reproduced
-- **false_positive** — LLM determines finding was incorrect
+Each finding starts with `validation_status = unvalidated`. The adversarial validator agent (`validator.py`) re-runs the probe with a mandate to disprove the finding. See §8 for full detail.
 
 All findings carry a `finding_source` field that records their origin:
 
@@ -518,13 +606,15 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/sites/` | `sites.py` | CRUD for target sites and credentials |
 | `/api/settings/llm-config` | `settings.py` | Get/set LLM provider config |
 | `/api/settings/scanner-policy` | `settings.py` | Get/set scanner policy |
+| `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
 | `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
 | `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
 | `/api/test-runs/` | `test_runs.py` | Create runs, check status, retrieve site map graph |
-| `/api/test-runs/{id}/scan/` | `scan.py` | Start/stop/status for structured scan |
-| `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status for dynamic scan |
+| `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
+| `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
 | `/api/test-runs/{id}/findings/` | `test_runs.py` | List, import, validate findings |
+| `/api/test-runs/{id}/thinking-log/export` | `scan.py` | Export the full scan activity log |
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
 | `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
 
@@ -541,23 +631,28 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 Events are emitted at key points during crawling and scanning, enabling the UI to update live:
 
 - Crawl progress (pages discovered, depth reached)
-- Scan progress (page being probed, probe count)
 - Thinking-scan step (action taken, tool called, finding written)
 - Finding created / updated
 - Task graph changes (hypothesis seeded, task status update)
-- `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-run the crawl with the new account
+- `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
+- `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
+- `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
+- `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-crawl with the new account
 - Error events
 
-### UI panels
+### UI tabs
 
-| Panel | Data shown |
+The run view has seven top-level tabs:
+
+| Tab | Content |
 |---|---|
-| Activity log | Timestamped crawl/scan events |
-| Site map | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
-| Intelligence log | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, xss_sinks |
-| Task graph | `PentestHypothesis` tree with `PentestTask` leaves |
-| Traffic log | All `TrafficEntry` records (request + response) |
-| Findings | `ScanFinding` list sorted by severity, with CVSS and evidence |
+| **Status** | Scan controls, run metadata, token usage; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
+| **Site Map** | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
+| **Intelligence** | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, `xss_sink` items |
+| **Task Graph** | Sub-tabs: **Attack Surface** (rendered `ReconSummary` — trust zones, attack classes, tech stack) and **Task Queue** (`PentestHypothesis` tree with `PentestTask` leaves) |
+| **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
+| **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, and validation controls |
+| **Traffic Log** | All `TrafficEntry` records (request + response) |
 
 ---
 
@@ -566,6 +661,8 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
+- **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
+- **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
 
