@@ -108,6 +108,14 @@ class _CrawlShared:
 # ── Core orchestrator ─────────────────────────────────────────────────────────
 
 async def _do_crawl(run_id: int) -> None:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+    try:
+        await _do_crawl_inner(run_id)
+    finally:
+        llm_svc.clear_run_context()
+
+
+async def _do_crawl_inner(run_id: int) -> None:
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
         if run is None:
@@ -574,6 +582,7 @@ async def _crawl_as_credential(
 
 def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     """Atomically create a stub CrawledPage and return its ID."""
+    from aespa.services.scope import register_scope_host_for_run
     with Session(get_engine()) as s:
         cp = CrawledPage(
             test_run_id=run_id, url=url, depth=depth,
@@ -583,7 +592,12 @@ def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
         s.commit()
         s.refresh(cp)
         s.expunge(cp)
-        return cp.id
+    # Fire-and-forget: doesn't matter if this fails
+    try:
+        register_scope_host_for_run(run_id, url)
+    except Exception:
+        pass
+    return cp.id
 
 
 def _update_page(page_id: int, **kwargs) -> None:

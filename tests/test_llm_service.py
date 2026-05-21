@@ -18,7 +18,7 @@ def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
     calls: list[list[dict]] = []
     executed: list[tuple[str, dict, int]] = []
 
-    async def fake_call_with_tools(config_arg, system_message, messages):
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
         calls.append(messages)
         if len(calls) == 1:
             block = {
@@ -83,7 +83,7 @@ def test_agentic_loop_can_reject_premature_done(monkeypatch):
     executed: list[tuple[str, dict, int]] = []
     done_attempts = 0
 
-    async def fake_call_with_tools(config_arg, system_message, messages):
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
         nonlocal done_attempts
         if done_attempts == 0:
             done_attempts += 1
