@@ -1599,8 +1599,8 @@ async def normalize_finding_titles(
         for i, f in enumerate(existing_findings[:60])
     )
     new_list = "\n".join(
-        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] "
-        f"{f.get('title', '?')} — {(f.get('description') or '')[:120]}"
+        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
+        + (f"\n     desc: {(f.get('description') or '')[:120]}" if f.get('description') else "")
         for i, f in enumerate(new_findings)
     )
 
