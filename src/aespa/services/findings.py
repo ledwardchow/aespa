@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, urlparse
 from sqlmodel import Session, select
 
 from aespa.models import LLMConfig, ScanFinding
+from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 
 
@@ -90,6 +91,18 @@ _STOP_WORDS = {
 
 
 async def deduplicate_findings(
+    session: Session,
+    run_id: int,
+    llm_cfg: LLMConfig | None = None,
+) -> DeduplicationResult:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+    try:
+        return await _deduplicate_findings_inner(session, run_id, llm_cfg)
+    finally:
+        llm_svc.clear_run_context()
+
+
+async def _deduplicate_findings_inner(
     session: Session,
     run_id: int,
     llm_cfg: LLMConfig | None = None,
