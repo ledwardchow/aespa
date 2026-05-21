@@ -29,6 +29,10 @@ const api = {
   testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),
   getUpstreamProxy: ()            => req("/api/settings/upstream-proxy"),
   upsertUpstreamProxy: (b)        => req("/api/settings/upstream-proxy", { method:"PUT", body:b }),
+  getSpecialistAgentConfig: ()    => req("/api/settings/specialist-agent-config"),
+  upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
+  getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
+  upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -47,7 +51,9 @@ const api = {
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
+  getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
+  updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
@@ -60,6 +66,8 @@ const api = {
   stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
   getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
+  getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
+  getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -71,6 +79,7 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
+  getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
@@ -122,6 +131,7 @@ function useRoute() {
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
   if (hash === "#/external-integrations")                return { name: "external-integrations" };
+  if (hash === "#/debug")                                return { name: "debug" };
 
   return { name: "list" };
 }
@@ -258,6 +268,11 @@ const IconChevronLeft = () => html`<svg width="14" height="14" viewBox="0 0 14 1
 const IconChevronRight = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
   <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
+const IconBug = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <circle cx="8" cy="9" r="4" stroke="currentColor" stroke-width="1.4"/>
+  <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+</svg>`;
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -268,6 +283,7 @@ function App() {
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const onExternalIntegrations = route.name === "external-integrations";
+  const onDebug      = route.name === "debug";
   const [appVersion, setAppVersion] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
@@ -295,11 +311,14 @@ function App() {
           <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")} title="LLM Settings">
             <span className="nav-icon"><${IconSettings}/></span>${!collapsed && " LLM Settings"}
           </a>
-          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Scan Policy">
-            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Scan Policy"}
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Agent Settings">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Agent Settings"}
           </a>
           <a href="#/external-integrations" className=${"nav-item"+(onExternalIntegrations?" active":"")} title="External Integrations">
             <span className="nav-icon"><${IconShield}/></span>${!collapsed && " External Integrations"}
+          </a>
+          <a href="#/debug" className=${"nav-item"+(onDebug?" active":"")} title="Debug">
+            <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
         </nav>
         <div className="sidebar-footer">
@@ -321,6 +340,7 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage}/>`}
       </div>
     </div>
   `;
@@ -905,11 +925,14 @@ function TestRunDetail({ runId, initialTab }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState(initialTab || "sitemap");
+  const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "activity"));
+  const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
   const [taskGraph, setTaskGraph]           = useState(null);
+  const [reconSummary, setReconSummary]     = useState(null);
+  const [tasksSubTab, setTasksSubTab]       = useState("attack-surface"); // "attack-surface" | "task-queue"
   const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
   const [clearBusy, setClearBusy]           = useState(""); // which section is clearing
@@ -930,6 +953,14 @@ function TestRunDetail({ runId, initialTab }) {
   const toggleLogId = (id) => setExpandedLogIds(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
   });
+  const [activitySubTab, setActivitySubTab] = useState("agents");
+  const [agents, setAgents]                = useState([]);
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
+    const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
+  });
+  const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
@@ -952,6 +983,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter]   = useState("");
   const [autoScroll, setAutoScroll]         = useState(true);
+  const [trafficTotal, setTrafficTotal]     = useState(0);
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
@@ -960,6 +992,7 @@ function TestRunDetail({ runId, initialTab }) {
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
   const prevGraphKeyRef                     = useRef("");
+  const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
   const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
@@ -969,6 +1002,7 @@ function TestRunDetail({ runId, initialTab }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
       api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
       api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
@@ -976,6 +1010,204 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  const agentRoleLabel = (agent) => {
+    if (agent?.id === "crawler") return "Crawler";
+    if (agent?.id === "scanner") return "Test Lead";
+    return agent?.role || "Agent";
+  };
+  const normalizeAgentForRun = (agent) => {
+    if (agent?.id !== "crawler") return agent;
+    if (run?.status === "running") return { ...agent, status: "active" };
+    if (Date.now() - lastRunPollOkRef.current > 10000) {
+      return { ...agent, status: "idle", currentTask: "Crawler connection stale" };
+    }
+    return {
+      ...agent,
+      status: agent.status === "failed" ? "failed" : "idle",
+      currentTask: agent.currentTask || "Crawl is not running",
+    };
+  };
+  const defaultAgentRoster = () => [
+    {
+      id: "crawler",
+      role: "Crawler",
+      status: run?.status === "running" ? "active" : "idle",
+      currentTask: run?.status === "running" ? "" : "Waiting for crawl",
+    },
+    {
+      id: "scanner",
+      role: "Test Lead",
+      status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
+      currentTask: isDynamicScanActive(thinkingStatus?.status) ? "Coordinating pentest" : "Standing by",
+    },
+    { id: "specialist", role: "Specialist", status: "idle", currentTask: "No specialist dispatched" },
+    { id: "burp", role: "Burp", status: "idle", currentTask: "No active scan dispatched" },
+    { id: "validator", role: "Validator", status: "idle", currentTask: "No validation running" },
+    {
+      id: "reporting",
+      role: "Reporting",
+      status: thinkingStatus?.status === "analysing" ? "active" : "idle",
+      currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by",
+    },
+  ];
+  const representsAgent = (agent, placeholder) => {
+    if (agent.id === placeholder.id) return true;
+    if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
+    if (placeholder.id === "validator") return agent.role === "Validator" || agent.id?.startsWith("validator-");
+    if (placeholder.id === "specialist") return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "reporting") return agent.role === "Reporting" || agent.id === "reporting";
+    return false;
+  };
+  const fmtEventTime = (value) => {
+    if (!value) return "--:--:--";
+    try {
+      return new Date(value).toLocaleTimeString("en-US", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return "--:--:--";
+    }
+  };
+  const crawlEventsFromRun = () => {
+    const progress = run?.per_user_progress || {};
+    const labelByUsername = new Map((run?.credentials || []).map(c => [c.username, c.label || c.username]));
+    return Object.entries(progress)
+      .filter(([, p]) => p && (p.current_url || p.done || p.pages_visited))
+      .map(([username, p]) => ({
+        ts: fmtEventTime(p.updated_at),
+        username: labelByUsername.get(username) || username || "anonymous",
+        url: p.current_url || "",
+        pagesVisited: p.pages_visited || 0,
+        done: !!p.done,
+      }));
+  };
+  const mergeCrawlEvents = (liveEvents, threadEvents) => {
+    const seen = new Set();
+    return [...(liveEvents || []), ...threadEvents]
+      .filter((event) => {
+        const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.done ? 1 : 0}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+  const agentCrawlEvents = (agent) => (
+    agent?.id === "crawler"
+      ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun())
+      : []
+  );
+  const compactAgentText = (value, max=180) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  };
+  const thinkingStepTitle = (entry) => {
+    const step = entry.data?.step;
+    const prefix = step ? `Step ${step}` : "Step";
+    const message = String(entry.message || "").replace(/^Step\s+\d+:\s*/i, "").trim();
+    const isDuplicateStep = (value) => (
+      !value || /^Step\s+\d+$/i.test(String(value).trim())
+    );
+    let detail = (
+      entry.data?.payload_purpose ||
+      entry.data?.hypothesis ||
+      entry.data?.observation ||
+      entry.data?.payload_summary ||
+      message
+    );
+    if (isDuplicateStep(detail)) {
+      if (entry.data?.tool) {
+        detail = `Context tool: ${entry.data.tool}`;
+      } else if (entry.data?.method && entry.data?.url) {
+        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
+      } else if (message && !isDuplicateStep(message)) {
+        detail = message;
+      } else if (entry.status === "deciding") {
+        detail = "LLM deciding next action";
+      } else {
+        detail = "Reviewing scan state";
+      }
+    }
+    const cleaned = compactAgentText(detail || "Reviewing next action");
+    return `${prefix}: ${cleaned}`;
+  };
+  const thinkingStepOutcome = (entry) => {
+    const parts = [];
+    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
+    if (entry.data?.method && entry.data?.url) parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
+    if (entry.data?.observation) parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
+    if (entry.data?.hypothesis) parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
+    if (entry.data?.payload_purpose) parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
+    if (entry.data?.payload_summary) parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
+    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
+    return parts.join(" · ");
+  };
+  const testLeadHistory = () => activityLog
+    .filter(entry => entry.phase === "thinking_step")
+    .map(entry => ({
+      ts: entry._ts || "--:--:--",
+      task: thinkingStepTitle(entry),
+      outcome: thinkingStepOutcome(entry),
+    }));
+  const agentTaskHistory = (agent) => (
+    agent?.id === "scanner" && testLeadHistory().length
+      ? testLeadHistory()
+      : (agent?.taskHistory || [])
+  );
+  const agentCurrentTask = (agent) => {
+    agent = normalizeAgentForRun(agent);
+    const crawlEvents = agentCrawlEvents(agent);
+    if (agent?.id === "crawler" && crawlEvents.length) {
+      if (agent.status !== "active") {
+        const label = run?.status === "failed" ? "Crawl failed" :
+          run?.status === "stopped" ? "Crawl stopped" :
+          run?.status === "complete" ? "Crawl complete" :
+          "Crawl is not running";
+        return agent.outcome ? `${label} · ${agent.outcome}` : label;
+      }
+      const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
+      const latest = active || crawlEvents[crawlEvents.length - 1];
+      if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
+      return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+    }
+    if (agent?.id === "scanner" && testLeadHistory().length) {
+      if (agent.status !== "active") return "Standing by";
+      return testLeadHistory()[testLeadHistory().length - 1].task;
+    }
+    return agent?.currentTask || "Waiting for work";
+  };
+  const agentStatusLabel = (agent) => {
+    if (agent?.status === "active") return "ACTIVE";
+    if (agent?.status === "idle") return "IDLE";
+    if (agent?.status === "failed") return "FAILED";
+    return "COMPLETE";
+  };
+  const upsertAgent = (items, patch, histEntry = null) => {
+    const normalized = {
+      ...patch,
+      role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role,
+    };
+    const idx = items.findIndex(a => a.id === normalized.id);
+    if (idx === -1) {
+      return [...items, {
+        ...normalized,
+        taskHistory: histEntry ? [histEntry] : [],
+        crawlEvents: normalized.crawlEvents || [],
+      }];
+    }
+    const updated = [...items];
+    const prev = updated[idx];
+    updated[idx] = {
+      ...prev,
+      ...normalized,
+      taskHistory: histEntry ? [...(prev.taskHistory || []), histEntry].slice(-200) : (prev.taskHistory || []),
+      crawlEvents: normalized.crawlEvents || prev.crawlEvents || [],
+    };
+    return updated;
+  };
 
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {
@@ -993,6 +1225,32 @@ function TestRunDetail({ runId, initialTab }) {
       const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
       if (planComplete) setSitePlanData(planComplete.data);
     }).catch(() => {});
+  }, [runId]);
+
+  // Seed agents panel from persisted DB entries on mount.
+  useEffect(() => {
+    api.getAgentLog(runId).then(entries => {
+      if (!entries || entries.length === 0) return;
+      const agentsMap = new Map();
+      for (const e of entries) {
+        const ts = e.created_at
+          ? new Date(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+          : "--:--:--";
+        const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
+        existing.status = e.status;
+        existing.role = role;
+        existing.currentTask = e.current_task;
+        existing.taskHistory.push({ ts, task: e.current_task, outcome: e.outcome });
+        agentsMap.set(e.agent_id, existing);
+      }
+      setAgents([...agentsMap.values()]);
+    }).catch(() => {});
+  }, [runId]);
+
+  // Load token usage from the API on mount (in-process memory, best effort).
+  useEffect(() => {
+    api.getTokenUsage(runId).then(d => { if (d) setTokenUsage(d); }).catch(() => {});
   }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
@@ -1020,6 +1278,30 @@ function TestRunDetail({ runId, initialTab }) {
         if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const username = evt.username || "anonymous";
+          const crawlEvent = {
+            ts,
+            username,
+            url: evt.current_url || "",
+            pagesVisited: evt.pages_visited || 0,
+            done: !!evt.done,
+          };
+          const idx = prev.findIndex(a => a.id === "crawler");
+          const existingEvents = idx >= 0 ? (prev[idx].crawlEvents || []) : [];
+          const crawlEvents = [...existingEvents, crawlEvent].slice(-200);
+          const currentTask = evt.done
+            ? `Completed crawl as ${username} (${evt.pages_visited || 0} pg)`
+            : `Crawling ${truncUrl(evt.current_url || "", 88)} as ${username}`;
+          return upsertAgent(prev, {
+            id: "crawler",
+            role: "Crawler",
+            status: "active",
+            currentTask,
+            crawlEvents,
+          });
+        });
         // crawl_progress is still used for the done flag
         if (evt.username && evt.done) {
           setRun(prev => {
@@ -1071,6 +1353,39 @@ function TestRunDetail({ runId, initialTab }) {
         ));
         // Refresh validation status summary when an individual finding resolves.
         api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
+      } else if (evt.type === "agent_status") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
+          return upsertAgent(prev, {
+            id: evt.agent_id,
+            role: evt.role,
+            status: evt.status,
+            currentTask: evt.current_task,
+            outcome: evt.outcome,
+          }, histEntry);
+        });
+      } else if (evt.type === "specialist_step") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const agentId = evt.agent_id;
+        if (agentId) {
+          setAgents(prev => {
+            const idx = prev.findIndex(a => a.id === agentId);
+            const stepEntry = { ts, step: evt.step, action_type: evt.action_type, method: evt.method, url: evt.url, status: evt.status, observation: evt.observation };
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            const prev_agent = updated[idx];
+            updated[idx] = {
+              ...prev_agent,
+              stepHistory: [...(prev_agent.stepHistory || []), stepEntry].slice(-200),
+            };
+            return updated;
+          });
+        }
+      } else if (evt.type === "token_usage_update") {
+        setTokenUsage(evt.totals);
+      } else if (evt.type === "scope_hosts_updated") {
+        setScopeHosts(evt.scope_hosts || []);
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -1083,9 +1398,23 @@ function TestRunDetail({ runId, initialTab }) {
     if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
       api.getRun(runId).then(r => {
+        lastRunPollOkRef.current = Date.now();
         setRun(r);
+        if (r.status !== "running") {
+          setAgents(prev => prev.map(a => (
+            a.id === "crawler" && a.status === "active"
+              ? { ...a, status: "idle", currentTask: "Crawl is not running" }
+              : a
+          )));
+        }
         if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
-      }).catch(() => {});
+      }).catch(() => {
+        setAgents(prev => prev.map(a => (
+          a.id === "crawler" && a.status === "active"
+            ? { ...a, status: "idle", currentTask: "Crawler connection stale" }
+            : a
+        )));
+      });
     }, 2000);
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
@@ -1168,6 +1497,7 @@ function TestRunDetail({ runId, initialTab }) {
     if (!active) return;
     const loadTasks = () => api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{});
     loadTasks();
+    api.getReconSummary(runId).then(setReconSummary).catch(()=>{});
     if (!isDynamicScanActive(thinkingStatus?.status)) return;
     const iv = setInterval(loadTasks, 4000);
     return () => clearInterval(iv);
@@ -1184,6 +1514,10 @@ function TestRunDetail({ runId, initialTab }) {
     return () => clearInterval(iv);
   }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
 
+  useEffect(() => {
+    api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
+  }, [runId]);
+
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
     const poll = async () => {
@@ -1197,6 +1531,9 @@ function TestRunDetail({ runId, initialTab }) {
             const next = [...prev, ...stamped];
             return next.length > 2000 ? next.slice(-2000) : next;
           });
+        }
+        if (activeTab === "traffic" || entries.length > 0) {
+          api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
         }
       } catch(_) {}
     };
@@ -1751,14 +2088,12 @@ function TestRunDetail({ runId, initialTab }) {
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
 
       <div className="tab-bar">
-        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
-          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
-          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); nav(`#/runs/${runId}/scan`); }}>Structured Scan</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
-          Pentest Activity Log${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Status${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
+        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
+          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
         <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
           onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); nav(`#/runs/${runId}/intelligence`); }}>
           Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
@@ -1777,7 +2112,7 @@ function TestRunDetail({ runId, initialTab }) {
         </button>
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
           onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
-          Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
+          Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
         ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && canShowScanStartButtons && html`
@@ -1841,6 +2176,12 @@ function TestRunDetail({ runId, initialTab }) {
           })()}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
+        ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
+          <${ScopeHostsPanel}
+            siteId=${run.site_id}
+            hosts=${scopeHosts}
+            onChange=${setScopeHosts}
+          />`}
         ${(()=>{
           if (activeTab === "scan") {
             const thinkingActive = isDynamicScanActive(thinkingStatus?.status);
@@ -2376,6 +2717,9 @@ function TestRunDetail({ runId, initialTab }) {
       ${activeTab==="tasks" && html`
         <${TaskGraphPanel}
           data=${taskGraph}
+          reconSummary=${reconSummary}
+          subTab=${tasksSubTab}
+          onSubTab=${setTasksSubTab}
           refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
           seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
           onClear=${async()=>{
@@ -2399,24 +2743,63 @@ function TestRunDetail({ runId, initialTab }) {
         <div className="activity-panel">
           ${(() => {
             const isAgentic = activityLog.some(e => e.data?.mode === "agentic");
+            const fmtTok = (n) => n >= 1_000_000 ? (n/1_000_000).toFixed(1)+"M" : n >= 1_000 ? (n/1_000).toFixed(1)+"K" : String(n||0);
+            const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
             return html`
-              <div className="activity-toolbar">
-                <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
-                ${isAgentic && html`<span className="activity-mode-badge">Continuous session</span>`}
-                <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
-                ${activityLog.length>0 && html`
-                  <button className="btn danger-outline sm"
-                    disabled=${clearBusy==="activity"}
-                    onClick=${async()=>{
-                      if (!confirm("Clear all activity log entries for this run?")) return;
-                      setClearBusy("activity"); setClearError(null);
-                      try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); }
-                      catch(e) { setClearError(e.message); }
-                      finally { setClearBusy(""); }
-                    }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+              <div className="activity-token-bar" onClick=${hasTokens ? ()=>setTokenExpanded(p=>!p) : undefined}
+                   style=${{cursor: hasTokens ? "pointer" : "default"}}>
+                ${hasTokens ? html`
+                  <span className="token-bar-label">Tokens</span>
+                  <span className="token-bar-in" title="Input tokens">↑${fmtTok(tokenUsage.total_input)} in</span>
+                  <span className="token-bar-sep">·</span>
+                  <span className="token-bar-out" title="Output tokens">↓${fmtTok(tokenUsage.total_output)} out</span>
+                  ${(tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0) ? html`
+                    <span className="token-bar-sep">·</span>
+                    ${tokenUsage.total_cache_read > 0 ? html`<span className="token-bar-cache-read" title="Cache read tokens">⚡${fmtTok(tokenUsage.total_cache_read)} cached</span>` : null}
+                    ${tokenUsage.total_cache_write > 0 ? html`<span className="token-bar-cache-write" title="Cache write tokens">✎${fmtTok(tokenUsage.total_cache_write)} written</span>` : null}
+                  ` : null}
+                  <span className="activity-expand-chevron" style=${{marginLeft:4}}>${tokenExpanded?"▲":"▼"}</span>
+                ` : html`<span className="token-bar-empty">No token data yet</span>`}
+              </div>
+              ${tokenExpanded && hasTokens && html`
+                <div className="token-breakdown">
+                  ${Object.entries(tokenUsage.by_model||{}).map(([model, v]) => html`
+                    <div key=${model} className="token-breakdown-row">
+                      <span className="token-model-name">${model}</span>
+                      <span className="token-in">↑${fmtTok(v.input)}</span>
+                      <span className="token-out">↓${fmtTok(v.output)}</span>
+                      ${(v.cache_read > 0 || v.cache_write > 0) ? html`
+                        ${v.cache_read > 0 ? html`<span className="token-cache-read" title="Cache read">⚡${fmtTok(v.cache_read)}</span>` : null}
+                        ${v.cache_write > 0 ? html`<span className="token-cache-write" title="Cache write">✎${fmtTok(v.cache_write)}</span>` : null}
+                      ` : null}
+                    </div>`)}
+                </div>`}
+              <div className="activity-sub-tab-bar">
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
+                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.map(normalizeAgentForRun).some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="specialists"?" active":"")}
+                  onClick=${()=>setActivitySubTab("specialists")}>Specialist${agents.filter(a=>a.id.startsWith("specialist-")).some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
+                  onClick=${()=>setActivitySubTab("log")}>Log</button>
               </div>`;
           })()}
+          ${activitySubTab==="log" && html`
           <div className="activity-feed" ref=${activityFeedRef}>
+            <div className="activity-log-toolbar">
+              <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
+              ${activityLog.some(e => e.data?.mode === "agentic") && html`<span className="activity-mode-badge">Continuous session</span>`}
+              <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
+              ${activityLog.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="activity"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all activity log entries for this run?")) return;
+                    setClearBusy("activity"); setClearError(null);
+                    try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); setTokenUsage(null); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+            </div>
             ${sitePlanData && html`
               <div className="site-plan-card">
                 <div className="site-plan-header">
@@ -2467,9 +2850,16 @@ function TestRunDetail({ runId, initialTab }) {
                 llm_heartbeat:      { label: "LLM ⟳",     cls: "phase-llm-wait" },
                 credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
                 thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
+                thinking_analysis:  { label: "Report",    cls: "phase-reporting" },
+                reporting_turn:     { label: "Turn",      cls: entry.data?.findings_this_turn > 0 ? "phase-finding" : "phase-ok" },
+                post_scan_review:   { label: "Review",    cls: "phase-reporting" },
+                post_review_turn:   { label: "Review",    cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok" },
               };
-              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
-              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : "";
+              const _baseMeta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const meta = entry.status === "error"
+                ? { label: _baseMeta.label, cls: "phase-finding" }
+                : _baseMeta;
+              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : entry.status === "error" ? " ✗" : "";
               // Augment llm_request message to surface agentic context count
               const displayMessage = (
                 entry.phase === "llm_request" && entry.data?.message_count != null
@@ -2480,7 +2870,8 @@ function TestRunDetail({ runId, initialTab }) {
                 entry.data?.observation || entry.data?.hypothesis ||
                 entry.data?.payload_purpose || entry.data?.payload_summary
               );
-              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail);
+              const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
               const isExpanded = expandedLogIds.has(entry._id);
               return html`
                 <div key=${entry._id}>
@@ -2513,10 +2904,155 @@ function TestRunDetail({ runId, initialTab }) {
                         ${entry.data?.payload_summary && html`
                           <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
                           <pre>${entry.data.payload_summary}</pre>`}`}
+                      ${(entry.phase === "reporting_turn" && entry.data?.titles?.length > 0) && html`
+                        <div className="activity-payload-label">Issues identified this turn</div>
+                        <ul style=${{margin:"4px 0 0 0",paddingLeft:18}}>
+                          ${entry.data.titles.map((t,i) => html`<li key=${i}>${t}</li>`)}
+                        </ul>`}
                     </div>`}
                 </div>`;
             })}
-          </div>
+          </div>`}
+          ${activitySubTab==="specialists" && html`
+          <div className="agents-panel">
+            ${(()=>{
+              const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+              if (specialistAgents.length === 0) return html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No specialist agents dispatched yet.</div>`;
+              return specialistAgents.map(sa => {
+                const saActive = sa.status === "active";
+                const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                const saSteps = sa.stepHistory || [];
+                const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
+                const threadLabel = sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1");
+                return html`
+                  <div key=${sa.id} className=${"agent-row"+(saActive?" agent-row--active":" agent-row--complete")+(saSteps.length>0?" agent-row--expandable":"")}
+                       onClick=${saSteps.length>0 ? ()=>toggleAgentId(sa.id) : undefined}>
+                    <span className=${"agent-dot"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                    <span className=${"agent-role-name"+(saActive?" agent-role-name--pulse":"")} style=${{textTransform:"capitalize"}}>${threadLabel}</span>
+                    <span className=${"agent-badge"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${saActive?"ACTIVE":"DONE"}
+                    </span>
+                    <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                    ${saSteps.length>0 && html`<span className="activity-expand-chevron">${saExpanded?"▲":"▼"}</span>`}
+                    ${saSteps.length>0 && saExpanded && html`
+                      <div className="agent-task-history">
+                        ${saSteps.slice().reverse().map((s,i) => html`
+                          <div key=${i} className="agent-history-entry">
+                            <span className="activity-ts">${s.ts}</span>
+                            <span className="agent-step-method">
+                              ${s.method ? html`${s.method} ${s.url ? html`<span title=${s.url}>${truncUrl(s.url,80)}</span>` : ""}` : s.action_type || "tool"}
+                            </span>
+                            ${s.observation && html`<span className="agent-history-outcome" title=${s.observation}>${String(s.observation).slice(0,80)}</span>`}
+                          </div>`)}
+                      </div>`}
+                  </div>`;
+              });
+            })()}
+          </div>`}
+          ${activitySubTab==="agents" && html`
+          <div className="agents-panel">
+            ${(()=>{
+              const roster = defaultAgentRoster();
+              // Container slots (specialist/burp/validator) must always render as
+              // their placeholder so the multi-agent container row fires correctly.
+              const CONTAINER_IDS = new Set(["specialist", "burp", "validator"]);
+              const rosterAgents = roster.map(p =>
+                CONTAINER_IDS.has(p.id) ? p : (agents.find(a => representsAgent(a, p)) || p)
+              );
+              const extras = agents.filter(a => !roster.some(p => representsAgent(a, p)));
+              const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
+              const renderRow = (a) => {
+                // ── Specialist container row ────────────────────────────────
+                if (a.id === "specialist") {
+                  const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+                  const anyActive = specialistAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (specialistAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = specialistAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = specialistAgents.length - activeCount;
+                  const summaryTask = specialistAgents.length === 0
+                    ? "No specialist dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} running, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = specialistAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+                  return html`
+                    <div key="specialist" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("specialist") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Specialist</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (specialistAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${specialistAgents.map(sa => {
+                            const saActive = sa.status === "active";
+                            const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${sa.id} className=${"agent-thread-row"+(saActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${saActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
+                const isActive = a.status==="active";
+                const roleLabel = agentRoleLabel(a);
+                const currentTask = agentCurrentTask(a);
+                const crawlEvents = agentCrawlEvents(a);
+                const taskHistory = agentTaskHistory(a);
+                const canExpand = (a.id === "crawler" && crawlEvents.length > 0) ||
+                  taskHistory.length > 1 ||
+                  taskHistory.some(h => h.outcome);
+                const isExpanded = canExpand && !collapsedAgentIds.has(a.id);
+                return html`
+                  <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                       onClick=${canExpand ? ()=>toggleAgentId(a.id) : undefined}>
+                    <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                    <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>
+                      ${roleLabel}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)&&!a.id.startsWith("burp-")?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
+                    </span>
+                    <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${agentStatusLabel(a)}
+                    </span>
+                    <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                    ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                    ${canExpand && isExpanded && html`
+                      <div className="agent-task-history">
+                        ${a.id === "crawler" && crawlEvents.length > 0 ? html`
+                          ${crawlEvents.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry agent-history-entry--crawl">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-user">${h.username || "anonymous"}</span>
+                              <span className="agent-history-task mono" title=${h.url || ""}>
+                                ${h.done ? `Finished (${h.pagesVisited || 0} pg)` : truncUrl(h.url || "", 112)}
+                              </span>
+                            </div>`)}
+                        ` : html`
+                          ${taskHistory.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-task">${h.task}</span>
+                              ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                            </div>`)}
+                        `}
+                      </div>`}
+                  </div>`;
+              };
+              return html`
+                ${shownAgents.map(renderRow)}`;
+            })()}
+          </div>`}
         </div>`}
 
       ${activeTab==="traffic" && html`
@@ -2524,7 +3060,7 @@ function TestRunDetail({ runId, initialTab }) {
           <div className="traffic-toolbar">
             <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…"
               value=${trafficFilter} onInput=${e=>setTrafficFilter(e.target.value)}/>
-            <span className="traffic-count-label">${filteredTraffic.length} request${filteredTraffic.length!==1?"s":""}</span>
+            <span className="traffic-count-label">${filteredTraffic.length} shown${trafficTotal>filteredTraffic.length ? ` of ${trafficTotal}` : ""}</span>
             <label className="traffic-autoscroll">
               <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
               Auto-scroll
@@ -2771,7 +3307,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     </div>`;
 }
 
-function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
+function TaskGraphPanel({ data, reconSummary, subTab, onSubTab, refresh, seed, onClear, clearing }) {
   const [taskColW, startTaskResize] = useColResize("colw:tasks", [88, 84, null, 86, 200]);
   const hypotheses = data?.hypotheses || [];
   const tasks = data?.tasks || [];
@@ -2787,8 +3323,23 @@ function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
     .filter(([, count]) => count > 0);
   const orphanTasks = tasksByHypothesis.none || [];
   const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+  const activeSubTab = subTab || "attack-surface";
   return html`
     <div className="task-panel">
+      <div className="tasks-subtab-bar">
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="attack-surface"?" active":"")}
+          onClick=${()=>onSubTab("attack-surface")}>
+          Attack Surface${reconSummary?.attack_classes?.length>0 ? html` <span className="traffic-count">${reconSummary.attack_classes.length}</span>` : ""}
+        </button>
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="task-queue"?" active":"")}
+          onClick=${()=>onSubTab("task-queue")}>
+          Task Queue${counts.tasks>0 ? html` <span className="traffic-count">${counts.tasks}</span>` : ""}
+        </button>
+      </div>
+
+      ${activeSubTab==="attack-surface" && html`<${AttackSurfacePanel} summary=${reconSummary}/>`}
+
+      ${activeSubTab==="task-queue" && html`
       <div className="intel-toolbar">
         <div className="intel-title">
           <span>Hypothesis & Task Graph</span>
@@ -2884,7 +3435,100 @@ function TaskGraphPanel({ data, refresh, seed, onClear, clearing }) {
               </table>
             </div>
           </div>`}
-      </div>
+      </div>`}
+    </div>`;
+}
+
+function AttackSurfacePanel({ summary }) {
+  const [expanded, setExpanded] = useState({ trust_zones: true, attack_classes: true, meta: false });
+  const toggle = (key) => setExpanded(prev => ({...prev, [key]: !prev[key]}));
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+
+  if (!summary) {
+    return html`
+      <div className="attack-surface-empty">
+        <span className="subtle">No attack surface summary yet. Run a Dynamic Scan to generate one.</span>
+      </div>`;
+  }
+
+  const { trust_zones = {}, attack_classes = [], tech_stack = [], credential_roles = [], entry_points = [] } = summary;
+  const zoneEntries = Object.entries(trust_zones).filter(([,urls]) => urls?.length > 0);
+
+  return html`
+    <div className="attack-surface-panel">
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("trust_zones")}>
+            <span className="attack-surface-toggle">${expanded.trust_zones ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Trust Zones</span>
+            ${zoneEntries.map(([zone, urls]) => html`
+              <span key=${zone} className=${"zone-badge zone-"+zone}>${zone.toUpperCase()} (${urls.length})</span>`)}
+          </div>
+          ${expanded.trust_zones && html`
+            <div className="attack-surface-body">
+              ${zoneEntries.map(([zone, urls]) => html`
+                <div key=${zone} className="trust-zone-group">
+                  <div className=${"trust-zone-label zone-"+zone}>${zone.toUpperCase()}</div>
+                  <div className="trust-zone-urls">
+                    ${urls.slice(0,8).map(url => html`<div key=${url} className="mono trust-zone-url" title=${url}>${truncUrl(url,90)}</div>`)}
+                    ${urls.length > 8 && html`<div className="subtle">+${urls.length - 8} more</div>`}
+                  </div>
+                </div>`)}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("attack_classes")}>
+            <span className="attack-surface-toggle">${expanded.attack_classes ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Attack Classes</span>
+            <span className="subtle">${attack_classes.length} identified</span>
+          </div>
+          ${expanded.attack_classes && html`
+            <div className="attack-surface-body">
+              ${attack_classes.map(cls => {
+                const urls = cls.entry_point_urls || [];
+                return html`
+                  <div key=${cls.id} className="attack-class-card">
+                    <div className="attack-class-head">
+                      <span className=${"task-priority "+priorityTone(cls.priority)}>P${cls.priority}</span>
+                      <span className="owasp-badge">${cls.owasp}</span>
+                      <span className="attack-class-id">${cls.id?.replace(/_/g," ")}</span>
+                    </div>
+                    <div className="attack-class-rationale">${cls.rationale}</div>
+                    ${urls.length > 0 && html`
+                      <div className="attack-class-urls">
+                        ${urls.slice(0,4).map(url => html`<span key=${url} className="mono attack-class-url" title=${url}>${truncUrl(url,70)}</span>`)}
+                        ${urls.length > 4 && html`<span className="subtle">+${urls.length-4} more</span>`}
+                      </div>`}
+                  </div>`;
+              })}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("meta")}>
+            <span className="attack-surface-toggle">${expanded.meta ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Tech Stack & Credentials</span>
+          </div>
+          ${expanded.meta && html`
+            <div className="attack-surface-body">
+              ${tech_stack.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Tech stack:</span>
+                  ${tech_stack.map(t => html`<span key=${t} className="intel-kind">${t}</span>`)}
+                </div>`}
+              ${credential_roles.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Credential roles:</span>
+                  ${credential_roles.map(r => html`<span key=${r} className="intel-kind">${r}</span>`)}
+                </div>`}
+              <div className="meta-row">
+                <span className="meta-label">Entry points:</span>
+                <span>${entry_points.length} total</span>
+              </div>
+            </div>`}
+        </div>
+
     </div>`;
 }
 
@@ -2929,10 +3573,6 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <label className="toggle-row">
       <input type="checkbox" disabled=${disabled} checked=${form.allow_subdomains} onChange=${e=>upd({allow_subdomains:e.target.checked})}/>
       <span>Allow subdomains of the crawled host</span>
-    </label>
-    <label className="toggle-row">
-      <input type="checkbox" disabled=${disabled} checked=${form.require_approval_for_destructive} onChange=${e=>upd({require_approval_for_destructive:e.target.checked})}/>
-      <span>Require approval for destructive mode</span>
     </label>
     <div className="divider"/>
     <div className="form-section-title">Methods</div>
@@ -3042,9 +3682,181 @@ function UpstreamProxySettings() {
       </form>`}`;
 }
 
+const DEFAULT_SPECIALIST_AGENT_FORM = {
+  enabled: true,
+  max_concurrent: 5,
+  max_steps: 30,
+  min_priority: 7,
+  dispatch_idor: true,
+  dispatch_auth_bypass: true,
+  dispatch_sqli: true,
+  dispatch_xss: true,
+  dispatch_business_logic: true,
+  dispatch_ssrf: true,
+  dispatch_path_traversal: true,
+  dispatch_cors: false,
+  dispatch_crypto: true,
+  dispatch_config: false,
+  trigger_specialist_on_burp: false,
+};
+
+function specialistAgentToForm(cfg) {
+  return cfg ? {
+    enabled:           cfg.enabled           ?? true,
+    max_concurrent:    cfg.max_concurrent     ?? 5,
+    max_steps:         cfg.max_steps          ?? 30,
+    min_priority:      cfg.min_priority       ?? 7,
+    dispatch_idor:     cfg.dispatch_idor      ?? true,
+    dispatch_auth_bypass: cfg.dispatch_auth_bypass ?? true,
+    dispatch_sqli:     cfg.dispatch_sqli      ?? true,
+    dispatch_xss:      cfg.dispatch_xss       ?? true,
+    dispatch_business_logic: cfg.dispatch_business_logic ?? true,
+    dispatch_ssrf:     cfg.dispatch_ssrf      ?? true,
+    dispatch_path_traversal: cfg.dispatch_path_traversal ?? true,
+    dispatch_cors:     cfg.dispatch_cors      ?? false,
+    dispatch_crypto:   cfg.dispatch_crypto    ?? true,
+    dispatch_config:   cfg.dispatch_config    ?? false,
+    trigger_specialist_on_burp: cfg.trigger_specialist_on_burp ?? false,
+  } : { ...DEFAULT_SPECIALIST_AGENT_FORM };
+}
+
+function specialistAgentPayload(form) {
+  return {
+    enabled:             !!form.enabled,
+    max_concurrent:      Number(form.max_concurrent),
+    max_steps:           Number(form.max_steps),
+    min_priority:        Number(form.min_priority),
+    dispatch_idor:       !!form.dispatch_idor,
+    dispatch_auth_bypass:!!form.dispatch_auth_bypass,
+    dispatch_sqli:       !!form.dispatch_sqli,
+    dispatch_xss:        !!form.dispatch_xss,
+    dispatch_business_logic: !!form.dispatch_business_logic,
+    dispatch_ssrf:       !!form.dispatch_ssrf,
+    dispatch_path_traversal: !!form.dispatch_path_traversal,
+    dispatch_cors:       !!form.dispatch_cors,
+    dispatch_crypto:     !!form.dispatch_crypto,
+    dispatch_config:     !!form.dispatch_config,
+    trigger_specialist_on_burp: !!form.trigger_specialist_on_burp,
+  };
+}
+
+function SpecialistAgentSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(specialistAgentToForm(await api.getSpecialistAgentConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertSpecialistAgentConfig(specialistAgentPayload(form));
+      setForm(specialistAgentToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Specialist Agent Dispatch</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable specialist agent dispatch</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, the Test Lead can dispatch focused specialist agents to investigate
+          specific vulnerability leads in parallel. Each specialist receives an independent
+          LLM session and a subset of tools (HTTP, browser, context, write_finding).
+        </div>
+
+        <div className="form-section-title">Concurrency &amp; Budget</div>
+        <div className="field">
+          <label>Max concurrent specialists</label>
+          <input type="number" min="0" max="20" value=${form.max_concurrent} disabled=${dis}
+            onChange=${e=>upd({max_concurrent:Number(e.target.value)})}/>
+          <div className="field-hint">Maximum number of specialist agents running at the same time (0 = effectively disabled). Default: 5.</div>
+        </div>
+        <div className="field">
+          <label>Max steps per specialist</label>
+          <input type="number" min="1" max="200" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">Step budget for each specialist agent before it is stopped. Default: 30.</div>
+        </div>
+        <div className="field">
+          <label>Minimum priority to dispatch</label>
+          <input type="number" min="1" max="10" value=${form.min_priority} disabled=${dis}
+            onChange=${e=>upd({min_priority:Number(e.target.value)})}/>
+          <div className="field-hint">Only dispatch a specialist if the lead's priority score meets this threshold (1–10). Default: 7.</div>
+        </div>
+
+        <div className="divider"/>
+        <div className="form-section-title">Attack Classes to Dispatch</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>
+          Only dispatch specialists for the selected vulnerability classes. Disable classes
+          you don't need to keep token usage under control.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_idor} disabled=${dis} onChange=${e=>upd({dispatch_idor:e.target.checked})}/>
+          <span>IDOR / Broken Object Level Authorization (A01)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_auth_bypass} disabled=${dis} onChange=${e=>upd({dispatch_auth_bypass:e.target.checked})}/>
+          <span>Authentication Bypass / Broken Auth (A07)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_sqli} disabled=${dis} onChange=${e=>upd({dispatch_sqli:e.target.checked})}/>
+          <span>SQL Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_xss} disabled=${dis} onChange=${e=>upd({dispatch_xss:e.target.checked})}/>
+          <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_business_logic} disabled=${dis} onChange=${e=>upd({dispatch_business_logic:e.target.checked})}/>
+          <span>Business Logic (A04)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_ssrf} disabled=${dis} onChange=${e=>upd({dispatch_ssrf:e.target.checked})}/>
+          <span>Server-Side Request Forgery / SSRF (A10)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_path_traversal} disabled=${dis} onChange=${e=>upd({dispatch_path_traversal:e.target.checked})}/>
+          <span>Path Traversal / LFI (A01/A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_crypto} disabled=${dis} onChange=${e=>upd({dispatch_crypto:e.target.checked})}/>
+          <span>Cryptographic Failures (A02)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_cors} disabled=${dis} onChange=${e=>upd({dispatch_cors:e.target.checked})}/>
+          <span>CORS Misconfiguration (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_config} disabled=${dis} onChange=${e=>upd({dispatch_config:e.target.checked})}/>
+          <span>Security Misconfiguration (A05)</span>
+        </label>
+
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Specialist Settings"}</button>
+        </div>
+      </form>`}`;
+}
+
 const DEFAULT_BURP_REST_API_FORM = {
-  enabled:false,
-  api_url:"http://127.0.0.1:1337",
   api_key:"",
   scan_configuration_name:"Audit checks - all except time-based detection methods",
   scan_sqli:true,
@@ -3502,11 +4314,191 @@ function SettingsPage() {
     </div>`;
 }
 
-function ScanPolicyPage() {
+const DEFAULT_VALIDATOR_FORM = {
+  enabled: true,
+  max_steps: 20,
+  min_severity: "low",
+  auto_validate_inline: true,
+  require_concrete_disproof: true,
+};
+
+function validatorToForm(cfg) {
+  return {
+    enabled: cfg.enabled ?? true,
+    max_steps: cfg.max_steps ?? 20,
+    min_severity: cfg.min_severity ?? "low",
+    auto_validate_inline: cfg.auto_validate_inline ?? true,
+    require_concrete_disproof: cfg.require_concrete_disproof ?? true,
+  };
+}
+
+function validatorPayload(form) {
+  return {
+    enabled: form.enabled,
+    max_steps: Number(form.max_steps),
+    min_severity: form.min_severity,
+    auto_validate_inline: form.auto_validate_inline,
+    require_concrete_disproof: form.require_concrete_disproof,
+  };
+}
+
+function ValidatorSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(validatorToForm(await api.getAdversarialValidatorConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertAdversarialValidatorConfig(validatorPayload(form));
+      setForm(validatorToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
   return html`
-    <div className="topbar"><div className="topbar-title">Scan Policy</div></div>
-    <div className="content scroll-content">
-      <${ScannerPolicySettings}/>
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Adversarial Validator</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable adversarial validator</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is reviewed by an adversarial LLM agent whose explicit
+          mandate is to <em>disprove</em> the finding before confirming it. This reduces false
+          positives without relying on the scanner's own judgment. When disabled, the legacy
+          static-probe validator is used instead.
+        </div>
+
+        <div className="form-section-title">Step Budget</div>
+        <div className="field">
+          <label>Max steps per finding</label>
+          <input type="number" min="1" max="50" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">
+            Maximum number of tool calls the validator may make per finding (1–50). Default: 20.
+            Higher values give the validator more opportunities to disprove a finding but increase
+            cost and latency.
+          </div>
+        </div>
+
+        <div className="form-section-title">Severity Filter</div>
+        <div className="field">
+          <label>Minimum severity to validate</label>
+          <select value=${form.min_severity} disabled=${dis}
+            onChange=${e=>upd({min_severity:e.target.value})}>
+            <option value="critical">Critical only</option>
+            <option value="high">High and above</option>
+            <option value="medium">Medium and above</option>
+            <option value="low">Low and above (default)</option>
+            <option value="info">All (including Info)</option>
+          </select>
+          <div className="field-hint">
+            Findings below this severity are skipped by the validator and left as "unconfirmed".
+          </div>
+        </div>
+
+        <div className="form-section-title">Behaviour</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.auto_validate_inline} disabled=${dis}
+            onChange=${e=>upd({auto_validate_inline:e.target.checked})}/>
+          <span>Auto-validate findings inline during scan</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is validated immediately after it is written, while the
+          scan is still running. When disabled, validation only runs when triggered manually.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.require_concrete_disproof} disabled=${dis}
+            onChange=${e=>upd({require_concrete_disproof:e.target.checked})}/>
+          <span>Require concrete disproof (strict mode)</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled (recommended), the validator must find a specific innocent explanation
+          to mark a finding as a false positive — failure to reproduce is not sufficient.
+          When disabled, inability to reproduce is treated as a false positive (lenient mode).
+        </div>
+
+        <div className="form-row">
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save"}</button>
+          ${saved&&html`<span className="saved-indicator">Saved</span>`}
+        </div>
+      </form>`}`;
+}
+
+function ScopeHostsPanel({ siteId, hosts, onChange }) {
+  const [input, setInput] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const remove = async (host) => {
+    const next = hosts.filter(h => h !== host);
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const add = async () => {
+    const host = input.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0];
+    if (!host || hosts.includes(host)) { setInput(""); return; }
+    const next = [...hosts, host];
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); setInput(""); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const onKey = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+
+  return html`
+    <div className="scope-hosts-panel">
+      <div className="scope-hosts-title">Attack Scope</div>
+      <div className="scope-hosts-list">
+        ${hosts.length === 0 && html`<span className="scope-hosts-empty">No restriction — all hosts allowed</span>`}
+        ${hosts.map(h => html`
+          <span key=${h} className="scope-host-chip">
+            ${h}
+            <button className="scope-host-remove" title="Remove" disabled=${saving}
+              onClick=${()=>remove(h)}>×</button>
+          </span>`)}
+      </div>
+      <div className="scope-hosts-add">
+        <input className="scope-hosts-input" placeholder="Add hostname…" value=${input}
+          onInput=${e=>setInput(e.target.value)} onKeyDown=${onKey} disabled=${saving}/>
+        <button className="btn sm" onClick=${add} disabled=${saving||!input.trim()}>Add</button>
+      </div>
+    </div>`;
+}
+
+function ScanPolicyPage() {
+  const [tab, setTab] = useState("scanner");
+  return html`
+    <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
+    <div className="content" style=${{paddingLeft:16,paddingRight:0,paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(tab==="scanner"?" active":"")} onClick=${()=>setTab("scanner")}>Scanner</button>
+        <button className=${"tab-btn"+(tab==="specialists"?" active":"")} onClick=${()=>setTab("specialists")}>Specialist Agents</button>
+        <button className=${"tab-btn"+(tab==="validator"?" active":"")} onClick=${()=>setTab("validator")}>Validator</button>
+      </div>
+      <div className="scroll-content" style=${{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",paddingTop:16,paddingBottom:28}}>
+        ${tab==="scanner"     && html`<${ScannerPolicySettings}/>`}
+        ${tab==="specialists" && html`<${SpecialistAgentSettings}/>`}
+        ${tab==="validator"   && html`<${ValidatorSettings}/>`}
+      </div>
     </div>`;
 }
 
@@ -3525,6 +4517,54 @@ function ExternalIntegrationsPage() {
         ${tab==="burp"  && html`<${BurpRestApiSettings}/>`}
         ${tab==="proxy" && html`<${UpstreamProxySettings}/>`}
       </div>
+    </div>`;
+}
+
+function DebugPage() {
+  const [cfg, setCfg] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try { setCfg(await api.getSpecialistAgentConfig()); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const toggle = async (checked) => {
+    setSaved(false); setSaving(true); setError(null);
+    try {
+      const updated = await api.upsertSpecialistAgentConfig({ ...cfg, trigger_specialist_on_burp: checked });
+      setCfg(updated);
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Debug</div>
+    </div>
+    <div className="content scroll-content">
+      ${!cfg && !error && html`<div className="subtle">Loading…</div>`}
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${cfg && html`
+        <div className="card">
+          <div className="form-section-title">Specialist Agent</div>
+          <label className="toggle-row">
+            <input type="checkbox" checked=${cfg.trigger_specialist_on_burp ?? false}
+              disabled=${saving}
+              onChange=${e=>toggle(e.target.checked)}/>
+            <span>Trigger a Specialist Agent whenever a Burp active scan is triggered</span>
+          </label>
+          <div className="field-hint">
+            When enabled, a specialist agent is dispatched immediately alongside every Burp active scan,
+            independently investigating the same URL. Use this to force specialist agents to fire for
+            debugging purposes.
+          </div>
+          ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
+        </div>`}
     </div>`;
 }
 

@@ -33,7 +33,8 @@ from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services import checkpoint as checkpoint_svc
-from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config
+from aespa.services.scope import check_scope, register_scope_host_for_run
+from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
 
 log = logging.getLogger("aespa.scanner")
 
@@ -622,6 +623,83 @@ def _build_compact_thinking_context(
             "re-proving issues already in this list.\n"
             + "\n".join(lines)
         )
+    return "\n\n".join(sections)
+
+
+def _build_thinking_context_from_recon_summary(
+    run_id: int,
+    base_url: str,
+    findings_snapshot: list[dict[str, Any]],
+) -> str:
+    """Build the LLM opening context from the stored recon summary.
+
+    Falls back to :func:`_build_compact_thinking_context` (with an empty
+    pages_snapshot) when no summary is present, so old runs are unaffected.
+    """
+    import json as _json
+    from aespa.models import TestRun as _TestRun
+
+    with Session(get_engine()) as s:
+        run = s.get(_TestRun, run_id)
+        raw = run.recon_summary if run else None
+
+    if not raw:
+        # No summary yet — fall back to minimal compact context
+        return _build_compact_thinking_context(base_url, [], findings_snapshot)
+
+    try:
+        summary = _json.loads(raw)
+    except Exception:
+        return _build_compact_thinking_context(base_url, [], findings_snapshot)
+
+    trust_zones: dict = summary.get("trust_zones") or {}
+    attack_classes: list[dict] = summary.get("attack_classes") or []
+    tech_stack: list[str] = summary.get("tech_stack") or []
+    credential_roles: list[str] = summary.get("credential_roles") or []
+    entry_points: list[dict] = summary.get("entry_points") or []
+    business_logic: list[str] = summary.get("business_logic_pages") or []
+
+    zone_counts = {z: len(v) for z, v in trust_zones.items() if v}
+    zone_str = "  ".join(f"{z.upper()}={n}" for z, n in zone_counts.items())
+    ep_total = len(entry_points)
+
+    sections = [
+        f"Target: {base_url}",
+        (
+            "Attack surface snapshot:  "
+            + zone_str
+            + f"  entry_points={ep_total}"
+            + (f"  business_logic={len(business_logic)}" if business_logic else "")
+            + (f"\nTech stack: {', '.join(tech_stack)}" if tech_stack else "")
+            + (f"\nCredential roles: {', '.join(credential_roles)}" if credential_roles else "")
+        ),
+        "Use context tools for page-level details instead of assuming full crawl data is inline.",
+    ]
+
+    if attack_classes:
+        ac_lines = ["Identified attack classes (work through these in priority order):"]
+        for cls in attack_classes:
+            urls = cls.get("entry_point_urls") or []
+            url_sample = ", ".join(urls[:4]) + ("…" if len(urls) > 4 else "")
+            ac_lines.append(
+                f"  [{cls['owasp']} P{cls['priority']}] {cls['id']} — {cls['rationale'][:160]}"
+                + (f"\n    entry points: {url_sample}" if url_sample else "")
+            )
+        sections.append("\n".join(ac_lines))
+
+    if findings_snapshot:
+        lines = [
+            f"  - [{f['severity'].upper()}] {f['owasp']} {f['title']} @ {f['affected_url']}"
+            for f in findings_snapshot
+        ]
+        sections.append(
+            "CONFIRMED VULNERABILITIES — already proven, do NOT re-test:\n"
+            "You may USE a confirmed exploit capability (e.g. a known JWT secret or admin "
+            "password) only as a stepping stone to reach NEW endpoints. Do not spend steps "
+            "re-proving issues already in this list.\n"
+            + "\n".join(lines)
+        )
+
     return "\n\n".join(sections)
 
 
@@ -1909,6 +1987,76 @@ def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]
     return {}, {}
 
 
+# Maps Burp vuln class strings to specialist attack_class values.
+_BURP_VULN_TO_SPECIALIST_CLASS: dict[str, str] = {
+    "SQL Injection":     "sqli",
+    "XSS":               "xss",
+    "Command Injection": "sqli",
+    "Path Traversal":    "path_traversal",
+    "SSRF":              "ssrf",
+    "XXE":               "sqli",
+    "SSTI":              "xss",
+}
+
+
+def _maybe_trigger_specialist_for_burp(
+    run_id: int,
+    url: str,
+    vuln_class: str,
+    session_vault: dict,
+) -> None:
+    """If trigger_specialist_on_burp is enabled, dispatch a specialist alongside the Burp scan."""
+    import json as _json
+
+    with Session(get_engine()) as s:
+        specialist_cfg = get_specialist_agent_config(s)
+        if not specialist_cfg.trigger_specialist_on_burp:
+            return
+        run = s.get(TestRun, run_id)
+        if not run:
+            return
+        llm_cfg = get_llm_config_for_run(s, run)
+        scanner_policy = get_run_scanner_policy(s, run)
+        recon_raw = getattr(run, "recon_summary", None)
+        recon_summary = _json.loads(recon_raw) if recon_raw else None
+        site_id: int = getattr(run, "site_id", 0) or 0
+
+    attack_class = _BURP_VULN_TO_SPECIALIST_CLASS.get(vuln_class, "xss")
+    agent_id = _next_specialist_agent_id(run_id, attack_class)
+    log.info(
+        "debug trigger_specialist_on_burp: dispatching %s for %s url=%s",
+        agent_id, vuln_class, url,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
+            _run_specialist_agent(
+                run_id=run_id,
+                agent_id=agent_id,
+                attack_class=attack_class,
+                target_url=url,
+                rationale=(
+                    f"Debug: triggered alongside Burp active scan for {vuln_class} on {url}"
+                ),
+                recon_summary_entry=None,
+                session_vault=session_vault,
+                llm_cfg=llm_cfg,
+                base_url=url,
+                scanner_policy=scanner_policy,
+                max_steps=specialist_cfg.max_steps,
+                site_id=site_id,
+            ),
+            name=f"specialist-debug-{run_id}-{agent_id}",
+        )
+        _specialist_tasks.setdefault(run_id, []).append(task)
+        task.add_done_callback(
+            lambda t, rid=run_id: _specialist_tasks.get(rid, []).remove(t)
+            if t in _specialist_tasks.get(rid, []) else None
+        )
+    except RuntimeError:
+        pass
+
+
 async def _run_burp_active_scan_for_target(
     run_id: int,
     *,
@@ -1941,6 +2089,8 @@ async def _run_burp_active_scan_for_target(
         vuln_class, url,
     )
     target_label = f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
+    # Stable agent_id for this Burp scan (URL slug, truncated).
+    _burp_agent_id = "burp-" + re.sub(r"[^a-z0-9]+", "-", url.lower())[:50].strip("-")
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "burp_active_scan",
@@ -1950,8 +2100,23 @@ async def _run_burp_active_scan_for_target(
         ),
         "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
     })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": _burp_agent_id,
+        "role": "Burp",
+        "status": "active",
+        "current_task": f"Active scan: {url} ({vuln_class})",
+        "outcome": None,
+        "_persist": True,
+    })
 
     cookies, extra_headers = _best_burp_auth(session_vault)
+
+    # Debug: if trigger_specialist_on_burp is set, dispatch a specialist alongside
+    # the Burp scan.  We fire this immediately (before the launch attempt) so the
+    # specialist still runs even when Burp is not reachable.
+    _maybe_trigger_specialist_for_burp(run_id, url, vuln_class, session_vault)
+
     try:
         task_id = await burp_rest_svc.launch_active_scan(
             burp_cfg,
@@ -1968,6 +2133,15 @@ async def _run_burp_active_scan_for_target(
             "status": "error",
             "message": f"Burp active scan launch failed: {exc}",
             "data": {"finding_id": finding_id, "url": url},
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "failed",
+            "current_task": "Launch failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
         })
         return
 
@@ -1990,6 +2164,15 @@ async def _run_burp_active_scan_for_target(
             "message": f"Burp active scan task {task_id} failed: {exc}",
             "data": {"finding_id": finding_id, "task_id": task_id},
         })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "failed",
+            "current_task": f"Scan task {task_id} failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
+        })
         return
 
     if not issues:
@@ -1999,6 +2182,15 @@ async def _run_burp_active_scan_for_target(
             "status": "complete",
             "message": f"Burp active scan task {task_id} completed — no issues found.",
             "data": {"finding_id": finding_id, "task_id": task_id, "issue_count": 0},
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": _burp_agent_id,
+            "role": "Burp",
+            "status": "complete",
+            "current_task": f"Active scan: {url}",
+            "outcome": "No issues found",
+            "_persist": True,
         })
         return
 
@@ -2062,6 +2254,15 @@ async def _run_burp_active_scan_for_target(
             "issue_count": len(issues),
             "saved_count": saved_count,
         },
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": _burp_agent_id,
+        "role": "Burp",
+        "status": "complete",
+        "current_task": f"Active scan: {url}",
+        "outcome": f"{len(issues)} issue(s), {saved_count} saved",
+        "_persist": True,
     })
 
 
@@ -2127,6 +2328,440 @@ def _schedule_burp_active_scan_for_investigation(
         )
     except RuntimeError:
         pass
+
+
+# ── Specialist agent dispatch ─────────────────────────────────────────────────
+
+# Maps attack_class strings (from recon summary / agent_dispatch) to the
+# corresponding boolean field on SpecialistAgentConfig.
+_SPECIALIST_DISPATCH_CLASSES: dict[str, str] = {
+    "idor":             "dispatch_idor",
+    "auth_bypass":      "dispatch_auth_bypass",
+    "sqli":             "dispatch_sqli",
+    "xss":              "dispatch_xss",
+    "business_logic":   "dispatch_business_logic",
+    "ssrf":             "dispatch_ssrf",
+    "path_traversal":   "dispatch_path_traversal",
+    "cors":             "dispatch_cors",
+    "crypto":           "dispatch_crypto",
+    "config":           "dispatch_config",
+}
+
+# Per-run concurrency tracker: run_id → count of currently-running specialists.
+_specialist_running: dict[int, int] = {}
+# Per-scan-invocation dispatch counter used to generate unique agent_ids.
+# This is a dict keyed by run_id so concurrent scans don't collide.
+_specialist_seq: dict[int, int] = {}
+# Tracks live specialist asyncio tasks so they can be cancelled on stop.
+_specialist_tasks: dict[int, list[asyncio.Task]] = {}
+
+
+def _should_dispatch_specialist(
+    attack_class: str,
+    priority: int,
+    config,  # SpecialistAgentConfigOut
+) -> bool:
+    """Return True if a specialist should be dispatched for this attack class."""
+    if config is None or not config.enabled:
+        return False
+    if config.max_concurrent == 0:
+        return False
+    field = _SPECIALIST_DISPATCH_CLASSES.get(attack_class)
+    if field is None or not getattr(config, field, False):
+        return False
+    if priority < config.min_priority:
+        return False
+    return True
+
+
+def _specialist_at_capacity(run_id: int, config) -> bool:
+    """Return True if the run has reached max_concurrent specialists."""
+    running = _specialist_running.get(run_id, 0)
+    return running >= (config.max_concurrent if config else 5)
+
+
+def _next_specialist_agent_id(run_id: int, attack_class: str) -> str:
+    seq = _specialist_seq.get(run_id, 0) + 1
+    _specialist_seq[run_id] = seq
+    return f"specialist-{attack_class}-{seq}"
+
+
+_SPECIALIST_SYSTEM_PROMPT = (
+    "You are a specialist security agent with a single focused mission: "
+    "deeply investigate the specific vulnerability lead you have been briefed on. "
+    "You have access to HTTP request, browser interaction, and context tools. "
+    "Work methodically — gather evidence step by step. "
+    "Write a finding only when you have concrete proof. "
+    "Do not speculate or write findings without direct evidence. "
+    "Call done when you have either confirmed a finding, ruled out the lead, "
+    "or exhausted your step budget."
+)
+
+
+async def _run_specialist_agent(
+    *,
+    run_id: int,
+    agent_id: str,
+    attack_class: str,
+    target_url: str,
+    rationale: str,
+    recon_summary_entry: dict | None,
+    session_vault: dict,
+    llm_cfg,
+    base_url: str,
+    scanner_policy,
+    max_steps: int,
+    site_id: int,
+) -> None:
+    """Run a focused specialist agent for a specific vulnerability lead."""
+    step_count = [0]  # mutable for closure
+
+    # Build the opening brief from the dispatch payload + recon summary entry.
+    recon_block = ""
+    if recon_summary_entry:
+        recon_block = (
+            f"\nAttack class context from recon summary:\n"
+            f"  class:      {recon_summary_entry.get('class', attack_class)}\n"
+            f"  rationale:  {recon_summary_entry.get('rationale', '')}\n"
+            f"  priority:   {recon_summary_entry.get('priority', '')}\n"
+            f"  entry points: {', '.join(recon_summary_entry.get('entry_points', []))}\n"
+        )
+
+    # Derive primary session for HTTP requests from the vault.
+    primary_session = (
+        session_vault.get("configured_primary")
+        or next(iter(session_vault.values()), None)
+    )
+    cookies = (primary_session or {}).get("cookies") or {}
+    extra_headers = (primary_session or {}).get("extra_headers") or {}
+
+    initial_message = (
+        f"Target: {base_url}\n"
+        f"Your mission: investigate the {attack_class} vulnerability lead below.\n"
+        f"Focus URL: {target_url}\n"
+        f"Lead rationale: {rationale}\n"
+        f"{recon_block}\n"
+        f"You have a budget of {max_steps} steps. Begin immediately."
+    )
+
+    findings_written = [0]
+
+    async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
+        step_count[0] = step
+        note = str(tool_input.get("note") or f"Step {step}")
+
+        # Emit specialist_step as scanner_phase so it persists to scan_log
+        # (Log tab) and also as specialist_step for the Agents panel thread view.
+        step_event_data = {
+            "agent_id": agent_id,
+            "step": step,
+            "action_type": (
+                "http_request" if tool_name == "http_request"
+                else "browser" if tool_name == "browser"
+                else "tool" if tool_name == "context_tool"
+                else "deciding"
+            ),
+            "method": tool_input.get("method"),
+            "url": tool_input.get("url") or target_url,
+            "observation": tool_input.get("observation"),
+            "hypothesis": tool_input.get("hypothesis"),
+            "payload_summary": tool_input.get("payload_summary"),
+        }
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "specialist_step",
+            "status": "running",
+            "message": (
+                f"[{agent_id}] Step {step}: "
+                + (f"{tool_input.get('method')} {tool_input.get('url')}" if tool_name == "http_request"
+                   else f"{tool_name}")
+            ),
+            "data": step_event_data,
+        })
+        events_svc.emit(run_id, {
+            "type": "specialist_step",
+            **step_event_data,
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": "Specialist",
+            "status": "active",
+            "current_task": f"Step {step}: {note}",
+            "outcome": None,
+        })
+
+        if tool_name == "done":
+            summary = str(tool_input.get("summary") or "")
+            return summary
+
+        if tool_name == "write_finding":
+            affected = str(tool_input.get("affected_url") or target_url)
+            _fw_title = str(tool_input.get("title") or "Untitled finding")
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "active",
+                "current_task": f"Writing: {_fw_title}",
+                "outcome": None,
+            })
+            result_dict = {
+                "source": "specialist_agent",
+                "desc": note,
+                "url": affected,
+                "status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": str(tool_input.get("evidence") or "")[:1000],
+                "request_evidence": str(tool_input.get("request_evidence") or ""),
+                "response_evidence": str(tool_input.get("response_evidence") or ""),
+            }
+            # Force finding_source to specialist_agent
+            raw = {**tool_input, "finding_source": "specialist_agent"}
+            async with _make_scanner_client(
+                cookies=cookies,
+                headers={"User-Agent": _UA, **extra_headers},
+                timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+                follow_redirects=True,
+                verify=False,
+            ) as _hx:
+                saved = await _persist_dynamic_finding(
+                    run_id=run_id,
+                    llm_cfg=llm_cfg,
+                    raw=raw,
+                    base_url=base_url,
+                    pages_snapshot=[],
+                    first_page_id=None,
+                    result_by_url={affected: result_dict},
+                )
+            if saved is not None:
+                findings_written[0] += 1
+                _emit_scan_update(run_id)
+                from aespa.services import validator as _validator_svc
+                asyncio.create_task(
+                    _validator_svc.validate_finding_inline(
+                        run_id,
+                        saved.id,
+                        llm_cfg=llm_cfg,
+                        cred_sessions=get_active_sessions(run_id) or {},
+                        scanner_policy=scanner_policy,
+                    )
+                )
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "idle",
+                "current_task": f"Wrote: {_fw_title}",
+                "outcome": (
+                    f"Saved [{tool_input.get('severity', '?')}] {_fw_title} (ID: {saved.id})"
+                    if saved else
+                    f"Duplicate skipped: {_fw_title}"
+                ),
+                "_persist": True,
+            })
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "specialist_step",
+                "status": "complete",
+                "message": (
+                    f"[{agent_id}] Step {step}: "
+                    f"{'recorded finding' if saved else 'skipped duplicate'} "
+                    f"{_fw_title}"
+                ),
+                "data": {**step_event_data, "finding_id": saved.id if saved else None},
+            })
+            if saved:
+                return (
+                    f"Finding recorded: \"{tool_input.get('title')}\" "
+                    f"(severity: {tool_input.get('severity')}, ID: {saved.id})"
+                )
+            return (
+                f"Duplicate skipped: \"{tool_input.get('title')}\" already exists. "
+                "Move to a different test vector."
+            )
+
+        if tool_name == "http_request":
+            _url = str(tool_input.get("url") or target_url)
+            _scope_err = check_scope(_url, site_id, run_id)
+            if _scope_err:
+                return f"[SCOPE BLOCK] {_scope_err}"
+            method = str(tool_input.get("method") or "GET").upper()
+            url = str(tool_input.get("url") or target_url)
+            headers = dict(tool_input.get("headers") or {})
+            body = tool_input.get("body")
+            use_session_label = tool_input.get("use_session") if isinstance(tool_input.get("use_session"), str) else None
+            selected_session = session_vault.get(use_session_label) if use_session_label else None
+            req_cookies = (selected_session or {}).get("cookies") or cookies
+            req_headers = {"User-Agent": _UA, **extra_headers, **((selected_session or {}).get("extra_headers") or {}), **headers}
+            async with _make_scanner_client(
+                cookies=req_cookies,
+                headers=req_headers,
+                timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
+                follow_redirects=True,
+                verify=False,
+                event_hooks=traffic_svc.make_httpx_hooks(run_id, username=f"specialist"),
+            ) as _hx:
+                try:
+                    kwargs: dict = {}
+                    if body is not None:
+                        if isinstance(body, dict):
+                            kwargs["json"] = body
+                        else:
+                            kwargs["content"] = str(body).encode()
+                    resp = await _hx.request(method, url, **kwargs)
+                    resp_body = resp.text[:BODY_READ_LIMIT]
+                    return (
+                        f"HTTP {resp.status_code} {method} {url}\n"
+                        f"Response ({len(resp_body)} chars):\n{resp_body[:4096]}"
+                    )
+                except Exception as exc:
+                    return f"Request failed: {exc}"
+
+        if tool_name == "context_tool":
+            ctx_tool = str(tool_input.get("tool") or "")
+            ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+            try:
+                output = _run_thinking_context_tool(
+                    ctx_tool, ctx_args,
+                    pages_snapshot=[],
+                    findings_snapshot=[],
+                    history=[],
+                    run_id=run_id,
+                    base_url=base_url,
+                )
+                import json as _json
+                result = _json.dumps(output, separators=(",", ":"), default=str)
+                return result[:8192]
+            except Exception as exc:
+                return f"Context tool error: {exc}"
+
+        return f"Tool {tool_name} not supported in specialist context."
+
+    # ── Run the agentic loop ───────────────────────────────────────────────────
+    try:
+        _specialist_running[run_id] = _specialist_running.get(run_id, 0) + 1
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": "Specialist",
+            "status": "active",
+            "current_task": f"Starting {attack_class} investigation on {target_url}",
+            "outcome": None,
+            "_persist": True,
+        })
+
+        await llm_svc.thinking_agentic_loop(
+            llm_cfg,
+            system_message=_SPECIALIST_SYSTEM_PROMPT,
+            initial_user_message=initial_message,
+            tool_executor=_tool_executor,
+            stop_check=lambda: (
+                step_count[0] >= max_steps
+                or run_id in _thinking_stop_requested
+            ),
+            tools=llm_svc.SPECIALIST_AGENT_TOOLS,
+        )
+
+        outcome = (
+            f"{findings_written[0]} new finding{'s' if findings_written[0] != 1 else ''}"
+            if findings_written[0] > 0
+            else "No additional issues found"
+        )
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": "Specialist",
+            "status": "complete",
+            "current_task": outcome,
+            "outcome": outcome,
+            "_persist": True,
+        })
+        log.info("Specialist agent %s complete: %s", agent_id, outcome)
+    except Exception as exc:
+        log.warning("Specialist agent %s error: %s", agent_id, exc)
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": "Specialist",
+            "status": "complete",
+            "current_task": f"Error: {exc}",
+            "outcome": "Error",
+            "_persist": True,
+        })
+    finally:
+        _specialist_running[run_id] = max(0, _specialist_running.get(run_id, 0) - 1)
+
+
+def _schedule_specialist_agent(
+    run_id: int,
+    dispatch: dict,
+    session_vault: dict,
+    llm_cfg,
+    base_url: str,
+    scanner_policy,
+    specialist_config,  # SpecialistAgentConfigOut
+    recon_summary: dict | None,
+    site_id: int = 0,
+) -> str | None:
+    """Gate-check and schedule a specialist agent as a background asyncio task.
+
+    Returns the agent_id if dispatched, or None if dropped.
+    """
+    attack_class = str(dispatch.get("attack_class") or "").strip()
+    priority = int(dispatch.get("priority") or 0)
+    target_url = str(dispatch.get("target_url") or base_url)
+    rationale = str(dispatch.get("rationale") or "")
+
+    if not _should_dispatch_specialist(attack_class, priority, specialist_config):
+        return None
+    if _specialist_at_capacity(run_id, specialist_config):
+        log.info(
+            "Specialist dispatch for %s dropped: at capacity (%d/%d)",
+            attack_class, _specialist_running.get(run_id, 0),
+            specialist_config.max_concurrent,
+        )
+        return None
+
+    # Find the matching entry in recon_summary.attack_classes if available.
+    recon_entry: dict | None = None
+    if recon_summary and isinstance(recon_summary.get("attack_classes"), list):
+        for entry in recon_summary["attack_classes"]:
+            if entry.get("class") == attack_class:
+                recon_entry = entry
+                break
+
+    agent_id = _next_specialist_agent_id(run_id, attack_class)
+    max_steps = specialist_config.max_steps if specialist_config else 30
+
+    try:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
+            _run_specialist_agent(
+                run_id=run_id,
+                agent_id=agent_id,
+                attack_class=attack_class,
+                target_url=target_url,
+                rationale=rationale,
+                recon_summary_entry=recon_entry,
+                session_vault=session_vault,
+                llm_cfg=llm_cfg,
+                base_url=base_url,
+                scanner_policy=scanner_policy,
+                max_steps=max_steps,
+                site_id=site_id,
+            ),
+            name=f"specialist-{run_id}-{agent_id}",
+        )
+        _specialist_tasks.setdefault(run_id, []).append(task)
+        task.add_done_callback(
+            lambda t, rid=run_id: _specialist_tasks.get(rid, []).remove(t)
+            if t in _specialist_tasks.get(rid, []) else None
+        )
+    except RuntimeError:
+        return None
+
+    return agent_id
 
 
 async def _persist_dynamic_finding(
@@ -2228,9 +2863,32 @@ def is_thinking_running(run_id: int) -> bool:
 
 def request_thinking_stop(run_id: int) -> None:
     _thinking_stop_requested.add(run_id)
+    # Cancel the main scan task immediately so it doesn't wait out a full LLM
+    # round-trip or Playwright navigation before seeing the stop flag.
+    task = _thinking_tasks.get(run_id)
+    if task and not task.done():
+        task.cancel()
+    # Cancel all in-flight specialist tasks for this run.
+    for spec_task in list(_specialist_tasks.get(run_id, [])):
+        if not spec_task.done():
+            spec_task.cancel()
     if is_thinking_running(run_id):
         _thinking_scan_status[run_id] = "stopping"
         _emit_thinking_status(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "stop_requested",
+        "status": "warning",
+        "message": "Stop requested — cancelling in-flight requests.",
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "active",
+        "current_task": "Stopping scan…",
+        "outcome": None,
+    })
 
 
 def get_thinking_scan_status(run_id: int) -> dict:
@@ -2293,6 +2951,7 @@ async def start_thinking_scan_resume(run_id: int) -> None:
 # ── Task wrapper ──────────────────────────────────────────────────────────────
 
 async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
         await _do_scan(run_id, page_ids=page_ids)
     except asyncio.CancelledError:
@@ -2306,6 +2965,7 @@ async def _scan_task(run_id: int, page_ids: list[int] | None = None) -> None:
     finally:
         _stop_requested.discard(run_id)
         _active_sessions.pop(run_id, None)
+        llm_svc.clear_run_context()
 
 
 # ── Thinking-scan task wrapper & core ─────────────────────────────────────────
@@ -2317,19 +2977,61 @@ def _emit_thinking_status(run_id: int) -> None:
 async def _thinking_scan_task(run_id: int) -> None:
     _thinking_scan_status[run_id] = "running"
     _emit_thinking_status(run_id)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "scan_started",
+        "status": "start",
+        "message": "Dynamic scan started.",
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "active",
+        "current_task": "Dynamic scan started",
+        "outcome": None,
+        "_persist": True,
+    })
     try:
         await _do_thinking_scan(run_id)
     except asyncio.CancelledError:
         log.info("Thinking scan task cancelled for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "stopped"
         _emit_thinking_status(run_id)
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "scan_stopped",
+            "status": "warning",
+            "message": "Dynamic scan stopped by user.",
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "complete",
+            "current_task": "Scan stopped",
+            "outcome": "Stopped by user",
+            "_persist": True,
+        })
         raise
     except Exception as exc:
         log.exception("Thinking scan task failed for run_id=%s", run_id)
         _thinking_scan_status[run_id] = "failed"
         _emit_thinking_status(run_id)
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "failed",
+            "current_task": "Scan failed",
+            "outcome": str(exc)[:200],
+            "_persist": True,
+        })
     finally:
         _thinking_stop_requested.discard(run_id)
+        _specialist_running.pop(run_id, None)
+        _specialist_seq.pop(run_id, None)
+        _specialist_tasks.pop(run_id, None)
 
 
 async def _run_post_scan_llm_review(
@@ -2362,11 +3064,19 @@ async def _run_post_scan_llm_review(
     if not candidates:
         return
 
+    total_review_batches = (len(candidates) + 9) // 10
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "post_scan_review",
         "status": "start",
-        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s)…",
+        "message": f"LLM pre-screen: reviewing {len(candidates)} finding(s) across {total_review_batches} turn(s)…",
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "reporting",
+        "role": "Reporting",
+        "status": "active",
+        "current_task": f"Pre-screening {len(candidates)} finding(s) for false positives…",
     })
 
     BATCH = 10
@@ -2375,6 +3085,7 @@ async def _run_post_scan_llm_review(
 
     for batch_start in range(0, len(candidates), BATCH):
         batch = candidates[batch_start : batch_start + BATCH]
+        turn_num = batch_start // BATCH + 1
         batch_lines = []
         for f in batch:
             ep = f.affected_url or "(no URL)"
@@ -2400,10 +3111,18 @@ async def _run_post_scan_llm_review(
             "  <ID> | LOW_CONFIDENCE:<short reason>\n"
             "Do NOT include any other text."
         )
+        batch_low_confidence: list[int] = []
         try:
             verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
         except Exception as exc:
             log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "post_review_turn",
+                "status": "complete",
+                "message": f"Turn {turn_num}/{total_review_batches}: review failed — {exc}",
+                "data": {"turn": turn_num, "total_turns": total_review_batches, "error": str(exc)},
+            })
             continue
 
         for line in verdict_text.strip().splitlines():
@@ -2422,7 +3141,35 @@ async def _run_post_scan_llm_review(
                     else "Pre-screen: low confidence"
                 )
                 low_confidence_ids.append(fid)
+                batch_low_confidence.append(fid)
                 reasons[fid] = reason
+
+        accepted_this_batch = len(batch) - len(batch_low_confidence)
+        batch_msg = (
+            f"Turn {turn_num}/{total_review_batches}: reviewed {len(batch)} finding(s)"
+            f" → {accepted_this_batch} accepted"
+            + (f", {len(batch_low_confidence)} flagged low confidence" if batch_low_confidence else "")
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "post_review_turn",
+            "status": "complete",
+            "message": batch_msg,
+            "data": {
+                "turn": turn_num,
+                "total_turns": total_review_batches,
+                "batch_size": len(batch),
+                "accepted": accepted_this_batch,
+                "low_confidence": len(batch_low_confidence),
+            },
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            "status": "active",
+            "current_task": batch_msg,
+        })
 
     if low_confidence_ids:
         with Session(get_engine()) as s:
@@ -2442,14 +3189,24 @@ async def _run_post_scan_llm_review(
             })
 
     accepted = len(candidates) - len(low_confidence_ids)
+    review_complete_msg = (
+        f"Pre-screen complete: {accepted} accepted, "
+        f"{len(low_confidence_ids)} flagged as low confidence."
+    )
     events_svc.emit(run_id, {
         "type": "scanner_phase",
         "phase": "post_scan_review",
         "status": "complete",
-        "message": (
-            f"Pre-screen complete: {accepted} accepted, "
-            f"{len(low_confidence_ids)} flagged as low confidence."
-        ),
+        "message": review_complete_msg,
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "reporting",
+        "role": "Reporting",
+        "status": "complete",
+        "current_task": "Pre-screen complete",
+        "outcome": review_complete_msg,
+        "_persist": True,
     })
     log.info(
         "Post-scan review run_id=%s: %d accepted, %d low_confidence",
@@ -2529,12 +3286,15 @@ async def _do_thinking_scan(run_id: int) -> None:
         upstream_proxy = get_upstream_proxy_config(s)
         scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
+        specialist_cfg = get_specialist_agent_config(s)
 
+        site_id = site.id  # captured before expunge for scope checks
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
     _scanner_proxy_var.set(scanner_proxy_url)
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
     base_url      = str(site.base_url or "").strip()
     login_url     = site.login_url
@@ -2555,14 +3315,24 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             _resume_checkpoint.get("step_count", "?"),
         )
+        _resume_msg = (
+            f"Resuming scan from step {_resume_checkpoint.get('step_count', '?')} "
+            f"({len(_resume_checkpoint.get('history') or [])} prior actions in context)."
+        )
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_scan",
             "status": "resuming",
-            "message": (
-                f"Resuming scan from step {_resume_checkpoint.get('step_count', '?')} "
-                f"({len(_resume_checkpoint.get('history') or [])} prior actions in context)."
-            ),
+            "message": _resume_msg,
+        })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": f"Resuming from step {_resume_checkpoint.get('step_count', '?')}…",
+            "outcome": None,
+            "_persist": True,
         })
 
     if not resuming:
@@ -2574,9 +3344,13 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
     # are available through context tools so they are only sent when needed.
-    crawl_context = _build_compact_thinking_context(
+    recon_summary: dict | None = None
+    if not resuming:
+        recon_summary = task_graph_svc.build_recon_summary(run_id)
+
+    crawl_context = _build_thinking_context_from_recon_summary(
+        run_id,
         base_url,
-        pages_snapshot,
         findings_snapshot,
     )
     intel_context = _build_target_intelligence_context(run_id)
@@ -2599,7 +3373,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             ", ".join(sorted(_selected_skills)),
         )
 
-    seeded_task_graph = task_graph_svc.seed_task_graph(run_id) if not resuming else {}
+    seeded_task_graph = task_graph_svc.seed_task_graph(run_id, summary=recon_summary) if not resuming else {}
     if seeded_task_graph.get("hypotheses_created") or seeded_task_graph.get("tasks_created"):
         events_svc.emit(run_id, {
             "type": "task_graph_update",
@@ -2796,6 +3570,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                     hx=hx, browser_ctx=browser_ctx, pw_page=pw_page,
                     history=history, all_results=all_results,
                     resume_from=_resume_checkpoint,
+                    specialist_config=specialist_cfg,
+                    recon_summary=recon_summary,
+                    site_id=site_id,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -2812,6 +3589,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "status": "deciding",
                     "message": f"Step {step}: LLM deciding next action…",
                     "data": {"step": step},
+                })
+                events_svc.emit(run_id, {
+                    "type": "agent_status",
+                    "agent_id": "scanner",
+                    "role": "Test Lead",
+                    "status": "active",
+                    "current_task": f"Step {step}: deciding next action…",
+                    "outcome": None,
                 })
 
                 # Ask the LLM what to do next.
@@ -3719,6 +4504,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             first_page_id=first_page_id,
             results=all_results,
         )
+        total_batches = len(llm_svc._chunk_probe_results(all_results))
         events_svc.emit(run_id, {
             "type": "scanner_phase",
             "phase": "thinking_analysis",
@@ -3729,8 +4515,50 @@ async def _do_thinking_scan(run_id: int) -> None:
                 f"{deterministic_saved} deterministic finding(s) already recorded…"
             ),
         })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            "status": "active",
+            "current_task": f"Analysing {len(all_results)} probe result(s) across {total_batches} LLM turn(s)…",
+        })
         try:
-            raw_findings = await llm_svc.analyse_probes(llm_cfg, base_url, all_results)
+            _reporting_batch_findings: list[dict] = []
+
+            async def _on_batch_complete(turn_num: int, batch_size: int, batch_findings: list[dict]) -> None:
+                _reporting_batch_findings.extend(batch_findings)
+                found = len(batch_findings)
+                cumulative = len(_reporting_batch_findings)
+                msg = (
+                    f"Turn {turn_num}/{total_batches}: analysed {batch_size} probe(s)"
+                    + (f" → {found} finding(s) identified" if found else " → no new findings")
+                    + (f" ({cumulative} total so far)" if cumulative and turn_num < total_batches else "")
+                )
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "reporting_turn",
+                    "status": "complete",
+                    "message": msg,
+                    "data": {
+                        "turn": turn_num,
+                        "total_turns": total_batches,
+                        "batch_size": batch_size,
+                        "findings_this_turn": found,
+                        "findings_cumulative": cumulative,
+                        "titles": [f.get("title", "Untitled") for f in batch_findings],
+                    },
+                })
+                events_svc.emit(run_id, {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "active",
+                    "current_task": msg,
+                })
+
+            raw_findings = await llm_svc.analyse_probes(
+                llm_cfg, base_url, all_results, on_batch_complete=_on_batch_complete
+            )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.
             if raw_findings:
@@ -3792,6 +4620,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "status": "complete",
                 "message": message,
             })
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "complete",
+                "current_task": "Probe analysis complete",
+                "outcome": message,
+            })
         except Exception as exc:
             log.warning("Thinking scan analysis failed: %s", exc)
 
@@ -3804,6 +4640,21 @@ async def _do_thinking_scan(run_id: int) -> None:
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
     _emit_thinking_status(run_id)
     log.info("=== Thinking scan %s: run_id=%s ===", "stopped" if stopped else "complete", run_id)
+    # Count findings created during this scan for the agent outcome summary.
+    with Session(get_engine()) as _s:
+        _finding_count = len(_s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all())
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "complete",
+        "current_task": "Scan complete",
+        "outcome": f"{_finding_count} finding(s) recorded",
+        "_persist": True,
+    })
+    llm_svc.clear_run_context()
 
 
 # ── Agentic loop helper ───────────────────────────────────────────────────────
@@ -3818,6 +4669,7 @@ _TOOL_NAME_TO_ACTION: dict[str, str] = {
     "decode_jwt":      "jwt",
     "credential_check": "credential_check",
     "register_account": "register_account",
+    "agent_dispatch":  "agent_dispatch",
     "done":            "done",
 }
 
@@ -3840,6 +4692,9 @@ async def _do_agentic_thinking_loop(
     history: list[dict],
     all_results: list[dict],
     resume_from: dict | None = None,
+    specialist_config=None,
+    recon_summary: dict | None = None,
+    site_id: int = 0,
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -3952,6 +4807,16 @@ async def _do_agentic_thinking_loop(
         nonlocal progressive_findings_count
         note = str(tool_input.get("note") or f"Step {step}")
 
+        # Emit live agent_status update for every agentic step (SSE only, not persisted).
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": f"Step {step}: {note}",
+            "outcome": None,
+        })
+
         # ── context_tool ──────────────────────────────────────────────────────
         if tool_name == "context_tool":
             inner_tool = str(tool_input.get("tool") or "").strip()
@@ -4016,6 +4881,15 @@ async def _do_agentic_thinking_loop(
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
             affected = str(tool_input.get("affected_url") or base_url)
+            _fw_title = str(tool_input.get("title") or "Untitled finding")
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "active",
+                "current_task": f"Writing: {_fw_title}",
+                "outcome": None,
+            })
             fw_result = {
                 "source": "finding_write",
                 "desc": note,
@@ -4079,6 +4953,29 @@ async def _do_agentic_thinking_loop(
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
                 _schedule_burp_active_scan(run_id, saved, session_vault)
+                from aespa.services import validator as _validator_svc
+                asyncio.create_task(
+                    _validator_svc.validate_finding_inline(
+                        run_id,
+                        saved.id,
+                        llm_cfg=llm_cfg,
+                        cred_sessions=get_active_sessions(run_id) or {},
+                        scanner_policy=scanner_policy,
+                    )
+                )
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "idle",
+                "current_task": f"Wrote: {_fw_title}",
+                "outcome": (
+                    f"Saved [{tool_input.get('severity', '?')}] {_fw_title} (ID: {saved.id})"
+                    if saved is not None else
+                    f"Duplicate skipped: {_fw_title}"
+                ),
+                "_persist": True,
+            })
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
                 "phase": "thinking_step",
@@ -4086,7 +4983,7 @@ async def _do_agentic_thinking_loop(
                 "message": (
                     f"Step {step}: "
                     f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
-                    f"{tool_input.get('title', 'Untitled finding')}"
+                    f"{_fw_title}"
                 ),
                 "data": {
                     "step": step,
@@ -4109,6 +5006,9 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
+            _scope_err = check_scope(br_url, site_id, run_id)
+            if _scope_err:
+                return f"[SCOPE BLOCK] {_scope_err}"
             steps_list = tool_input.get("steps") or []
             use_session_label = (
                 tool_input.get("use_session")
@@ -4151,6 +5051,10 @@ async def _do_agentic_thinking_loop(
             resp_status = br_result.get("status") or 0
             resp_headers = br_result.get("headers") or {}
             final_url = br_result.get("url") or br_url
+            try:
+                register_scope_host_for_run(run_id, final_url)
+            except Exception:
+                pass
             action_log = br_result.get("action_log") or []
             request_evidence = _request_evidence(
                 f"BROWSER {final_url}\nSteps: {json.dumps(steps_list)[:800]}"
@@ -4582,11 +5486,97 @@ async def _do_agentic_thinking_loop(
                 f"Body: {ra_resp_body[:500]}"
             )
 
+        # ── agent_dispatch ────────────────────────────────────────────────────
+        if tool_name == "agent_dispatch":
+            dispatched_id = _schedule_specialist_agent(
+                run_id=run_id,
+                dispatch=tool_input,
+                session_vault=session_vault,
+                llm_cfg=llm_cfg,
+                base_url=base_url,
+                scanner_policy=scanner_policy,
+                specialist_config=specialist_config,
+                recon_summary=recon_summary,
+                site_id=site_id,
+            )
+            task_graph_svc.complete_task_after_result(
+                run_id, active_task_id,
+                step=step, method="AGENT_DISPATCH",
+                url=str(tool_input.get("target_url") or base_url),
+                status=200 if dispatched_id else 0,
+                note=note,
+                response_excerpt=dispatched_id or "dropped",
+            )
+            if dispatched_id:
+                events_svc.emit(run_id, {
+                    "type": "agent_status",
+                    "agent_id": dispatched_id,
+                    "role": "Specialist",
+                    "status": "queued",
+                    "current_task": f"Queued: {tool_input.get('attack_class')} on {tool_input.get('target_url')}",
+                    "outcome": None,
+                    "_persist": True,
+                })
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "complete",
+                    "message": (
+                        f"Step {step}: dispatched specialist {dispatched_id} "
+                        f"({tool_input.get('attack_class')} → "
+                        f"{tool_input.get('target_url')})"
+                    ),
+                    "data": {"step": step, "note": note, "agent_id": dispatched_id},
+                })
+                history.append({
+                    "step": step, "note": note, "method": "AGENT_DISPATCH",
+                    "url": str(tool_input.get("target_url") or base_url),
+                    "request_headers": {}, "request_body": tool_input,
+                    "response_status": 200, "response_headers": {},
+                    "response_body": f"Specialist {dispatched_id} dispatched.",
+                })
+                return (
+                    f"Specialist agent dispatched: {dispatched_id}\n"
+                    f"Class: {tool_input.get('attack_class')}\n"
+                    f"Target: {tool_input.get('target_url')}\n"
+                    f"Rationale: {tool_input.get('rationale')}"
+                )
+            else:
+                drop_reason = (
+                    "capacity reached"
+                    if specialist_config and _specialist_at_capacity(run_id, specialist_config)
+                    else "class disabled or priority too low"
+                )
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "complete",
+                    "message": (
+                        f"Step {step}: specialist dispatch dropped "
+                        f"({tool_input.get('attack_class')}: {drop_reason})"
+                    ),
+                    "data": {"step": step, "note": note},
+                })
+                history.append({
+                    "step": step, "note": note, "method": "AGENT_DISPATCH",
+                    "url": str(tool_input.get("target_url") or base_url),
+                    "request_headers": {}, "request_body": tool_input,
+                    "response_status": 0, "response_headers": {},
+                    "response_body": f"Specialist dispatch dropped: {drop_reason}.",
+                })
+                return (
+                    f"Specialist dispatch dropped ({drop_reason}). "
+                    "Continue investigating directly."
+                )
+
         # ── http_request (default) ────────────────────────────────────────────
         hr_method = str(tool_input.get("method") or "GET").upper()
         hr_url = str(tool_input.get("url") or "").strip()
         if not hr_url:
             return "http_request: missing URL"
+        _scope_err = check_scope(hr_url, site_id, run_id)
+        if _scope_err:
+            return f"[SCOPE BLOCK] {_scope_err}"
         hr_headers = tool_input.get("headers") or {}
         hr_body = tool_input.get("body")
         hr_use_session = (
