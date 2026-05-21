@@ -21,11 +21,11 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import Credential, CrawledPage, ScanFinding, Site, TestRun
+from aespa.models import AdversarialValidatorConfig, Credential, CrawledPage, ScanFinding, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
-from aespa.services.settings import get_llm_config, get_run_scanner_policy
+from aespa.services.settings import get_adversarial_validator_config, get_llm_config, get_run_scanner_policy
 
 log = logging.getLogger("aespa.validator")
 
@@ -121,6 +121,7 @@ async def validate_finding_inline(
             llm_cfg = get_llm_config(s)
         if scanner_policy is None:
             scanner_policy = get_run_scanner_policy(s, run)
+        validator_cfg = get_adversarial_validator_config(s)
         creds = list(site.credentials) if site else []
         finding.validation_status = "validating"
         finding.validation_note = "Validation running."
@@ -139,6 +140,15 @@ async def validate_finding_inline(
         "finding_id": finding_id,
         "validation_status": "validating",
         "validation_note": "Validation running.",
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": f"validator-{finding_id}",
+        "role": "Validator",
+        "status": "active",
+        "current_task": f"Validating: {finding.title[:80]}",
+        "outcome": None,
+        "_persist": True,
     })
 
     if llm_cfg is None:
@@ -166,13 +176,14 @@ async def validate_finding_inline(
 
     await _validate_one(
         run_id, finding, llm_cfg, user_sessions, users_list,
-        scanner_policy, cred_sessions=cred_sessions,
+        scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
     )
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
 
 async def _validation_task(run_id: int, finding_ids: list[int] | None = None) -> None:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
         await _do_validate(run_id, finding_ids=finding_ids)
     except asyncio.CancelledError:
@@ -183,6 +194,7 @@ async def _validation_task(run_id: int, finding_ids: list[int] | None = None) ->
         _reset_validating_findings(run_id, "Validation failed before a verdict was reached.")
     finally:
         _stop_requested.discard(run_id)
+        llm_svc.clear_run_context()
 
 
 # ── Core validation ───────────────────────────────────────────────────────────
@@ -198,6 +210,7 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration — configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
+        validator_cfg = get_adversarial_validator_config(s)
         creds = list(site.credentials)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -231,6 +244,15 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
             "finding_id": f.id,
             "validation_status": "validating",
         })
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": f"validator-{f.id}",
+            "role": "Validator",
+            "status": "active",
+            "current_task": f"Validating: {f.title[:80]}",
+            "outcome": None,
+            "_persist": True,
+        })
 
     # Bootstrap sessions (reuse from active scan if possible).
     cred_sessions = await _get_or_create_sessions(
@@ -251,8 +273,212 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
             return
         await _validate_one(
             run_id, finding, llm_cfg, user_sessions, users_list,
-            scanner_policy, cred_sessions=cred_sessions,
+            scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
         )
+
+
+async def _run_adversarial_validator_loop(
+    *,
+    run_id: int,
+    finding: ScanFinding,
+    validator_cfg,
+    llm_cfg,
+    cred_sessions: dict[int, dict],
+    scanner_policy,
+) -> tuple[str, str, str]:
+    """Run the adversarial agentic validator loop for a single finding.
+
+    Returns (verdict, reasoning, confidence) where verdict is "confirmed" or
+    "false_positive".
+    """
+    # Build the user message for the validator.
+    disproof_hints = llm_svc._disproof_hints_for_finding(finding.owasp_category or "")
+    initial_message = (
+        f"**Finding to review**\n"
+        f"Title: {finding.title}\n"
+        f"OWASP Category: {finding.owasp_category or 'Unknown'}\n"
+        f"Severity: {finding.severity or 'unknown'}\n"
+        f"Affected URL: {finding.affected_url or 'unknown'}\n\n"
+        f"**Description**\n{finding.description or 'No description.'}\n\n"
+        f"**Scanner evidence**\n{finding.evidence or 'No evidence provided.'}"
+    )
+    if disproof_hints:
+        initial_message += f"\n\n**Category-specific disproof strategies**\n{disproof_hints}"
+    if validator_cfg.require_concrete_disproof:
+        initial_message += (
+            "\n\n**Validation mode: strict**\n"
+            "Do NOT return false_positive unless you can state a specific innocent "
+            "explanation. Failure to reproduce is not sufficient."
+        )
+
+    # Build a session map for the http_request tool (same format as scanner uses).
+    # Key: username string → session dict with 'cookies' and 'extra_headers'.
+    user_sessions_by_name: dict[str, dict] = {
+        cs["username"]: cs for cs in cred_sessions.values()
+    }
+    primary_session = next(iter(user_sessions_by_name.values()), None)
+
+    # Mutable verdict holder — set by the done() tool call.
+    verdict_holder: list[tuple[str, str, str]] = []
+    step_counter: list[int] = [0]
+
+    async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> Any:  # noqa: ANN401
+        step_counter[0] = step
+        if tool_name == "http_request":
+            return await _validator_http_request(
+                tool_input, primary_session, user_sessions_by_name, scanner_policy
+            )
+        if tool_name == "compare_responses":
+            return await _validator_compare_responses(
+                tool_input, primary_session, user_sessions_by_name, scanner_policy
+            )
+        if tool_name == "context_tool":
+            return await _validator_context_tool(tool_input, run_id, finding)
+        if tool_name == "done":
+            verdict = tool_input.get("verdict", "confirmed")
+            reasoning = tool_input.get("reasoning", "")
+            confidence = tool_input.get("confidence", "medium")
+            verdict_holder.append((verdict, reasoning, confidence))
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": f"validator-{finding.id}",
+                "role": "Validator",
+                "status": "active",
+                "current_task": f"Verdict reached: {verdict}",
+                "outcome": None,
+                "_persist": True,
+            })
+            return {"verdict": verdict, "reasoning": reasoning}
+        log.warning("Adversarial validator: unknown tool call '%s'", tool_name)
+        return {"error": f"Unknown tool: {tool_name}"}
+
+    def _stop_check() -> bool:
+        return len(verdict_holder) > 0 or step_counter[0] >= validator_cfg.max_steps
+
+    await llm_svc.thinking_agentic_loop(
+        config=llm_cfg,
+        system_message=llm_svc._ADVERSARIAL_VALIDATOR_SYSTEM,
+        initial_user_message=initial_message,
+        tool_executor=_tool_executor,
+        stop_check=_stop_check,
+        tools=llm_svc.VALIDATOR_AGENT_TOOLS,
+    )
+
+    if verdict_holder:
+        return verdict_holder[0]
+    # Step budget exhausted without a verdict.
+    return (
+        "confirmed",
+        "Adversarial validator exhausted the step budget without finding a disproof.",
+        "low",
+    )
+
+
+async def _validator_http_request(
+    tool_input: dict,
+    primary_session: dict | None,
+    user_sessions: dict[str, dict],
+    scanner_policy,
+) -> dict:
+    method = (tool_input.get("method") or "GET").upper()
+    url = tool_input.get("url", "")
+    headers_in = tool_input.get("headers") or {}
+    body = tool_input.get("body")
+    use_session = tool_input.get("use_session")
+
+    session = user_sessions.get(use_session) if use_session else primary_session
+    cookies = session["cookies"] if session else {}
+    hdrs = {"User-Agent": _UA, **(session.get("extra_headers", {}) if session else {})}
+
+    content = None
+    if body is not None:
+        if isinstance(body, (dict, list)):
+            content = json.dumps(body).encode()
+            hdrs.setdefault("Content-Type", "application/json")
+        else:
+            content = str(body).encode()
+
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            headers=hdrs,
+            timeout=REQUEST_TIMEOUT,
+            follow_redirects=getattr(scanner_policy, "follow_redirects", True),
+            verify=False,
+        ) as client:
+            req = client.build_request(method, url, content=content, headers=headers_in)
+            t0 = time.perf_counter()
+            resp = await client.send(req)
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+        return {
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text[:2000],
+            "duration_ms": duration_ms,
+            "url": str(resp.url),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "status": None, "headers": {}, "body": ""}
+
+
+async def _validator_compare_responses(
+    tool_input: dict,
+    primary_session: dict | None,
+    user_sessions: dict[str, dict],
+    scanner_policy,
+) -> dict:
+    """Execute baseline and test requests then return a comparison."""
+
+    async def _fetch(spec: dict) -> dict:
+        return await _validator_http_request(spec, primary_session, user_sessions, scanner_policy)
+
+    baseline_spec = tool_input.get("baseline", {})
+    test_spec = tool_input.get("test", {})
+    note = tool_input.get("note", "")
+
+    baseline_res, test_res = await asyncio.gather(
+        _fetch(baseline_spec),
+        _fetch(test_spec),
+    )
+
+    # Simple diff summary: status codes and body length difference.
+    baseline_status = baseline_res.get("status")
+    test_status = test_res.get("status")
+    baseline_body = baseline_res.get("body", "")
+    test_body = test_res.get("body", "")
+    len_diff = len(test_body) - len(baseline_body)
+    status_diff = (
+        "same" if baseline_status == test_status
+        else f"changed from {baseline_status} to {test_status}"
+    )
+    body_diff_summary = (
+        f"Body length changed by {len_diff:+d} characters. "
+        f"Status: {status_diff}."
+    )
+
+    return {
+        "note": note,
+        "baseline": baseline_res,
+        "test": test_res,
+        "diff_summary": body_diff_summary,
+    }
+
+
+async def _validator_context_tool(tool_input: dict, run_id: int, finding: ScanFinding) -> dict:
+    """Provide finding context to the validator. Limited subset of the full context tool."""
+    action = tool_input.get("action", "")
+    if action == "get_finding":
+        return {
+            "id": finding.id,
+            "title": finding.title,
+            "description": finding.description,
+            "owasp_category": finding.owasp_category,
+            "severity": finding.severity,
+            "affected_url": finding.affected_url,
+            "evidence": finding.evidence,
+        }
+    # For other actions, return a helpful message rather than an error.
+    return {"message": f"context_tool action '{action}' is not available to the validator. Use http_request or compare_responses to gather evidence directly."}
 
 
 async def _validate_one(
@@ -263,8 +489,21 @@ async def _validate_one(
     users_list: list[dict] | None,
     scanner_policy,
     cred_sessions: dict[int, dict] | None = None,
+    validator_cfg=None,
 ) -> None:
     log.info("Validating finding id=%s: %s", finding.id, finding.title)
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "thinking_step",
+        "status": "start",
+        "message": f"Validating finding: {finding.title!r} — {finding.url or 'no URL'}",
+        "data": {"finding_id": finding.id},
+    })
+
+    # Load validator config lazily if not provided (e.g., from inline validation).
+    if validator_cfg is None:
+        with Session(get_engine()) as s:
+            validator_cfg = get_adversarial_validator_config(s)
 
     deterministic = await _deterministic_validate_finding(finding, cred_sessions or {}, scanner_policy)
     if deterministic:
@@ -279,6 +518,51 @@ async def _validate_one(
         )
         return
 
+    # Skip finding if it is below the configured severity threshold.
+    if not llm_svc.severity_meets_threshold(
+        str(finding.severity or "low"), validator_cfg.min_severity
+    ):
+        log.info(
+            "  Skipping validation for finding %s (severity %s below threshold %s)",
+            finding.id, finding.severity, validator_cfg.min_severity,
+        )
+        await _persist_verdict(
+            run_id,
+            finding.id,
+            "unconfirmed",
+            f"Skipped: severity '{finding.severity}' is below the configured threshold '{validator_cfg.min_severity}'.",
+            validation_results=[],
+            source="severity_threshold",
+        )
+        return
+
+    # ── Adversarial validator (agentic loop) ─────────────────────────────────
+    if validator_cfg.enabled:
+        try:
+            verdict, reasoning, confidence = await _run_adversarial_validator_loop(
+                run_id=run_id,
+                finding=finding,
+                validator_cfg=validator_cfg,
+                llm_cfg=llm_cfg,
+                cred_sessions=cred_sessions or {},
+                scanner_policy=scanner_policy,
+            )
+        except Exception as e:
+            log.warning("Adversarial validator loop failed for finding %s: %s", finding.id, e)
+            verdict, reasoning = "confirmed", f"Adversarial validator encountered an error: {e}"
+            confidence = "low"
+        log.info("  Finding %s adversarial verdict: %s (confidence: %s)", finding.id, verdict, confidence)
+        await _persist_verdict(
+            run_id,
+            finding.id,
+            verdict,
+            reasoning,
+            validation_results=[],
+            source="adversarial_validator",
+        )
+        return
+
+    # ── Legacy static-probe fallback ─────────────────────────────────────────
     # Phase 1: LLM generates targeted validation probes.
     try:
         probes = await llm_svc.plan_validation_probes(
@@ -474,6 +758,21 @@ async def _persist_verdict(
         "validation_note": reasoning,
         "evidence_json": evidence_json,
         "evidence_items": _evidence_items_from_json(evidence_json),
+    })
+    # Emit agent_status complete for this validator agent.
+    outcome_map = {
+        "confirmed": "Confirmed",
+        "false_positive": "False positive",
+        "unconfirmed": "Unconfirmed",
+    }
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": f"validator-{finding_id}",
+        "role": "Validator",
+        "status": "complete",
+        "current_task": f"Verdict: {verdict}",
+        "outcome": outcome_map.get(verdict, verdict),
+        "_persist": True,
     })
 
 

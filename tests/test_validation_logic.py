@@ -105,7 +105,8 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
         assert saved.validation_status == "confirmed"
         assert saved.validation_note == "Replay returned protected content."
         assert "secret-token" not in saved.evidence_json
-        assert emitted[-1]["evidence_items"]
+        update_event = next(e for e in emitted if e.get("type") == "finding_validation_update")
+        assert update_event["evidence_items"]
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

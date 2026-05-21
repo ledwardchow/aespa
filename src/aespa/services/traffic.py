@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from aespa.db import get_engine
 
@@ -98,6 +98,15 @@ def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
             }
             for e in entries
         ]
+
+
+def count_traffic(run_id: int) -> int:
+    from aespa.models import TrafficEntry
+    with Session(get_engine()) as s:
+        return s.exec(
+            select(func.count(TrafficEntry.id))
+            .where(TrafficEntry.test_run_id == run_id)
+        ).one()
 
 
 # ── httpx event hooks ─────────────────────────────────────────────────────────

@@ -22,6 +22,16 @@ def get_traffic(
     return traffic_svc.get_traffic(run_id, since_id)
 
 
+@router.get("/api/test-runs/{run_id}/traffic/count")
+def get_traffic_count(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, int]:
+    if session.get(TestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    return {"count": traffic_svc.count_traffic(run_id)}
+
+
 @router.delete("/api/test-runs/{run_id}/traffic", status_code=204)
 def clear_traffic(
     run_id: int,
