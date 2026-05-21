@@ -9,7 +9,7 @@ from fastapi.responses import Response as HTTPResponse
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
+from aespa.models import AgentLog, CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import (
     ScanCheckpointStatusOut,
     ScanFindingDeduplicationResult,
@@ -23,6 +23,7 @@ from aespa.services import findings as findings_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
 from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import llm as llm_svc
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["scan"])
@@ -63,9 +64,11 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/stop")
-def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    import asyncio
     _get_run_or_404(session, run_id)
     scanner_svc.request_thinking_stop(run_id)
+    await asyncio.sleep(0)  # yield to event loop so queued SSE events are flushed
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
@@ -421,6 +424,44 @@ def get_scan_log(
     ]
 
 
+@router.delete("/api/test-runs/{run_id}/agent-log", status_code=204)
+def clear_agent_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all persisted agent log entries for this run."""
+    _get_run_or_404(session, run_id)
+    for entry in session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id)
+    ).all():
+        session.delete(entry)
+    session.commit()
+
+
+@router.get("/api/test-runs/{run_id}/agent-log")
+def get_agent_log(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    entries = session.exec(
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .order_by(AgentLog.id)
+    ).all()
+    return [
+        {
+            "agent_id": e.agent_id,
+            "role": e.role,
+            "status": e.status,
+            "current_task": e.current_task,
+            "outcome": e.outcome,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
 def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
     """Format thinking-scan ScanLog entries as a readable markdown document."""
     # Group events by step number so each step becomes one section.
@@ -508,6 +549,16 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         lines += ["---", ""]
 
     return "\n".join(lines)
+
+
+@router.get("/api/test-runs/{run_id}/token-usage")
+def get_token_usage(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return accumulated LLM token usage for this run (in-process memory only)."""
+    _get_run_or_404(session, run_id)
+    return llm_svc.get_run_token_usage(run_id)
 
 
 @router.get("/api/test-runs/{run_id}/thinking-log/export")

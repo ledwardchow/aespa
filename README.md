@@ -95,10 +95,13 @@ Intelligence Log (populated by crawler and scanners):
 ![Screenshot](docs/images/intelligence.png)
 
 Dynamic scan in progress:
-![Screenshot](docs/images/activitylog.png)
+![Screenshot](docs/images/agentstatus.png)
 
 Task Graph used by the dynamic scan:
 ![Screenshot](docs/images/taskgraph.png)
+
+Attack Surface
+![Screenshot](docs/images/attacksurface.png)
 
 Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
