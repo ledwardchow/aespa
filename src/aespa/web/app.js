@@ -29,6 +29,10 @@ const api = {
   testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),
   getUpstreamProxy: ()            => req("/api/settings/upstream-proxy"),
   upsertUpstreamProxy: (b)        => req("/api/settings/upstream-proxy", { method:"PUT", body:b }),
+  getSpecialistAgentConfig: ()    => req("/api/settings/specialist-agent-config"),
+  upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
+  getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
+  upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -49,6 +53,7 @@ const api = {
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
+  updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
   startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
@@ -126,6 +131,7 @@ function useRoute() {
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
   if (hash === "#/external-integrations")                return { name: "external-integrations" };
+  if (hash === "#/debug")                                return { name: "debug" };
 
   return { name: "list" };
 }
@@ -262,6 +268,11 @@ const IconChevronLeft = () => html`<svg width="14" height="14" viewBox="0 0 14 1
 const IconChevronRight = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
   <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
+const IconBug = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <circle cx="8" cy="9" r="4" stroke="currentColor" stroke-width="1.4"/>
+  <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+</svg>`;
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -272,6 +283,7 @@ function App() {
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const onExternalIntegrations = route.name === "external-integrations";
+  const onDebug      = route.name === "debug";
   const [appVersion, setAppVersion] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
@@ -299,11 +311,14 @@ function App() {
           <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")} title="LLM Settings">
             <span className="nav-icon"><${IconSettings}/></span>${!collapsed && " LLM Settings"}
           </a>
-          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Scan Policy">
-            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Scan Policy"}
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Agent Settings">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Agent Settings"}
           </a>
           <a href="#/external-integrations" className=${"nav-item"+(onExternalIntegrations?" active":"")} title="External Integrations">
             <span className="nav-icon"><${IconShield}/></span>${!collapsed && " External Integrations"}
+          </a>
+          <a href="#/debug" className=${"nav-item"+(onDebug?" active":"")} title="Debug">
+            <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
         </nav>
         <div className="sidebar-footer">
@@ -325,6 +340,7 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage}/>`}
       </div>
     </div>
   `;
@@ -910,6 +926,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "activity"));
+  const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
   const [targetIntelKind, setTargetIntelKind] = useState("");
@@ -985,6 +1002,7 @@ function TestRunDetail({ runId, initialTab }) {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
+      if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
       api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
       api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
@@ -1156,6 +1174,7 @@ function TestRunDetail({ runId, initialTab }) {
       return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
     }
     if (agent?.id === "scanner" && testLeadHistory().length) {
+      if (agent.status !== "active") return "Standing by";
       return testLeadHistory()[testLeadHistory().length - 1].task;
     }
     return agent?.currentTask || "Waiting for work";
@@ -1346,8 +1365,27 @@ function TestRunDetail({ runId, initialTab }) {
             outcome: evt.outcome,
           }, histEntry);
         });
+      } else if (evt.type === "specialist_step") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const agentId = evt.agent_id;
+        if (agentId) {
+          setAgents(prev => {
+            const idx = prev.findIndex(a => a.id === agentId);
+            const stepEntry = { ts, step: evt.step, action_type: evt.action_type, method: evt.method, url: evt.url, status: evt.status, observation: evt.observation };
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            const prev_agent = updated[idx];
+            updated[idx] = {
+              ...prev_agent,
+              stepHistory: [...(prev_agent.stepHistory || []), stepEntry].slice(-200),
+            };
+            return updated;
+          });
+        }
       } else if (evt.type === "token_usage_update") {
         setTokenUsage(evt.totals);
+      } else if (evt.type === "scope_hosts_updated") {
+        setScopeHosts(evt.scope_hosts || []);
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -2138,6 +2176,12 @@ function TestRunDetail({ runId, initialTab }) {
           })()}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
+        ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
+          <${ScopeHostsPanel}
+            siteId=${run.site_id}
+            hosts=${scopeHosts}
+            onChange=${setScopeHosts}
+          />`}
         ${(()=>{
           if (activeTab === "scan") {
             const thinkingActive = isDynamicScanActive(thinkingStatus?.status);
@@ -2709,6 +2753,11 @@ function TestRunDetail({ runId, initialTab }) {
                   <span className="token-bar-in" title="Input tokens">↑${fmtTok(tokenUsage.total_input)} in</span>
                   <span className="token-bar-sep">·</span>
                   <span className="token-bar-out" title="Output tokens">↓${fmtTok(tokenUsage.total_output)} out</span>
+                  ${(tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0) ? html`
+                    <span className="token-bar-sep">·</span>
+                    ${tokenUsage.total_cache_read > 0 ? html`<span className="token-bar-cache-read" title="Cache read tokens">⚡${fmtTok(tokenUsage.total_cache_read)} cached</span>` : null}
+                    ${tokenUsage.total_cache_write > 0 ? html`<span className="token-bar-cache-write" title="Cache write tokens">✎${fmtTok(tokenUsage.total_cache_write)} written</span>` : null}
+                  ` : null}
                   <span className="activity-expand-chevron" style=${{marginLeft:4}}>${tokenExpanded?"▲":"▼"}</span>
                 ` : html`<span className="token-bar-empty">No token data yet</span>`}
               </div>
@@ -2719,11 +2768,17 @@ function TestRunDetail({ runId, initialTab }) {
                       <span className="token-model-name">${model}</span>
                       <span className="token-in">↑${fmtTok(v.input)}</span>
                       <span className="token-out">↓${fmtTok(v.output)}</span>
+                      ${(v.cache_read > 0 || v.cache_write > 0) ? html`
+                        ${v.cache_read > 0 ? html`<span className="token-cache-read" title="Cache read">⚡${fmtTok(v.cache_read)}</span>` : null}
+                        ${v.cache_write > 0 ? html`<span className="token-cache-write" title="Cache write">✎${fmtTok(v.cache_write)}</span>` : null}
+                      ` : null}
                     </div>`)}
                 </div>`}
               <div className="activity-sub-tab-bar">
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
                   onClick=${()=>setActivitySubTab("agents")}>Agents${agents.map(normalizeAgentForRun).some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="specialists"?" active":"")}
+                  onClick=${()=>setActivitySubTab("specialists")}>Specialist${agents.filter(a=>a.id.startsWith("specialist-")).some(a=>a.status==="active")?" ●":""}</button>
                 <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
                   onClick=${()=>setActivitySubTab("log")}>Log</button>
               </div>`;
@@ -2800,8 +2855,11 @@ function TestRunDetail({ runId, initialTab }) {
                 post_scan_review:   { label: "Review",    cls: "phase-reporting" },
                 post_review_turn:   { label: "Review",    cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok" },
               };
-              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
-              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : "";
+              const _baseMeta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const meta = entry.status === "error"
+                ? { label: _baseMeta.label, cls: "phase-finding" }
+                : _baseMeta;
+              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : entry.status === "error" ? " ✗" : "";
               // Augment llm_request message to surface agentic context count
               const displayMessage = (
                 entry.phase === "llm_request" && entry.data?.message_count != null
@@ -2855,14 +2913,99 @@ function TestRunDetail({ runId, initialTab }) {
                 </div>`;
             })}
           </div>`}
+          ${activitySubTab==="specialists" && html`
+          <div className="agents-panel">
+            ${(()=>{
+              const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+              if (specialistAgents.length === 0) return html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No specialist agents dispatched yet.</div>`;
+              return specialistAgents.map(sa => {
+                const saActive = sa.status === "active";
+                const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                const saSteps = sa.stepHistory || [];
+                const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
+                const threadLabel = sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1");
+                return html`
+                  <div key=${sa.id} className=${"agent-row"+(saActive?" agent-row--active":" agent-row--complete")+(saSteps.length>0?" agent-row--expandable":"")}
+                       onClick=${saSteps.length>0 ? ()=>toggleAgentId(sa.id) : undefined}>
+                    <span className=${"agent-dot"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                    <span className=${"agent-role-name"+(saActive?" agent-role-name--pulse":"")} style=${{textTransform:"capitalize"}}>${threadLabel}</span>
+                    <span className=${"agent-badge"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${saActive?"ACTIVE":"DONE"}
+                    </span>
+                    <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                    ${saSteps.length>0 && html`<span className="activity-expand-chevron">${saExpanded?"▲":"▼"}</span>`}
+                    ${saSteps.length>0 && saExpanded && html`
+                      <div className="agent-task-history">
+                        ${saSteps.slice().reverse().map((s,i) => html`
+                          <div key=${i} className="agent-history-entry">
+                            <span className="activity-ts">${s.ts}</span>
+                            <span className="agent-step-method">
+                              ${s.method ? html`${s.method} ${s.url ? html`<span title=${s.url}>${truncUrl(s.url,80)}</span>` : ""}` : s.action_type || "tool"}
+                            </span>
+                            ${s.observation && html`<span className="agent-history-outcome" title=${s.observation}>${String(s.observation).slice(0,80)}</span>`}
+                          </div>`)}
+                      </div>`}
+                  </div>`;
+              });
+            })()}
+          </div>`}
           ${activitySubTab==="agents" && html`
           <div className="agents-panel">
             ${(()=>{
               const roster = defaultAgentRoster();
-              const rosterAgents = roster.map(p => agents.find(a => representsAgent(a, p)) || p);
+              // Container slots (specialist/burp/validator) must always render as
+              // their placeholder so the multi-agent container row fires correctly.
+              const CONTAINER_IDS = new Set(["specialist", "burp", "validator"]);
+              const rosterAgents = roster.map(p =>
+                CONTAINER_IDS.has(p.id) ? p : (agents.find(a => representsAgent(a, p)) || p)
+              );
               const extras = agents.filter(a => !roster.some(p => representsAgent(a, p)));
               const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
               const renderRow = (a) => {
+                // ── Specialist container row ────────────────────────────────
+                if (a.id === "specialist") {
+                  const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+                  const anyActive = specialistAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (specialistAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = specialistAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = specialistAgents.length - activeCount;
+                  const summaryTask = specialistAgents.length === 0
+                    ? "No specialist dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} running, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = specialistAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+                  return html`
+                    <div key="specialist" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("specialist") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Specialist</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (specialistAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${specialistAgents.map(sa => {
+                            const saActive = sa.status === "active";
+                            const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${sa.id} className=${"agent-thread-row"+(saActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${saActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
                 const currentTask = agentCurrentTask(a);
@@ -2877,7 +3020,7 @@ function TestRunDetail({ runId, initialTab }) {
                        onClick=${canExpand ? ()=>toggleAgentId(a.id) : undefined}>
                     <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
                     <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>
-                      ${roleLabel}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
+                      ${roleLabel}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)&&!a.id.startsWith("burp-")?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
                     </span>
                     <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
                       ${agentStatusLabel(a)}
@@ -3431,10 +3574,6 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
       <input type="checkbox" disabled=${disabled} checked=${form.allow_subdomains} onChange=${e=>upd({allow_subdomains:e.target.checked})}/>
       <span>Allow subdomains of the crawled host</span>
     </label>
-    <label className="toggle-row">
-      <input type="checkbox" disabled=${disabled} checked=${form.require_approval_for_destructive} onChange=${e=>upd({require_approval_for_destructive:e.target.checked})}/>
-      <span>Require approval for destructive mode</span>
-    </label>
     <div className="divider"/>
     <div className="form-section-title">Methods</div>
     <div className="two-col">
@@ -3543,9 +3682,181 @@ function UpstreamProxySettings() {
       </form>`}`;
 }
 
+const DEFAULT_SPECIALIST_AGENT_FORM = {
+  enabled: true,
+  max_concurrent: 5,
+  max_steps: 30,
+  min_priority: 7,
+  dispatch_idor: true,
+  dispatch_auth_bypass: true,
+  dispatch_sqli: true,
+  dispatch_xss: true,
+  dispatch_business_logic: true,
+  dispatch_ssrf: true,
+  dispatch_path_traversal: true,
+  dispatch_cors: false,
+  dispatch_crypto: true,
+  dispatch_config: false,
+  trigger_specialist_on_burp: false,
+};
+
+function specialistAgentToForm(cfg) {
+  return cfg ? {
+    enabled:           cfg.enabled           ?? true,
+    max_concurrent:    cfg.max_concurrent     ?? 5,
+    max_steps:         cfg.max_steps          ?? 30,
+    min_priority:      cfg.min_priority       ?? 7,
+    dispatch_idor:     cfg.dispatch_idor      ?? true,
+    dispatch_auth_bypass: cfg.dispatch_auth_bypass ?? true,
+    dispatch_sqli:     cfg.dispatch_sqli      ?? true,
+    dispatch_xss:      cfg.dispatch_xss       ?? true,
+    dispatch_business_logic: cfg.dispatch_business_logic ?? true,
+    dispatch_ssrf:     cfg.dispatch_ssrf      ?? true,
+    dispatch_path_traversal: cfg.dispatch_path_traversal ?? true,
+    dispatch_cors:     cfg.dispatch_cors      ?? false,
+    dispatch_crypto:   cfg.dispatch_crypto    ?? true,
+    dispatch_config:   cfg.dispatch_config    ?? false,
+    trigger_specialist_on_burp: cfg.trigger_specialist_on_burp ?? false,
+  } : { ...DEFAULT_SPECIALIST_AGENT_FORM };
+}
+
+function specialistAgentPayload(form) {
+  return {
+    enabled:             !!form.enabled,
+    max_concurrent:      Number(form.max_concurrent),
+    max_steps:           Number(form.max_steps),
+    min_priority:        Number(form.min_priority),
+    dispatch_idor:       !!form.dispatch_idor,
+    dispatch_auth_bypass:!!form.dispatch_auth_bypass,
+    dispatch_sqli:       !!form.dispatch_sqli,
+    dispatch_xss:        !!form.dispatch_xss,
+    dispatch_business_logic: !!form.dispatch_business_logic,
+    dispatch_ssrf:       !!form.dispatch_ssrf,
+    dispatch_path_traversal: !!form.dispatch_path_traversal,
+    dispatch_cors:       !!form.dispatch_cors,
+    dispatch_crypto:     !!form.dispatch_crypto,
+    dispatch_config:     !!form.dispatch_config,
+    trigger_specialist_on_burp: !!form.trigger_specialist_on_burp,
+  };
+}
+
+function SpecialistAgentSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(specialistAgentToForm(await api.getSpecialistAgentConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertSpecialistAgentConfig(specialistAgentPayload(form));
+      setForm(specialistAgentToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Specialist Agent Dispatch</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable specialist agent dispatch</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, the Test Lead can dispatch focused specialist agents to investigate
+          specific vulnerability leads in parallel. Each specialist receives an independent
+          LLM session and a subset of tools (HTTP, browser, context, write_finding).
+        </div>
+
+        <div className="form-section-title">Concurrency &amp; Budget</div>
+        <div className="field">
+          <label>Max concurrent specialists</label>
+          <input type="number" min="0" max="20" value=${form.max_concurrent} disabled=${dis}
+            onChange=${e=>upd({max_concurrent:Number(e.target.value)})}/>
+          <div className="field-hint">Maximum number of specialist agents running at the same time (0 = effectively disabled). Default: 5.</div>
+        </div>
+        <div className="field">
+          <label>Max steps per specialist</label>
+          <input type="number" min="1" max="200" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">Step budget for each specialist agent before it is stopped. Default: 30.</div>
+        </div>
+        <div className="field">
+          <label>Minimum priority to dispatch</label>
+          <input type="number" min="1" max="10" value=${form.min_priority} disabled=${dis}
+            onChange=${e=>upd({min_priority:Number(e.target.value)})}/>
+          <div className="field-hint">Only dispatch a specialist if the lead's priority score meets this threshold (1–10). Default: 7.</div>
+        </div>
+
+        <div className="divider"/>
+        <div className="form-section-title">Attack Classes to Dispatch</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>
+          Only dispatch specialists for the selected vulnerability classes. Disable classes
+          you don't need to keep token usage under control.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_idor} disabled=${dis} onChange=${e=>upd({dispatch_idor:e.target.checked})}/>
+          <span>IDOR / Broken Object Level Authorization (A01)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_auth_bypass} disabled=${dis} onChange=${e=>upd({dispatch_auth_bypass:e.target.checked})}/>
+          <span>Authentication Bypass / Broken Auth (A07)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_sqli} disabled=${dis} onChange=${e=>upd({dispatch_sqli:e.target.checked})}/>
+          <span>SQL Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_xss} disabled=${dis} onChange=${e=>upd({dispatch_xss:e.target.checked})}/>
+          <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_business_logic} disabled=${dis} onChange=${e=>upd({dispatch_business_logic:e.target.checked})}/>
+          <span>Business Logic (A04)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_ssrf} disabled=${dis} onChange=${e=>upd({dispatch_ssrf:e.target.checked})}/>
+          <span>Server-Side Request Forgery / SSRF (A10)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_path_traversal} disabled=${dis} onChange=${e=>upd({dispatch_path_traversal:e.target.checked})}/>
+          <span>Path Traversal / LFI (A01/A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_crypto} disabled=${dis} onChange=${e=>upd({dispatch_crypto:e.target.checked})}/>
+          <span>Cryptographic Failures (A02)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_cors} disabled=${dis} onChange=${e=>upd({dispatch_cors:e.target.checked})}/>
+          <span>CORS Misconfiguration (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_config} disabled=${dis} onChange=${e=>upd({dispatch_config:e.target.checked})}/>
+          <span>Security Misconfiguration (A05)</span>
+        </label>
+
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Specialist Settings"}</button>
+        </div>
+      </form>`}`;
+}
+
 const DEFAULT_BURP_REST_API_FORM = {
-  enabled:false,
-  api_url:"http://127.0.0.1:1337",
   api_key:"",
   scan_configuration_name:"Audit checks - all except time-based detection methods",
   scan_sqli:true,
@@ -4003,11 +4314,191 @@ function SettingsPage() {
     </div>`;
 }
 
-function ScanPolicyPage() {
+const DEFAULT_VALIDATOR_FORM = {
+  enabled: true,
+  max_steps: 20,
+  min_severity: "low",
+  auto_validate_inline: true,
+  require_concrete_disproof: true,
+};
+
+function validatorToForm(cfg) {
+  return {
+    enabled: cfg.enabled ?? true,
+    max_steps: cfg.max_steps ?? 20,
+    min_severity: cfg.min_severity ?? "low",
+    auto_validate_inline: cfg.auto_validate_inline ?? true,
+    require_concrete_disproof: cfg.require_concrete_disproof ?? true,
+  };
+}
+
+function validatorPayload(form) {
+  return {
+    enabled: form.enabled,
+    max_steps: Number(form.max_steps),
+    min_severity: form.min_severity,
+    auto_validate_inline: form.auto_validate_inline,
+    require_concrete_disproof: form.require_concrete_disproof,
+  };
+}
+
+function ValidatorSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(validatorToForm(await api.getAdversarialValidatorConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertAdversarialValidatorConfig(validatorPayload(form));
+      setForm(validatorToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
   return html`
-    <div className="topbar"><div className="topbar-title">Scan Policy</div></div>
-    <div className="content scroll-content">
-      <${ScannerPolicySettings}/>
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Adversarial Validator</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable adversarial validator</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is reviewed by an adversarial LLM agent whose explicit
+          mandate is to <em>disprove</em> the finding before confirming it. This reduces false
+          positives without relying on the scanner's own judgment. When disabled, the legacy
+          static-probe validator is used instead.
+        </div>
+
+        <div className="form-section-title">Step Budget</div>
+        <div className="field">
+          <label>Max steps per finding</label>
+          <input type="number" min="1" max="50" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">
+            Maximum number of tool calls the validator may make per finding (1–50). Default: 20.
+            Higher values give the validator more opportunities to disprove a finding but increase
+            cost and latency.
+          </div>
+        </div>
+
+        <div className="form-section-title">Severity Filter</div>
+        <div className="field">
+          <label>Minimum severity to validate</label>
+          <select value=${form.min_severity} disabled=${dis}
+            onChange=${e=>upd({min_severity:e.target.value})}>
+            <option value="critical">Critical only</option>
+            <option value="high">High and above</option>
+            <option value="medium">Medium and above</option>
+            <option value="low">Low and above (default)</option>
+            <option value="info">All (including Info)</option>
+          </select>
+          <div className="field-hint">
+            Findings below this severity are skipped by the validator and left as "unconfirmed".
+          </div>
+        </div>
+
+        <div className="form-section-title">Behaviour</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.auto_validate_inline} disabled=${dis}
+            onChange=${e=>upd({auto_validate_inline:e.target.checked})}/>
+          <span>Auto-validate findings inline during scan</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is validated immediately after it is written, while the
+          scan is still running. When disabled, validation only runs when triggered manually.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.require_concrete_disproof} disabled=${dis}
+            onChange=${e=>upd({require_concrete_disproof:e.target.checked})}/>
+          <span>Require concrete disproof (strict mode)</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled (recommended), the validator must find a specific innocent explanation
+          to mark a finding as a false positive — failure to reproduce is not sufficient.
+          When disabled, inability to reproduce is treated as a false positive (lenient mode).
+        </div>
+
+        <div className="form-row">
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save"}</button>
+          ${saved&&html`<span className="saved-indicator">Saved</span>`}
+        </div>
+      </form>`}`;
+}
+
+function ScopeHostsPanel({ siteId, hosts, onChange }) {
+  const [input, setInput] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const remove = async (host) => {
+    const next = hosts.filter(h => h !== host);
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const add = async () => {
+    const host = input.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0];
+    if (!host || hosts.includes(host)) { setInput(""); return; }
+    const next = [...hosts, host];
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); setInput(""); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const onKey = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+
+  return html`
+    <div className="scope-hosts-panel">
+      <div className="scope-hosts-title">Attack Scope</div>
+      <div className="scope-hosts-list">
+        ${hosts.length === 0 && html`<span className="scope-hosts-empty">No restriction — all hosts allowed</span>`}
+        ${hosts.map(h => html`
+          <span key=${h} className="scope-host-chip">
+            ${h}
+            <button className="scope-host-remove" title="Remove" disabled=${saving}
+              onClick=${()=>remove(h)}>×</button>
+          </span>`)}
+      </div>
+      <div className="scope-hosts-add">
+        <input className="scope-hosts-input" placeholder="Add hostname…" value=${input}
+          onInput=${e=>setInput(e.target.value)} onKeyDown=${onKey} disabled=${saving}/>
+        <button className="btn sm" onClick=${add} disabled=${saving||!input.trim()}>Add</button>
+      </div>
+    </div>`;
+}
+
+function ScanPolicyPage() {
+  const [tab, setTab] = useState("scanner");
+  return html`
+    <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
+    <div className="content" style=${{paddingLeft:16,paddingRight:0,paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(tab==="scanner"?" active":"")} onClick=${()=>setTab("scanner")}>Scanner</button>
+        <button className=${"tab-btn"+(tab==="specialists"?" active":"")} onClick=${()=>setTab("specialists")}>Specialist Agents</button>
+        <button className=${"tab-btn"+(tab==="validator"?" active":"")} onClick=${()=>setTab("validator")}>Validator</button>
+      </div>
+      <div className="scroll-content" style=${{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",paddingTop:16,paddingBottom:28}}>
+        ${tab==="scanner"     && html`<${ScannerPolicySettings}/>`}
+        ${tab==="specialists" && html`<${SpecialistAgentSettings}/>`}
+        ${tab==="validator"   && html`<${ValidatorSettings}/>`}
+      </div>
     </div>`;
 }
 
@@ -4026,6 +4517,54 @@ function ExternalIntegrationsPage() {
         ${tab==="burp"  && html`<${BurpRestApiSettings}/>`}
         ${tab==="proxy" && html`<${UpstreamProxySettings}/>`}
       </div>
+    </div>`;
+}
+
+function DebugPage() {
+  const [cfg, setCfg] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try { setCfg(await api.getSpecialistAgentConfig()); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const toggle = async (checked) => {
+    setSaved(false); setSaving(true); setError(null);
+    try {
+      const updated = await api.upsertSpecialistAgentConfig({ ...cfg, trigger_specialist_on_burp: checked });
+      setCfg(updated);
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Debug</div>
+    </div>
+    <div className="content scroll-content">
+      ${!cfg && !error && html`<div className="subtle">Loading…</div>`}
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${cfg && html`
+        <div className="card">
+          <div className="form-section-title">Specialist Agent</div>
+          <label className="toggle-row">
+            <input type="checkbox" checked=${cfg.trigger_specialist_on_burp ?? false}
+              disabled=${saving}
+              onChange=${e=>toggle(e.target.checked)}/>
+            <span>Trigger a Specialist Agent whenever a Burp active scan is triggered</span>
+          </label>
+          <div className="field-hint">
+            When enabled, a specialist agent is dispatched immediately alongside every Burp active scan,
+            independently investigating the same URL. Use this to force specialist agents to fire for
+            debugging purposes.
+          </div>
+          ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
+        </div>`}
     </div>`;
 }
 
