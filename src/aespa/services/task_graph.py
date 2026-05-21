@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PentestHypothesis, PentestTask, TargetIntelItem
+from aespa.models import CrawledPage, PentestHypothesis, PentestTask, TargetIntelItem, TestRun
 from aespa.schemas import PentestHypothesisOut, PentestTaskGraphOut, PentestTaskOut
 from aespa.services import events as events_svc
 
@@ -29,11 +29,210 @@ class TaskSeed:
     intel_id: int | None = None
 
 
-def seed_task_graph(run_id: int, session: Session | None = None) -> dict[str, int]:
+def build_recon_summary(
+    run_id: int,
+    session: Session | None = None,
+) -> dict:
+    """Analyse crawl data and produce an attack-surface summary JSON blob.
+
+    The summary is written to ``TestRun.recon_summary`` and returned.  It has
+    a stable schema so downstream callers (LLM context builder, seed_task_graph,
+    UI endpoint) can rely on it.
+
+    Schema:
+      trust_zones:           {"public": [...urls], "user": [...urls], "admin": [...urls]}
+      entry_points:          [{url, method, params, zone}]
+      attack_classes:        [{id, owasp, priority, rationale, entry_point_urls}]
+      business_logic_pages:  [...urls]
+      tech_stack:            [...strings]
+      credential_roles:      [...usernames]
+    """
+    own_session = session is None
+    s = session or Session(get_engine())
+    try:
+        pages = list(s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.in_scope != False)  # noqa: E712
+            .order_by(CrawledPage.depth, CrawledPage.url)
+        ))
+        intel_items = list(s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc())
+        ))
+
+        # ── Trust zones ───────────────────────────────────────────────────────
+        trust_zones: dict[str, list[str]] = {"public": [], "user": [], "admin": []}
+        for page in pages:
+            url_l = page.url.lower()
+            if any(seg in url_l for seg in ("/admin", "/manage", "/dashboard/admin", "/superuser", "/staff")):
+                trust_zones["admin"].append(page.url)
+            elif page.req_auth:
+                trust_zones["user"].append(page.url)
+            else:
+                trust_zones["public"].append(page.url)
+
+        # ── Entry points ──────────────────────────────────────────────────────
+        entry_points: list[dict] = []
+        admin_set = set(trust_zones["admin"])
+        user_set = set(trust_zones["user"])
+        for page in pages:
+            if not page.takes_input:
+                continue
+            zone = "admin" if page.url in admin_set else "user" if page.url in user_set else "public"
+            entry_points.append({"url": page.url, "method": "GET", "params": [], "zone": zone})
+        for item in intel_items:
+            if item.kind in {"input", "form", "endpoint"} and item.url:
+                zone = "admin" if item.url in admin_set else "user" if item.url in user_set else "public"
+                params = [item.key] if item.key else []
+                entry_points.append({"url": item.url, "method": item.method or "GET", "params": params, "zone": zone})
+        # Deduplicate by url+method
+        seen_ep: set[tuple[str, str]] = set()
+        deduped_eps: list[dict] = []
+        for ep in entry_points:
+            k = (ep["url"], ep["method"])
+            if k not in seen_ep:
+                seen_ep.add(k)
+                deduped_eps.append(ep)
+        entry_points = deduped_eps
+
+        # ── Attack classes ────────────────────────────────────────────────────
+        attack_classes: list[dict] = []
+
+        has_object_ref_pages = [p.url for p in pages if p.has_object_ref]
+        has_business_logic_pages = [p.url for p in pages if p.has_business_logic]
+        auth_pages = trust_zones["user"] + trust_zones["admin"]
+        admin_intel = [i for i in intel_items if "/admin" in _intel_text(i).lower()]
+        sensitive_fields = [i for i in intel_items if i.kind == "response_field" and _looks_sensitive_name(i.key)]
+        storage_tokens = [i for i in intel_items if i.kind == "storage_key" and _looks_tokenish(i.key, i.value)]
+        public_config = [i for i in intel_items if _looks_like_public_config_endpoint(i)]
+        input_fields = [i for i in intel_items if i.kind in {"input", "form"} and _looks_attackable_input(i.key, i.value)]
+        idor_items = [i for i in intel_items if _looks_like_object_reference(i)]
+
+        if has_object_ref_pages or idor_items:
+            attack_classes.append({
+                "id": "idor",
+                "owasp": "A01",
+                "priority": 90,
+                "rationale": "Object-reference pages and id-bearing intel suggest IDOR opportunities.",
+                "entry_point_urls": has_object_ref_pages[:20] + [i.url for i in idor_items[:10] if i.url],
+            })
+        if sensitive_fields:
+            attack_classes.append({
+                "id": "data_exposure",
+                "owasp": "A02",
+                "priority": 92,
+                "rationale": f"{len(sensitive_fields)} response fields with credential/secret-like names.",
+                "entry_point_urls": [i.url for i in sensitive_fields[:20] if i.url],
+            })
+        if input_fields:
+            attack_classes.append({
+                "id": "injection",
+                "owasp": "A03",
+                "priority": 76,
+                "rationale": f"{len(input_fields)} attackable input parameters found.",
+                "entry_point_urls": [ep["url"] for ep in entry_points if ep["params"]][:20],
+            })
+        if has_business_logic_pages:
+            attack_classes.append({
+                "id": "business_logic",
+                "owasp": "A04",
+                "priority": 84,
+                "rationale": f"{len(has_business_logic_pages)} pages flagged as business-logic surfaces.",
+                "entry_point_urls": has_business_logic_pages[:20],
+            })
+        if public_config:
+            attack_classes.append({
+                "id": "misconfiguration",
+                "owasp": "A05",
+                "priority": 88,
+                "rationale": f"{len(public_config)} public operational/config endpoints detected.",
+                "entry_point_urls": [i.url or i.value for i in public_config[:20] if i.url or i.value],
+            })
+        if auth_pages or storage_tokens:
+            attack_classes.append({
+                "id": "auth",
+                "owasp": "A07",
+                "priority": 85,
+                "rationale": (
+                    f"{len(auth_pages)} authenticated pages"
+                    + (f"; {len(storage_tokens)} token-like storage keys" if storage_tokens else "") + "."
+                ),
+                "entry_point_urls": auth_pages[:20],
+            })
+        if admin_intel:
+            attack_classes.append({
+                "id": "privilege_escalation",
+                "owasp": "A01",
+                "priority": 86,
+                "rationale": f"{len(admin_intel)} admin-path intel items detected.",
+                "entry_point_urls": [i.url for i in admin_intel[:20] if i.url],
+            })
+        attack_classes.sort(key=lambda c: -c["priority"])
+
+        # ── Tech stack ────────────────────────────────────────────────────────
+        tech_stack: list[str] = []
+        tech_markers = {
+            "react": "React", "vue": "Vue.js", "angular": "Angular",
+            "next.js": "Next.js", "nuxt": "Nuxt", "django": "Django",
+            "flask": "Flask", "fastapi": "FastAPI", "rails": "Rails",
+            "spring": "Spring", "express": "Express", "laravel": "Laravel",
+            "graphql": "GraphQL", "jwt": "JWT", "oauth": "OAuth",
+            "swagger": "Swagger/OpenAPI", "openapi": "Swagger/OpenAPI",
+        }
+        combined_intel_text = " ".join(_intel_text(i) for i in intel_items).lower()
+        for marker, label in tech_markers.items():
+            if marker in combined_intel_text and label not in tech_stack:
+                tech_stack.append(label)
+
+        # ── Credential roles ──────────────────────────────────────────────────
+        credential_roles: list[str] = []
+        for item in intel_items:
+            if item.kind == "credential" and item.key and item.key not in credential_roles:
+                credential_roles.append(item.key)
+        for page in pages:
+            if page.accessible_by and page.accessible_by != "[]":
+                try:
+                    for cred_id in json.loads(page.accessible_by):
+                        label = f"cred:{cred_id}"
+                        if label not in credential_roles:
+                            credential_roles.append(label)
+                except Exception:
+                    pass
+
+        summary = {
+            "trust_zones": trust_zones,
+            "entry_points": entry_points,
+            "attack_classes": attack_classes,
+            "business_logic_pages": has_business_logic_pages,
+            "tech_stack": tech_stack,
+            "credential_roles": credential_roles,
+        }
+
+        run = s.get(TestRun, run_id)
+        if run is not None:
+            run.recon_summary = json.dumps(summary)
+            s.add(run)
+            s.commit()
+    finally:
+        if own_session:
+            s.close()
+
+    return summary
+
+
+def seed_task_graph(
+    run_id: int,
+    session: Session | None = None,
+    summary: dict | None = None,
+) -> dict[str, int]:
     """Create deterministic hypotheses/tasks from target intelligence.
 
-    This gives the dynamic scanner an explicit work queue before the LLM starts
-    making requests, and keeps that queue visible in the UI.
+    When *summary* is provided (produced by ``build_recon_summary``), the
+    attack_classes in the summary drive hypothesis generation.  Otherwise
+    the legacy heuristic ``_build_seed_specs`` is used (backward-compatible
+    for runs that pre-date the recon summary).
     """
     created_hypotheses = 0
     created_tasks = 0
@@ -53,7 +252,10 @@ def seed_task_graph(run_id: int, session: Session | None = None) -> dict[str, in
             .order_by(CrawledPage.depth, CrawledPage.url)
         ))
 
-        specs = _build_seed_specs(intel, pages)
+        if summary is not None:
+            specs = _build_seed_specs_from_summary(summary, intel, pages)
+        else:
+            specs = _build_seed_specs(intel, pages)
         for spec in specs:
             hypothesis, is_new = _ensure_hypothesis(
                 s,
@@ -255,6 +457,90 @@ def mark_related_hypothesis_confirmed(run_id: int, task_id: int | None) -> None:
         s.add(hypothesis)
         s.commit()
     _emit_update(run_id, "hypothesis_confirmed", {"task_id": task_id})
+
+
+def _build_seed_specs_from_summary(
+    summary: dict,
+    intel: list[TargetIntelItem],
+    pages: list[CrawledPage],
+) -> list[dict]:
+    """Translate a ``ReconSummary`` dict into hypothesis+task spec dicts.
+
+    Each attack_class becomes a hypothesis; its entry_point_urls each become
+    a task.  Fallback: if attack_classes is empty, delegate to ``_build_seed_specs``.
+    """
+    attack_classes: list[dict] = summary.get("attack_classes") or []
+    if not attack_classes:
+        return _build_seed_specs(intel, pages)
+
+    # Build a lookup: url -> CrawledPage (for evidence)
+    page_by_url = {p.url: p for p in pages}
+    # Build a lookup: url -> TargetIntelItem (for evidence)
+    intel_by_url: dict[str, TargetIntelItem] = {}
+    for item in intel:
+        if item.url and item.url not in intel_by_url:
+            intel_by_url[item.url] = item
+
+    _OWASP_LABEL: dict[str, str] = {
+        "A01": "access control",
+        "A02": "data exposure",
+        "A03": "input validation",
+        "A04": "business logic",
+        "A05": "misconfiguration",
+        "A07": "authentication",
+    }
+
+    specs: list[dict] = []
+    for cls in attack_classes:
+        cls_id: str = cls.get("id", "unknown")
+        owasp: str = cls.get("owasp", "")
+        priority: int = int(cls.get("priority", 70))
+        rationale: str = cls.get("rationale", "")
+        ep_urls: list[str] = cls.get("entry_point_urls") or []
+        attack_area = _OWASP_LABEL.get(owasp, cls_id.replace("_", " "))
+
+        tasks: list[TaskSeed] = []
+        for url in ep_urls[:MAX_TASKS_PER_HYPOTHESIS]:
+            page = page_by_url.get(url)
+            intel_item = intel_by_url.get(url)
+            evidence = ""
+            if page and (page.llm_context or page.page_text):
+                evidence = _truncate(page.llm_context or page.page_text or "", 500)
+            elif intel_item and intel_item.evidence:
+                evidence = _truncate(intel_item.evidence, 500)
+            method = "GET"
+            if intel_item:
+                method = (intel_item.method or "GET").upper()
+            tasks.append(TaskSeed(
+                title=f"[{cls_id}] Test {_path_label(url)}",
+                description=rationale,
+                target_url=url,
+                method=method,
+                task_type=cls_id,
+                priority=priority,
+                evidence=evidence,
+                intel_id=intel_item.id if intel_item else None,
+            ))
+
+        if not tasks:
+            continue
+
+        related = sorted({t.intel_id for t in tasks if t.intel_id is not None})
+        specs.append({
+            "key": cls_id,
+            "title": f"{owasp} — {cls_id.replace('_', ' ').title()}",
+            "description": rationale,
+            "attack_area": attack_area,
+            "owasp_category": owasp,
+            "priority": priority,
+            "confidence": round(priority / 100.0, 2),
+            "rationale": rationale,
+            "created_from": "recon_summary",
+            "related_intel_ids": related,
+            "tasks": _dedupe_tasks(tasks),
+        })
+
+    return specs
 
 
 def _build_seed_specs(intel: list[TargetIntelItem], pages: list[CrawledPage]) -> list[dict]:

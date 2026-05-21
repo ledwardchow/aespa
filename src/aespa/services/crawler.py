@@ -108,6 +108,14 @@ class _CrawlShared:
 # ── Core orchestrator ─────────────────────────────────────────────────────────
 
 async def _do_crawl(run_id: int) -> None:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+    try:
+        await _do_crawl_inner(run_id)
+    finally:
+        llm_svc.clear_run_context()
+
+
+async def _do_crawl_inner(run_id: int) -> None:
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
         if run is None:
@@ -151,6 +159,15 @@ async def _do_crawl(run_id: int) -> None:
                 completed_at=None, error_message=None,
                 pages_discovered=shared.pages_done, current_url=base_url,
                 per_user_progress=None)
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Crawler",
+        "status": "active",
+        "current_task": "Crawling application…",
+        "outcome": None,
+        "_persist": True,
+    })
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
@@ -196,6 +213,15 @@ async def _do_crawl(run_id: int) -> None:
     events_svc.emit(run_id, {
         "type": "run_update", "status": final_status,
         "pages_discovered": shared.pages_done, "current_url": None,
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Crawler",
+        "status": "complete",
+        "current_task": "Crawl complete",
+        "outcome": f"{shared.pages_done} page(s) discovered",
+        "_persist": True,
     })
 
 
@@ -542,6 +568,7 @@ async def _crawl_as_credential(
 
         await browser.close()
 
+    _update_credential_progress(run_id, username, None, local_pages, done=True)
     events_svc.emit(run_id, {
         "type": "crawl_progress",
         "username": username,
@@ -555,6 +582,7 @@ async def _crawl_as_credential(
 
 def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     """Atomically create a stub CrawledPage and return its ID."""
+    from aespa.services.scope import register_scope_host_for_run
     with Session(get_engine()) as s:
         cp = CrawledPage(
             test_run_id=run_id, url=url, depth=depth,
@@ -564,7 +592,12 @@ def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
         s.commit()
         s.refresh(cp)
         s.expunge(cp)
-        return cp.id
+    # Fire-and-forget: doesn't matter if this fails
+    try:
+        register_scope_host_for_run(run_id, url)
+    except Exception:
+        pass
+    return cp.id
 
 
 def _update_page(page_id: int, **kwargs) -> None:
@@ -2087,7 +2120,12 @@ def _update_run(run_id: int, **kwargs) -> None:
 
 
 def _update_credential_progress(
-    run_id: int, username: Optional[str], current_url: str, pages_visited: int
+    run_id: int,
+    username: Optional[str],
+    current_url: str | None,
+    pages_visited: int,
+    *,
+    done: bool = False,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -2097,7 +2135,12 @@ def _update_credential_progress(
         if run is None:
             return
         progress = json.loads(run.per_user_progress or "{}")
-        progress[username] = {"current_url": current_url, "pages_visited": pages_visited}
+        progress[username] = {
+            "current_url": current_url,
+            "pages_visited": pages_visited,
+            "done": done,
+            "updated_at": _utcnow().isoformat(),
+        }
         run.per_user_progress = json.dumps(progress)
         s.add(run)
         s.commit()

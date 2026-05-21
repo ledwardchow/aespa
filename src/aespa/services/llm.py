@@ -18,6 +18,133 @@ from aespa.models import LLMConfig
 log = logging.getLogger("aespa.llm")
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
+_run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
+_emit_fn_var: ContextVar[Any | None] = ContextVar('_emit_fn', default=None)
+
+# Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
+_run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
+
+# Tracks which run_ids have already been seeded from DB this process lifetime.
+_run_token_seeded: set[int] = set()
+
+
+def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
+    """Load persisted token usage for a run from the DB (best-effort)."""
+    try:
+        from aespa.db import get_engine
+        from aespa.models import TestRun
+        from sqlmodel import Session as _Session
+        with _Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run and run.token_usage_json:
+                return json.loads(run.token_usage_json)
+    except Exception:
+        pass
+    return {}
+
+
+def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
+    """Write the current in-memory bucket for a run back to the DB (best-effort)."""
+    try:
+        from aespa.db import get_engine
+        from aespa.models import TestRun
+        from sqlmodel import Session as _Session
+        with _Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run:
+                run.token_usage_json = json.dumps(bucket)
+                s.add(run)
+                s.commit()
+    except Exception:
+        pass
+
+
+def set_run_context(run_id: int, emit_fn: Any) -> None:
+    """Set the current run context so LLM calls track token usage automatically.
+
+    Seeds the in-memory bucket from DB on first call for this run_id so that
+    token counts accumulate correctly across server restarts.
+    """
+    _run_id_var.set(run_id)
+    _emit_fn_var.set(emit_fn)
+    if run_id not in _run_token_seeded:
+        existing = _load_bucket_from_db(run_id)
+        if existing:
+            # Merge DB data into the (possibly already-populated) in-memory bucket.
+            bucket = _run_token_usage.setdefault(run_id, {})
+            for model, counts in existing.items():
+                if model not in bucket:
+                    bucket[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+                for k in ("input", "output", "cache_read", "cache_write"):
+                    bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
+        _run_token_seeded.add(run_id)
+
+
+def clear_run_context() -> None:
+    _run_id_var.set(None)
+    _emit_fn_var.set(None)
+
+
+def _record_usage(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> None:
+    """Accumulate token counts for the active run and fire a SSE event."""
+    run_id = _run_id_var.get()
+    if run_id is None:
+        return
+    bucket = _run_token_usage.setdefault(run_id, {})
+    entry = bucket.setdefault(model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    entry["input"] += input_tokens
+    entry["output"] += output_tokens
+    entry["cache_read"] += cache_read_tokens
+    entry["cache_write"] += cache_write_tokens
+    _persist_bucket_to_db(run_id, bucket)
+    emit_fn = _emit_fn_var.get()
+    if emit_fn:
+        try:
+            total_in = sum(v["input"] for v in bucket.values())
+            total_out = sum(v["output"] for v in bucket.values())
+            total_cache_read = sum(v.get("cache_read", 0) for v in bucket.values())
+            total_cache_write = sum(v.get("cache_write", 0) for v in bucket.values())
+            emit_fn({
+                "type": "token_usage_update",
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "totals": {
+                    "total_input": total_in,
+                    "total_output": total_out,
+                    "total_cache_read": total_cache_read,
+                    "total_cache_write": total_cache_write,
+                    "by_model": {m: dict(v) for m, v in bucket.items()},
+                },
+            })
+        except Exception:
+            pass
+
+
+def get_run_token_usage(run_id: int) -> dict:
+    """Return accumulated token usage for a run.
+
+    If the run isn't in the in-memory dict (e.g. after a server restart), falls
+    back to the persisted DB value so the REST endpoint always returns data.
+    """
+    bucket = _run_token_usage.get(run_id)
+    if bucket is None:
+        bucket = _load_bucket_from_db(run_id)
+    return {
+        "total_input": sum(v["input"] for v in bucket.values()),
+        "total_output": sum(v["output"] for v in bucket.values()),
+        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
+        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
+        "by_model": {m: dict(v) for m, v in bucket.items()},
+    }
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -493,6 +620,11 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
         temperature=config.temperature,
         messages=[{"role": "user", "content": content}],
     )
+    _record_usage(config.model,
+                  getattr(resp.usage, "input_tokens", 0),
+                  getattr(resp.usage, "output_tokens", 0),
+                  cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+                  cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
@@ -517,6 +649,10 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
             temperature=config.temperature,
         ),
     )
+    _um = getattr(resp, "usage_metadata", None)
+    _record_usage(config.model,
+                  getattr(_um, "prompt_token_count", 0) if _um else 0,
+                  getattr(_um, "candidates_token_count", 0) if _um else 0)
     return resp.text or ""
 
 
@@ -550,6 +686,10 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -575,6 +715,10 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -605,6 +749,10 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -648,6 +796,10 @@ async def _azure_foundry_openai(
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0)
     return _extract_first_choice_text(resp)
 
 
@@ -705,6 +857,10 @@ async def _azure_foundry_anthropic(
         )
         resp.raise_for_status()
         data = resp.json()
+    _af_u = data.get("usage", {})
+    _record_usage(config.model, _af_u.get("input_tokens", 0), _af_u.get("output_tokens", 0),
+                  cache_read_tokens=_af_u.get("cache_read_input_tokens", 0),
+                  cache_write_tokens=_af_u.get("cache_creation_input_tokens", 0))
     return "".join(_content_part_text(block) for block in (data.get("content") or [])).strip()
 
 
@@ -742,7 +898,9 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         },
     }
     if not config.api_key:
+        import asyncio as _aio
         import boto3
+        from botocore.config import Config as _BotocoreConfig
 
         region = (
             os.getenv("AWS_REGION")
@@ -750,23 +908,35 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             or _bedrock_region_from_url(config.base_url)
         )
         profile = os.getenv("AWS_PROFILE")
-        session_kwargs = {"profile_name": profile} if profile else {}
-        session = boto3.Session(**session_kwargs)
-        from botocore.config import Config as _BotocoreConfig
         _proxy_url = _llm_proxy_var.get()
-        _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
-        client = session.client(
-            "bedrock-runtime",
-            region_name=region,
-            endpoint_url=config.base_url,
-            verify=not _proxy_url,
-            **{"config": _boto_cfg} if _boto_cfg else {},
-        )
-        data = client.converse(
-            modelId=config.model,
-            messages=payload["messages"],
-            inferenceConfig=payload["inferenceConfig"],
-        )
+        _model = config.model
+        _messages = payload["messages"]
+        _infer = payload["inferenceConfig"]
+        _endpoint = config.base_url
+
+        def _run_sync() -> dict:
+            _session_kwargs = {"profile_name": profile} if profile else {}
+            _session = boto3.Session(**_session_kwargs)
+            _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+            _client = _session.client(
+                "bedrock-runtime",
+                region_name=region,
+                endpoint_url=_endpoint,
+                verify=not _proxy_url,
+                **{"config": _boto_cfg} if _boto_cfg else {},
+            )
+            return _client.converse(
+                modelId=_model,
+                messages=_messages,
+                inferenceConfig=_infer,
+            )
+
+        loop = _aio.get_event_loop()
+        data = await loop.run_in_executor(None, _run_sync)
+        _bd_u = data.get("usage", {})
+        _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0),
+                      cache_read_tokens=_bd_u.get("cacheReadInputTokenCount", 0),
+                      cache_write_tokens=_bd_u.get("cacheWriteInputTokenCount", 0))
         return _extract_bedrock_text(data)
 
     model_id = quote(config.model, safe="")
@@ -780,7 +950,12 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
     async with _make_llm_http_client(timeout=120) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
-        return _extract_bedrock_text(resp.json())
+        _resp_data = resp.json()
+    _bd_u2 = _resp_data.get("usage", {})
+    _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0),
+                  cache_read_tokens=_bd_u2.get("cacheReadInputTokenCount", 0),
+                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokenCount", 0))
+    return _extract_bedrock_text(_resp_data)
 
 
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
@@ -1116,14 +1291,23 @@ async def analyse_probes(
     config: LLMConfig,
     url: str,
     results: list[dict],
+    on_batch_complete=None,
 ) -> list[dict]:
-    """Ask the LLM to analyse probe results and return a list of findings."""
+    """Ask the LLM to analyse probe results and return a list of findings.
+
+    on_batch_complete: optional async callable(turn_num, batch_size, batch_findings)
+        called after each LLM batch completes.
+    """
     if not results:
         return []
 
     findings: list[dict] = []
-    for batch in _chunk_probe_results(results):
-        findings.extend(await _analyse_probe_batch(config, url, batch))
+    batches = _chunk_probe_results(results)
+    for turn_num, batch in enumerate(batches, start=1):
+        batch_findings = await _analyse_probe_batch(config, url, batch)
+        findings.extend(batch_findings)
+        if on_batch_complete is not None:
+            await on_batch_complete(turn_num, len(batch), batch_findings)
     return findings
 
 
@@ -2067,6 +2251,15 @@ _THINKING_AGENT_SYSTEM = (
     "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
     "No duplicates.\n"
+    "- agent_dispatch: delegate a confirmed high-confidence lead to a Specialist Agent that "
+    "runs concurrently so you can continue covering other attack surface. Call this as soon "
+    "as you have concrete evidence of a testable vector — e.g. a confirmed stored-XSS sink "
+    "with a verified injection point, an IDOR primitive where you can enumerate a foreign "
+    "object ID, an auth bypass with a reproducible proof, or a SQLi indicator with a "
+    "distinctive error or timing response. Set priority 7–10 based on severity. "
+    "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
+    "cors, crypto, config. Dispatch immediately — do NOT keep probing the same lead "
+    "yourself after dispatching.\n"
     "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
@@ -2266,6 +2459,55 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "required": ["summary"],
         },
     },
+    {
+        "name": "agent_dispatch",
+        "description": (
+            "Dispatch a Specialist Agent to deep-dive on a strong, specific lead. "
+            "Use when you have identified a high-confidence attack vector that warrants "
+            "focused follow-up investigation beyond a single HTTP probe — for example, "
+            "a confirmed IDOR primitive, an exposed signing secret, or a business-logic "
+            "path with suspicious parameter handling. The specialist runs concurrently "
+            "and reports back via context tools. Do not dispatch on speculative leads; "
+            "only dispatch after gathering concrete evidence of a testable vector."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attack_class": {
+                    "type": "string",
+                    "description": (
+                        "One of: idor, auth_bypass, sqli, xss, business_logic, "
+                        "ssrf, path_traversal, cors, crypto, config"
+                    ),
+                },
+                "target_url": {
+                    "type": "string",
+                    "description": "The specific URL the specialist should focus on.",
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "Concrete evidence from prior tool results that justifies "
+                        "dispatching this specialist."
+                    ),
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Estimated priority 1-10 for this lead.",
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["attack_class", "target_url", "rationale"],
+        },
+    },
+]
+
+# Subset of tools available to specialist agents — no agent_dispatch (prevent
+# recursive dispatch), no JWT/credential/register tools (specialist is narrowly
+# focused on a specific lead).
+SPECIALIST_AGENT_TOOLS: list[dict] = [
+    t for t in THINKING_AGENT_TOOLS
+    if t["name"] in {"http_request", "browser", "context_tool", "write_finding", "done"}
 ]
 
 
@@ -2273,6 +2515,7 @@ async def _call_with_tools(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
+    tools: list[dict] | None = None,
 ) -> "tuple[list[dict], str, Any]":
     """Call an LLM with tool definitions.
 
@@ -2287,6 +2530,7 @@ async def _call_with_tools(
     and raw_content_for_history is appended as the assistant message (always in
     Anthropic-format so the growing messages list stays consistent).
     """
+    _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     # ── Anthropic (direct) ────────────────────────────────────────────────────
     if config.provider == "anthropic":
         import anthropic as _ant
@@ -2296,8 +2540,8 @@ async def _call_with_tools(
             model=config.model,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
-            system=system_message,
-            tools=THINKING_AGENT_TOOLS,
+            system=[{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            tools=_active_tools,
             messages=messages,
         )
         blocks = [
@@ -2310,6 +2554,11 @@ async def _call_with_tools(
             }
             for b in (resp.content or [])
         ]
+        _record_usage(config.model,
+                      getattr(resp.usage, "input_tokens", 0),
+                      getattr(resp.usage, "output_tokens", 0),
+                      cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+                      cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
         return blocks, resp.stop_reason or "end_turn", resp.content
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
@@ -2318,8 +2567,8 @@ async def _call_with_tools(
             "model": config.model,
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
-            "system": system_message,
-            "tools": THINKING_AGENT_TOOLS,
+            "system": [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            "tools": _active_tools,
             "messages": messages,
         }
         hdrs = {
@@ -2347,6 +2596,10 @@ async def _call_with_tools(
             }
             for b in content
         ]
+        _cwt_u = data.get("usage", {})
+        _record_usage(config.model, _cwt_u.get("input_tokens", 0), _cwt_u.get("output_tokens", 0),
+                      cache_read_tokens=_cwt_u.get("cache_read_input_tokens", 0),
+                      cache_write_tokens=_cwt_u.get("cache_creation_input_tokens", 0))
         return blocks, data.get("stop_reason") or "end_turn", content
 
     # ── AWS Bedrock (Converse API with toolConfig) ────────────────────────────
@@ -2362,7 +2615,7 @@ async def _call_with_tools(
                         "inputSchema": {"json": t.get("input_schema", {"type": "object"})},
                     }
                 }
-                for t in THINKING_AGENT_TOOLS
+                for t in _active_tools
             ]
         }
 
@@ -2498,6 +2751,10 @@ async def _call_with_tools(
             }}
             for b in blocks
         ]
+        _bdt_u = data.get("usage", {})
+        _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0),
+                      cache_read_tokens=_bdt_u.get("cacheReadInputTokenCount", 0),
+                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokenCount", 0))
         return blocks, stop_reason, raw_content_ant
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
@@ -2513,7 +2770,7 @@ async def _call_with_tools(
                     "parameters": t.get("input_schema", {"type": "object"}),
                 },
             }
-            for t in THINKING_AGENT_TOOLS
+            for t in _active_tools
         ]
 
     def _ant_messages_to_openai(msgs: list[dict]) -> list[dict]:
@@ -2616,6 +2873,10 @@ async def _call_with_tools(
                 "text": None,
             })
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
+        _oai_u = getattr(resp, "usage", None)
+        _record_usage(config.model,
+                      getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0)
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
@@ -2625,7 +2886,7 @@ async def _call_with_tools(
 
         def _ant_tools_to_gemini() -> list:
             fn_decls = []
-            for t in THINKING_AGENT_TOOLS:
+            for t in _active_tools:
                 schema = t.get("input_schema") or {}
                 fn_decls.append(
                     _gtypes.FunctionDeclaration(
@@ -2700,6 +2961,10 @@ async def _call_with_tools(
             if any(b["type"] == "tool_use" for b in blocks)
             else "end_turn"
         )
+        _g_um = getattr(g_resp, "usage_metadata", None)
+        _record_usage(config.model,
+                      getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
+                      getattr(_g_um, "candidates_token_count", 0) if _g_um else 0)
         return blocks, stop_reason, blocks
 
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
@@ -2716,6 +2981,7 @@ async def thinking_agentic_loop(
     done_check=None,
     resume_messages: list[dict] | None = None,
     on_checkpoint=None,
+    tools: list[dict] | None = None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -2742,7 +3008,8 @@ async def thinking_agentic_loop(
     final_summary = ""
     consecutive_text_only_turns = 0
 
-    while True:
+    try:
+      while True:
         if stop_check and stop_check():
             break
 
@@ -2785,7 +3052,7 @@ async def thinking_agentic_loop(
             _step_no = tool_call_count + 1
             _t_llm = time.monotonic()
             _llm_fut = asyncio.ensure_future(
-                _call_with_tools(config, system_message, messages)
+                _call_with_tools(config, system_message, messages, tools=tools)
             )
             while True:
                 _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
@@ -2811,6 +3078,26 @@ async def thinking_agentic_loop(
                 "thinking_agentic_loop: API error at step %d: %s",
                 tool_call_count + 1, exc,
             )
+            _exc_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else type(exc).__name__
+            _is_expired = "ExpiredToken" in _exc_code or "ExpiredToken" in type(exc).__name__ or "expired" in str(exc).lower()
+            if emit_fn:
+                try:
+                    if _is_expired:
+                        _msg = (
+                            f"Step {tool_call_count + 1}: AWS credentials have expired. "
+                            "Please refresh your AWS credentials and resume the pentest."
+                        )
+                    else:
+                        _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                    emit_fn({
+                        "type": "scanner_phase",
+                        "phase": "llm_response",
+                        "status": "error",
+                        "message": _msg,
+                        "data": {"step": tool_call_count + 1, "error": str(exc)},
+                    })
+                except Exception:
+                    pass
             break
 
         tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
@@ -2950,6 +3237,15 @@ async def thinking_agentic_loop(
 
         if session_done:
             break
+
+    finally:
+        # Save a final checkpoint on any exit — including CancelledError raised
+        # by task.cancel() — so the conversation state is always recoverable.
+        if on_checkpoint and len(messages) > 1:
+            try:
+                await on_checkpoint(messages)
+            except Exception:
+                pass
 
     return final_summary
 
@@ -3377,6 +3673,235 @@ async def thinking_next_action(
         except Exception:
             pass
     return action
+
+
+# ── Adversarial validator LLM config ─────────────────────────────────────────
+
+_ADVERSARIAL_VALIDATOR_SYSTEM = """\
+You are an adversarial security reviewer. A vulnerability scanner reported a potential finding.
+
+Your mandate is deliberately adversarial: your job is to DISPROVE the finding — to find the \
+innocent explanation, not the guilty one.
+
+You succeed when you find a concrete benign explanation for the evidence.
+You confirm only when you have exhausted all reasonable disproofs.
+
+Workflow
+────────
+1. Read the evidence with maximum scepticism. Identify the weakest assumption the scanner made \
+— the single assumption that, if wrong, makes this a false positive.
+2. Test that assumption first. Use the simplest, highest-information test you can devise.
+3. If your test provides a concrete innocent explanation → call done(verdict="false_positive"), \
+stating exactly what the innocent explanation is.
+4. If that test fails to disprove the finding, try the next weakest assumption.
+5. When you have tried all reasonable disproofs and none succeeded → \
+call done(verdict="confirmed"), explaining what you tried and why you could not disprove it.
+
+Hard rules
+──────────
+• A failed probe is NOT evidence of innocence. Network errors, rate-limiting, and \
+mis-specified probes are your problem to work around — keep trying with a different approach.
+• Never return false_positive based solely on failure to reproduce. You need a specific \
+innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
+so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
+• Stay focused on the finding's core claim. Do not explore adjacent attack surface.
+• You cannot write new findings. Your only output is a verdict via done().
+"""
+
+# Per-OWASP-category disproof strategies.  Keyed by two-character prefix (A01–A10).
+_DISPROOF_HINTS: dict[str, str] = {
+    "A01": """\
+Disproof checklist for A01 (Broken Access Control / IDOR):
+• Re-request the resource with no authentication at all (strip cookies and auth headers). \
+If you receive the same data, the endpoint may be intentionally public — not an access \
+control failure.
+• Verify the response is not a generic SPA shell (React/Vue root div + bundled script \
+tags with minimal readable text). A shell page is never sensitive data disclosure.
+• For IDOR claims: confirm the session token in the original evidence belonged to a \
+different user, not the legitimate owner. Session confusion in proxy tooling is a common \
+false-positive source.
+• Check whether the object ID appears in a public listing or URL. Sequential IDs on \
+public resources (blog posts, product catalogue) are not IDOR unless sensitive \
+user-specific data is returned.""",
+
+    "A02": """\
+Disproof checklist for A02 (Cryptographic Failures):
+• Missing HTTPS: the target may sit behind a TLS-terminating reverse proxy. Verify \
+whether the domain serves HTTPS on port 443 even if the scanner probed a direct backend \
+port (80 / 8080 / 8443).
+• Missing HSTS or weak cipher: re-request the URL directly without a proxy — intercepting \
+proxies sometimes strip or downgrade security headers. Use compare_responses against \
+a proxy-direct and a direct path if both are reachable.
+• Weak password storage: confirm the allegedly plaintext secret appears in a live response \
+body, not only in a static export or debug log that is already access-controlled.""",
+
+    "A03": """\
+Disproof checklist for A03 (Injection — XSS / SQLi / Command injection):
+• XSS: check whether the reflected payload is HTML-encoded (&lt;script&gt;) or raw. \
+HTML-encoding neutralises execution. Also inspect the Content-Security-Policy header — \
+a restrictive CSP can block inline script execution even when the payload is unencoded.
+• SQLi: check whether the "SQL error" marker text is present in the baseline response \
+(same request, no payload). Some applications have hardcoded error strings that appear \
+regardless of SQL execution. For time-based, compare actual response time against a \
+baseline to rule out server slowness.
+• Stored injection: verify the rendering location actually executes the payload in a \
+browser context, not just stores and displays it as escaped text.""",
+
+    "A04": """\
+Disproof checklist for A04 (Insecure Design / Business Logic):
+• Business logic flaws require precise preconditions. Reproduce the exact transaction \
+sequence: same starting state, same user role, same parameter values. Variation in \
+state often produces different results that look like a flaw but are not.
+• Check whether the "unexpected" behaviour is actually documented. Some applications \
+intentionally allow negative-value transactions, large transfers, or unusual role \
+combinations for operational reasons.
+• Race conditions require genuinely concurrent requests. Sequential probes cannot \
+reproduce them — if you suspect the scanner triggered one by accident, discard \
+the finding unless you can replicate it with actual concurrency.""",
+
+    "A05": """\
+Disproof checklist for A05 (Security Misconfiguration):
+• Missing headers (X-Frame-Options, CSP, HSTS): re-request the endpoint directly to rule \
+out proxy stripping. Check whether a meta-tag equivalent or a CDN-layer header covers \
+the same protection.
+• Exposed debug / admin endpoint: verify the endpoint returns meaningful sensitive data, \
+not just an HTTP 200 with an empty body or a redirect to a login page.
+• Default credentials: confirm the login actually succeeded with a privileged response \
+(token, redirect to authenticated area), not just an HTTP 200 on the login endpoint.""",
+
+    "A07": """\
+Disproof checklist for A07 (Identification and Authentication Failures):
+• Is the endpoint intentionally unauthenticated? Health checks (/health, /status, \
+/ping), metrics endpoints, OpenAPI specs (/swagger, /openapi.json), and CORS preflight \
+responses are typically public by design.
+• For JWT issues: was the signing secret actually extracted from an application response, \
+or is it a hypothesis? Verify by forging a token with the extracted secret and testing \
+whether it is accepted by a protected endpoint.
+• For missing auth on a sensitive endpoint: confirm the endpoint returns genuinely \
+sensitive data without a session, not just a 200 OK with a generic page body.
+• Was the scanner's "unauthenticated" request genuinely cookie-free? Some HTTP clients \
+carry session cookies from a prior authenticated step automatically.""",
+
+    "A10": """\
+Disproof checklist for A10 (Server-Side Request Forgery):
+• Does the application actually make an outbound request, or does it echo the URL in \
+an error message? Issue a request targeting a host you control and check for an inbound \
+connection to confirm real outbound activity.
+• Is the "internal IP response" genuinely from an internal host, or does the error \
+message coincidentally contain IP-like text in a static template?
+• Does the application validate or whitelist URLs before issuing requests? Test with \
+a valid external URL first to confirm the feature makes any outbound call at all, then \
+probe with an internal address.""",
+}
+
+
+def _disproof_hints_for_finding(owasp_category: str) -> str:
+    """Return category-specific disproof strategies or an empty string."""
+    cat = (owasp_category or "").upper()
+    for key, hints in _DISPROOF_HINTS.items():
+        if cat.startswith(key):
+            return hints
+    return ""
+
+
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def severity_meets_threshold(severity: str, min_severity: str) -> bool:
+    """Return True when *severity* is at or above *min_severity*."""
+    rank = _SEVERITY_RANK.get((severity or "low").lower(), 3)
+    threshold = _SEVERITY_RANK.get((min_severity or "low").lower(), 3)
+    return rank <= threshold
+
+
+# Validator-specific tool: compare two requests side-by-side.
+_COMPARE_RESPONSES_TOOL: dict = {
+    "name": "compare_responses",
+    "description": (
+        "Send two HTTP requests (baseline and test) and compare their responses. "
+        "Use to detect whether a payload causes a meaningful difference vs. a benign "
+        "baseline. Returns both full responses with a status and body diff summary. "
+        "This is the primary tool for disproving injection and access-control findings."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "baseline": {
+                "type": "object",
+                "description": "Baseline request — benign input or no payload.",
+                "properties": {
+                    "method": {"type": "string"},
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "body": {},
+                    "use_session": {"type": "string"},
+                },
+                "required": ["url"],
+            },
+            "test": {
+                "type": "object",
+                "description": "Test request — tampered or payload-bearing variant.",
+                "properties": {
+                    "method": {"type": "string"},
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "body": {},
+                    "use_session": {"type": "string"},
+                },
+                "required": ["url"],
+            },
+            "note": {
+                "type": "string",
+                "description": "What you expect this comparison to reveal.",
+            },
+        },
+        "required": ["baseline", "test"],
+    },
+}
+
+# Validator done tool — carries verdict, reasoning, confidence instead of summary.
+_VALIDATOR_DONE_TOOL: dict = {
+    "name": "done",
+    "description": (
+        "Call when you have reached a verdict. "
+        "Provide a specific reason grounded in your probe results."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["confirmed", "false_positive"],
+                "description": (
+                    "confirmed: you tried all reasonable disproofs and could not find "
+                    "an innocent explanation. "
+                    "false_positive: you found a concrete benign explanation."
+                ),
+            },
+            "reasoning": {
+                "type": "string",
+                "description": (
+                    "2–4 sentences. For false_positive: state the specific innocent "
+                    "explanation. For confirmed: state what you tried and why it failed."
+                ),
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+                "description": "Your confidence in the verdict.",
+            },
+        },
+        "required": ["verdict", "reasoning"],
+    },
+}
+
+# Tools available to the adversarial validator agent.
+VALIDATOR_AGENT_TOOLS: list[dict] = [
+    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "http_request"),
+    _COMPARE_RESPONSES_TOOL,
+    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "context_tool"),
+    _VALIDATOR_DONE_TOOL,
+]
 
 
 # ── Validation LLM functions ──────────────────────────────────────────────────
