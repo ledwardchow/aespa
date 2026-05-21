@@ -64,9 +64,11 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/stop")
-def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    import asyncio
     _get_run_or_404(session, run_id)
     scanner_svc.request_thinking_stop(run_id)
+    await asyncio.sleep(0)  # yield to event loop so queued SSE events are flushed
     return scanner_svc.get_thinking_scan_status(run_id)
 
 

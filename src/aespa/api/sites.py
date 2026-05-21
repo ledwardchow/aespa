@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel as _BaseModel
 from sqlmodel import Session
 
 from aespa.db import get_session
@@ -33,6 +34,7 @@ def _to_summary(site: Site) -> SiteSummary:
         created_at=site.created_at,
         updated_at=site.updated_at,
         credential_count=len(site.credentials),
+        scope_hosts=json.loads(site.scope_hosts or "[]"),
     )
 
 
@@ -47,6 +49,7 @@ def _to_detail(site: Site) -> SiteDetail:
         created_at=site.created_at,
         updated_at=site.updated_at,
         credentials=[CredentialOut.model_validate(c) for c in site.credentials],
+        scope_hosts=json.loads(site.scope_hosts or "[]"),
     )
 
 
@@ -94,6 +97,25 @@ def delete_site(site_id: int, session: Session = Depends(get_session)) -> None:
         sites_service.delete_site(session, site_id)
     except sites_service.SiteNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+class _ScopeHostsPayload(_BaseModel):
+    scope_hosts: list[str]
+
+
+@router.put("/{site_id}/scope-hosts")
+def update_scope_hosts(
+    site_id: int,
+    payload: _ScopeHostsPayload,
+    session: Session = Depends(get_session),
+) -> dict:
+    site = session.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+    site.scope_hosts = json.dumps(payload.scope_hosts)
+    session.add(site)
+    session.commit()
+    return {"scope_hosts": payload.scope_hosts}
 
 
 @router.post(

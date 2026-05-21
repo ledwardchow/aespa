@@ -41,6 +41,7 @@ class SiteBase(BaseModel):
     requires_auth: bool = False
     login_url: HttpUrl | None = None
     notes: str | None = None
+    scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
@@ -80,6 +81,7 @@ class SiteSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     credential_count: int
+    scope_hosts: list[str] = Field(default_factory=list)
 
 
 class SiteDetail(BaseModel):
@@ -94,6 +96,7 @@ class SiteDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]
+    scope_hosts: list[str] = Field(default_factory=list)
 
 
 # ── LLM config schemas ────────────────────────────────────────────────────
@@ -412,6 +415,56 @@ class BurpRestApiConfigOut(BurpRestApiConfigBase):
     updated_at: datetime
 
 
+# ── Specialist agent config schemas ──────────────────────────────────────────
+
+class SpecialistAgentConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = True
+    max_concurrent: int = Field(default=5, ge=0, le=20)
+    max_steps: int = Field(default=30, ge=1, le=200)
+    min_priority: int = Field(default=7, ge=1, le=10)
+    dispatch_idor: bool = True
+    dispatch_auth_bypass: bool = True
+    dispatch_sqli: bool = True
+    dispatch_xss: bool = True
+    dispatch_business_logic: bool = True
+    dispatch_ssrf: bool = True
+    dispatch_path_traversal: bool = True
+    dispatch_cors: bool = False
+    dispatch_crypto: bool = True
+    dispatch_config: bool = False
+    trigger_specialist_on_burp: bool = False
+
+
+class SpecialistAgentConfigIn(SpecialistAgentConfigBase):
+    pass
+
+
+class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
+    updated_at: datetime
+
+
+# ── Adversarial Validator config schemas ──────────────────────────────────────
+
+class ValidatorConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = True
+    max_steps: int = Field(default=20, ge=1, le=50)
+    min_severity: str = Field(default="low", pattern=r"^(critical|high|medium|low|info)$")
+    auto_validate_inline: bool = True
+    require_concrete_disproof: bool = True
+
+
+class ValidatorConfigIn(ValidatorConfigBase):
+    pass
+
+
+class ValidatorConfigOut(ValidatorConfigBase):
+    updated_at: datetime
+
+
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 class TestRunCreate(BaseModel):
@@ -464,6 +517,7 @@ class TestRunSummary(BaseModel):
     llm_config_id: int | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
+    scope_hosts: list[str] = Field(default_factory=list)
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
