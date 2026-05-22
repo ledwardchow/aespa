@@ -2853,7 +2853,7 @@ async def _call_with_tools(
             messages=oai_messages,
         )
         call_kwargs["tools"] = oai_tools
-        call_kwargs["tool_choice"] = "auto"
+        call_kwargs["tool_choice"] = "required"
         resp = await _create_chat_completion(oai_client, call_kwargs)
         choice = resp.choices[0]
         msg = choice.message
