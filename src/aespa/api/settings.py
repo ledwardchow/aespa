@@ -7,8 +7,12 @@ from aespa.db import get_session
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    LLMConfigExport,
     LLMConfigIn,
     LLMConfigOut,
+    LLMImportResult,
+    LLMProviderConfigIn,
+    LLMProviderConfigOut,
     PROVIDER_DEFAULT_MODELS,
     ScannerPolicyIn,
     ScannerPolicyOut,
@@ -31,7 +35,7 @@ def get_llm_config(session: Session = Depends(get_session)) -> LLMConfigOut | No
     cfg = settings_service.get_llm_config(session)
     if cfg is None:
         return None
-    return LLMConfigOut.model_validate(cfg)
+    return settings_service.llm_profile_out(session, cfg)
 
 
 @router.put("/llm", response_model=LLMConfigOut)
@@ -40,12 +44,12 @@ def upsert_llm_config(
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.upsert_llm_config(session, payload)
-    return LLMConfigOut.model_validate(cfg)
+    return settings_service.llm_profile_out(session, cfg)
 
 
 @router.get("/llm/profiles", response_model=list[LLMConfigOut])
 def list_llm_profiles(session: Session = Depends(get_session)) -> list[LLMConfigOut]:
-    return [LLMConfigOut.model_validate(cfg) for cfg in settings_service.list_llm_profiles(session)]
+    return [settings_service.llm_profile_out(session, cfg) for cfg in settings_service.list_llm_profiles(session)]
 
 
 @router.post("/llm/profiles", response_model=LLMConfigOut)
@@ -54,7 +58,7 @@ def create_llm_profile(
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.create_llm_profile(session, payload)
-    return LLMConfigOut.model_validate(cfg)
+    return settings_service.llm_profile_out(session, cfg)
 
 
 @router.put("/llm/profiles/{profile_id}", response_model=LLMConfigOut)
@@ -64,7 +68,7 @@ def update_llm_profile(
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.update_llm_profile(session, profile_id, payload)
-    return LLMConfigOut.model_validate(cfg)
+    return settings_service.llm_profile_out(session, cfg)
 
 
 @router.post("/llm/profiles/{profile_id}/activate", response_model=LLMConfigOut)
@@ -73,7 +77,7 @@ def activate_llm_profile(
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.activate_llm_profile(session, profile_id)
-    return LLMConfigOut.model_validate(cfg)
+    return settings_service.llm_profile_out(session, cfg)
 
 
 @router.delete("/llm/profiles/{profile_id}", status_code=204)
@@ -85,10 +89,56 @@ def delete_llm_profile(
     return Response(status_code=204)
 
 
+@router.get("/llm/providers", response_model=list[LLMProviderConfigOut])
+def list_llm_providers(session: Session = Depends(get_session)) -> list[LLMProviderConfigOut]:
+    return settings_service.list_llm_providers(session)
+
+
+@router.post("/llm/providers", response_model=LLMProviderConfigOut)
+def create_llm_provider(
+    payload: LLMProviderConfigIn,
+    session: Session = Depends(get_session),
+) -> LLMProviderConfigOut:
+    return settings_service.create_llm_provider(session, payload)
+
+
+@router.put("/llm/providers/{provider_id}", response_model=LLMProviderConfigOut)
+def update_llm_provider(
+    provider_id: int,
+    payload: LLMProviderConfigIn,
+    session: Session = Depends(get_session),
+) -> LLMProviderConfigOut:
+    return settings_service.update_llm_provider(session, provider_id, payload)
+
+
+@router.delete("/llm/providers/{provider_id}", status_code=204)
+def delete_llm_provider(
+    provider_id: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    settings_service.delete_llm_provider(session, provider_id)
+    return Response(status_code=204)
+
+
 @router.get("/llm/models")
 def default_models() -> dict[str, list[str]]:
     """Return well-known model names for each provider (for UI dropdowns)."""
     return PROVIDER_DEFAULT_MODELS
+
+
+@router.get("/llm/export", response_model=LLMConfigExport)
+def export_llm_config(session: Session = Depends(get_session)) -> LLMConfigExport:
+    """Export all LLM providers and profiles as a portable JSON bundle."""
+    return settings_service.export_llm_config(session)
+
+
+@router.post("/llm/import", response_model=LLMImportResult)
+def import_llm_config(
+    payload: LLMConfigExport,
+    session: Session = Depends(get_session),
+) -> LLMImportResult:
+    """Import LLM providers and profiles from a previously exported bundle."""
+    return settings_service.import_llm_config(session, payload)
 
 
 @router.get("/scanner-policy", response_model=ScannerPolicyOut)

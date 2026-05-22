@@ -5,13 +5,21 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
-from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, LLMConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
+from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, LLMConfig, LLMProviderConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    LLMConfigExport,
     LLMConfigIn,
+    LLMConfigOut,
+    LLMExportProfileItem,
+    LLMExportProviderItem,
+    LLMImportResult,
+    LLMProviderConfigIn,
+    LLMProviderConfigOut,
     RunScannerPolicyOut,
     ScannerPolicyIn,
     ScannerPolicyOut,
@@ -30,8 +38,63 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _provider_models(provider: LLMProviderConfig) -> list[str]:
+    models = _json_loads(provider.models_json, [])
+    return [m for m in models if isinstance(m, str) and m.strip()]
+
+
+def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
+    return LLMProviderConfigOut(
+        id=provider.id,
+        name=provider.name,
+        api_format=provider.api_format,
+        base_url=provider.base_url,
+        models=_provider_models(provider),
+        api_key=provider.api_key,
+        updated_at=provider.updated_at,
+    )
+
+
+def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
+    if cfg.provider_id is None:
+        return cfg
+    provider = session.get(LLMProviderConfig, cfg.provider_id)
+    if provider is None:
+        return cfg
+    set_committed_value(cfg, "provider", provider.api_format)
+    set_committed_value(cfg, "api_key", provider.api_key)
+    set_committed_value(cfg, "base_url", provider.base_url)
+    return cfg
+
+
+def llm_profile_out(session: Session, cfg: LLMConfig) -> LLMConfigOut:
+    resolved = _profile_with_provider(session, cfg)
+    provider_name = None
+    if cfg.provider_id is not None:
+        provider = session.get(LLMProviderConfig, cfg.provider_id)
+        provider_name = provider.name if provider is not None else None
+    return LLMConfigOut(
+        id=resolved.id,
+        name=resolved.name,
+        is_active=resolved.is_active,
+        provider_id=resolved.provider_id,
+        provider_name=provider_name,
+        provider=resolved.provider,
+        api_key=resolved.api_key,
+        base_url=resolved.base_url,
+        model=resolved.model,
+        max_tokens=resolved.max_tokens,
+        temperature=resolved.temperature,
+        use_vision=resolved.use_vision,
+        updated_at=resolved.updated_at,
+    )
+
+
 def get_llm_config(session: Session) -> LLMConfig | None:
-    return session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
+    cfg = session.exec(select(LLMConfig).where(LLMConfig.is_active == True)).first()  # noqa: E712
+    if cfg is None:
+        return None
+    return _profile_with_provider(session, cfg)
 
 
 def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
@@ -39,7 +102,7 @@ def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None
     if run.llm_config_id is not None:
         cfg = session.get(LLMConfig, run.llm_config_id)
         if cfg is not None:
-            return cfg
+            return _profile_with_provider(session, cfg)
     return get_llm_config(session)
 
 
@@ -53,6 +116,50 @@ def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
 
 def list_llm_profiles(session: Session) -> list[LLMConfig]:
     return list(session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).all())
+
+
+def list_llm_providers(session: Session) -> list[LLMProviderConfigOut]:
+    providers = session.exec(select(LLMProviderConfig).order_by(LLMProviderConfig.updated_at.desc())).all()
+    return [_provider_out(provider) for provider in providers]
+
+
+def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
+    provider = session.get(LLMProviderConfig, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="LLM provider not found")
+    return provider
+
+
+def create_llm_provider(session: Session, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+    provider = LLMProviderConfig()
+    return _apply_llm_provider(session, provider, payload)
+
+
+def update_llm_provider(session: Session, provider_id: int, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+    provider = get_llm_provider(session, provider_id)
+    return _apply_llm_provider(session, provider, payload)
+
+
+def delete_llm_provider(session: Session, provider_id: int) -> None:
+    provider = get_llm_provider(session, provider_id)
+    if session.exec(select(LLMConfig).where(LLMConfig.provider_id == provider_id)).first() is not None:
+        raise HTTPException(status_code=409, detail="Cannot delete an LLM provider that is used by a profile")
+    session.delete(provider)
+    session.commit()
+
+
+def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+    _ensure_unique_llm_provider_name(session, payload.name, provider.id)
+    provider.name = payload.name
+    provider.api_format = payload.api_format
+    provider.api_key = payload.api_key
+    provider.base_url = payload.base_url
+    provider.models_json = _json_dumps(payload.models)
+    provider.updated_at = _utcnow()
+    session.add(provider)
+    session.commit()
+    session.refresh(provider)
+    return _provider_out(provider)
 
 
 def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
@@ -95,13 +202,17 @@ def delete_llm_profile(session: Session, profile_id: int) -> None:
 
 def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool) -> LLMConfig:
     _ensure_unique_llm_profile_name(session, payload.name, cfg.id)
+    provider = get_llm_provider(session, payload.provider_id)
+    if payload.model not in _provider_models(provider):
+        raise HTTPException(status_code=422, detail="Model is not configured for the selected provider")
 
     cfg.name        = payload.name
     cfg.is_active   = bool(activate)
 
-    cfg.provider    = payload.provider
-    cfg.api_key     = payload.api_key
-    cfg.base_url    = payload.base_url
+    cfg.provider_id = payload.provider_id
+    cfg.provider    = provider.api_format
+    cfg.api_key     = provider.api_key
+    cfg.base_url    = provider.base_url
     cfg.model       = payload.model
     cfg.max_tokens  = payload.max_tokens
     cfg.temperature = payload.temperature
@@ -125,6 +236,13 @@ def _ensure_unique_llm_profile_name(session: Session, name: str, current_id: int
     for profile in session.exec(select(LLMConfig)).all():
         if profile.id != current_id and profile.name.strip().casefold() == normalized:
             raise HTTPException(status_code=409, detail="An LLM settings profile with that name already exists")
+
+
+def _ensure_unique_llm_provider_name(session: Session, name: str, current_id: int | None) -> None:
+    normalized = name.strip().casefold()
+    for provider in session.exec(select(LLMProviderConfig)).all():
+        if provider.id != current_id and provider.name.strip().casefold() == normalized:
+            raise HTTPException(status_code=409, detail="An LLM provider with that name already exists")
 
 
 def _json_loads(value: str | None, fallback):
@@ -353,3 +471,140 @@ def upsert_adversarial_validator_config(
     session.commit()
     session.refresh(cfg)
     return get_adversarial_validator_config(session)
+
+
+# ── LLM config export / import ────────────────────────────────────────────────
+
+def export_llm_config(session: Session) -> LLMConfigExport:
+    """Serialize all LLM providers and profiles to a portable dict."""
+    providers_db = session.exec(select(LLMProviderConfig).order_by(LLMProviderConfig.id)).all()
+    profiles_db = session.exec(select(LLMConfig).order_by(LLMConfig.id)).all()
+
+    provider_id_to_name: dict[int, str] = {p.id: p.name for p in providers_db if p.id is not None}
+
+    provider_items = [
+        LLMExportProviderItem(
+            name=p.name,
+            api_format=p.api_format,
+            base_url=p.base_url,
+            models=_provider_models(p),
+            api_key=p.api_key,
+        )
+        for p in providers_db
+    ]
+
+    profile_items = [
+        LLMExportProfileItem(
+            name=c.name,
+            provider_name=provider_id_to_name.get(c.provider_id, "") if c.provider_id is not None else "",
+            model=c.model,
+            max_tokens=c.max_tokens,
+            temperature=c.temperature,
+            use_vision=c.use_vision,
+            is_active=c.is_active,
+        )
+        for c in profiles_db
+    ]
+
+    return LLMConfigExport(
+        exported_at=_utcnow(),
+        providers=provider_items,
+        profiles=profile_items,
+    )
+
+
+def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportResult:
+    """Merge exported LLM providers and profiles into the database.
+
+    Matching is done by name (case-insensitive).
+    Existing records are updated; missing ones are created.
+    """
+    result = LLMImportResult()
+
+    # ── 1. Upsert providers ───────────────────────────────────────────────────
+    provider_name_to_id: dict[str, int] = {}
+    existing_providers = {p.name.strip().casefold(): p for p in session.exec(select(LLMProviderConfig)).all()}
+
+    for item in payload.providers:
+        key = item.name.strip().casefold()
+        if not item.models:
+            raise HTTPException(status_code=422, detail=f"Provider '{item.name}' has no models listed")
+        provider = existing_providers.get(key)
+        if provider is None:
+            provider = LLMProviderConfig()
+            result.providers_created += 1
+        else:
+            result.providers_updated += 1
+        provider.name = item.name
+        provider.api_format = item.api_format
+        provider.base_url = item.base_url
+        provider.api_key = item.api_key
+        provider.models_json = _json_dumps(item.models)
+        provider.updated_at = _utcnow()
+        session.add(provider)
+        session.flush()  # assign id before we need it
+        if provider.id is not None:
+            provider_name_to_id[item.name.strip().casefold()] = provider.id
+
+    session.flush()
+
+    # refresh the map with any newly-created providers
+    for p in session.exec(select(LLMProviderConfig)).all():
+        if p.id is not None:
+            provider_name_to_id.setdefault(p.name.strip().casefold(), p.id)
+
+    # ── 2. Upsert profiles ────────────────────────────────────────────────────
+    existing_profiles = {c.name.strip().casefold(): c for c in session.exec(select(LLMConfig)).all()}
+
+    imported_active_name: str | None = None
+    for item in payload.profiles:
+        provider_key = item.provider_name.strip().casefold()
+        provider_id = provider_name_to_id.get(provider_key)
+        if provider_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Profile '{item.name}' references unknown provider '{item.provider_name}'",
+            )
+        provider = session.get(LLMProviderConfig, provider_id)
+        if provider is None:
+            raise HTTPException(status_code=422, detail=f"Provider '{item.provider_name}' not found after import")
+        if item.model not in _provider_models(provider):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Model '{item.model}' is not in the model list for provider '{item.provider_name}'",
+            )
+
+        key = item.name.strip().casefold()
+        cfg = existing_profiles.get(key)
+        if cfg is None:
+            cfg = LLMConfig()
+            result.profiles_created += 1
+        else:
+            result.profiles_updated += 1
+
+        cfg.name = item.name
+        cfg.provider_id = provider_id
+        cfg.provider = provider.api_format
+        cfg.api_key = provider.api_key
+        cfg.base_url = provider.base_url
+        cfg.model = item.model
+        cfg.max_tokens = item.max_tokens
+        cfg.temperature = item.temperature
+        cfg.use_vision = item.use_vision
+        cfg.is_active = False  # we handle activation below
+        cfg.updated_at = _utcnow()
+        session.add(cfg)
+
+        if item.is_active:
+            imported_active_name = item.name.strip().casefold()
+
+    session.flush()
+
+    # ── 3. Activate the designated profile (if any) ───────────────────────────
+    if imported_active_name is not None:
+        for cfg in session.exec(select(LLMConfig)).all():
+            cfg.is_active = cfg.name.strip().casefold() == imported_active_name
+            session.add(cfg)
+
+    session.commit()
+    return result

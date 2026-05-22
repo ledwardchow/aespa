@@ -46,7 +46,7 @@ from aespa.services import crawler as crawler_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import task_graph as task_graph_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
 
@@ -198,6 +198,10 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
+    if payload.llm_config_id is not None:
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
     name = payload.name or _auto_name(session, site_id)
     policy = settings_service.get_scanner_policy(session)
     run = TestRun(
@@ -385,7 +389,7 @@ async def start_test_run(
             status_code=409,
             detail=f"Cannot start a run with status '{run.status}'",
         )
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
@@ -408,7 +412,7 @@ async def restart_test_run(
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Stop the run before restarting.")
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
