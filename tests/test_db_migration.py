@@ -255,3 +255,169 @@ def test_migrate_creates_scanner_session_table():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_migrate_splits_llm_providers_and_resets_run_profile_overrides():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE llm_config RENAME TO llm_config_new"))
+            conn.execute(text("""
+                CREATE TABLE llm_config (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT 'Default',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    provider TEXT NOT NULL DEFAULT 'anthropic',
+                    api_key TEXT,
+                    base_url TEXT,
+                    model TEXT NOT NULL DEFAULT 'claude-opus-4-5',
+                    max_tokens INTEGER NOT NULL DEFAULT 4096,
+                    temperature REAL NOT NULL DEFAULT 0.0,
+                    use_vision INTEGER NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO llm_config (
+                    id, name, is_active, provider, api_key, base_url, model,
+                    max_tokens, temperature, use_vision, updated_at
+                )
+                VALUES (
+                    42, 'Old Profile', 1, 'openai_compatible', 'sk-old',
+                    'http://localhost:1234/v1', 'llama-3', 4096, 0.0, 0,
+                    datetime('now')
+                )
+            """))
+            conn.execute(text("DROP TABLE llm_config_new"))
+            conn.execute(text("""
+                INSERT INTO site (id, name, base_url, requires_auth, created_at, updated_at)
+                VALUES (7, 'Site', 'https://target.local', 0, datetime('now'), datetime('now'))
+            """))
+            conn.execute(text("""
+                INSERT INTO test_run (
+                    id, site_id, name, status, use_screenshots, max_depth, max_pages,
+                    scan_mode, scanner_policy_json, pages_discovered, llm_config_id, created_at
+                )
+                VALUES (9, 7, 'Run', 'pending', 0, 3, 50, 'safe_active', '{}', 0, 42, datetime('now'))
+            """))
+            conn.commit()
+
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            profile = conn.execute(text("SELECT provider_id, provider, api_key, base_url FROM llm_config WHERE id = 42")).first()
+            provider = conn.execute(text("SELECT api_format, api_key, base_url, models_json FROM llm_provider_config")).first()
+            run = conn.execute(text("SELECT llm_config_id FROM test_run WHERE id = 9")).first()
+
+        assert profile[0] is not None
+        assert profile[1] == "openai_compatible"
+        assert profile[2] is None
+        assert profile[3] is None
+        assert provider[0] == "openai_compatible"
+        assert provider[1] == "sk-old"
+        assert provider[2] == "http://localhost:1234/v1"
+        assert provider[3] == '["llama-3"]'
+        assert run[0] is None
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_migrate_preserves_bedrock_provider_format():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            conn.execute(text("""
+                INSERT INTO llm_config (
+                    name, is_active, provider, api_key, base_url, model,
+                    max_tokens, temperature, use_vision, updated_at
+                )
+                VALUES (
+                    'Bedrock Profile', 1, 'bedrock', NULL, NULL,
+                    'global.anthropic.claude-sonnet-4-6', 4096, 0.0, 0,
+                    datetime('now')
+                )
+            """))
+            conn.commit()
+
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            profile = conn.execute(text("SELECT provider FROM llm_config WHERE name = 'Bedrock Profile'")).first()
+            provider = conn.execute(text("SELECT api_format, api_key, base_url FROM llm_provider_config")).first()
+
+        assert profile[0] == "bedrock"
+        assert provider == ("bedrock", None, None)
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_migrate_preserves_legacy_provider_formats():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        legacy_formats = [
+            "openai_compatible",
+            "openrouter",
+            "google",
+            "azure_openai",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
+        ]
+        with engine.connect() as conn:
+            for idx, provider in enumerate(legacy_formats, start=1):
+                conn.execute(text("""
+                    INSERT INTO llm_config (
+                        id, name, is_active, provider, api_key, base_url, model,
+                        max_tokens, temperature, use_vision, updated_at
+                    )
+                    VALUES (
+                        :id, :name, 0, :provider, 'key', 'https://example.test',
+                        :model, 4096, 0.0, 0, datetime('now')
+                    )
+                """), {
+                    "id": idx,
+                    "name": f"{provider} profile",
+                    "provider": provider,
+                    "model": f"{provider}-model",
+                })
+            conn.commit()
+
+        db._migrate(engine)
+
+        with engine.connect() as conn:
+            formats = {
+                row[0]
+                for row in conn.execute(text("SELECT api_format FROM llm_provider_config"))
+            }
+            profile_formats = {
+                row[0]
+                for row in conn.execute(text("SELECT provider FROM llm_config"))
+            }
+
+        assert set(legacy_formats) <= formats
+        assert set(legacy_formats) <= profile_formats
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
