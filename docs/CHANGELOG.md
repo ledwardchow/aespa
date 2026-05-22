@@ -4,17 +4,65 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [develop] JS Sink Analysis + Cross-User Stored XSS Detection
-**Branch:** `develop`
+## [PR #78] Fix Duplicate Issue Findings
+**Merged:** 2026-05-21 22:03 AEST | Branch: `develop`
 
-Adds a deterministic JS source analysis phase that identifies unsanitized `innerHTML` sinks before dynamic testing begins, and extends the stored XSS canary sweep to confirm cross-user exploitation when multiple credentials are configured.
+- Fixed duplicate issue findings being generated in the scanner service
+- Minor LLM service fix for deduplication logic
+- Version bump
 
+---
+
+## [PR #76] Hunter Agents — Specialist Agent & Attack Surface
+**Merged:** 2026-05-21 14:49 AEST | Branch: `hunter-agents`
+
+Major architectural release introducing specialist recon/hunter agents and attack surface mapping (33 files, 6,203 lines changed).
+
+- **Specialist agent** — dedicated recon agent implemented (`llm.py` +736 lines); runs targeted reconnaissance passes separate from the main scan loop
+- **Attack surface mapping** — new attack surface analysis phase implemented; surfaces endpoints, parameters, and inputs as structured intel before active testing begins
+- **Scope service** — new `scope.py` (126 lines) for managing scan scope boundaries and filtering out-of-scope targets
+- **Adversarial validator** significantly expanded (`validator.py` +307 lines) — improved adversarial payload validation logic
+- **Task graph** expanded (+296 lines) to coordinate specialist agent work alongside main scan tasks
+- **LLM service** major expansion (+736 lines) — new agent orchestration, recon prompts, and specialist invocation logic
+- **Scanner service** major expansion (+1,020 lines) — integrates specialist agents and attack surface phases into the scan lifecycle
+- **Web UI** major overhaul (`app.js` +1,149 lines, `styles.css` +169 lines) — agent status view, attack surface panel, improved activity log
+- **New API endpoints** — settings, sites, test runs, and traffic APIs extended
+- **New test suites** — adversarial validator (235 lines), recon summary (219 lines), specialist agent (269 lines)
+- **Architecture documentation** — `phase0-baseline.md` (362 lines) and `recon-hunter-plan.md` (807 lines) added under `docs/agent-architecture-revamp/`
+- Database models and schemas extended for new agent and attack surface data
+- Issue merge/deduplication methodology updated
+
+---
+
+## [PR #69] Scan Resume + XSS Improvements
+**Merged:** 2026-05-19 12:16 AEST | Branch: `develop`
+
+Adds a scan resume capability and a deterministic JS source analysis phase that identifies unsanitized `innerHTML` sinks before dynamic testing begins. Extends the stored XSS canary sweep to confirm cross-user exploitation when multiple credentials are configured.
+
+- **Scan resume** — new `checkpoint.py` service (145 lines) allows interrupted scans to resume from the last checkpoint rather than restarting
 - **JS sink analysis phase** (`_analyse_js_sinks`) — fetches every discovered JS file and regex-scans for `innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML` assignments lacking a sanitizer call (`escapeHtml`, `DOMPurify`, etc.); saves `TargetIntelItem(kind=xss_sink)` per unique unsanitized sink
 - **Info-severity findings** — one `ScanFinding(severity=info)` per identified sink written immediately to the findings panel, before dynamic confirmation
 - **Cross-user canary sweep** — second pass in `_stored_xss_sweep` that POSTs the canary to each sink's write endpoint (resolved via `kind=input` intel items), then re-fetches render pages as a victim session; any unescaped canary in the victim view produces a confirmed high-severity finding with cross-user evidence
 - **Thinking-scan bootstrap** — `_analyse_js_sinks` runs at the start of `_do_thinking_scan` so `xss_sink` items are available in `target_inventory` before the LLM loop begins
 - **WSTG XSS skill updated** — new Step 0 in the XSS skill block instructs the agent to consult `target_inventory` for `xss_sink` items, resolve their write endpoints via `kind=input` intel, and confirm with a victim-session browser check
-- **Architecture docs updated** — `architecture.md` updated to document the new scan phases, `xss_sink` intel kind, and cross-user sweep
+- **Architecture docs updated** — `architecture.md` updated to document the new scan phases, `xss_sink` intel kind, and cross-user sweep; `xss-fix.md` writeup added (162 lines)
+- Fix for long delay at end of scan before findings are written to the database
+- Fix for site import bug
+- LLM service expanded (+58 lines) for better XSS-related prompting
+- Database models and schemas extended to support checkpoint state
+- Web app improvements
+- Strix/Sonnet 4.6 comparison added to `results-comparison.md`
+
+---
+
+## [PR #67] Documentation Update
+**Merged:** 2026-05-16 22:09 AEST | Branch: `develop`
+
+- `architecture.md` significantly expanded (+162 lines) — updated to reflect current scan phases and LLM integration
+- `results-comparison.md` reorganised (+138 lines) — improved structure and added Strix/Sonnet 4.6 comparison
+- README updated
+- Screenshots refreshed (`activitylog.png`, `crawler.png`, `finding.png`)
+- LLM service minor update (+31 lines)
 
 ---
 

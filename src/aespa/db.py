@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from collections.abc import Iterator
 
 from sqlalchemy.engine import Engine
@@ -44,6 +46,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
@@ -75,6 +78,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
+    _ensure_llm_provider_config_migration(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
@@ -355,6 +359,119 @@ def _migrate(engine: Engine) -> None:
         "trigger_specialist_on_burp",
         "INTEGER NOT NULL DEFAULT 0",
     )
+
+
+def _ensure_llm_provider_config_migration(engine: Engine) -> None:
+    sql = __import__("sqlalchemy").text
+    with engine.connect() as conn:
+        conn.execute(sql("""
+            CREATE TABLE IF NOT EXISTS llm_provider_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                api_format TEXT NOT NULL DEFAULT 'anthropic',
+                api_key TEXT,
+                base_url TEXT,
+                models_json TEXT NOT NULL DEFAULT '[]',
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(sql("""
+            CREATE TABLE IF NOT EXISTS aespa_migration_state (
+                key TEXT PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+        applied = conn.execute(
+            sql("SELECT 1 FROM aespa_migration_state WHERE key = 'llm_provider_split_v1'")
+        ).first()
+        if applied is not None:
+            return
+
+        profiles = conn.execute(sql("""
+            SELECT id, name, provider, api_key, base_url, model, updated_at
+            FROM llm_config
+            WHERE provider_id IS NULL
+            ORDER BY id ASC
+        """)).mappings().all()
+        provider_by_key: dict[tuple[str, str | None, str | None], int] = {}
+        legacy_provider_formats = {
+            "anthropic",
+            "openai",
+            "openai_compatible",
+            "openrouter",
+            "google",
+            "bedrock",
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
+        }
+        for profile in profiles:
+            api_format = (
+                profile["provider"]
+                if profile["provider"] in legacy_provider_formats
+                else "openai"
+            )
+            base_url = profile["base_url"]
+            api_key = profile["api_key"]
+            key = (api_format, base_url, api_key)
+            provider_id = provider_by_key.get(key)
+            if provider_id is None:
+                label = {
+                    "anthropic": "Anthropic",
+                    "openai": "OpenAI",
+                    "openai_compatible": "OpenAI-compatible",
+                    "openrouter": "OpenRouter",
+                    "google": "Google",
+                    "bedrock": "Bedrock",
+                    "azure_openai": "Azure OpenAI",
+                    "azure_foundry": "Azure Foundry",
+                    "azure_foundry_openai": "Azure Foundry OpenAI",
+                    "azure_foundry_anthropic": "Azure Foundry Anthropic",
+                }.get(api_format, "OpenAI")
+                provider_name = f"{profile['name']} {label} Provider".strip()
+                result = conn.execute(sql("""
+                    INSERT INTO llm_provider_config (name, api_format, api_key, base_url, models_json, updated_at)
+                    VALUES (:name, :api_format, :api_key, :base_url, :models_json, COALESCE(:updated_at, datetime('now')))
+                """), {
+                    "name": provider_name,
+                    "api_format": api_format,
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "models_json": json.dumps([profile["model"]]),
+                    "updated_at": profile["updated_at"],
+                })
+                provider_id = int(result.lastrowid)
+                provider_by_key[key] = provider_id
+            else:
+                row = conn.execute(
+                    sql("SELECT models_json FROM llm_provider_config WHERE id = :id"),
+                    {"id": provider_id},
+                ).first()
+                models = json.loads(row[0] or "[]") if row is not None else []
+                if profile["model"] not in models:
+                    models.append(profile["model"])
+                    conn.execute(
+                        sql("UPDATE llm_provider_config SET models_json = :models_json WHERE id = :id"),
+                        {"id": provider_id, "models_json": json.dumps(models)},
+                    )
+
+            conn.execute(sql("""
+                UPDATE llm_config
+                SET provider_id = :provider_id,
+                    provider = :api_format,
+                    api_key = NULL,
+                    base_url = NULL
+                WHERE id = :profile_id
+            """), {"provider_id": provider_id, "api_format": api_format, "profile_id": profile["id"]})
+
+        # Existing historical runs that selected a profile should now fall back
+        # to the system default profile, as requested for this schema change.
+        conn.execute(sql("UPDATE test_run SET llm_config_id = NULL WHERE llm_config_id IS NOT NULL"))
+        conn.execute(sql("INSERT INTO aespa_migration_state (key) VALUES ('llm_provider_split_v1')"))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
