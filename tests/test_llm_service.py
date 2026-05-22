@@ -989,6 +989,55 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     }
 
 
+def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "ap-southeast-2",
+        "endpoint_url": None,
+    }.items() <= captured["client"].items()
+    assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+
+
 def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     captured: dict[str, str] = {}
 

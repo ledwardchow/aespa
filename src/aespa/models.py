@@ -47,7 +47,7 @@ class Credential(SQLModel, table=True):
 
 # ── LLM config ────────────────────────────────────────────────────────────────
 
-class LLMProvider(str, Enum):
+class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
     openai = "openai"
     openai_compatible = "openai_compatible"
@@ -60,6 +60,20 @@ class LLMProvider(str, Enum):
     azure_foundry_anthropic = "azure_foundry_anthropic"
 
 
+class LLMProviderConfig(SQLModel, table=True):
+    """Reusable LLM provider connection settings."""
+
+    __tablename__ = "llm_provider_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(default="Default Provider", index=True)
+    api_format: str = Field(default=LLMProviderAPI.anthropic)
+    api_key: Optional[str] = Field(default=None)
+    base_url: Optional[str] = Field(default=None)
+    models_json: str = Field(default="[]")
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class LLMConfig(SQLModel, table=True):
     """Saved LLM settings profile."""
 
@@ -68,7 +82,8 @@ class LLMConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(default="Default", index=True)
     is_active: bool = Field(default=False, index=True)
-    provider: str = Field(default=LLMProvider.anthropic)
+    provider_id: Optional[int] = Field(default=None, foreign_key="llm_provider_config.id", index=True)
+    provider: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")

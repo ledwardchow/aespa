@@ -10,6 +10,8 @@ Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparis
 * Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
 * Claude Code + Qwen3.6-35b-A3b (Abliterated)
 
+And a [comparison](docs/vuln-scanner-comparison.md) of a single vs multi-agent scan. A single-agent scan on Bank of Ed costs ~$15 USD with Sonnet 4.6, and a multi-agent scan costs ~$50 USD. The result is better, but not worth additional cost? 
+
 ## How does it work?
 
 See [Architecture](docs/architecture.md).
@@ -66,16 +68,10 @@ If you don't do this, it will use the values above as the default.
 
 ## LLM Configuration
 
-Open the app, go to **LLM Settings**, and configure one of:
+Open the app, go to **LLM Settings**, and configure:
 
-- **Anthropic** — requires an Anthropic API key
-- **OpenAI** — requires an OpenAI API key
-- **Google** - requires a Google API key
-- **AWS Bedrock** - requires a Bedrock API key, or you can use boto3 for authentication. Short-term key refresh currently not supported.
-- **OpenAI-compatible** — for local models via LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`); no API key required
-- **OpenRouter** — requires an OpenRouter API key (`sk-or-v1-...`) 
-
-
+- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and one or more model names. Built-in formats include Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Converse, Azure OpenAI, and Azure AI Foundry. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
+- **Profiles** — named runtime choices that select a provider and one model from that provider's configured model list. Runs can use the system default profile or a specific profile.
 
 
 ## Use
@@ -115,4 +111,3 @@ Findings
 Local (~24GB VRAM GPU required)
 * Qwen3.6-35b-A3b (Q3) - set output token cap to 10000
 * Qwen3-coder-30b - set output token cap to 10000
-
