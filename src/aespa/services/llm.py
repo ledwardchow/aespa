@@ -632,7 +632,14 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=config.api_key)
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+    )
+    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
     if screenshot_b64:
         parts.append(types.Part.from_bytes(
@@ -2934,7 +2941,14 @@ async def _call_with_tools(
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
 
-        g_client = genai.Client(api_key=config.api_key)
+        _g_proxy = _llm_proxy_var.get()
+        _g_http_opts: dict = {}
+        if config.base_url:
+            _g_http_opts["base_url"] = config.base_url
+        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+            verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+        )
+        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
         g_resp = await g_client.aio.models.generate_content(
