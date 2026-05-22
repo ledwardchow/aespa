@@ -2452,8 +2452,11 @@ THINKING_AGENT_TOOLS: list[dict] = [
     {
         "name": "done",
         "description": (
-            "Finish the assessment when key attack areas are covered "
-            "or steps are nearly exhausted."
+            "End the assessment only after all discovered endpoints, authentication flows, "
+            "IDOR surfaces, business logic paths, and injection points have been exhaustively "
+            "tested. Do not call done simply because specialists have been dispatched — "
+            "continue covering remaining attack surface directly until it is genuinely "
+            "unlikely that further vulnerabilities will be found."
         ),
         "input_schema": {
             "type": "object",
