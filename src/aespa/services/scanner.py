@@ -35,6 +35,7 @@ from aespa.services import traffic as traffic_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
+from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT
 
 log = logging.getLogger("aespa.scanner")
 
@@ -2386,17 +2387,6 @@ def _next_specialist_agent_id(run_id: int, attack_class: str) -> str:
     _specialist_seq[run_id] = seq
     return f"specialist-{attack_class}-{seq}"
 
-
-_SPECIALIST_SYSTEM_PROMPT = (
-    "You are a specialist security agent with a single focused mission: "
-    "deeply investigate the specific vulnerability lead you have been briefed on. "
-    "You have access to HTTP request, browser interaction, and context tools. "
-    "Work methodically — gather evidence step by step. "
-    "Write a finding only when you have concrete proof. "
-    "Do not speculate or write findings without direct evidence. "
-    "Call done when you have either confirmed a finding, ruled out the lead, "
-    "or exhausted your step budget."
-)
 
 
 async def _run_specialist_agent(
