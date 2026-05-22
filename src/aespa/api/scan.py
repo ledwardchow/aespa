@@ -464,19 +464,28 @@ def get_agent_log(
 
 def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
     """Format thinking-scan ScanLog entries as a readable markdown document."""
-    # Group events by step number so each step becomes one section.
-    steps: dict[int, list[tuple[ScanLog, dict]]] = {}
-    preamble: list[tuple[ScanLog, dict]] = []  # non-step events (warnings, etc.)
+    # Group consecutive entries by step number, preserving chronological order.
+    # Using a flat dict keyed by step number would jumble multiple scan attempts
+    # within one run (e.g. after a restart) because step numbers repeat from 1.
+    step_groups: list[tuple[int | None, list[tuple[ScanLog, dict]]]] = []
+    current_key: int | None = None
+    current_group: list[tuple[ScanLog, dict]] = []
+
     for e in entries:
         data = json.loads(e.data_json) if e.data_json else {}
         step_num = data.get("step")
-        if step_num is not None:
-            steps.setdefault(int(step_num), []).append((e, data))
-        else:
-            preamble.append((e, data))
+        key = int(step_num) if step_num is not None else None
+        if key != current_key:
+            if current_group:
+                step_groups.append((current_key, current_group))
+            current_key = key
+            current_group = []
+        current_group.append((e, data))
+    if current_group:
+        step_groups.append((current_key, current_group))
 
     exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    total_steps = len(steps)
+    total_steps = sum(1 for k, _ in step_groups if k is not None)
     lines: list[str] = [
         f"# Thinking Scan Log — Run #{run_id}",
         f"",
@@ -487,13 +496,13 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         "",
     ]
 
-    # Non-step preamble events (e.g. credential warnings injected before loop start).
-    for e, data in preamble:
-        ts = e.created_at.strftime("%H:%M:%S") if e.created_at else ""
-        lines += [f"> `{ts}` **{e.status.upper()}** {e.message}", ""]
-
-    for step_num in sorted(steps.keys()):
-        evts = steps[step_num]
+    for step_num, evts in step_groups:
+        if step_num is None:
+            # Non-step events (e.g. credential warnings injected before loop start).
+            for e, data in evts:
+                ts = e.created_at.strftime("%H:%M:%S") if e.created_at else ""
+                lines += [f"> `{ts}` **{e.status.upper()}** {e.message}", ""]
+            continue
 
         # Pick the most informative event in order: running → complete → deciding.
         def _pick(status: str):
