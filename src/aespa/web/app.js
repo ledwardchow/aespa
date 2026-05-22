@@ -21,6 +21,12 @@ const api = {
   updateLLMProfile: (id,b)        => req(`/api/settings/llm/profiles/${id}`, { method:"PUT", body:b }),
   activateLLMProfile: (id)        => req(`/api/settings/llm/profiles/${id}/activate`, { method:"POST" }),
   deleteLLMProfile: (id)          => req(`/api/settings/llm/profiles/${id}`, { method:"DELETE" }),
+  listLLMProviders: ()            => req("/api/settings/llm/providers"),
+  createLLMProvider: (b)          => req("/api/settings/llm/providers", { method:"POST", body:b }),
+  updateLLMProvider: (id,b)       => req(`/api/settings/llm/providers/${id}`, { method:"PUT", body:b }),
+  deleteLLMProvider: (id)         => req(`/api/settings/llm/providers/${id}`, { method:"DELETE" }),
+  exportLLMConfig:  ()            => req("/api/settings/llm/export"),
+  importLLMConfig:  (b)           => req("/api/settings/llm/import", { method:"POST", body:b }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
@@ -374,9 +380,6 @@ function SitesList() {
     } catch(err) { setError(err.message); }
     finally { setImporting(false); }
   };
-  const authCount = sites ? sites.filter(s=>s.requires_auth).length : 0;
-  const credCount = sites ? sites.reduce((n,s)=>n+s.credential_count,0) : 0;
-
   return html`
     <div className="topbar">
       <div className="topbar-title">Sites</div>
@@ -388,12 +391,6 @@ function SitesList() {
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
-      ${sites&&sites.length>0 && html`
-        <div className="stat-strip">
-          <div className="stat"><span className="stat-value">${sites.length}</span><span className="stat-label">Sites</span></div>
-          <div className="stat"><span className="stat-value">${authCount}</span><span className="stat-label">Authenticated</span></div>
-          <div className="stat"><span className="stat-value">${credCount}</span><span className="stat-label">Credentials</span></div>
-        </div>`}
       ${sites===null && html`<div className="subtle">Loading…</div>`}
       ${sites!==null&&sites.length===0 && html`
         <div className="empty-state">
@@ -4011,87 +4008,86 @@ function BurpRestApiSettings() {
       </form>`}`;
 }
 
-const PROVIDER_LABELS = {
-  anthropic:"Anthropic", openai:"OpenAI",
-  openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
+const API_FORMAT_LABELS = {
+  anthropic:"Anthropic API",
+  openai:"OpenAI API",
+  openai_compatible:"OpenAI-compatible API",
   openrouter:"OpenRouter",
-  google:"Google Gemini",
-  bedrock:"Amazon Bedrock",
+  google:"Google Gemini API",
+  bedrock:"Amazon Bedrock Converse",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry (OpenAI API)",
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const PROVIDER_OPTIONS = [
-  ["anthropic", "Anthropic"],
-  ["openai", "OpenAI"],
-  ["openai_compatible", "OpenAI-compatible (LM Studio, Ollama, etc.)"],
-  ["openrouter", "OpenRouter"],
-  ["google", "Google Gemini"],
-  ["bedrock", "Amazon Bedrock"],
-  ["azure_openai", "Azure OpenAI"],
-  ["azure_foundry", "Azure AI Foundry"],
-];
-const FOUNDRY_PROVIDERS = ["azure_foundry", "azure_foundry_openai", "azure_foundry_anthropic"];
-const isFoundryProvider = (provider) => FOUNDRY_PROVIDERS.includes(provider);
-const selectedProviderOption = (provider) => isFoundryProvider(provider) ? "azure_foundry" : provider;
-const PROVIDER_PLACEHOLDERS = {
-  anthropic:"claude-opus-4-5", openai:"gpt-4.1",
-  openai_compatible:"e.g. llama-3.1-8b-instruct",
-  openrouter:"e.g. openrouter/owl-alpha or a :free model id",
-  google:"gemini-2.5-flash-preview-04-17",
-  bedrock:"e.g. global.anthropic.claude-sonnet-4-6",
-  azure_openai:"Deployment name, e.g. gpt-4o",
-  azure_foundry:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
-  azure_foundry_openai:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
-  azure_foundry_anthropic:"e.g. claude-sonnet-4-5",
-};
-const BASE_URL_LABELS = {
-  openai_compatible:"Base URL",
-  bedrock:"Bedrock Runtime Endpoint",
-  azure_openai:"Azure Endpoint",
-  azure_foundry:"Foundry Endpoint",
-  azure_foundry_openai:"Foundry Endpoint",
-  azure_foundry_anthropic:"Foundry Endpoint",
-};
-const BASE_URL_PLACEHOLDERS = {
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"" };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
+const PROVIDER_BASE_URL_PLACEHOLDERS = {
+  anthropic:"https://api.anthropic.com",
+  openai:"https://api.openai.com/v1",
   openai_compatible:"http://localhost:1234/v1",
-  bedrock:"https://bedrock-runtime.ap-southeast-2.amazonaws.com",
-  azure_openai:"https://myresource.openai.azure.com/",
+  openrouter:"https://openrouter.ai/api/v1",
+  google:"",
+  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
   azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
 };
-const BASE_URL_HINTS = {
-  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Defaults to ap-southeast-2. The region is inferred from this endpoint — change it to match your Bedrock region.",
-  azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
-  azure_foundry:"Paste the endpoint from Azure AI Foundry. The selected API format determines the final request path.",
-  azure_foundry_openai:"OpenAI-format deployments use /openai/v1. If you paste the resource endpoint, Aespa appends it automatically.",
-  azure_foundry_anthropic:"Claude deployments use Anthropic Messages semantics. If you paste the resource endpoint, Aespa appends /anthropic/v1/messages automatically.",
+const PROVIDER_MODEL_PLACEHOLDERS = {
+  anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
+  openai:"gpt-4.1\ngpt-4o\nllama-3.1-8b-instruct",
+  openai_compatible:"llama-3.1-8b-instruct\nqwen2.5-coder",
+  openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
+  bedrock:"global.anthropic.claude-sonnet-4-6\nglobal.anthropic.claude-opus-4-7",
+  azure_openai:"gpt-4o\ngpt-4.1",
+  azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_anthropic:"claude-sonnet-4-5\nclaude-opus-4-1",
 };
 
-const DEFAULT_LLM_FORM = {
-  name:"Default", provider:"anthropic", api_key:"", base_url:"",
-  model:"claude-opus-4-5", max_tokens:4096, temperature:0, use_vision:false,
-};
+function providerToForm(provider) {
+  return provider ? {
+    name:provider.name || "",
+    api_format:provider.api_format || "anthropic",
+    base_url:provider.base_url || "",
+    models:(provider.models || []).join("\n"),
+    api_key:provider.api_key || "",
+  } : {...DEFAULT_PROVIDER_FORM};
+}
 
-function llmProfileToForm(cfg) {
+function providerPayload(form) {
+  return {
+    name:form.name.trim(),
+    api_format:form.api_format,
+    base_url:form.base_url.trim() || null,
+    models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
+    api_key:form.api_key.trim() || null,
+  };
+}
+
+function llmProfileToForm(cfg, providers=[]) {
+  const providerId = cfg?.provider_id || providers[0]?.id || "";
+  const provider = providers.find(p=>p.id===providerId) || providers[0];
   return cfg ? {
-    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"",
-    base_url:cfg.base_url||(cfg.provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:""),
-    model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
+    name:cfg.name??"Default",
+    provider_id:providerId,
+    model:cfg.model,
+    max_tokens:cfg.max_tokens,
+    temperature:cfg.temperature,
     use_vision:cfg.use_vision??false,
-  } : {...DEFAULT_LLM_FORM};
+  } : {
+    ...DEFAULT_LLM_FORM,
+    provider_id:provider?.id || "",
+    model:provider?.models?.[0] || "",
+  };
 }
 
 function llmPayload(form) {
-  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai",...FOUNDRY_PROVIDERS].includes(form.provider);
   return {
     name:form.name.trim(),
-    provider:form.provider,
-    api_key:form.api_key.trim()||null,
-    base_url:supportsBaseUrl?(form.base_url.trim()||null):null,
+    provider_id:Number(form.provider_id),
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
@@ -4099,32 +4095,75 @@ function llmPayload(form) {
   };
 }
 
-function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => llmProfileToForm(profile));
-  const [customModel, setCustomModel] = useState(false);
+function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => providerToForm(provider));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => {
-    const provider = p === "azure_foundry" ? "azure_foundry_openai" : p;
-    const ms=dms[provider]||[];
-    setCustomModel(false);
-    upd({
-      provider,
-      model:ms[0]||"",
-      api_key:"",
-      base_url:provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
-      max_tokens:provider==="bedrock"?64000:4096,
-    });
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const payload = providerPayload(form);
+      const savedProvider = mode === "edit"
+        ? await api.updateLLMProvider(provider.id, payload)
+        : await api.createLLMProvider(payload);
+      setSaved(true);
+      onSaved?.(savedProvider);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
-  const changeFoundryApi = apiMode => {
-    const provider = apiMode === "anthropic" ? "azure_foundry_anthropic" : "azure_foundry_openai";
-    const ms=dms[provider]||[];
-    setCustomModel(false);
-    upd({provider, model:ms[0]||"", base_url:form.base_url||""});
-  };
+  return html`
+    ${error&&html`<div className="alert error">${error}</div>`}
+    <form className="card" onSubmit=${onSubmit}>
+      <div className="form-section-title">Provider</div>
+      <div className="field"><label>Name</label>
+        <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
+      <div className="field">
+        <label>API format</label>
+        <select className="select" value=${form.api_format} onChange=${e=>upd({api_format:e.target.value})}>
+          <option value="anthropic">Anthropic API</option>
+          <option value="openai">OpenAI API</option>
+          <option value="openai_compatible">OpenAI-compatible API</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="google">Google Gemini API</option>
+          <option value="bedrock">Amazon Bedrock Converse</option>
+          <option value="azure_openai">Azure OpenAI</option>
+          <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
+          <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
+        </select>
+      </div>
+      <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+        <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({base_url:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
+      </div>
+      <div className="field"><label>Model names</label>
+        <textarea required rows="5" value=${form.models} placeholder=${PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({models:e.target.value})}></textarea>
+        <div className="field-hint">Enter one model per line, or separate models with commas.</div>
+      </div>
+      <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
+          onChange=${e=>upd({api_key:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+      </div>
+      <div className="divider"/>
+      <div className="row spread">
+        <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+        <div className="row">
+          ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save provider":"Create provider"}</button>
+        </div>
+      </div>
+    </form>`;
+}
 
+function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
     try {
@@ -4137,12 +4176,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
-  const models = form?(dms[form.provider]||[]):[];
-  const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&(["openai_compatible","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
-  const optionalBaseUrl = form&&form.provider==="bedrock";
-  const needsKey     = form&&(["anthropic","openai","openrouter","google","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
-  const foundryApiMode = form&&form.provider==="azure_foundry_anthropic" ? "anthropic" : "openai";
+  const selectedProvider = providers.find(p=>p.id===Number(form.provider_id));
+  const models = selectedProvider?.models || [];
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -4150,66 +4185,19 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="form-section-title">Profile</div>
       <div className="field"><label>Name</label>
         <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
-      <div className="divider"/>
-      <div className="form-section-title">Provider</div>
-      <div className="provider-grid">
-        ${PROVIDER_OPTIONS.map(([k,lbl])=>html`
-          <label key=${k} className=${"provider-card"+(selectedProviderOption(form.provider)===k?" selected":"")}>
-            <input type="radio" name="provider" value=${k} checked=${selectedProviderOption(form.provider)===k} onChange=${()=>changeProv(k)}/>
-            <span className="provider-name">${lbl}</span>
-          </label>`)}
+      <div className="field">
+        <label>Provider</label>
+        <select className="select" required value=${form.provider_id} onChange=${e=>{
+          const provider = providers.find(p=>p.id===Number(e.target.value));
+          upd({provider_id:e.target.value, model:provider?.models?.[0] || ""});
+        }}>
+          ${providers.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${API_FORMAT_LABELS[p.api_format]||p.api_format})</option>`)}
+        </select>
       </div>
-      <div className="divider"/>
-      <div className="form-section-title">${isFoundryProvider(form.provider)?"Azure AI Foundry":PROVIDER_LABELS[form.provider]} Configuration</div>
-      ${isFoundryProvider(form.provider)&&html`
-        <div className="field">
-          <label>API format</label>
-          <select className="select" value=${foundryApiMode} onChange=${e=>changeFoundryApi(e.target.value)}>
-            <option value="openai">OpenAI chat completions</option>
-            <option value="anthropic">Anthropic messages</option>
-          </select>
-          <div className="field-hint">Use OpenAI for GPT, DeepSeek, Mistral, Llama, Phi, and similar deployments. Use Anthropic for Claude deployments.</div>
-        </div>`}
-      ${(needsBaseUrl||optionalBaseUrl)&&html`
-        <div className="field">
-          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}${optionalBaseUrl&&html` <span className="field-optional">(optional)</span>`}</label>
-          <input type="url" required=${needsBaseUrl} value=${form.base_url}
-            placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
-            onChange=${e=>upd({base_url:e.target.value})}/>
-          ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
-        </div>`}
-      ${form.provider==="bedrock"&&html`
-        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-          <input type="password" value=${form.api_key}
-            placeholder="Leave blank to use AWS_PROFILE / AWS SSO credentials"
-            onChange=${e=>upd({api_key:e.target.value})}/>
-          <div className="field-hint">For SSO, run aws sso login outside Aespa and set AWS_PROFILE plus AWS_REGION/AWS_DEFAULT_REGION before starting the app.</div>
-        </div>
-        <div className="field-hint" style=${{marginBottom:8}}>The system prompt and initial scan context are automatically marked as cache checkpoints on every request, reducing per-turn token costs across long scans.</div>`}
-      ${needsKey&&html`
-        <div className="field"><label>API Key</label>
-          <input type="password" required value=${form.api_key}
-            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":form.provider==="bedrock"?"Bedrock API key":""}
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
-      ${form.provider==="openai_compatible"&&html`
-        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-          <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
       <div className="field"><label>Model</label>
-        ${models.length>0?html`
-          <div className="model-select-group">
-            <select className="select" value=${isCustom?"__custom__":form.model}
-              onChange=${e=>{
-                if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
-                else{setCustomModel(true);upd({model:""});}
-              }}>
-              ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
-              <option value="__custom__">Custom…</option>
-            </select>
-            ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
-          </div>`:html`
-          <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
-            onChange=${e=>upd({model:e.target.value})}/>`}
+        <select className="select" required value=${form.model} onChange=${e=>upd({model:e.target.value})}>
+          ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
+        </select>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Sampling</div>
@@ -4238,29 +4226,33 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
 function SettingsPage() {
   const [profiles, setProfiles] = useState(null);
-  const [dms, setDMs] = useState({});
+  const [providers, setProviders] = useState(null);
+  const [tab, setTab] = useState("profiles");
   const [screen, setScreen] = useState("list");
   const [editing, setEditing] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [items,dm] = await Promise.all([api.listLLMProfiles(), api.getDefaultModels()]);
+      const [items,providerItems] = await Promise.all([api.listLLMProfiles(), api.listLLMProviders()]);
       setProfiles(items);
-      setDMs(dm);
-      if (items.length === 0) { setScreen("new"); setEditing(null); }
-      else if (screen === "new" && profiles?.length === 0) { setScreen("list"); }
+      setProviders(providerItems);
+      if (tab === "profiles" && items.length === 0 && providerItems.length > 0) { setScreen("new"); setEditing(null); }
+      else if (tab === "providers" && providerItems.length === 0) { setScreen("new"); setEditing(null); }
+      else if (screen === "new" && ((tab === "profiles" && profiles?.length === 0) || (tab === "providers" && providers?.length === 0))) { setScreen("list"); }
     } catch(e) { setError(e.message); }
-  }, [screen, profiles?.length]);
+  }, [screen, tab, profiles?.length, providers?.length]);
 
   useEffect(() => { load(); }, []);
 
   const onSaved = async () => { await load(); setScreen("list"); setEditing(null); };
   const onEdit = profile => { setEditing(profile); setScreen("edit"); setError(null); };
   const onNew = () => { setEditing(null); setScreen("new"); setError(null); };
-  const onCancel = () => { setScreen(profiles?.length ? "list" : "new"); setEditing(null); setError(null); };
+  const onCancel = () => { setScreen("list"); setEditing(null); setError(null); };
   const onActivate = async (profile) => {
     setBusyId(profile.id); setError(null);
     try { await api.activateLLMProfile(profile.id); await load(); }
@@ -4272,45 +4264,110 @@ function SettingsPage() {
     try { await api.deleteLLMProfile(profile.id); await load(); }
     catch(e) { setError(e.message); } finally { setBusyId(null); }
   };
+  const onDeleteProvider = async (provider) => {
+    if (!confirm(`Delete LLM provider "${provider.name}"?`)) return;
+    setBusyId(provider.id); setError(null);
+    try { await api.deleteLLMProvider(provider.id); await load(); }
+    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  };
+  const switchTab = next => { setTab(next); setScreen("list"); setEditing(null); setError(null); };
 
-  const title = screen === "new" ? "New LLM Settings Profile" : screen === "edit" ? "Edit LLM Settings Profile" : "LLM Settings";
+  const onExport = async () => {
+    setError(null);
+    try {
+      const data = await api.exportLLMConfig();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aespa-llm-config-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportClick = () => { if (importRef.current) importRef.current.click(); };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setError(null); setImporting(true);
+    try {
+      const text = await file.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch { throw new Error("Invalid JSON file"); }
+      const result = await api.importLLMConfig(parsed);
+      await load();
+      alert(`Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} profile(s) created, ${result.profiles_updated} updated.`);
+    } catch(e) { setError(e.message); } finally { setImporting(false); }
+  };
+
+  const title = tab === "providers"
+    ? (screen === "new" ? "New LLM Provider" : screen === "edit" ? "Edit LLM Provider" : "LLM Providers")
+    : (screen === "new" ? "New LLM Profile" : screen === "edit" ? "Edit LLM Profile" : "LLM Profiles");
+  const canCreateProfile = (providers || []).length > 0;
 
   return html`
     <div className="topbar">
       <div className="topbar-title">${title}</div>
-      ${screen==="list"&&html`<div className="topbar-actions"><button className="btn" onClick=${onNew}>New profile</button></div>`}
+      <div className="topbar-actions">
+        <button className="btn secondary sm" disabled=${importing} onClick=${onExport}>Export</button>
+        <button className="btn secondary sm" disabled=${importing} onClick=${onImportClick}>${importing?"Importing…":"Import"}</button>
+        <input ref=${importRef} type="file" accept=".json,application/json" style=${{display:"none"}} onChange=${onImportFile} />
+        ${screen==="list"&&html`<button className="btn" disabled=${tab==="profiles"&&!canCreateProfile} onClick=${onNew}>${tab==="providers"?"New provider":"New profile"}</button>`}
+      </div>
     </div>
-    <div className="content scroll-content">
-      ${!profiles&&!error&&html`<div className="subtle">Loading…</div>`}
+    <div className="content scroll-content settings-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn "+(tab==="profiles"?"active":"")} onClick=${()=>switchTab("profiles")}>Profiles</button>
+        <button className=${"tab-btn "+(tab==="providers"?"active":"")} onClick=${()=>switchTab("providers")}>Providers</button>
+      </div>
+      ${(!profiles||!providers)&&!error&&html`<div className="subtle">Loading…</div>`}
       ${error&&html`<div className="alert error">${error}</div>`}
-      ${profiles&&screen==="list"&&html`
-        <div className="table-wrap">
-          <table>
-            <colgroup>
-              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"30%"}}/><col style=${{width:"7%"}}/><col style=${{width:"10%"}}/><col style=${{width:"21%"}}/>
-            </colgroup>
-            <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-              ${profiles.map(p=>html`
-                <tr key=${p.id}>
-                  <td><strong>${p.name}</strong></td>
-                  <td>${PROVIDER_LABELS[p.provider]||p.provider}</td>
-                  <td className="mono">${p.model}</td>
-                  <td>${p.use_vision?"On":"Off"}</td>
-                  <td>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</td>
-                  <td>
-                    <div className="row" style=${{justifyContent:"flex-end"}}>
-                      ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
-                      <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
-                      <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>`)}
-            </tbody>
-          </table>
+      ${profiles&&providers&&tab==="profiles"&&screen==="list"&&html`
+        ${providers.length===0&&html`<div className="alert">Create a provider before adding LLM profiles.</div>`}
+        <div className="settings-list settings-list-profiles">
+          <div className="settings-list-head">
+            <div>Name</div><div>Provider</div><div>Model</div><div>Vision</div><div>Status</div><div></div>
+          </div>
+          ${profiles.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${p.provider_name || `Provider #${p.provider_id}`}</div>
+              <div className="mono">${p.model}</div>
+              <div>${p.use_vision?"On":"Off"}</div>
+              <div>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</div>
+              <div className="row settings-list-actions">
+                ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
+              </div>
+            </div>`)}
         </div>`}
-      ${profiles&&screen==="new"&&html`<${LLMProfileForm} mode="new" dms=${dms} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
-      ${profiles&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} dms=${dms} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="list"&&html`
+        <div className="settings-list settings-list-providers">
+          <div className="settings-list-head">
+            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div></div>
+          </div>
+          ${providers.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
+              <div className="mono">${p.base_url || "Default"}</div>
+              <div className="mono">${(p.models||[]).join(", ")}</div>
+              <div className="row settings-list-actions">
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDeleteProvider(p)}>Delete</button>
+              </div>
+            </div>`)}
+        </div>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="new"&&html`<${LLMProfileForm} mode="new" providers=${providers} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} providers=${providers} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="new"&&html`<${LLMProviderForm} mode="new" onSaved=${onSaved} onCancel=${providers.length?onCancel:null}/>`}
+      ${providers&&tab==="providers"&&screen==="edit"&&editing&&html`<${LLMProviderForm} mode="edit" provider=${editing} onSaved=${onSaved} onCancel=${onCancel}/>`}
     </div>`;
 }
 

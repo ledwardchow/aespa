@@ -877,8 +877,8 @@ def _bedrock_region_from_url(base_url: str) -> str:
 
 
 async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    if not config.base_url:
-        raise ValueError("Amazon Bedrock Runtime endpoint is required")
+    if config.api_key and not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required when using an API key")
 
     content: list[dict[str, Any]] = []
     if screenshot_b64:
@@ -905,14 +905,14 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         region = (
             os.getenv("AWS_REGION")
             or os.getenv("AWS_DEFAULT_REGION")
-            or _bedrock_region_from_url(config.base_url)
+            or _bedrock_region_from_url(config.base_url or "")
         )
         profile = os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
         _messages = payload["messages"]
         _infer = payload["inferenceConfig"]
-        _endpoint = config.base_url
+        _endpoint = config.base_url or None
 
         def _run_sync() -> dict:
             _session_kwargs = {"profile_name": profile} if profile else {}
@@ -939,6 +939,8 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
                       cache_write_tokens=_bd_u.get("cacheWriteInputTokenCount", 0))
         return _extract_bedrock_text(data)
 
+    if not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required")
     model_id = quote(config.model, safe="")
     url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
     headers = {
@@ -2836,7 +2838,7 @@ async def _call_with_tools(
                 if config.provider in ("azure_foundry", "azure_foundry_openai")
                 else base
             )
-        elif config.provider == "openai_compatible" and config.base_url:
+        elif config.provider in ("openai", "openai_compatible") and config.base_url:
             base = config.base_url.rstrip("/")
             if not base.endswith("/v1"):
                 base += "/v1"
