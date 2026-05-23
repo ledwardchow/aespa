@@ -25,7 +25,8 @@
       "Bash(awk '$1 > 5841 {print; exit}')",
       "Bash(awk '$1 > 6566 {print; exit}')",
       "Bash(python3)",
-      "Bash(python -m pytest tests/ -x -q --tb=short)"
+      "Bash(python -m pytest tests/ -x -q --tb=short)",
+      "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")"
     ]
   }
 }
