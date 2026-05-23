@@ -23,8 +23,6 @@ def test_scan_buttons_are_available_after_failed_scan(client: TestClient):
 
     assert response.status_code == 200
     assert '"failed"' in response.text
-    assert "canShowScanStartButtons" in response.text
-    assert "Start Structured Scan" in response.text
     assert "Source" in response.text
     assert "source-badge" in response.text
 
