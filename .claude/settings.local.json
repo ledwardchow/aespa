@@ -20,7 +20,13 @@
       "Bash(gh pr *)",
       "Bash(python3 -c \"import json,sys; prs=json.load\\(sys.stdin\\); [print\\(f'PR#{p[\\\\\"number\\\\\"]} [{p[\\\\\"mergedAt\\\\\"]}] {p[\\\\\"headRefName\\\\\"]}: {p[\\\\\"title\\\\\"]}'\\) for p in prs]\")",
       "Bash(python -m py_compile src/aespa/services/scanner.py)",
-      "Bash(python -m py_compile src/aespa/services/llm.py)"
+      "Bash(python -m py_compile src/aespa/services/llm.py)",
+      "Bash(awk -F: '{print $1, $2}')",
+      "Bash(awk '$1 > 5841 {print; exit}')",
+      "Bash(awk '$1 > 6566 {print; exit}')",
+      "Bash(python3)",
+      "Bash(python -m pytest tests/ -x -q --tb=short)",
+      "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")"
     ]
   }
 }

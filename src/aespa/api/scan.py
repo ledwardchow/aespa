@@ -16,7 +16,6 @@ from aespa.schemas import (
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
-    ScanStatusOut,
     ValidationStatusOut,
 )
 from aespa.services import findings as findings_svc
@@ -36,18 +35,6 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     return run
 
 
-@router.post("/api/test-runs/{run_id}/scan/start", response_model=ScanStatusOut)
-async def start_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    await scanner_svc.start_scan(run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
 async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
@@ -55,8 +42,6 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     await scanner_svc.start_thinking_scan(run_id)
@@ -97,8 +82,6 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
@@ -107,40 +90,6 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
-
-@router.post("/api/test-runs/{run_id}/pages/{page_id}/scan", response_model=ScanStatusOut)
-async def scan_single_page(
-    run_id: int,
-    page_id: int,
-    session: Session = Depends(get_session),
-) -> ScanStatusOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    page = session.get(CrawledPage, page_id)
-    if page is None or page.test_run_id != run_id:
-        raise HTTPException(status_code=404, detail="Page not found")
-    if page.in_scope is False:
-        raise HTTPException(status_code=409, detail="Page is out of scope")
-    await scanner_svc.start_scan(run_id, page_ids=[page_id])
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.post("/api/test-runs/{run_id}/scan/stop", response_model=ScanStatusOut)
-def stop_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    _get_run_or_404(session, run_id)
-    scanner_svc.request_stop(run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.get("/api/test-runs/{run_id}/scan/status", response_model=ScanStatusOut)
-def scan_status(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    _get_run_or_404(session, run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
