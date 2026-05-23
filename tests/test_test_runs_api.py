@@ -74,35 +74,6 @@ def test_list_runs_unknown_site(client: TestClient):
     assert r.status_code == 404
 
 
-def test_list_active_jobs_includes_running_structured_scan(client: TestClient, monkeypatch):
-    from aespa.services import scanner as scanner_svc
-
-    site = _make_site(client)
-    run = _make_run(client, site["id"], name="Live scan").json()
-
-    monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: run_id == run["id"])
-    monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
-    monkeypatch.setattr(scanner_svc, "get_scan_status", lambda run_id: {
-        "total_pages": 4,
-        "pages_done": 2,
-        "findings_count": 3,
-        "status": "running",
-    })
-
-    r = client.get("/api/test-runs/active")
-
-    assert r.status_code == 200
-    data = r.json()
-    assert len(data) == 1
-    assert data[0]["run_id"] == run["id"]
-    assert data[0]["site_name"] == site["name"]
-    assert data[0]["run_name"] == "Live scan"
-    assert data[0]["job_type"] == "Structured Scan"
-    assert data[0]["status"] == "running"
-    assert data[0]["pages_done"] == 2
-    assert data[0]["total_pages"] == 4
-    assert data[0]["findings_count"] == 3
-
 
 def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monkeypatch):
     from aespa.services import scanner as scanner_svc
@@ -110,7 +81,6 @@ def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monk
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
 
-    monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"])
     monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {
         "status": "analysing",
@@ -406,142 +376,6 @@ def test_deduplicate_findings_uses_llm_for_semantic_matches(
     assert len(client.get(f"/api/test-runs/{run['id']}/findings").json()) == 1
 
 
-def test_run_summary_prefers_live_scan_status(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-    from aespa.api import test_runs as test_runs_api
-    from aespa.models import Site, TestRun, TestRunStatus
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
-    try:
-        with Session(engine) as session:
-            from aespa.services import scanner as scanner_svc
-
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-
-            run = TestRun(
-                site_id=site.id,
-                name="Run #1",
-                status=TestRunStatus.complete,
-                error_message="scan:complete",
-            )
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: run_id == run.id)
-
-            summary = test_runs_api._run_summary(run, session)
-
-        assert summary.scan_status == "running"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
-
-
-def test_run_summary_ignores_non_live_running_scan_marker(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-    from aespa.api import test_runs as test_runs_api
-    from aespa.models import Site, TestRun, TestRunStatus
-    from aespa.services import scanner as scanner_svc
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-
-            run = TestRun(
-                site_id=site.id,
-                name="Run #1",
-                status=TestRunStatus.complete,
-                error_message="scan:running",
-            )
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
-
-            summary = test_runs_api._run_summary(run, session)
-
-        assert summary.scan_status == "idle"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
-
-
-def test_run_summary_does_not_infer_structured_complete_from_dynamic_page(monkeypatch):
-    from aespa import models as _models  # noqa: F401
-    from aespa.api import test_runs as test_runs_api
-    from aespa.models import CrawledPage, Site, TestRun, TestRunStatus
-    from aespa.services import scanner as scanner_svc
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-
-            run = TestRun(
-                site_id=site.id,
-                name="Run #1",
-                status=TestRunStatus.complete,
-            )
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/api/accounts/1",
-                title="Dynamic Scan target",
-                status="crawled",
-                in_scope=True,
-                scan_status="complete",
-            )
-            session.add(page)
-            session.commit()
-            session.refresh(run)
-
-            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: False)
-            monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {"status": "complete"})
-
-            summary = test_runs_api._run_summary(run, session)
-
-        assert summary.scan_total_pages == 1
-        assert summary.scan_pages_done == 1
-        assert summary.scan_status == "idle"
-        assert summary.thinking_status == "complete"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
-
-
 def test_get_scanner_sessions_redacts_auth_material():
     from aespa.api import test_runs as test_runs_api
     from aespa.models import Site, TestRun
@@ -746,82 +580,14 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     assert r.json()["status"] == "stopped"
 
 
-def test_normal_scan_start_does_not_start_thinking_scan(client: TestClient, monkeypatch):
-    from aespa.api import scan as scan_api
-
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    calls = {"normal": [], "thinking": []}
-
-    async def fake_start_scan(run_id, page_ids=None):
-        calls["normal"].append((run_id, page_ids))
-
-    async def fake_start_thinking_scan(run_id):
-        calls["thinking"].append(run_id)
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "get_scan_status", lambda run_id: {
-        "total_pages": 0,
-        "pages_done": 0,
-        "findings_count": 0,
-        "status": "running",
-    })
-
-    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
-
-    assert r.status_code == 200
-    assert calls["normal"] == [(run["id"], None)]
-    assert calls["thinking"] == []
-    assert r.json()["status"] == "running"
-
-
-def test_thinking_scan_start_does_not_start_normal_scan(client: TestClient, monkeypatch):
-    from aespa.api import scan as scan_api
-
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    calls = {"normal": [], "thinking": []}
-
-    async def fake_start_scan(run_id, page_ids=None):
-        calls["normal"].append((run_id, page_ids))
-
-    async def fake_start_thinking_scan(run_id):
-        calls["thinking"].append(run_id)
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "get_thinking_scan_status", lambda run_id: {
-        "status": "running",
-    })
-
-    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
-
-    assert r.status_code == 200
-    assert calls["normal"] == []
-    assert calls["thinking"] == [run["id"]]
-    assert r.json()["status"] == "running"
-
-
-def test_scan_modes_block_each_other(client: TestClient, monkeypatch):
+def test_thinking_scan_start_blocked_when_already_running(client: TestClient, monkeypatch):
     from aespa.api import scan as scan_api
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
 
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: True)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
-    assert r.status_code == 409
-    assert r.json()["detail"] == "Scan already running"
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
     monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
-    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
     assert r.status_code == 409
     assert r.json()["detail"] == "Dynamic Scan already running"
 
