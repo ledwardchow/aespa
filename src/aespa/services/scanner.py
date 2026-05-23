@@ -35,7 +35,11 @@ from aespa.services import traffic as traffic_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
-from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT
+from aespa.services.prompts.specialist import (
+    SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
+    SPECIALIST_SYSTEM_PROMPTS as _SPECIALIST_SYSTEM_PROMPTS,
+    get_specialist_tools as _get_specialist_tools,
+)
 
 log = logging.getLogger("aespa.scanner")
 
@@ -2354,6 +2358,12 @@ _specialist_seq: dict[int, int] = {}
 # Tracks live specialist asyncio tasks so they can be cancelled on stop.
 _specialist_tasks: dict[int, list[asyncio.Task]] = {}
 
+# Pseudo-OOB reflected-SSRF detection: inject the canary URL into SSRF-prone
+# parameters and flag any response that reflects the fingerprint back.
+_ssrf_canary: dict[int, str] = {}
+_SSRF_CANARY_URL = "https://example.com"
+_SSRF_CANARY_FINGERPRINT = "Example Domain"
+
 
 def _should_dispatch_specialist(
     attack_class: str,
@@ -2368,7 +2378,10 @@ def _should_dispatch_specialist(
     field = _SPECIALIST_DISPATCH_CLASSES.get(attack_class)
     if field is None or not getattr(config, field, False):
         return False
-    if priority < config.min_priority:
+    # SSRF leads can rarely be confirmed without OOB infrastructure; dispatch
+    # at a lower threshold so parameter-level evidence is sufficient.
+    effective_min = 5 if attack_class == "ssrf" else config.min_priority
+    if priority < effective_min:
         return False
     return True
 
@@ -2423,12 +2436,23 @@ async def _run_specialist_agent(
     cookies = (primary_session or {}).get("cookies") or {}
     extra_headers = (primary_session or {}).get("extra_headers") or {}
 
+    canary_block = ""
+    if attack_class == "ssrf" and _ssrf_canary.get(run_id):
+        canary_block = (
+            f"\nSSRF canary: inject `{_SSRF_CANARY_URL}` as the value of SSRF-prone "
+            f"parameters (url=, webhook=, redirect=, src=, callback=, fetch=, imageurl=, etc.).\n"
+            f"If '{_SSRF_CANARY_FINGERPRINT}' appears in a response body, the server is "
+            "fetching and reflecting external URLs — confirmed reflected SSRF.\n"
+            "The tool executor will flag canary matches automatically with [SSRF CANARY MATCH].\n"
+        )
+
     initial_message = (
         f"Target: {base_url}\n"
         f"Your mission: investigate the {attack_class} vulnerability lead below.\n"
         f"Focus URL: {target_url}\n"
         f"Lead rationale: {rationale}\n"
-        f"{recon_block}\n"
+        f"{recon_block}"
+        f"{canary_block}\n"
         f"You have a budget of {max_steps} steps. Begin immediately."
     )
 
@@ -2599,7 +2623,14 @@ async def _run_specialist_agent(
                             kwargs["content"] = str(body).encode()
                     resp = await _hx.request(method, url, **kwargs)
                     resp_body = resp.text[:BODY_READ_LIMIT]
+                    _sp_canary_fp = _ssrf_canary.get(run_id)
+                    _sp_canary_alert = (
+                        f"[SSRF CANARY MATCH] Response contains '{_sp_canary_fp}' from "
+                        f"{_SSRF_CANARY_URL} — the server fetched and reflected the canary URL. "
+                        "Confirmed reflected SSRF. Write a finding immediately.\n\n"
+                    ) if _sp_canary_fp and _sp_canary_fp in resp_body else ""
                     return (
+                        f"{_sp_canary_alert}"
                         f"HTTP {resp.status_code} {method} {url}\n"
                         f"Response ({len(resp_body)} chars):\n{resp_body[:4096]}"
                     )
@@ -2641,14 +2672,14 @@ async def _run_specialist_agent(
 
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
-            system_message=_SPECIALIST_SYSTEM_PROMPT,
+            system_message=_SPECIALIST_SYSTEM_PROMPTS.get(attack_class, _SPECIALIST_SYSTEM_PROMPT),
             initial_user_message=initial_message,
             tool_executor=_tool_executor,
             stop_check=lambda: (
                 step_count[0] >= max_steps
                 or run_id in _thinking_stop_requested
             ),
-            tools=llm_svc.SPECIALIST_AGENT_TOOLS,
+            tools=_get_specialist_tools(attack_class),
         )
 
         outcome = (
@@ -2989,6 +3020,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         _specialist_running.pop(run_id, None)
         _specialist_seq.pop(run_id, None)
         _specialist_tasks.pop(run_id, None)
+        _ssrf_canary.pop(run_id, None)
 
 
 async def _run_post_scan_llm_review(
@@ -4687,6 +4719,8 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
+    _ssrf_canary[run_id] = _SSRF_CANARY_FINGERPRINT
+
     pending_session_labels: set[str] = set()
 
     def _mark_session_pending(label: str | None) -> None:
@@ -5722,8 +5756,15 @@ async def _do_agentic_thinking_loop(
                 "server", "access-control-allow-origin",
             )
         }
+        _canary_fp = _ssrf_canary.get(run_id)
+        _canary_alert = (
+            f"[SSRF CANARY MATCH] Response contains '{_canary_fp}' from "
+            f"{_SSRF_CANARY_URL} — the server fetched and reflected the canary URL. "
+            "This is confirmed reflected SSRF. Write a finding immediately.\n\n"
+        ) if _canary_fp and _canary_fp in hr_resp_body else ""
         return (
-            f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
+            _canary_alert
+            + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
                 "Key headers:\n"
