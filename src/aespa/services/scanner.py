@@ -2666,6 +2666,18 @@ async def _run_specialist_agent(
             "_persist": True,
         })
         log.info("Specialist agent %s complete: %s", agent_id, outcome)
+    except asyncio.CancelledError:
+        log.info("Specialist agent %s cancelled", agent_id)
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": agent_id,
+            "role": "Specialist",
+            "status": "complete",
+            "current_task": "Stopped",
+            "outcome": "Stopped",
+            "_persist": True,
+        })
+        raise
     except Exception as exc:
         log.warning("Specialist agent %s error: %s", agent_id, exc)
         events_svc.emit(run_id, {

@@ -2793,6 +2793,50 @@ function TestRunDetail({ runId, initialTab }) {
                         </div>`}
                     </div>`;
                 }
+                // ── Burp container row ──────────────────────────────────────
+                if (a.id === "burp") {
+                  const burpAgents = agents.filter(ag => ag.id.startsWith("burp-")).map(normalizeAgentForRun);
+                  const anyActive = burpAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (burpAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = burpAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = burpAgents.length - activeCount;
+                  const summaryTask = burpAgents.length === 0
+                    ? "No active scan dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} scanning, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} scan${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} scan${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = burpAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("burp");
+                  return html`
+                    <div key="burp" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("burp") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Burp</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (burpAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${burpAgents.map(ba => {
+                            const baActive = ba.status === "active";
+                            const baTask = ba.currentTask || ba.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${ba.id} className=${"agent-thread-row"+(baActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(baActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${ba.id.replace("burp-","")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(baActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${baActive?"ACTIVE":ba.status==="failed"?"FAILED":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${baTask}>${baTask.length>90?baTask.slice(0,89)+"…":baTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
                 const currentTask = agentCurrentTask(a);
