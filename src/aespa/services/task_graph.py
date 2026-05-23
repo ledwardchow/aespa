@@ -134,6 +134,23 @@ def build_recon_summary(
                 "rationale": f"{len(input_fields)} attackable input parameters found.",
                 "entry_point_urls": [ep["url"] for ep in entry_points if ep["params"]][:20],
             })
+        ssrf_items = [
+            i for i in intel_items
+            if i.kind in {"input", "form", "endpoint"} and _looks_ssrf_param(i.key or "")
+        ]
+        if ssrf_items:
+            ssrf_urls = list(dict.fromkeys(i.url for i in ssrf_items if i.url))
+            ssrf_keys = sorted({i.key for i in ssrf_items[:5] if i.key})
+            attack_classes.append({
+                "id": "ssrf",
+                "owasp": "A10",
+                "priority": 82,
+                "rationale": (
+                    f"{len(ssrf_items)} SSRF-prone parameter(s) discovered "
+                    f"({', '.join(ssrf_keys)})."
+                ),
+                "entry_point_urls": ssrf_urls[:20],
+            })
         if has_business_logic_pages:
             attack_classes.append({
                 "id": "business_logic",
@@ -902,13 +919,26 @@ def _looks_tokenish(key: str, value: str) -> bool:
     ))
 
 
+def _looks_ssrf_param(key: str) -> bool:
+    k = (key or "").lower()
+    return any(marker in k for marker in (
+        "url", "uri", "link", "href", "src", "dest", "destination",
+        "redirect", "redirecturl", "target", "returnurl", "callback",
+        "feed", "fetch", "load", "resource", "proxy", "imageurl",
+        "image_url", "webhook", "endpoint", "host", "site",
+    ))
+
+
 def _looks_attackable_input(key: str, value: str) -> bool:
     text = f"{key} {value}".lower()
-    return any(marker in text for marker in (
-        "search", "sort", "filter", "query", "q", "email", "username",
-        "name", "description", "comment", "message", "amount", "price",
-        "redirect", "url", "return", "next",
-    ))
+    return (
+        any(marker in text for marker in (
+            "search", "sort", "filter", "query", "q", "email", "username",
+            "name", "description", "comment", "message", "amount", "price",
+            "redirect", "url", "return", "next",
+        ))
+        or _looks_ssrf_param(key)
+    )
 
 
 def _looks_like_object_reference(item: TargetIntelItem) -> bool:
