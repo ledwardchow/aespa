@@ -72,26 +72,6 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     s.scan_mode = policy.scan_mode
     import json as _json
     s.scope_hosts = _json.loads(site.scope_hosts or "[]") if site else []
-    scan_pages = session.exec(
-        select(CrawledPage)
-        .where(CrawledPage.test_run_id == run.id)
-        .where(CrawledPage.in_scope != False)  # noqa: E712
-    ).all()
-    s.scan_total_pages = len(scan_pages)
-    s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
-    em = run.error_message or ""
-    if scanner_svc.is_running(run.id):
-        s.scan_status = "running"
-    elif em.startswith("scan:"):
-        parts = em.split(":", 2)
-        s.scan_status = parts[1] if len(parts) > 1 else "idle"
-        if s.scan_status == "running":
-            s.scan_status = "idle"
-        s.error_message = (
-            f"Scan failed: {parts[2]}"
-            if s.scan_status == "failed" and len(parts) > 2
-            else None
-        )
     thinking = scanner_svc.get_thinking_scan_status(run.id)
     s.thinking_status = thinking.get("status", "idle")
     return s
@@ -255,24 +235,6 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                     pages_done=run.pages_discovered,
                     total_pages=run.max_pages,
                     current_url=run.current_url,
-                    started_at=run.started_at,
-                    created_at=run.created_at,
-                )
-            )
-
-        if scanner_svc.is_running(run.id):
-            scan = scanner_svc.get_scan_status(run.id)
-            jobs.append(
-                ActiveJobSummary(
-                    run_id=run.id,
-                    site_id=run.site_id,
-                    site_name=site_name,
-                    run_name=run.name,
-                    job_type="Structured Scan",
-                    status=scan.get("status", "running"),
-                    pages_done=scan.get("pages_done"),
-                    total_pages=scan.get("total_pages"),
-                    findings_count=scan.get("findings_count"),
                     started_at=run.started_at,
                     created_at=run.created_at,
                 )
