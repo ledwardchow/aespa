@@ -339,3 +339,67 @@ def test_upsert_scanner_policy_invalid_method(client: TestClient):
     payload["methods_by_mode"]["safe_active"] = ["GET", "BAD METHOD"]
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
+
+
+def test_import_llm_config_rejects_duplicate_names(client: TestClient):
+    # Duplicate provider names
+    payload_dup_provider = {
+        "exported_at": "2026-05-24T10:00:00Z",
+        "providers": [
+            {
+                "name": "DuplicateProvider",
+                "api_format": "openai",
+                "base_url": "http://localhost:1234/v1",
+                "models": ["gpt-4"],
+                "api_key": "some-key",
+            },
+            {
+                "name": "duplicateprovider",
+                "api_format": "openai",
+                "base_url": "http://localhost:5678/v1",
+                "models": ["gpt-4"],
+                "api_key": "some-other-key",
+            }
+        ],
+        "profiles": []
+    }
+    r = client.post("/api/settings/llm/import", json=payload_dup_provider)
+    assert r.status_code == 422
+    assert "Duplicate provider name" in r.json()["detail"]
+
+    # Duplicate profile names
+    payload_dup_profile = {
+        "exported_at": "2026-05-24T10:00:00Z",
+        "providers": [
+            {
+                "name": "SomeProvider",
+                "api_format": "openai",
+                "base_url": "http://localhost:1234/v1",
+                "models": ["gpt-4"],
+                "api_key": "some-key",
+            }
+        ],
+        "profiles": [
+            {
+                "name": "DuplicateProfile",
+                "provider_name": "SomeProvider",
+                "model": "gpt-4",
+                "max_tokens": 1000,
+                "temperature": 0.0,
+                "use_vision": False,
+                "is_active": True,
+            },
+            {
+                "name": "duplicateprofile",
+                "provider_name": "SomeProvider",
+                "model": "gpt-4",
+                "max_tokens": 2000,
+                "temperature": 0.5,
+                "use_vision": False,
+                "is_active": False,
+            }
+        ]
+    }
+    r = client.post("/api/settings/llm/import", json=payload_dup_profile)
+    assert r.status_code == 422
+    assert "Duplicate profile name" in r.json()["detail"]
