@@ -335,19 +335,20 @@ function App() {
             <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
         </nav>
-        <div className="sidebar-footer" style=${{display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "6px", height: "auto"}}>
-          <div style=${{display: "flex", alignItems: "center", gap: "8px", width: "100%"}}>
-            <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
-              ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
-            </button>
-            ${!collapsed && appVersion && (!showUsername || !username) && html`v${appVersion}`}
-          </div>
-          ${!collapsed && showUsername && username && html`
-            <div style=${{display: "flex", flexDirection: "column", gap: "2px", width: "100%", overflow: "hidden"}}>
-              <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
-                ${username}
-              </span>
-              ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "10px"}}>v${appVersion}</span>`}
+        <div className="sidebar-footer">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
+              ${showUsername && username ? html`
+                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                  ${username}
+                </span>
+                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
+              ` : html`
+                ${appVersion && html`<span>v${appVersion}</span>`}
+              `}
             </div>
           `}
         </div>
