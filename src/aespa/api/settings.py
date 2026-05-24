@@ -7,6 +7,8 @@ from aespa.db import get_session
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    GlobalHttpHeaderConfigIn,
+    GlobalHttpHeaderConfigOut,
     LLMConfigExport,
     LLMConfigIn,
     LLMConfigOut,
@@ -217,3 +219,18 @@ def upsert_adversarial_validator_config(
     session: Session = Depends(get_session),
 ) -> ValidatorConfigOut:
     return settings_service.upsert_adversarial_validator_config(session, payload)
+
+
+@router.get("/global-http-header", response_model=GlobalHttpHeaderConfigOut)
+def get_global_http_header_config(
+    session: Session = Depends(get_session),
+) -> GlobalHttpHeaderConfigOut:
+    return settings_service.get_global_http_header_config(session)
+
+
+@router.put("/global-http-header", response_model=GlobalHttpHeaderConfigOut)
+def upsert_global_http_header_config(
+    payload: GlobalHttpHeaderConfigIn,
+    session: Session = Depends(get_session),
+) -> GlobalHttpHeaderConfigOut:
+    return settings_service.upsert_global_http_header_config(session, payload)

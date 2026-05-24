@@ -39,6 +39,8 @@ const api = {
   upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
   getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
   upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
+  getGlobalHttpHeader: ()         => req("/api/settings/global-http-header"),
+  upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -286,8 +288,19 @@ function App() {
   const onExternalIntegrations = route.name === "external-integrations";
   const onDebug      = route.name === "debug";
   const [appVersion, setAppVersion] = useState("");
+  const [username, setUsername] = useState("");
+  const [showUsername, setShowUsername] = useState(() => {
+    try { return localStorage.getItem("aespa_show_username") === "true"; } catch (_) { return false; }
+  });
   const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
+  useEffect(() => {
+    api.getVersion()
+      .then(d => {
+        setAppVersion(d.version);
+        setUsername(d.username || "");
+      })
+      .catch(()=>{});
+  }, []);
 
   return html`
     <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
@@ -322,11 +335,21 @@ function App() {
             <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
         </nav>
-        <div className="sidebar-footer">
-          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
-            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
-          </button>
-          ${!collapsed && (appVersion ? `v${appVersion}` : "")}
+        <div className="sidebar-footer" style=${{display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "6px", height: "auto"}}>
+          <div style=${{display: "flex", alignItems: "center", gap: "8px", width: "100%"}}>
+            <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+              ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+            </button>
+            ${!collapsed && appVersion && (!showUsername || !username) && html`v${appVersion}`}
+          </div>
+          ${!collapsed && showUsername && username && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", width: "100%", overflow: "hidden"}}>
+              <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                ${username}
+              </span>
+              ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "10px"}}>v${appVersion}</span>`}
+            </div>
+          `}
         </div>
       </aside>
 
@@ -341,7 +364,7 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
-        ${route.name==="debug"       && html`<${DebugPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username}/>`}
       </div>
     </div>
   `;
@@ -4470,16 +4493,29 @@ function ExternalIntegrationsPage() {
     </div>`;
 }
 
-function DebugPage() {
+function DebugPage({ showUsername, setShowUsername, username }) {
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
+  const [hdrCfg, setHdrCfg] = useState(null);
+  const [hdrForm, setHdrForm] = useState({ header_name: "", header_value: "" });
+  const [hdrSaving, setHdrSaving] = useState(false);
+  const [hdrSaved, setHdrSaved] = useState(false);
+  const [hdrError, setHdrError] = useState(null);
+
   useEffect(() => {
     (async () => {
       try { setCfg(await api.getSpecialistAgentConfig()); }
       catch(e) { setError(e.message); }
+    })();
+    (async () => {
+      try {
+        const h = await api.getGlobalHttpHeader();
+        setHdrCfg(h);
+        setHdrForm({ header_name: h.header_name || "", header_value: h.header_value || "" });
+      } catch(e) { setHdrError(e.message); }
     })();
   }, []);
 
@@ -4492,12 +4528,62 @@ function DebugPage() {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
+  const saveHeader = async (e) => {
+    e.preventDefault();
+    setHdrSaved(false); setHdrSaving(true); setHdrError(null);
+    try {
+      const updated = await api.upsertGlobalHttpHeader({
+        header_name: hdrForm.header_name.trim() || null,
+        header_value: hdrForm.header_value.trim() || null,
+      });
+      setHdrCfg(updated);
+      setHdrForm({ header_name: updated.header_name || "", header_value: updated.header_value || "" });
+      setHdrSaved(true);
+    } catch(e) { setHdrError(e.message); } finally { setHdrSaving(false); }
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">Debug</div>
     </div>
     <div className="content scroll-content">
-      ${!cfg && !error && html`<div className="subtle">Loading…</div>`}
+      ${!cfg && !hdrCfg && !error && !hdrError && html`<div className="subtle">Loading…</div>`}
+
+      <div className="card">
+        <div className="form-section-title">Global Extra HTTP Header</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Inject an additional HTTP header into every request made by the scanner and crawler
+          (Playwright and HTTPX). Does not affect requests sent to LLMs. Leave the header name
+          empty to disable.
+        </div>
+        ${hdrError && html`<div className="alert error">${hdrError}</div>`}
+        ${hdrCfg !== null && html`
+          <form onSubmit=${saveHeader}>
+            <div className="form-row">
+              <label className="form-label">Header Name</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. X-Debug-Token"
+                value=${hdrForm.header_name}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_name: e.target.value})); }}/>
+            </div>
+            <div className="form-row">
+              <label className="form-label">Header Value</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. my-secret-value"
+                value=${hdrForm.header_value}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_value: e.target.value})); }}/>
+            </div>
+            <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+              <button className="btn btn-primary" type="submit" disabled=${hdrSaving}>
+                ${hdrSaving ? "Saving…" : "Save"}
+              </button>
+              ${hdrSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            </div>
+          </form>`}
+      </div>
+
       ${error && html`<div className="alert error">${error}</div>`}
       ${cfg && html`
         <div className="card">
@@ -4515,6 +4601,27 @@ function DebugPage() {
           </div>
           ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
         </div>`}
+
+      <div className="card" style=${{marginTop: 16}}>
+        <div className="form-section-title">Cloudflare Access</div>
+        <div className="field-hint" style=${{marginBottom: 12}}>
+          Show the authenticated user's email/username above the application version on the bottom left of the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${showUsername}
+            onChange=${e => {
+              const checked = e.target.checked;
+              setShowUsername(checked);
+              try { localStorage.setItem("aespa_show_username", String(checked)); } catch(_) {}
+            }}/>
+          <span>Show Username in Sidebar</span>
+        </label>
+        ${showUsername && html`
+          <div className="field-hint" style=${{marginTop: 8}}>
+            Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
+          </div>
+        `}
+      </div>
     </div>`;
 }
 
