@@ -832,6 +832,108 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(m
     }
 
 
+def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=800)
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 0,
+    }
+
+
+def test_openai_caching_tokens_extraction_missing_details(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=None
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+
+
 def test_openai_compatible_retries_reasoning_parameter_mismatch(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -989,6 +1091,55 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     }
 
 
+def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "ap-southeast-2",
+        "endpoint_url": None,
+    }.items() <= captured["client"].items()
+    assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+
+
 def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     captured: dict[str, str] = {}
 
@@ -1079,3 +1230,203 @@ def test_analyse_probes_chunks_large_result_sets(monkeypatch):
 
     assert len(prompts) == 3
     assert findings[0]["title"] == "Verbose error response"
+
+
+def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 100,
+                    "cacheReadInputTokens": 400,
+                    "cacheWriteInputTokens": 200,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 200,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 150,
+                    "cacheReadInputTokens": 500,
+                    "cacheWriteInputTokens": 300,
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1200,
+        "output_tokens": 150,
+        "cache_read_tokens": 500,
+        "cache_write_tokens": 300,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content_ant = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 2000,
+        "output_tokens": 250,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 400,
+    }
+

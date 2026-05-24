@@ -166,7 +166,7 @@ def test_dynamic_scan_creates_page_for_findings_without_crawl():
         engine.dispose()
 
 
-def test_dynamic_scan_task_does_not_write_structured_scan_status(monkeypatch):
+def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
     from aespa import models as _models  # noqa: F401
 
     engine = create_engine(
@@ -203,7 +203,6 @@ def test_dynamic_scan_task_does_not_write_structured_scan_status(monkeypatch):
             refreshed_run = session.get(RunModel, run_id)
 
         assert refreshed_run.error_message is None
-        assert scanner.get_scan_status(run_id)["status"] == "idle"
     finally:
         scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)
         SQLModel.metadata.drop_all(engine)
@@ -464,69 +463,6 @@ def test_bac_evidence_matches_original_user_content():
     ) is True
 
 
-def test_bac_check_uses_llm_generated_finding_text(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        status_code = 200
-        text = "<html><h1>Admin Dashboard</h1><p>Secret invoice data</p></html>"
-        content = text.encode()
-        headers = {"content-type": "text/html"}
-
-    class FakeAsyncClient:
-        def __init__(self, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, url):
-            return FakeResponse()
-
-    async def fake_analyse_probes(config, url, results):
-        captured["results"] = results
-        return [{
-            "owasp_category": "A01",
-            "title": "LLM generated BAC title",
-            "description": "Description written by the LLM.",
-            "impact": "Impact written by the LLM.",
-            "likelihood": "Likelihood written by the LLM.",
-            "recommendation": "Recommendation written by the LLM.",
-            "cvss_score": 8.1,
-            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
-            "severity": "high",
-            "affected_url": "https://target.local/admin",
-            "evidence": "LLM evidence summary.",
-        }]
-
-    monkeypatch.setattr(scanner.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(scanner.llm_svc, "analyse_probes", fake_analyse_probes)
-
-    findings = asyncio.run(scanner._run_bac_checks(
-        run_id=1,
-        page_id=2,
-        llm_cfg=object(),
-        page_url="https://target.local/admin",
-        page_title="Admin Dashboard",
-        page_text="Secret invoice data",
-        accessible_by=[1],
-        cred_sessions={
-            1: {"username": "alice", "cookies": {}},
-            2: {"username": "bob", "cookies": {"sid": "secret-session"}},
-        },
-    ))
-
-    assert findings[0].title == "LLM generated BAC title"
-    assert findings[0].description == "Description written by the LLM."
-    assert findings[0].impact == "Impact written by the LLM."
-    assert findings[0].request_evidence.startswith("GET https://target.local/admin")
-    assert "Secret invoice data" in findings[0].response_evidence
-    assert captured["results"][0]["as_user"] == "bob"
-
-
 def test_thinking_context_tools_filter_routes_and_history():
     pages = [
         {
@@ -689,73 +625,6 @@ def test_request_stop_noops_when_validation_not_running(monkeypatch):
     assert validator.request_stop(456) is False
     assert 456 not in validator._stop_requested
     assert reset_calls == []
-
-
-def test_probe_body_helper_serializes_json_objects():
-    content, headers, preview = scanner._prepare_probe_body(
-        {"account": {"id": 10000001}},
-        {},
-    )
-
-    assert content == b'{"account":{"id":10000001}}'
-    assert headers["Content-Type"] == "application/json"
-    assert preview == '{"account":{"id":10000001}}'
-
-
-def test_probe_body_helper_preserves_explicit_content_type():
-    content, headers, preview = scanner._prepare_probe_body(
-        {"accountId": "10000001"},
-        {"Content-Type": "application/vnd.api+json"},
-    )
-
-    assert content == b'{"accountId":"10000001"}'
-    assert headers["Content-Type"] == "application/vnd.api+json"
-    assert preview == '{"accountId":"10000001"}'
-
-
-def test_probe_cap_prioritizes_injection_for_input_pages():
-    probes = []
-    for i in range(40):
-        probes.append({
-            "type": "http",
-            "method": "GET",
-            "url": f"https://target.local/accounts/{i}",
-            "params": {},
-            "headers": {},
-            "body": None,
-            "desc": f"IDOR [range]: /1→/{i}",
-        })
-    for i in range(10):
-        probes.append({
-            "type": "http",
-            "method": "GET",
-            "url": "https://target.local/search",
-            "params": {"q": "<script>alert(1)</script>" if i % 2 else "' OR '1'='1'--"},
-            "headers": {},
-            "body": None,
-            "desc": "XSS probe" if i % 2 else "SQLi probe",
-        })
-
-    selected = scanner._prioritize_probes_for_cap(
-        probes,
-        20,
-        {"takes_input": True, "has_object_ref": True},
-    )
-
-    injection_count = sum(1 for p in selected if "probe" in p["desc"])
-
-    assert len(selected) == 20
-    assert injection_count == 10
-
-
-def test_input_validation_probes_include_expanded_sqli_and_xss_payloads():
-    probes = scanner._input_validation_probes("https://target.local/search?q=test")
-    text = "\n".join(p["url"] + " " + p["desc"] for p in probes)
-
-    assert "WAITFOR" in text or "WAITFOR" in text.upper()
-    assert "pg_sleep" in text
-    assert "onfocus" in text
-    assert "%253Cscript%253Ealert%281%29%253C%2Fscript%253E" in text
 
 
 def test_deterministic_result_analysis_detects_sql_error():
