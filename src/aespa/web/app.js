@@ -39,6 +39,8 @@ const api = {
   upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
   getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
   upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
+  getGlobalHttpHeader: ()         => req("/api/settings/global-http-header"),
+  upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -4476,10 +4478,23 @@ function DebugPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
+  const [hdrCfg, setHdrCfg] = useState(null);
+  const [hdrForm, setHdrForm] = useState({ header_name: "", header_value: "" });
+  const [hdrSaving, setHdrSaving] = useState(false);
+  const [hdrSaved, setHdrSaved] = useState(false);
+  const [hdrError, setHdrError] = useState(null);
+
   useEffect(() => {
     (async () => {
       try { setCfg(await api.getSpecialistAgentConfig()); }
       catch(e) { setError(e.message); }
+    })();
+    (async () => {
+      try {
+        const h = await api.getGlobalHttpHeader();
+        setHdrCfg(h);
+        setHdrForm({ header_name: h.header_name || "", header_value: h.header_value || "" });
+      } catch(e) { setHdrError(e.message); }
     })();
   }, []);
 
@@ -4492,12 +4507,62 @@ function DebugPage() {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
+  const saveHeader = async (e) => {
+    e.preventDefault();
+    setHdrSaved(false); setHdrSaving(true); setHdrError(null);
+    try {
+      const updated = await api.upsertGlobalHttpHeader({
+        header_name: hdrForm.header_name.trim() || null,
+        header_value: hdrForm.header_value.trim() || null,
+      });
+      setHdrCfg(updated);
+      setHdrForm({ header_name: updated.header_name || "", header_value: updated.header_value || "" });
+      setHdrSaved(true);
+    } catch(e) { setHdrError(e.message); } finally { setHdrSaving(false); }
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">Debug</div>
     </div>
     <div className="content scroll-content">
-      ${!cfg && !error && html`<div className="subtle">Loading…</div>`}
+      ${!cfg && !hdrCfg && !error && !hdrError && html`<div className="subtle">Loading…</div>`}
+
+      <div className="card">
+        <div className="form-section-title">Global Extra HTTP Header</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Inject an additional HTTP header into every request made by the scanner and crawler
+          (Playwright and HTTPX). Does not affect requests sent to LLMs. Leave the header name
+          empty to disable.
+        </div>
+        ${hdrError && html`<div className="alert error">${hdrError}</div>`}
+        ${hdrCfg !== null && html`
+          <form onSubmit=${saveHeader}>
+            <div className="form-row">
+              <label className="form-label">Header Name</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. X-Debug-Token"
+                value=${hdrForm.header_name}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_name: e.target.value})); }}/>
+            </div>
+            <div className="form-row">
+              <label className="form-label">Header Value</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. my-secret-value"
+                value=${hdrForm.header_value}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_value: e.target.value})); }}/>
+            </div>
+            <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+              <button className="btn btn-primary" type="submit" disabled=${hdrSaving}>
+                ${hdrSaving ? "Saving…" : "Save"}
+              </button>
+              ${hdrSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            </div>
+          </form>`}
+      </div>
+
       ${error && html`<div className="alert error">${error}</div>`}
       ${cfg && html`
         <div className="card">

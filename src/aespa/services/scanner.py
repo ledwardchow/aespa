@@ -34,7 +34,7 @@ from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.scope import check_scope, register_scope_host_for_run
-from aespa.services.settings import get_burp_rest_api_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
+from aespa.services.settings import get_burp_rest_api_config, get_global_http_header_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
     SPECIALIST_SYSTEM_PROMPTS as _SPECIALIST_SYSTEM_PROMPTS,
@@ -44,12 +44,16 @@ from aespa.services.prompts.specialist import (
 log = logging.getLogger("aespa.scanner")
 
 _scanner_proxy_var: _ContextVar[str | None] = _ContextVar('_scanner_proxy', default=None)
+_scanner_global_header_var: _ContextVar[dict[str, str]] = _ContextVar('_scanner_global_header', default={})
 
 
 def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     kwargs.setdefault("verify", False)
     if proxy := _scanner_proxy_var.get():
         kwargs["proxy"] = proxy
+    if global_header := _scanner_global_header_var.get():
+        existing = kwargs.get("headers", {})
+        kwargs["headers"] = {**global_header, **existing}
     return httpx.AsyncClient(**kwargs)
 
 
@@ -57,6 +61,14 @@ def _playwright_proxy() -> dict:
     if proxy := _scanner_proxy_var.get():
         return {"proxy": {"server": proxy}}
     return {}
+
+
+def _playwright_global_headers(session_extra_headers: dict | None = None) -> dict[str, str]:
+    """Merge global extra header with session-specific extra headers for Playwright contexts."""
+    merged = dict(_scanner_global_header_var.get())
+    if session_extra_headers:
+        merged.update(session_extra_headers)
+    return merged
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -3276,12 +3288,18 @@ async def _do_thinking_scan(run_id: int) -> None:
         scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
         llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
         specialist_cfg = get_specialist_agent_config(s)
+        global_header_cfg = get_global_http_header_config(s)
 
         site_id = site.id  # captured before expunge for scope checks
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
+    global_http_header: dict[str, str] = {}
+    if global_header_cfg.header_name and global_header_cfg.header_value:
+        global_http_header = {global_header_cfg.header_name: global_header_cfg.header_value}
+
     _scanner_proxy_var.set(scanner_proxy_url)
+    _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
@@ -3814,8 +3832,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                             if cookie_list:
                                 await browser_ctx.add_cookies(cookie_list)
                         await browser_ctx.set_extra_http_headers(
-                            selected_session.get("extra_headers", {})
-                            if selected_session else {}
+                            _playwright_global_headers(
+                                (selected_session.get("extra_headers") or {}) if selected_session else {}
+                            )
                         )
                     except Exception:
                         pass
@@ -5031,7 +5050,9 @@ async def _do_agentic_thinking_loop(
                     if cookie_list:
                         await browser_ctx.add_cookies(cookie_list)
                 await browser_ctx.set_extra_http_headers(
-                    selected_session.get("extra_headers", {}) if selected_session else {}
+                    _playwright_global_headers(
+                        (selected_session.get("extra_headers") or {}) if selected_session else {}
+                    )
                 )
             except Exception:
                 pass

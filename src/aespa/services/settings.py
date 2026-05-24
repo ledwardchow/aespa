@@ -8,10 +8,12 @@ from fastapi import HTTPException
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
-from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, LLMConfig, LLMProviderConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
+from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, GlobalHttpHeaderConfig, LLMConfig, LLMProviderConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    GlobalHttpHeaderConfigIn,
+    GlobalHttpHeaderConfigOut,
     LLMConfigExport,
     LLMConfigIn,
     LLMConfigOut,
@@ -471,6 +473,32 @@ def upsert_adversarial_validator_config(
     session.commit()
     session.refresh(cfg)
     return get_adversarial_validator_config(session)
+
+
+def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut:
+    cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
+    if cfg is None:
+        return GlobalHttpHeaderConfigOut(**GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow())
+    return GlobalHttpHeaderConfigOut(
+        header_name=cfg.header_name,
+        header_value=cfg.header_value,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_global_http_header_config(
+    session: Session, payload: GlobalHttpHeaderConfigIn
+) -> GlobalHttpHeaderConfigOut:
+    cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = GlobalHttpHeaderConfig(id=_SINGLETON_ID)
+    cfg.header_name = payload.header_name
+    cfg.header_value = payload.header_value
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_global_http_header_config(session)
 
 
 # ── LLM config export / import ────────────────────────────────────────────────

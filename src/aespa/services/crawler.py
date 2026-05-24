@@ -24,7 +24,7 @@ from aespa.models import CrawledPage, PageCredentialView, PageLink, TargetIntelI
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config, get_llm_config_for_run, get_upstream_proxy_config
+from aespa.services.settings import get_global_http_header_config, get_llm_config, get_llm_config_for_run, get_upstream_proxy_config
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -128,10 +128,14 @@ async def _do_crawl_inner(run_id: int) -> None:
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
         crawl_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        global_header_cfg = get_global_http_header_config(s)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
+    _global_http_header: dict[str, str] = {}
+    if global_header_cfg.header_name and global_header_cfg.header_value:
+        _global_http_header = {global_header_cfg.header_name: global_header_cfg.header_value}
     base_url      = _site_base_url(site.base_url)
     login_url     = site.login_url or ""
     requires_auth = site.requires_auth
@@ -181,6 +185,7 @@ async def _do_crawl_inner(run_id: int) -> None:
                 base_netloc=base_netloc, base_path=base_path,
                 phase_idx=idx, total_phases=len(phases),
                 pw_proxy=_pw_proxy,
+                global_http_header=_global_http_header,
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -200,6 +205,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         requires_auth=requires_auth,
         llm_cfg=llm_cfg,
         pw_proxy=_pw_proxy,
+        global_http_header=_global_http_header,
     )
 
     # OR-merge page categories from all credential views into each CrawledPage.
@@ -243,6 +249,7 @@ async def _crawl_as_credential(
     phase_idx: int,
     total_phases: int,
     pw_proxy: dict,
+    global_http_header: dict[str, str],
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -267,6 +274,8 @@ async def _crawl_as_credential(
             ignore_https_errors=True,
             **pw_proxy,
         )
+        if global_http_header:
+            await ctx.set_extra_http_headers(global_http_header)
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
@@ -1809,6 +1818,7 @@ async def _reconcile_direct_access(
     requires_auth: bool,
     llm_cfg,
     pw_proxy: dict,
+    global_http_header: dict[str, str],
 ) -> None:
     """Mark pages as accessible when a credential can load a known URL directly.
 
@@ -1844,6 +1854,8 @@ async def _reconcile_direct_access(
                     break
                 credential_login_url = _login_url_for_credential(login_url, cred)
                 ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **pw_proxy)
+                if global_http_header:
+                    await ctx.set_extra_http_headers(global_http_header)
                 traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
                 page = await ctx.new_page()
                 try:
