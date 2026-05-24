@@ -3907,12 +3907,25 @@ const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openai:"https://api.openai.com/v1",
   openai_compatible:"http://localhost:1234/v1",
   openrouter:"https://openrouter.ai/api/v1",
-  google:"",
+  google:"https://generativelanguage.googleapis.com",
   bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
   azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
+};
+// Actual runtime defaults used by the backend when base_url is blank
+const PROVIDER_DEFAULT_BASE_URLS = {
+  anthropic:  "https://api.anthropic.com",
+  openai:     "https://api.openai.com/v1",
+  openai_compatible: null,           // no sensible default — must be set
+  openrouter: "https://openrouter.ai/api/v1",
+  google:     "https://generativelanguage.googleapis.com",
+  bedrock:    "AWS SDK default (us-east-1)",
+  azure_openai: null,                // must be set
+  azure_foundry: null,
+  azure_foundry_openai: null,
+  azure_foundry_anthropic: null,
 };
 const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
@@ -4236,7 +4249,7 @@ function SettingsPage() {
             <div className="settings-list-row" key=${p.id}>
               <div><strong>${p.name}</strong></div>
               <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
-              <div className="mono">${p.base_url || "Default"}</div>
+              <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
               <div className="mono">${(p.models||[]).join(", ")}</div>
               <div className="row settings-list-actions">
                 <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
