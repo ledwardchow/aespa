@@ -496,7 +496,7 @@ async def _validate_one(
         "type": "scanner_phase",
         "phase": "thinking_step",
         "status": "start",
-        "message": f"Validating finding: {finding.title!r} — {finding.url or 'no URL'}",
+        "message": f"Validating finding: {finding.title!r} — {finding.affected_url or 'no URL'}",
         "data": {"finding_id": finding.id},
     })
 

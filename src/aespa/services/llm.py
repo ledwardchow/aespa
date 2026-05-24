@@ -680,9 +680,11 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -709,9 +711,11 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -743,9 +747,11 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -790,9 +796,11 @@ async def _azure_foundry_openai(
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -2013,9 +2021,11 @@ async def _call_with_tools(
             })
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
         _oai_u = getattr(resp, "usage", None)
+        _oai_cached = getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0) if _oai_u else 0
         _record_usage(config.model,
                       getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
-                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0)
+                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+                      cache_read_tokens=_oai_cached)
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
