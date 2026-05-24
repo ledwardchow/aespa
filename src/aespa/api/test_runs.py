@@ -46,7 +46,7 @@ from aespa.services import crawler as crawler_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import task_graph as task_graph_svc
-from aespa.services.settings import get_llm_config
+from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
 
@@ -72,26 +72,6 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     s.scan_mode = policy.scan_mode
     import json as _json
     s.scope_hosts = _json.loads(site.scope_hosts or "[]") if site else []
-    scan_pages = session.exec(
-        select(CrawledPage)
-        .where(CrawledPage.test_run_id == run.id)
-        .where(CrawledPage.in_scope != False)  # noqa: E712
-    ).all()
-    s.scan_total_pages = len(scan_pages)
-    s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
-    em = run.error_message or ""
-    if scanner_svc.is_running(run.id):
-        s.scan_status = "running"
-    elif em.startswith("scan:"):
-        parts = em.split(":", 2)
-        s.scan_status = parts[1] if len(parts) > 1 else "idle"
-        if s.scan_status == "running":
-            s.scan_status = "idle"
-        s.error_message = (
-            f"Scan failed: {parts[2]}"
-            if s.scan_status == "failed" and len(parts) > 2
-            else None
-        )
     thinking = scanner_svc.get_thinking_scan_status(run.id)
     s.thinking_status = thinking.get("status", "idle")
     return s
@@ -198,6 +178,10 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
+    if payload.llm_config_id is not None:
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
     name = payload.name or _auto_name(session, site_id)
     policy = settings_service.get_scanner_policy(session)
     run = TestRun(
@@ -251,24 +235,6 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                     pages_done=run.pages_discovered,
                     total_pages=run.max_pages,
                     current_url=run.current_url,
-                    started_at=run.started_at,
-                    created_at=run.created_at,
-                )
-            )
-
-        if scanner_svc.is_running(run.id):
-            scan = scanner_svc.get_scan_status(run.id)
-            jobs.append(
-                ActiveJobSummary(
-                    run_id=run.id,
-                    site_id=run.site_id,
-                    site_name=site_name,
-                    run_name=run.name,
-                    job_type="Structured Scan",
-                    status=scan.get("status", "running"),
-                    pages_done=scan.get("pages_done"),
-                    total_pages=scan.get("total_pages"),
-                    findings_count=scan.get("findings_count"),
                     started_at=run.started_at,
                     created_at=run.created_at,
                 )
@@ -385,7 +351,7 @@ async def start_test_run(
             status_code=409,
             detail=f"Cannot start a run with status '{run.status}'",
         )
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
@@ -408,7 +374,7 @@ async def restart_test_run(
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Stop the run before restarting.")
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",

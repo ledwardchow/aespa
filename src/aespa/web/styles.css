@@ -620,6 +620,97 @@ legend {
 
 .settings-tab-bar { margin-bottom: 14px; }
 
+.settings-content {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.settings-content > .alert,
+.settings-content > .subtle,
+.settings-content > .card {
+  margin-left: 28px;
+  margin-right: 28px;
+}
+
+.settings-content > .alert {
+  margin-top: 12px;
+}
+
+.settings-content > .card {
+  margin-top: 14px;
+}
+
+.settings-content .settings-tab-bar {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.settings-list {
+  margin-top: 14px;
+  min-width: 0;
+}
+
+.settings-list-head,
+.settings-list-row {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  padding-left: 28px;
+  padding-right: 28px;
+}
+
+.settings-list-profiles .settings-list-head,
+.settings-list-profiles .settings-list-row {
+  grid-template-columns: minmax(130px, 1fr) minmax(150px, 1.2fr) minmax(180px, 1.4fr) 64px 96px minmax(168px, auto);
+}
+
+.settings-list-providers .settings-list-head,
+.settings-list-providers .settings-list-row {
+  grid-template-columns: minmax(150px, 1.1fr) minmax(120px, 0.8fr) minmax(190px, 1.2fr) minmax(200px, 1.4fr) minmax(120px, auto);
+}
+
+.settings-list-head {
+  padding-top: 0;
+  padding-bottom: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-list-row {
+  min-height: 52px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.settings-list-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-list-row strong {
+  color: var(--text);
+}
+
+.settings-list-row > div {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-list-row .settings-list-actions {
+  justify-content: flex-end;
+  overflow: visible;
+}
+
 .policy-panel {
   overflow: auto;
   padding-bottom: 18px;

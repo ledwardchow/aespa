@@ -21,6 +21,12 @@ const api = {
   updateLLMProfile: (id,b)        => req(`/api/settings/llm/profiles/${id}`, { method:"PUT", body:b }),
   activateLLMProfile: (id)        => req(`/api/settings/llm/profiles/${id}/activate`, { method:"POST" }),
   deleteLLMProfile: (id)          => req(`/api/settings/llm/profiles/${id}`, { method:"DELETE" }),
+  listLLMProviders: ()            => req("/api/settings/llm/providers"),
+  createLLMProvider: (b)          => req("/api/settings/llm/providers", { method:"POST", body:b }),
+  updateLLMProvider: (id,b)       => req(`/api/settings/llm/providers/${id}`, { method:"PUT", body:b }),
+  deleteLLMProvider: (id)         => req(`/api/settings/llm/providers/${id}`, { method:"DELETE" }),
+  exportLLMConfig:  ()            => req("/api/settings/llm/export"),
+  importLLMConfig:  (b)           => req("/api/settings/llm/import", { method:"POST", body:b }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
@@ -33,6 +39,8 @@ const api = {
   upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
   getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
   upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
+  getGlobalHttpHeader: ()         => req("/api/settings/global-http-header"),
+  upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -56,15 +64,11 @@ const api = {
   updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
-  startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
-  startBurpScan:    (id)          => req(`/api/test-runs/${id}/burp-scan/start`,          { method:"POST" }),
   startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
   resumeThinkingScan:(id)         => req(`/api/test-runs/${id}/thinking-scan/resume`,     { method:"POST" }),
   stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
   getCheckpointStatus:(id)        => req(`/api/test-runs/${id}/thinking-scan/checkpoint`),
-  stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
-  getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
   getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
@@ -77,7 +81,6 @@ const api = {
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
-  scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
@@ -285,8 +288,19 @@ function App() {
   const onExternalIntegrations = route.name === "external-integrations";
   const onDebug      = route.name === "debug";
   const [appVersion, setAppVersion] = useState("");
+  const [username, setUsername] = useState("");
+  const [showUsername, setShowUsername] = useState(() => {
+    try { return localStorage.getItem("aespa_show_username") === "true"; } catch (_) { return false; }
+  });
   const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
+  useEffect(() => {
+    api.getVersion()
+      .then(d => {
+        setAppVersion(d.version);
+        setUsername(d.username || "");
+      })
+      .catch(()=>{});
+  }, []);
 
   return html`
     <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
@@ -325,7 +339,18 @@ function App() {
           <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
             ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
           </button>
-          ${!collapsed && (appVersion ? `v${appVersion}` : "")}
+          ${!collapsed && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
+              ${showUsername && username ? html`
+                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                  ${username}
+                </span>
+                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
+              ` : html`
+                ${appVersion && html`<span>v${appVersion}</span>`}
+              `}
+            </div>
+          `}
         </div>
       </aside>
 
@@ -340,7 +365,7 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
-        ${route.name==="debug"       && html`<${DebugPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username}/>`}
       </div>
     </div>
   `;
@@ -374,9 +399,6 @@ function SitesList() {
     } catch(err) { setError(err.message); }
     finally { setImporting(false); }
   };
-  const authCount = sites ? sites.filter(s=>s.requires_auth).length : 0;
-  const credCount = sites ? sites.reduce((n,s)=>n+s.credential_count,0) : 0;
-
   return html`
     <div className="topbar">
       <div className="topbar-title">Sites</div>
@@ -388,12 +410,6 @@ function SitesList() {
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
-      ${sites&&sites.length>0 && html`
-        <div className="stat-strip">
-          <div className="stat"><span className="stat-value">${sites.length}</span><span className="stat-label">Sites</span></div>
-          <div className="stat"><span className="stat-value">${authCount}</span><span className="stat-label">Authenticated</span></div>
-          <div className="stat"><span className="stat-value">${credCount}</span><span className="stat-label">Credentials</span></div>
-        </div>`}
       ${sites===null && html`<div className="subtle">Loading…</div>`}
       ${sites!==null&&sites.length===0 && html`
         <div className="empty-state">
@@ -845,8 +861,6 @@ const SCOPE_IN_COLOR  = "#3b82f6";
 const SCOPE_OUT_COLOR = "#ef4444";
 const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLOR;
 
-const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
-const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
 const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
 const isDynamicScanActive = (status) => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
 
@@ -864,24 +878,18 @@ const userColor = (d, credentials) => {
 
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
-  const scanStatus = opts.scanStatus || run.scan_status || "idle";
   const thinkingStatus = opts.thinkingStatus || run.thinking_status || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
-  if (opts.scanStopping) return { key:"stopping", label:"stopping Structured Scan" };
   if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };
   if (run.status === "running") return { key:"running", label:"crawling" };
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
   if (thinkingStatus === "running") return { key:"running", label:"Dynamic Scan" };
   if (thinkingStatus === "analysing") return { key:"running", label:"analysing Dynamic Scan" };
-  if (scanStatus === "running") return { key:"running", label:"Structured Scan" };
   if (thinkingStatus === "failed") return { key:"danger", label:"Dynamic Scan failed" };
-  if (scanStatus === "failed") return { key:"danger", label:"Structured Scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
   if (thinkingStatus === "stopped") return { key:"neutral", label:"Dynamic Scan stopped" };
-  if (scanStatus === "stopped") return { key:"neutral", label:"Structured Scan stopped" };
   if (thinkingStatus === "complete") return { key:"ok", label:"Dynamic Scan complete" };
-  if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
-  if (run.status === "complete") return { key:"partial", label:"crawl complete" };
+  if (run.status === "complete") return { key:"ok", label:"complete" };
   return { key:"neutral", label:run.status || "pending" };
 }
 
@@ -925,7 +933,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState(initialTab === "scan" ? "sitemap" : (initialTab || "activity"));
+  const [activeTab, setActiveTab] = useState(initialTab || "activity");
   const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
   const [targetIntel, setTargetIntel]       = useState(null);
@@ -947,7 +955,6 @@ function TestRunDetail({ runId, initialTab }) {
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
-  const [scanStatus, setScanStatus]         = useState(null);
   const [activityLog, setActivityLog]       = useState([]);
   const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
   const toggleLogId = (id) => setExpandedLogIds(prev => {
@@ -964,7 +971,6 @@ function TestRunDetail({ runId, initialTab }) {
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
-  const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [thinkingStatus, setThinkingStatus]         = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [checkpointStatus, setCheckpointStatus]     = useState(null);
@@ -1003,7 +1009,6 @@ function TestRunDetail({ runId, initialTab }) {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
-      api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
       api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
       api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
@@ -1321,9 +1326,6 @@ function TestRunDetail({ runId, initialTab }) {
             ),
           };
         });
-      } else if (evt.type === "scan_update") {
-        setScanStatus(evt);
-        if (evt.status && evt.status !== "running") setScanStopRequested(false);
       } else if (evt.type === "thinking_scan_update") {
         setThinkingStatus(evt);
         if (evt.status && !isDynamicScanActive(evt.status)) setThinkingStopReq(false);
@@ -1419,24 +1421,13 @@ function TestRunDetail({ runId, initialTab }) {
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
 
-  // Poll findings/status while scan is running, stopping, or on findings tab.
+  // Poll findings when on findings tab.
   useEffect(() => {
-    const scanActive = scanStatus?.status === "running" || scanStopRequested;
-    const needsFindings = scanActive || activeTab === "findings";
-    if (!needsFindings) return;
-    const poll = () => {
-      api.getFindings(runId).then(setFindings).catch(() => {});
-      if (scanActive || !scanStatus) {
-        api.getScanStatus(runId).then(s => {
-          setScanStatus(s);
-          if (scanStopRequested && s.status !== "running") setScanStopRequested(false);
-        }).catch(() => {});
-      }
-    };
-    poll();
-    const iv = setInterval(poll, 4000);
+    if (activeTab !== "findings") return;
+    api.getFindings(runId).then(setFindings).catch(() => {});
+    const iv = setInterval(() => { api.getFindings(runId).then(setFindings).catch(() => {}); }, 4000);
     return () => clearInterval(iv);
-  }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
+  }, [runId, activeTab]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
@@ -1473,14 +1464,7 @@ function TestRunDetail({ runId, initialTab }) {
   useEffect(() => {
     if (activeTab !== "findings") return;
     api.getFindings(runId).then(setFindings).catch(()=>{});
-    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
     api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
-  }, [activeTab, runId]);
-
-  useEffect(() => {
-    if (activeTab !== "scan") return;
-    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
-    api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   useEffect(() => {
@@ -1504,15 +1488,14 @@ function TestRunDetail({ runId, initialTab }) {
   }, [activeTab, runId, thinkingStatus?.status]);
 
   useEffect(() => {
-    const scanRunning = (scanStatus?.status || run?.scan_status) === "running";
-    const active = activeTab === "sessions" || isDynamicScanActive(thinkingStatus?.status) || scanRunning;
+    const active = activeTab === "sessions" || isDynamicScanActive(thinkingStatus?.status);
     if (!active) return;
     const loadSessions = () => api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{});
     loadSessions();
-    if (activeTab === "sessions" && !isDynamicScanActive(thinkingStatus?.status) && !scanRunning) return;
+    if (activeTab === "sessions" && !isDynamicScanActive(thinkingStatus?.status)) return;
     const iv = setInterval(loadSessions, 4000);
     return () => clearInterval(iv);
-  }, [activeTab, runId, thinkingStatus?.status, scanStatus?.status, run?.scan_status]);
+  }, [activeTab, runId, thinkingStatus?.status]);
 
   useEffect(() => {
     api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
@@ -1540,17 +1523,15 @@ function TestRunDetail({ runId, initialTab }) {
     const isActive = (
       activeTab === "traffic" ||
       run?.status === "running" ||
-      scanStatus?.status === "running" ||
       isDynamicScanActive(thinkingStatus?.status) ||
       crawlStopRequested ||
-      scanStopRequested ||
       thinkingStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, thinkingStatus?.status, runId, crawlStopRequested, scanStopRequested, thinkingStopRequested]);
+  }, [activeTab, run?.status, thinkingStatus?.status, runId, crawlStopRequested, thinkingStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
@@ -1588,9 +1569,7 @@ function TestRunDetail({ runId, initialTab }) {
   useEffect(() => {
     if (!graph || !svgRef.current) return;
 
-    const isScan = activeTab === "scan";
-    const visibleNodes = isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes;
-    const structureKey = `${activeTab}:${graphView}:${visibleNodes.length}:${graph.links.length}`;
+    const structureKey = `${activeTab}:${graphView}:${graph.nodes.length}:${graph.links.length}`;
 
     // Status-only change (same nodes/links, just colour updates) — update in-place.
     if (structureKey === prevGraphKeyRef.current && simRef.current) {
@@ -1612,16 +1591,8 @@ function TestRunDetail({ runId, initialTab }) {
     const W = svgRef.current.clientWidth || 800;
     const H = svgRef.current.clientHeight || 500;
 
-    const inScopeIds = isScan
-      ? new Set(graph.nodes.filter(n => n.in_scope !== false).map(n => n.id))
-      : null;
-
-    const nodes = (isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes)
-      .map(n => ({...n}));
-    const links = (isScan
-      ? graph.links.filter(l => inScopeIds.has(l.source) && inScopeIds.has(l.target))
-      : graph.links
-    ).map(l => ({...l}));
+    const nodes = graph.nodes.map(n => ({...n}));
+    const links = graph.links.map(l => ({...l}));
 
     const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => g.attr("transform", e.transform));
     svg.call(zoom);
@@ -1715,23 +1686,8 @@ function TestRunDetail({ runId, initialTab }) {
   }, [run?.current_url, graph]);
 
   // Pulse graph nodes that are actively being scanned.
-  useEffect(() => {
-    if (!svgRef.current || !graph) return;
-    const svg = d3.select(svgRef.current);
-    svg.selectAll(".node-scan-pulse").remove();
-    const runningIds = new Set(graph.nodes.filter(n => n.scan_status === "running").map(n => n.id));
-    if (runningIds.size === 0) return;
-    svg.select("g").selectAll("g")
-      .filter(d => d && runningIds.has(d.id))
-      .insert("circle", ":first-child")
-        .attr("class", "node-scan-pulse")
-        .attr("r", 11);
-  }, [graph, activeTab, graphView]);
-
   // Compute the fill colour for a graph node based on current view mode.
   const nodeColorFn = (d) => {
-    const isScan = activeTab === "scan";
-    if (isScan) return scanColor(d);
     if (graphView === "user") return userColor(d, run?.credentials);
     return scopeColor(d);
   };
@@ -1780,49 +1736,6 @@ function TestRunDetail({ runId, initialTab }) {
     ? html`<span className="sort-arrow">${trafficSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
   const fmtTs = (iso) => { try { const d = new Date(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
 
-  const onStartScan = async () => {
-    try {
-      setScanStopRequested(false);
-      const policy = await api.getScannerPolicy();
-      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
-        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
-        const ok = confirm(
-          `Start ${scanModeLabel(policy.scan_mode)} scan?\n\n` +
-          `Methods: ${methods}\n` +
-          `Max probes/page: ${policy.max_probes_per_page}\n` +
-          `Delay: ${policy.min_delay_s}s\n` +
-          `Timeout: ${policy.request_timeout_s}s`
-        );
-        if (!ok) return;
-      }
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.startScan(runId);
-      setScanStatus(s);
-    } catch(e) { setScanStopRequested(false); setError(e.message); }
-  };
-
-  const onScanPage = async () => {
-    if (!selectedNode || scopeBusy) return;
-    setScopeBusy(true);
-    try {
-      setScanStopRequested(false);
-      const policy = await api.getScannerPolicy();
-      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
-        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
-        const ok = confirm(
-          `Scan this page with ${scanModeLabel(policy.scan_mode)} mode?\n\n` +
-          `Methods: ${methods}\n` +
-          `Max probes/page: ${policy.max_probes_per_page}\n` +
-          `Delay: ${policy.min_delay_s}s\n` +
-          `Timeout: ${policy.request_timeout_s}s`
-        );
-        if (!ok) return;
-      }
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.scanPage(runId, selectedNode.id);
-      setScanStatus(s);
-    } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
-  };
   const onDeleteFinding = async (e, findingId) => {
     e.stopPropagation();
     try {
@@ -1918,16 +1831,6 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(err) { setError(err.message); }
   };
 
-  const onStopScan = async () => {
-    try {
-      setScanStopRequested(true);
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.stopScan(runId);
-      setScanStatus(prev => s.status === "running" ? { ...prev, ...s, status: "running" } : s);
-      if (s.status !== "running") setScanStopRequested(false);
-    } catch(e) { setScanStopRequested(false); setError(e.message); }
-  };
-
   const onStopThinkingScan = async () => {
     try {
       setThinkingStopReq(true);
@@ -2021,22 +1924,17 @@ function TestRunDetail({ runId, initialTab }) {
     if (!confirm("Clear all crawled pages for this run?")) return;
     try {
       setCrawlStopRequested(false);
-      setScanStopRequested(false);
       setGraph({nodes:[], links:[]});
       const r = await api.clearCrawl(runId);
       setRun({...r, status: "pending", per_user_progress: null});
     } catch(e) { setError(e.message); }
   };
 
-  const rawScanStatus           = scanStatus?.status     || run?.scan_status || "idle";
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   const dynamicScanActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
-  const effectiveScanStatus = dynamicScanActive && rawScanStatus === "running" ? "idle" : rawScanStatus;
   const headerStatus = runWorkflowStatus(run, {
-    scanStatus: effectiveScanStatus,
     thinkingStatus: effectiveThinkingStatus,
     crawlStopping: crawlStopRequested,
-    scanStopping: scanStopRequested,
     thinkingStopping: thinkingStopRequested,
   });
   const STATUS_COLOR = {
@@ -2051,10 +1949,8 @@ function TestRunDetail({ runId, initialTab }) {
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
   const canClearCrawl = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
-  const canStopScan = effectiveScanStatus === "running";
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
-  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !isDynamicScanActive(effectiveThinkingStatus);
-  const canShowScanStartButtons = ["idle","complete","stopped","failed"].includes(effectiveScanStatus) || effectiveScanStatus == null;
+  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
 
   return html`
@@ -2079,7 +1975,6 @@ function TestRunDetail({ runId, initialTab }) {
           <button className="btn sm" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} title=${`Resume scan from step ${checkpointStatus.step_count}`} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest</button>`}
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
-        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop Structured Scan"}</button>`}
         ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
       </div>
     </div>
@@ -2090,7 +1985,7 @@ function TestRunDetail({ runId, initialTab }) {
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
           onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
-          Status${(effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          Status${isDynamicScanActive(thinkingStatus?.status) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
           onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
@@ -2115,10 +2010,8 @@ function TestRunDetail({ runId, initialTab }) {
           Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
-        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && canShowScanStartButtons && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title=${!graph||graph.nodes.length===0 ? "No site map yet — crawl first" : "Run the Structured Scan page-by-page scanner"} onClick=${onStartScan} disabled=${!graph||graph.nodes.length===0}><${IconPlay}/> Start Structured Scan</button>`}
         ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
-        ${(activeTab==="sitemap"||activeTab==="scan") && run?.credentials?.length > 1 && html`
+        ${activeTab==="sitemap" && run?.credentials?.length > 1 && html`
           <div className="view-toggle" style=${{margin:"auto 8px auto 0"}}>
             <button className=${"btn ghost sm"+(graphView==="scope"?" active":"")}
               onClick=${()=>setGraphView("scope")}>By Scope</button>
@@ -2127,7 +2020,7 @@ function TestRunDetail({ runId, initialTab }) {
           </div>`}
       </div>
 
-      ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
+      ${activeTab==="sitemap" && run && html`
         <div className="run-meta">
           <div className="run-stat"><span className="run-stat-val">${run.pages_discovered}</span><span className="run-stat-lbl">Pages found</span></div>
           ${editingSettings ? html`
@@ -2176,69 +2069,13 @@ function TestRunDetail({ runId, initialTab }) {
           })()}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
-        ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
+        ${activeTab==="sitemap" && run && html`
           <${ScopeHostsPanel}
             siteId=${run.site_id}
             hosts=${scopeHosts}
             onChange=${setScopeHosts}
           />`}
         ${(()=>{
-          if (activeTab === "scan") {
-            const thinkingActive = isDynamicScanActive(thinkingStatus?.status);
-            const showNormalScan = scanStatus &&
-              !thinkingActive &&
-              !(scanStatus.status === "idle" && scanStatus.pages_done === 0) &&
-              !(thinkingStatus?.status === "complete" && scanStatus.status === "complete");
-            const showThinkingScan = thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle";
-            if (!showNormalScan && !showThinkingScan) return null;
-            const total   = scanStatus?.total_pages || 0;
-            const done    = scanStatus?.pages_done  || 0;
-            const scanPct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
-            const currentPage = graph?.nodes.find(n => n.scan_status === "running");
-            const normalScanStrip = showNormalScan ? html`
-              <div className="scan-progress-strip">
-                <div className="scan-progress-bar">
-                  <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
-                </div>
-                <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">
-                    Structured Scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
-                  </span>
-                  ${(scanStatus?.findings_count || 0) > 0 && html`
-                    <span className="scan-progress-findings">
-                      ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
-                    </span>`}
-                  ${currentPage && html`
-                    <span className="scan-progress-url mono" title=${currentPage.url}>
-                      ${truncUrl(currentPage.url, 48)}
-                    </span>`}
-                </div>
-              </div>` : null;
-            const thinkingLabel = thinkingStopRequested ? "stop requested" : (
-              thinkingStatus?.status === "running" ? "running" :
-              thinkingStatus?.status === "analysing" ? "analysing probe results" :
-              thinkingStatus?.status === "stopping" ? "stopping after current step, then analysing findings" :
-              thinkingStatus?.status === "complete" ? "complete" :
-              thinkingStatus?.status === "stopped" ? "stopped, findings processed" :
-              thinkingStatus?.status === "failed" ? "failed" : thinkingStatus?.status
-            );
-            const thinkingStrip = showThinkingScan ? html`
-              <div className="scan-progress-strip">
-                <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">Dynamic Scan: ${thinkingLabel}</span>
-                  ${(thinkingStatus?.findings_count || 0) > 0 && html`
-                    <span className="scan-progress-findings">
-                      ${thinkingStatus.findings_count} finding${thinkingStatus.findings_count !== 1 ? "s" : ""}
-                    </span>`}
-                  <span className="scan-progress-url">Autonomous request-by-request assessment</span>
-                </div>
-              </div>` : null;
-            return html`
-              <div className="scan-progress-stack">
-                ${normalScanStrip}
-                ${thinkingStrip}
-              </div>`;
-          }
           const credList = run.credentials || [];
           const multiUser = credList.length > 1;
           // Overall progress reaches the cap while crawling, then fills once discovery is complete.
@@ -2291,11 +2128,7 @@ function TestRunDetail({ runId, initialTab }) {
           <svg ref=${svgRef} className="graph-svg" width="100%" height="100%" style=${{pointerEvents: (!graph || graph.nodes.length === 0) ? "none" : "all"}}></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
-              ${activeTab === "scan" ? html`
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.pending}}></span>Not scanned</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.running}}></span>Scanning…</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.complete}}></span>Complete</div>
-              ` : graphView === "user" && run?.credentials?.length > 1 ? html`
+              ${graphView === "user" && run?.credentials?.length > 1 ? html`
                 ${(run.credentials||[]).map((c,i) => html`
                   <div key=${c.id} className="legend-item">
                     <span className="legend-dot" style=${{background:USER_PALETTE[i%USER_PALETTE.length]}}></span>
@@ -2331,16 +2164,6 @@ function TestRunDetail({ runId, initialTab }) {
                   <button className="btn danger-outline sm" onClick=${onDeleteNode} disabled=${scopeBusy}
                     title="Delete this node (and children if checkbox is ticked)">🗑</button>
                 </div>
-                ${activeTab==="scan" && selectedNode.in_scope !== false && html`
-                  <div style=${{marginTop:10}}>
-                    <button className="btn sm" onClick=${onScanPage} disabled=${scopeBusy||scanStatus?.status==="running"}>
-                      ${scopeBusy ? "Starting…" : scanStatus?.status==="running" ? "Scan running…" : "▶ Scan this page"}
-                    </button>
-                    ${selectedNode.scan_status && html`
-                      <span className=${"scan-node-status scan-node-"+selectedNode.scan_status}>
-                        ${selectedNode.scan_status}
-                      </span>`}
-                  </div>`}
                 <label className="scope-cascade-label">
                   <input type="checkbox" checked=${cascade} onChange=${e=>setCascade(e.target.checked)}/>
                   Also apply to all children
@@ -2404,18 +2227,6 @@ function TestRunDetail({ runId, initialTab }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && !dynamicScanActive && !(thinkingStatus?.status === "complete" && scanStatus.status === "complete") && html`
-              <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
-                ${scanStopRequested ? "Stopping scan…" :
-                  scanStatus.status==="running" ? "Structured Scan running…" :
-                  scanStatus.status==="complete" ? "Structured Scan complete" :
-                  scanStatus.status==="stopped"  ? "Structured Scan stopped" :
-                  scanStatus.status==="failed"   ? "Structured Scan failed"  : "Not scanned"}
-              </span>`}
-            ${effectiveScanStatus==="running" && html`
-              <span className="subtle" style=${{fontSize:12}}>
-                ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
-              </span>`}
             ${thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && html`
               <span className=${"scan-status-badge scan-status-"+(thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
                 ${thinkingStopRequested ? "Stopping Dynamic Scan…" :
@@ -2477,25 +2288,29 @@ function TestRunDetail({ runId, initialTab }) {
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
-                ${effectiveScanStatus==="running" || isDynamicScanActive(thinkingStatus?.status)
+                ${isDynamicScanActive(thinkingStatus?.status)
                   ? "Scan running… findings will appear here."
-                  : "No findings yet. Start a scan from the Scan Status tab."}
+                  : "No findings yet. Start a Dynamic Scan to begin."}
               </div>`
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
                 const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4, low_confidence:4};
+                const DETERMINISTIC_GROUP_KEY = "__deterministic__";
                 const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
                 const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
                 const unconfirmedMap = {};
                 const fpMap = {};
+                const deterministicMap = {};
                 for (const f of findings) {
-                  const target = (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
-                    ? fpMap
-                    : f.validation_status === "unconfirmed"
-                      ? unconfirmedMap
-                      : activeMap;
+                  const target = (f.finding_source === "deterministic_probe")
+                    ? deterministicMap
+                    : (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
+                      ? fpMap
+                      : f.validation_status === "unconfirmed"
+                        ? unconfirmedMap
+                        : activeMap;
                   (target[f.title] = target[f.title]||[]).push(f);
                 }
                 const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
@@ -2514,6 +2329,7 @@ function TestRunDetail({ runId, initialTab }) {
                 const groups = makeGroups(activeMap);
                 const unconfirmedGroups = makeGroups(unconfirmedMap);
                 const fpGroups = makeGroups(fpMap);
+                const deterministicGroups = makeGroups(deterministicMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
                 const evidenceItemsFor = (f) => {
@@ -2634,6 +2450,7 @@ function TestRunDetail({ runId, initialTab }) {
                 });
                 const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
                 const fpRows = renderStatusRows(fpGroups, "fp");
+                const deterministicRows = renderStatusRows(deterministicGroups, "deterministic");
                 return html`
                 <table className="findings-table">
                   <colgroup>${findColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
@@ -2691,6 +2508,20 @@ function TestRunDetail({ runId, initialTab }) {
                         <td></td>
                       </tr>
                       ${expandedGroups.has(FP_GROUP_KEY) && fpRows}
+                    `}
+                    ${deterministicCount > 0 && html`
+                      <tr key=${DETERMINISTIC_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(DETERMINISTIC_GROUP_KEY)}>
+                        <td><span className="val-badge val-fp">deterministic</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(DETERMINISTIC_GROUP_KEY)?"▾":"▸"}</span>
+                          Deterministic Findings
+                        </td>
+                        <td><span className="finding-count-badge">${deterministicCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(DETERMINISTIC_GROUP_KEY) && deterministicRows}
                     `}
                   </tbody>
                 </table>`;
@@ -2836,7 +2667,7 @@ function TestRunDetail({ runId, initialTab }) {
               </div>`}
             ${activityLog.length === 0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
+                No scanner activity yet. Start a Dynamic Scan to begin.
               </div>`}
             ${activityLog.map(entry => {
               const PHASE_META = {
@@ -3006,6 +2837,96 @@ function TestRunDetail({ runId, initialTab }) {
                         </div>`}
                     </div>`;
                 }
+                // ── Validator container row ────────────────────────────────
+                if (a.id === "validator") {
+                  const validatorAgents = agents.filter(ag => ag.id.startsWith("validator-")).map(normalizeAgentForRun);
+                  const anyActive = validatorAgents.some(ag => ag.status === "active");
+                  const activeCount = validatorAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = validatorAgents.length - activeCount;
+                  const summaryTask = validatorAgents.length === 0
+                    ? "No validation running"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} validating, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+                        : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+                  const canExpand = validatorAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+                  return html`
+                    <div key="validator" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("validator") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Validator</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (validatorAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${validatorAgents.map(va => {
+                            const vaActive = va.status === "active";
+                            const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            const vaOutcome = va.outcome || va.taskHistory?.slice(-1)[0]?.outcome;
+                            const findingNum = va.id.replace("validator-", "");
+                            return html`
+                              <div key=${va.id} className=${"agent-thread-row"+(vaActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(vaActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">Finding #${findingNum}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(vaActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${vaActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${vaTask}>${vaTask.length>90?vaTask.slice(0,89)+"…":vaTask}</span>
+                                ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
+                // ── Burp container row ──────────────────────────────────────
+                if (a.id === "burp") {
+                  const burpAgents = agents.filter(ag => ag.id.startsWith("burp-")).map(normalizeAgentForRun);
+                  const anyActive = burpAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (burpAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = burpAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = burpAgents.length - activeCount;
+                  const summaryTask = burpAgents.length === 0
+                    ? "No active scan dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} scanning, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} scan${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} scan${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = burpAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("burp");
+                  return html`
+                    <div key="burp" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("burp") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Burp</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (burpAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${burpAgents.map(ba => {
+                            const baActive = ba.status === "active";
+                            const baTask = ba.currentTask || ba.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${ba.id} className=${"agent-thread-row"+(baActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(baActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${ba.id.replace("burp-","")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(baActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${baActive?"ACTIVE":ba.status==="failed"?"FAILED":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${baTask}>${baTask.length>90?baTask.slice(0,89)+"…":baTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
                 const currentTask = agentCurrentTask(a);
@@ -3101,7 +3022,7 @@ function TestRunDetail({ runId, initialTab }) {
             </table>
             ${filteredTraffic.length===0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${run?.status==="running"||effectiveScanStatus==="running"||isDynamicScanActive(thinkingStatus?.status)
+                ${run?.status==="running"||isDynamicScanActive(thinkingStatus?.status)
                   ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>`}
           </div>
@@ -4011,87 +3932,99 @@ function BurpRestApiSettings() {
       </form>`}`;
 }
 
-const PROVIDER_LABELS = {
-  anthropic:"Anthropic", openai:"OpenAI",
-  openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
+const API_FORMAT_LABELS = {
+  anthropic:"Anthropic API",
+  openai:"OpenAI API",
+  openai_compatible:"OpenAI-compatible API",
   openrouter:"OpenRouter",
-  google:"Google Gemini",
-  bedrock:"Amazon Bedrock",
+  google:"Google Gemini API",
+  bedrock:"Amazon Bedrock Converse",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry (OpenAI API)",
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const PROVIDER_OPTIONS = [
-  ["anthropic", "Anthropic"],
-  ["openai", "OpenAI"],
-  ["openai_compatible", "OpenAI-compatible (LM Studio, Ollama, etc.)"],
-  ["openrouter", "OpenRouter"],
-  ["google", "Google Gemini"],
-  ["bedrock", "Amazon Bedrock"],
-  ["azure_openai", "Azure OpenAI"],
-  ["azure_foundry", "Azure AI Foundry"],
-];
-const FOUNDRY_PROVIDERS = ["azure_foundry", "azure_foundry_openai", "azure_foundry_anthropic"];
-const isFoundryProvider = (provider) => FOUNDRY_PROVIDERS.includes(provider);
-const selectedProviderOption = (provider) => isFoundryProvider(provider) ? "azure_foundry" : provider;
-const PROVIDER_PLACEHOLDERS = {
-  anthropic:"claude-opus-4-5", openai:"gpt-4.1",
-  openai_compatible:"e.g. llama-3.1-8b-instruct",
-  openrouter:"e.g. openrouter/owl-alpha or a :free model id",
-  google:"gemini-2.5-flash-preview-04-17",
-  bedrock:"e.g. global.anthropic.claude-sonnet-4-6",
-  azure_openai:"Deployment name, e.g. gpt-4o",
-  azure_foundry:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
-  azure_foundry_openai:"e.g. gpt-4o or Meta-Llama-3.3-70B-Instruct",
-  azure_foundry_anthropic:"e.g. claude-sonnet-4-5",
-};
-const BASE_URL_LABELS = {
-  openai_compatible:"Base URL",
-  bedrock:"Bedrock Runtime Endpoint",
-  azure_openai:"Azure Endpoint",
-  azure_foundry:"Foundry Endpoint",
-  azure_foundry_openai:"Foundry Endpoint",
-  azure_foundry_anthropic:"Foundry Endpoint",
-};
-const BASE_URL_PLACEHOLDERS = {
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"" };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
+const PROVIDER_BASE_URL_PLACEHOLDERS = {
+  anthropic:"https://api.anthropic.com",
+  openai:"https://api.openai.com/v1",
   openai_compatible:"http://localhost:1234/v1",
-  bedrock:"https://bedrock-runtime.ap-southeast-2.amazonaws.com",
-  azure_openai:"https://myresource.openai.azure.com/",
+  openrouter:"https://openrouter.ai/api/v1",
+  google:"https://generativelanguage.googleapis.com",
+  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
   azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
 };
-const BASE_URL_HINTS = {
-  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Defaults to ap-southeast-2. The region is inferred from this endpoint — change it to match your Bedrock region.",
-  azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
-  azure_foundry:"Paste the endpoint from Azure AI Foundry. The selected API format determines the final request path.",
-  azure_foundry_openai:"OpenAI-format deployments use /openai/v1. If you paste the resource endpoint, Aespa appends it automatically.",
-  azure_foundry_anthropic:"Claude deployments use Anthropic Messages semantics. If you paste the resource endpoint, Aespa appends /anthropic/v1/messages automatically.",
+// Actual runtime defaults used by the backend when base_url is blank
+const PROVIDER_DEFAULT_BASE_URLS = {
+  anthropic:  "https://api.anthropic.com",
+  openai:     "https://api.openai.com/v1",
+  openai_compatible: null,           // no sensible default — must be set
+  openrouter: "https://openrouter.ai/api/v1",
+  google:     "https://generativelanguage.googleapis.com",
+  bedrock:    "AWS SDK default (us-east-1)",
+  azure_openai: null,                // must be set
+  azure_foundry: null,
+  azure_foundry_openai: null,
+  azure_foundry_anthropic: null,
+};
+const PROVIDER_MODEL_PLACEHOLDERS = {
+  anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
+  openai:"gpt-4.1\ngpt-4o\nllama-3.1-8b-instruct",
+  openai_compatible:"llama-3.1-8b-instruct\nqwen2.5-coder",
+  openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
+  bedrock:"global.anthropic.claude-sonnet-4-6\nglobal.anthropic.claude-opus-4-7",
+  azure_openai:"gpt-4o\ngpt-4.1",
+  azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_anthropic:"claude-sonnet-4-5\nclaude-opus-4-1",
 };
 
-const DEFAULT_LLM_FORM = {
-  name:"Default", provider:"anthropic", api_key:"", base_url:"",
-  model:"claude-opus-4-5", max_tokens:4096, temperature:0, use_vision:false,
-};
+function providerToForm(provider) {
+  return provider ? {
+    name:provider.name || "",
+    api_format:provider.api_format || "anthropic",
+    base_url:provider.base_url || "",
+    models:(provider.models || []).join("\n"),
+    api_key:provider.api_key || "",
+  } : {...DEFAULT_PROVIDER_FORM};
+}
 
-function llmProfileToForm(cfg) {
+function providerPayload(form) {
+  return {
+    name:form.name.trim(),
+    api_format:form.api_format,
+    base_url:form.base_url.trim() || null,
+    models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
+    api_key:form.api_key.trim() || null,
+  };
+}
+
+function llmProfileToForm(cfg, providers=[]) {
+  const providerId = cfg?.provider_id || providers[0]?.id || "";
+  const provider = providers.find(p=>p.id===providerId) || providers[0];
   return cfg ? {
-    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"",
-    base_url:cfg.base_url||(cfg.provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:""),
-    model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
+    name:cfg.name??"Default",
+    provider_id:providerId,
+    model:cfg.model,
+    max_tokens:cfg.max_tokens,
+    temperature:cfg.temperature,
     use_vision:cfg.use_vision??false,
-  } : {...DEFAULT_LLM_FORM};
+  } : {
+    ...DEFAULT_LLM_FORM,
+    provider_id:provider?.id || "",
+    model:provider?.models?.[0] || "",
+  };
 }
 
 function llmPayload(form) {
-  const supportsBaseUrl = ["openai_compatible","bedrock","azure_openai",...FOUNDRY_PROVIDERS].includes(form.provider);
   return {
     name:form.name.trim(),
-    provider:form.provider,
-    api_key:form.api_key.trim()||null,
-    base_url:supportsBaseUrl?(form.base_url.trim()||null):null,
+    provider_id:Number(form.provider_id),
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
@@ -4099,32 +4032,75 @@ function llmPayload(form) {
   };
 }
 
-function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => llmProfileToForm(profile));
-  const [customModel, setCustomModel] = useState(false);
+function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => providerToForm(provider));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => {
-    const provider = p === "azure_foundry" ? "azure_foundry_openai" : p;
-    const ms=dms[provider]||[];
-    setCustomModel(false);
-    upd({
-      provider,
-      model:ms[0]||"",
-      api_key:"",
-      base_url:provider==="bedrock"?BASE_URL_PLACEHOLDERS.bedrock:"",
-      max_tokens:provider==="bedrock"?64000:4096,
-    });
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const payload = providerPayload(form);
+      const savedProvider = mode === "edit"
+        ? await api.updateLLMProvider(provider.id, payload)
+        : await api.createLLMProvider(payload);
+      setSaved(true);
+      onSaved?.(savedProvider);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
-  const changeFoundryApi = apiMode => {
-    const provider = apiMode === "anthropic" ? "azure_foundry_anthropic" : "azure_foundry_openai";
-    const ms=dms[provider]||[];
-    setCustomModel(false);
-    upd({provider, model:ms[0]||"", base_url:form.base_url||""});
-  };
+  return html`
+    ${error&&html`<div className="alert error">${error}</div>`}
+    <form className="card" onSubmit=${onSubmit}>
+      <div className="form-section-title">Provider</div>
+      <div className="field"><label>Name</label>
+        <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
+      <div className="field">
+        <label>API format</label>
+        <select className="select" value=${form.api_format} onChange=${e=>upd({api_format:e.target.value})}>
+          <option value="anthropic">Anthropic API</option>
+          <option value="openai">OpenAI API</option>
+          <option value="openai_compatible">OpenAI-compatible API</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="google">Google Gemini API</option>
+          <option value="bedrock">Amazon Bedrock Converse</option>
+          <option value="azure_openai">Azure OpenAI</option>
+          <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
+          <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
+        </select>
+      </div>
+      <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+        <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({base_url:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
+      </div>
+      <div className="field"><label>Model names</label>
+        <textarea required rows="5" value=${form.models} placeholder=${PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({models:e.target.value})}></textarea>
+        <div className="field-hint">Enter one model per line, or separate models with commas.</div>
+      </div>
+      <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
+          onChange=${e=>upd({api_key:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+      </div>
+      <div className="divider"/>
+      <div className="row spread">
+        <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+        <div className="row">
+          ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save provider":"Create provider"}</button>
+        </div>
+      </div>
+    </form>`;
+}
 
+function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
     try {
@@ -4137,12 +4113,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
-  const models = form?(dms[form.provider]||[]):[];
-  const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&(["openai_compatible","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
-  const optionalBaseUrl = form&&form.provider==="bedrock";
-  const needsKey     = form&&(["anthropic","openai","openrouter","google","azure_openai"].includes(form.provider)||isFoundryProvider(form.provider));
-  const foundryApiMode = form&&form.provider==="azure_foundry_anthropic" ? "anthropic" : "openai";
+  const selectedProvider = providers.find(p=>p.id===Number(form.provider_id));
+  const models = selectedProvider?.models || [];
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -4150,66 +4122,19 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="form-section-title">Profile</div>
       <div className="field"><label>Name</label>
         <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
-      <div className="divider"/>
-      <div className="form-section-title">Provider</div>
-      <div className="provider-grid">
-        ${PROVIDER_OPTIONS.map(([k,lbl])=>html`
-          <label key=${k} className=${"provider-card"+(selectedProviderOption(form.provider)===k?" selected":"")}>
-            <input type="radio" name="provider" value=${k} checked=${selectedProviderOption(form.provider)===k} onChange=${()=>changeProv(k)}/>
-            <span className="provider-name">${lbl}</span>
-          </label>`)}
+      <div className="field">
+        <label>Provider</label>
+        <select className="select" required value=${form.provider_id} onChange=${e=>{
+          const provider = providers.find(p=>p.id===Number(e.target.value));
+          upd({provider_id:e.target.value, model:provider?.models?.[0] || ""});
+        }}>
+          ${providers.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${API_FORMAT_LABELS[p.api_format]||p.api_format})</option>`)}
+        </select>
       </div>
-      <div className="divider"/>
-      <div className="form-section-title">${isFoundryProvider(form.provider)?"Azure AI Foundry":PROVIDER_LABELS[form.provider]} Configuration</div>
-      ${isFoundryProvider(form.provider)&&html`
-        <div className="field">
-          <label>API format</label>
-          <select className="select" value=${foundryApiMode} onChange=${e=>changeFoundryApi(e.target.value)}>
-            <option value="openai">OpenAI chat completions</option>
-            <option value="anthropic">Anthropic messages</option>
-          </select>
-          <div className="field-hint">Use OpenAI for GPT, DeepSeek, Mistral, Llama, Phi, and similar deployments. Use Anthropic for Claude deployments.</div>
-        </div>`}
-      ${(needsBaseUrl||optionalBaseUrl)&&html`
-        <div className="field">
-          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}${optionalBaseUrl&&html` <span className="field-optional">(optional)</span>`}</label>
-          <input type="url" required=${needsBaseUrl} value=${form.base_url}
-            placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
-            onChange=${e=>upd({base_url:e.target.value})}/>
-          ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
-        </div>`}
-      ${form.provider==="bedrock"&&html`
-        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-          <input type="password" value=${form.api_key}
-            placeholder="Leave blank to use AWS_PROFILE / AWS SSO credentials"
-            onChange=${e=>upd({api_key:e.target.value})}/>
-          <div className="field-hint">For SSO, run aws sso login outside Aespa and set AWS_PROFILE plus AWS_REGION/AWS_DEFAULT_REGION before starting the app.</div>
-        </div>
-        <div className="field-hint" style=${{marginBottom:8}}>The system prompt and initial scan context are automatically marked as cache checkpoints on every request, reducing per-turn token costs across long scans.</div>`}
-      ${needsKey&&html`
-        <div className="field"><label>API Key</label>
-          <input type="password" required value=${form.api_key}
-            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":form.provider==="bedrock"?"Bedrock API key":""}
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
-      ${form.provider==="openai_compatible"&&html`
-        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-          <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
       <div className="field"><label>Model</label>
-        ${models.length>0?html`
-          <div className="model-select-group">
-            <select className="select" value=${isCustom?"__custom__":form.model}
-              onChange=${e=>{
-                if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
-                else{setCustomModel(true);upd({model:""});}
-              }}>
-              ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
-              <option value="__custom__">Custom…</option>
-            </select>
-            ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
-          </div>`:html`
-          <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
-            onChange=${e=>upd({model:e.target.value})}/>`}
+        <select className="select" required value=${form.model} onChange=${e=>upd({model:e.target.value})}>
+          ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
+        </select>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Sampling</div>
@@ -4238,29 +4163,33 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
 function SettingsPage() {
   const [profiles, setProfiles] = useState(null);
-  const [dms, setDMs] = useState({});
+  const [providers, setProviders] = useState(null);
+  const [tab, setTab] = useState("profiles");
   const [screen, setScreen] = useState("list");
   const [editing, setEditing] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [items,dm] = await Promise.all([api.listLLMProfiles(), api.getDefaultModels()]);
+      const [items,providerItems] = await Promise.all([api.listLLMProfiles(), api.listLLMProviders()]);
       setProfiles(items);
-      setDMs(dm);
-      if (items.length === 0) { setScreen("new"); setEditing(null); }
-      else if (screen === "new" && profiles?.length === 0) { setScreen("list"); }
+      setProviders(providerItems);
+      if (tab === "profiles" && items.length === 0 && providerItems.length > 0) { setScreen("new"); setEditing(null); }
+      else if (tab === "providers" && providerItems.length === 0) { setScreen("new"); setEditing(null); }
+      else if (screen === "new" && ((tab === "profiles" && profiles?.length === 0) || (tab === "providers" && providers?.length === 0))) { setScreen("list"); }
     } catch(e) { setError(e.message); }
-  }, [screen, profiles?.length]);
+  }, [screen, tab, profiles?.length, providers?.length]);
 
   useEffect(() => { load(); }, []);
 
   const onSaved = async () => { await load(); setScreen("list"); setEditing(null); };
   const onEdit = profile => { setEditing(profile); setScreen("edit"); setError(null); };
   const onNew = () => { setEditing(null); setScreen("new"); setError(null); };
-  const onCancel = () => { setScreen(profiles?.length ? "list" : "new"); setEditing(null); setError(null); };
+  const onCancel = () => { setScreen("list"); setEditing(null); setError(null); };
   const onActivate = async (profile) => {
     setBusyId(profile.id); setError(null);
     try { await api.activateLLMProfile(profile.id); await load(); }
@@ -4272,45 +4201,110 @@ function SettingsPage() {
     try { await api.deleteLLMProfile(profile.id); await load(); }
     catch(e) { setError(e.message); } finally { setBusyId(null); }
   };
+  const onDeleteProvider = async (provider) => {
+    if (!confirm(`Delete LLM provider "${provider.name}"?`)) return;
+    setBusyId(provider.id); setError(null);
+    try { await api.deleteLLMProvider(provider.id); await load(); }
+    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  };
+  const switchTab = next => { setTab(next); setScreen("list"); setEditing(null); setError(null); };
 
-  const title = screen === "new" ? "New LLM Settings Profile" : screen === "edit" ? "Edit LLM Settings Profile" : "LLM Settings";
+  const onExport = async () => {
+    setError(null);
+    try {
+      const data = await api.exportLLMConfig();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aespa-llm-config-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportClick = () => { if (importRef.current) importRef.current.click(); };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setError(null); setImporting(true);
+    try {
+      const text = await file.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch { throw new Error("Invalid JSON file"); }
+      const result = await api.importLLMConfig(parsed);
+      await load();
+      alert(`Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} profile(s) created, ${result.profiles_updated} updated.`);
+    } catch(e) { setError(e.message); } finally { setImporting(false); }
+  };
+
+  const title = tab === "providers"
+    ? (screen === "new" ? "New LLM Provider" : screen === "edit" ? "Edit LLM Provider" : "LLM Providers")
+    : (screen === "new" ? "New LLM Profile" : screen === "edit" ? "Edit LLM Profile" : "LLM Profiles");
+  const canCreateProfile = (providers || []).length > 0;
 
   return html`
     <div className="topbar">
       <div className="topbar-title">${title}</div>
-      ${screen==="list"&&html`<div className="topbar-actions"><button className="btn" onClick=${onNew}>New profile</button></div>`}
+      <div className="topbar-actions">
+        <button className="btn secondary sm" disabled=${importing} onClick=${onExport}>Export</button>
+        <button className="btn secondary sm" disabled=${importing} onClick=${onImportClick}>${importing?"Importing…":"Import"}</button>
+        <input ref=${importRef} type="file" accept=".json,application/json" style=${{display:"none"}} onChange=${onImportFile} />
+        ${screen==="list"&&html`<button className="btn" disabled=${tab==="profiles"&&!canCreateProfile} onClick=${onNew}>${tab==="providers"?"New provider":"New profile"}</button>`}
+      </div>
     </div>
-    <div className="content scroll-content">
-      ${!profiles&&!error&&html`<div className="subtle">Loading…</div>`}
+    <div className="content scroll-content settings-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn "+(tab==="profiles"?"active":"")} onClick=${()=>switchTab("profiles")}>Profiles</button>
+        <button className=${"tab-btn "+(tab==="providers"?"active":"")} onClick=${()=>switchTab("providers")}>Providers</button>
+      </div>
+      ${(!profiles||!providers)&&!error&&html`<div className="subtle">Loading…</div>`}
       ${error&&html`<div className="alert error">${error}</div>`}
-      ${profiles&&screen==="list"&&html`
-        <div className="table-wrap">
-          <table>
-            <colgroup>
-              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"30%"}}/><col style=${{width:"7%"}}/><col style=${{width:"10%"}}/><col style=${{width:"21%"}}/>
-            </colgroup>
-            <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-              ${profiles.map(p=>html`
-                <tr key=${p.id}>
-                  <td><strong>${p.name}</strong></td>
-                  <td>${PROVIDER_LABELS[p.provider]||p.provider}</td>
-                  <td className="mono">${p.model}</td>
-                  <td>${p.use_vision?"On":"Off"}</td>
-                  <td>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</td>
-                  <td>
-                    <div className="row" style=${{justifyContent:"flex-end"}}>
-                      ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
-                      <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
-                      <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>`)}
-            </tbody>
-          </table>
+      ${profiles&&providers&&tab==="profiles"&&screen==="list"&&html`
+        ${providers.length===0&&html`<div className="alert">Create a provider before adding LLM profiles.</div>`}
+        <div className="settings-list settings-list-profiles">
+          <div className="settings-list-head">
+            <div>Name</div><div>Provider</div><div>Model</div><div>Vision</div><div>Status</div><div></div>
+          </div>
+          ${profiles.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${p.provider_name || `Provider #${p.provider_id}`}</div>
+              <div className="mono">${p.model}</div>
+              <div>${p.use_vision?"On":"Off"}</div>
+              <div>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</div>
+              <div className="row settings-list-actions">
+                ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
+              </div>
+            </div>`)}
         </div>`}
-      ${profiles&&screen==="new"&&html`<${LLMProfileForm} mode="new" dms=${dms} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
-      ${profiles&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} dms=${dms} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="list"&&html`
+        <div className="settings-list settings-list-providers">
+          <div className="settings-list-head">
+            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div></div>
+          </div>
+          ${providers.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
+              <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
+              <div className="mono">${(p.models||[]).join(", ")}</div>
+              <div className="row settings-list-actions">
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDeleteProvider(p)}>Delete</button>
+              </div>
+            </div>`)}
+        </div>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="new"&&html`<${LLMProfileForm} mode="new" providers=${providers} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} providers=${providers} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="new"&&html`<${LLMProviderForm} mode="new" onSaved=${onSaved} onCancel=${providers.length?onCancel:null}/>`}
+      ${providers&&tab==="providers"&&screen==="edit"&&editing&&html`<${LLMProviderForm} mode="edit" provider=${editing} onSaved=${onSaved} onCancel=${onCancel}/>`}
     </div>`;
 }
 
@@ -4520,16 +4514,29 @@ function ExternalIntegrationsPage() {
     </div>`;
 }
 
-function DebugPage() {
+function DebugPage({ showUsername, setShowUsername, username }) {
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
 
+  const [hdrCfg, setHdrCfg] = useState(null);
+  const [hdrForm, setHdrForm] = useState({ header_name: "", header_value: "" });
+  const [hdrSaving, setHdrSaving] = useState(false);
+  const [hdrSaved, setHdrSaved] = useState(false);
+  const [hdrError, setHdrError] = useState(null);
+
   useEffect(() => {
     (async () => {
       try { setCfg(await api.getSpecialistAgentConfig()); }
       catch(e) { setError(e.message); }
+    })();
+    (async () => {
+      try {
+        const h = await api.getGlobalHttpHeader();
+        setHdrCfg(h);
+        setHdrForm({ header_name: h.header_name || "", header_value: h.header_value || "" });
+      } catch(e) { setHdrError(e.message); }
     })();
   }, []);
 
@@ -4542,12 +4549,62 @@ function DebugPage() {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
+  const saveHeader = async (e) => {
+    e.preventDefault();
+    setHdrSaved(false); setHdrSaving(true); setHdrError(null);
+    try {
+      const updated = await api.upsertGlobalHttpHeader({
+        header_name: hdrForm.header_name.trim() || null,
+        header_value: hdrForm.header_value.trim() || null,
+      });
+      setHdrCfg(updated);
+      setHdrForm({ header_name: updated.header_name || "", header_value: updated.header_value || "" });
+      setHdrSaved(true);
+    } catch(e) { setHdrError(e.message); } finally { setHdrSaving(false); }
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">Debug</div>
     </div>
     <div className="content scroll-content">
-      ${!cfg && !error && html`<div className="subtle">Loading…</div>`}
+      ${!cfg && !hdrCfg && !error && !hdrError && html`<div className="subtle">Loading…</div>`}
+
+      <div className="card">
+        <div className="form-section-title">Global Extra HTTP Header</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Inject an additional HTTP header into every request made by the scanner and crawler
+          (Playwright and HTTPX). Does not affect requests sent to LLMs. Leave the header name
+          empty to disable.
+        </div>
+        ${hdrError && html`<div className="alert error">${hdrError}</div>`}
+        ${hdrCfg !== null && html`
+          <form onSubmit=${saveHeader}>
+            <div className="form-row">
+              <label className="form-label">Header Name</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. X-Debug-Token"
+                value=${hdrForm.header_name}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_name: e.target.value})); }}/>
+            </div>
+            <div className="form-row">
+              <label className="form-label">Header Value</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. my-secret-value"
+                value=${hdrForm.header_value}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_value: e.target.value})); }}/>
+            </div>
+            <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+              <button className="btn btn-primary" type="submit" disabled=${hdrSaving}>
+                ${hdrSaving ? "Saving…" : "Save"}
+              </button>
+              ${hdrSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            </div>
+          </form>`}
+      </div>
+
       ${error && html`<div className="alert error">${error}</div>`}
       ${cfg && html`
         <div className="card">
@@ -4565,6 +4622,27 @@ function DebugPage() {
           </div>
           ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
         </div>`}
+
+      <div className="card" style=${{marginTop: 16}}>
+        <div className="form-section-title">Cloudflare Access</div>
+        <div className="field-hint" style=${{marginBottom: 12}}>
+          Show the authenticated user's email/username above the application version on the bottom left of the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${showUsername}
+            onChange=${e => {
+              const checked = e.target.checked;
+              setShowUsername(checked);
+              try { localStorage.setItem("aespa_show_username", String(checked)); } catch(_) {}
+            }}/>
+          <span>Show Username in Sidebar</span>
+        </label>
+        ${showUsername && html`
+          <div className="field-hint" style=${{marginTop: 8}}>
+            Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
+          </div>
+        `}
+      </div>
     </div>`;
 }
 
@@ -4588,7 +4666,6 @@ function sourceLabel(source) {
     burp_active_scan: "Burp",
     burp_mcp: "Burp MCP",
     deterministic_probe: "Deterministic",
-    structured_scan: "Structured",
     manual_import: "Imported",
     unknown: "Unknown",
   };

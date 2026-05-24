@@ -16,7 +16,6 @@ from aespa.schemas import (
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
-    ScanStatusOut,
     ValidationStatusOut,
 )
 from aespa.services import findings as findings_svc
@@ -36,18 +35,6 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     return run
 
 
-@router.post("/api/test-runs/{run_id}/scan/start", response_model=ScanStatusOut)
-async def start_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    await scanner_svc.start_scan(run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
 async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
@@ -55,8 +42,6 @@ async def start_thinking_scan(run_id: int, session: Session = Depends(get_sessio
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     await scanner_svc.start_thinking_scan(run_id)
@@ -97,8 +82,6 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
@@ -107,40 +90,6 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
-
-@router.post("/api/test-runs/{run_id}/pages/{page_id}/scan", response_model=ScanStatusOut)
-async def scan_single_page(
-    run_id: int,
-    page_id: int,
-    session: Session = Depends(get_session),
-) -> ScanStatusOut:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running")
-    if scanner_svc.is_running(run_id):
-        raise HTTPException(status_code=409, detail="Scan already running")
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    page = session.get(CrawledPage, page_id)
-    if page is None or page.test_run_id != run_id:
-        raise HTTPException(status_code=404, detail="Page not found")
-    if page.in_scope is False:
-        raise HTTPException(status_code=409, detail="Page is out of scope")
-    await scanner_svc.start_scan(run_id, page_ids=[page_id])
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.post("/api/test-runs/{run_id}/scan/stop", response_model=ScanStatusOut)
-def stop_scan(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    _get_run_or_404(session, run_id)
-    scanner_svc.request_stop(run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
-
-
-@router.get("/api/test-runs/{run_id}/scan/status", response_model=ScanStatusOut)
-def scan_status(run_id: int, session: Session = Depends(get_session)) -> ScanStatusOut:
-    _get_run_or_404(session, run_id)
-    return ScanStatusOut(**scanner_svc.get_scan_status(run_id))
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
@@ -464,19 +413,28 @@ def get_agent_log(
 
 def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
     """Format thinking-scan ScanLog entries as a readable markdown document."""
-    # Group events by step number so each step becomes one section.
-    steps: dict[int, list[tuple[ScanLog, dict]]] = {}
-    preamble: list[tuple[ScanLog, dict]] = []  # non-step events (warnings, etc.)
+    # Group consecutive entries by step number, preserving chronological order.
+    # Using a flat dict keyed by step number would jumble multiple scan attempts
+    # within one run (e.g. after a restart) because step numbers repeat from 1.
+    step_groups: list[tuple[int | None, list[tuple[ScanLog, dict]]]] = []
+    current_key: int | None = None
+    current_group: list[tuple[ScanLog, dict]] = []
+
     for e in entries:
         data = json.loads(e.data_json) if e.data_json else {}
         step_num = data.get("step")
-        if step_num is not None:
-            steps.setdefault(int(step_num), []).append((e, data))
-        else:
-            preamble.append((e, data))
+        key = int(step_num) if step_num is not None else None
+        if key != current_key:
+            if current_group:
+                step_groups.append((current_key, current_group))
+            current_key = key
+            current_group = []
+        current_group.append((e, data))
+    if current_group:
+        step_groups.append((current_key, current_group))
 
     exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    total_steps = len(steps)
+    total_steps = sum(1 for k, _ in step_groups if k is not None)
     lines: list[str] = [
         f"# Thinking Scan Log — Run #{run_id}",
         f"",
@@ -487,13 +445,13 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         "",
     ]
 
-    # Non-step preamble events (e.g. credential warnings injected before loop start).
-    for e, data in preamble:
-        ts = e.created_at.strftime("%H:%M:%S") if e.created_at else ""
-        lines += [f"> `{ts}` **{e.status.upper()}** {e.message}", ""]
-
-    for step_num in sorted(steps.keys()):
-        evts = steps[step_num]
+    for step_num, evts in step_groups:
+        if step_num is None:
+            # Non-step events (e.g. credential warnings injected before loop start).
+            for e, data in evts:
+                ts = e.created_at.strftime("%H:%M:%S") if e.created_at else ""
+                lines += [f"> `{ts}` **{e.status.upper()}** {e.message}", ""]
+            continue
 
         # Pick the most informative event in order: running → complete → deciding.
         def _pick(status: str):

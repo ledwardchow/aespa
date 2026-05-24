@@ -14,6 +14,38 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from aespa.models import LLMConfig
+from aespa.services.prompts.reporting import (
+    _ANALYSIS_PROMPT,
+    _PLAN_PROMPT,
+    _SEVERITY_CALIBRATION,
+    _ANALYSE_PROMPT,
+    _SITE_PLAN_PROMPT,
+    _FOLLOWUP_PROMPT,
+    _NORMALIZE_TITLES_PROMPT,
+    _DEDUPLICATE_FINDINGS_PROMPT,
+    _FINGERPRINT_PROMPT,
+)
+from aespa.services.prompts.test_lead import (
+    _THINKING_CORRECTION_PROMPT,
+    _THINKING_PENTEST_PLAYBOOK,
+    WSTG_SKILLS,
+    _SSRF_PARAM_NAMES,
+    _AUTH_PATH_FRAGMENTS,
+    _SKILL_ORDER,
+    _THINKING_AGENT_SYSTEM,
+    THINKING_AGENT_TOOLS,
+    _THINKING_NEXT_ACTION_PROMPT,
+)
+from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS
+from aespa.services.prompts.validator import (
+    _ADVERSARIAL_VALIDATOR_SYSTEM,
+    _DISPROOF_HINTS,
+    _COMPARE_RESPONSES_TOOL,
+    _VALIDATOR_DONE_TOOL,
+    VALIDATOR_AGENT_TOOLS,
+    _VALIDATION_PLAN_PROMPT,
+    _VALIDATION_VERDICT_PROMPT,
+)
 
 log = logging.getLogger("aespa.llm")
 
@@ -285,52 +317,6 @@ def _normalize_thinking_action(action: Any) -> Any:
     normalized["tool"] = action_name
     normalized["args"] = args
     return normalized
-
-
-_THINKING_CORRECTION_PROMPT = """\
-Your previous response was not valid for the scanner control loop.
-
-Return exactly one JSON object and no markdown or prose. The object must use one of these
-actions: tool, http, browser, jwt, decode_jwt, credential_check, register_account,
-finding_write, done.
-"""
-
-_ANALYSIS_PROMPT = """\
-You are a web application security analyst performing reconnaissance on a target web application.
-
-Analyse the following web page and return a JSON response.
-
-URL: {url}
-Title: {title}
-
-Page content:
-{text}
-
-Return ONLY valid JSON in this exact format (no markdown fences):
-{{
-  "context": "2-4 sentence description of the page's purpose and the functionality it offers to users",
-  "suggested_links": ["absolute_url_1", "absolute_url_2"],
-  "categories": {{
-    "req_auth": true,
-    "takes_input": false,
-    "has_object_ref": false,
-    "has_business_logic": false
-  }}
-}}
-
-For suggested_links: include up to 10 absolute URLs that appear as actual links on this page \
-(same domain) and reveal the most important or interesting application functionality. Do not \
-construct, guess, rewrite, or substitute URLs from IDs/account numbers visible in page text. \
-Prefer links to forms, features, user actions, admin areas, API endpoints, etc. over navigation \
-links already visible on every page.
-
-For categories — answer true/false to each:
-- req_auth: Does accessing or using this page require the user to be authenticated/logged in?
-- takes_input: Does this page contain forms, input fields, search boxes, or otherwise accept data from the user?
-- has_object_ref: Does the URL or page content reference a specific object by ID \
-(e.g. id=1 in a query param, /accounts/42/ in the path, or a resource identifier in a POST body)?
-- has_business_logic: Can this page trigger transactions, modify account data, transfer funds, \
-create/update/delete records, or perform other business-significant operations?"""
 
 
 PageCategories = dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
@@ -632,7 +618,14 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=config.api_key)
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+    )
+    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
     if screenshot_b64:
         parts.append(types.Part.from_bytes(
@@ -687,9 +680,11 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -716,9 +711,11 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -750,9 +747,11 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -797,9 +796,11 @@ async def _azure_foundry_openai(
         ),
     )
     _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
     _record_usage(config.model,
                   getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0)
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
@@ -877,8 +878,8 @@ def _bedrock_region_from_url(base_url: str) -> str:
 
 
 async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    if not config.base_url:
-        raise ValueError("Amazon Bedrock Runtime endpoint is required")
+    if config.api_key and not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required when using an API key")
 
     content: list[dict[str, Any]] = []
     if screenshot_b64:
@@ -905,14 +906,14 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         region = (
             os.getenv("AWS_REGION")
             or os.getenv("AWS_DEFAULT_REGION")
-            or _bedrock_region_from_url(config.base_url)
+            or _bedrock_region_from_url(config.base_url or "")
         )
         profile = os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
         _model = config.model
         _messages = payload["messages"]
         _infer = payload["inferenceConfig"]
-        _endpoint = config.base_url
+        _endpoint = config.base_url or None
 
         def _run_sync() -> dict:
             _session_kwargs = {"profile_name": profile} if profile else {}
@@ -935,10 +936,12 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         data = await loop.run_in_executor(None, _run_sync)
         _bd_u = data.get("usage", {})
         _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0),
-                      cache_read_tokens=_bd_u.get("cacheReadInputTokenCount", 0),
-                      cache_write_tokens=_bd_u.get("cacheWriteInputTokenCount", 0))
+                      cache_read_tokens=_bd_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bd_u.get("cacheWriteInputTokens", 0))
         return _extract_bedrock_text(data)
 
+    if not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required")
     model_id = quote(config.model, safe="")
     url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
     headers = {
@@ -953,97 +956,12 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         _resp_data = resp.json()
     _bd_u2 = _resp_data.get("usage", {})
     _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0),
-                  cache_read_tokens=_bd_u2.get("cacheReadInputTokenCount", 0),
-                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokenCount", 0))
+                  cache_read_tokens=_bd_u2.get("cacheReadInputTokens", 0),
+                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokens", 0))
     return _extract_bedrock_text(_resp_data)
 
 
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
-
-_PLAN_PROMPT = """\
-You are a web application penetration tester. Given the page details below, generate a list \
-of HTTP probes to test for OWASP Top 10 vulnerabilities.
-
-URL: {url}
-Title: {title}
-LLM Context: {context}
-{site_context_section}
-Page categories:
-- Authentication Required: {req_auth}
-- Takes User Input: {takes_input}
-- Contains Object Reference: {has_object_ref}
-- Contains Business Logic: {has_business_logic}
-
-Applicable OWASP checks: {applicable}
-
-{users_section}
-{category_guidance}
-{xss_canary_section}
-Return ONLY valid JSON — an array of probe objects (no markdown fences):
-[
-  {{
-    "type": "http",
-    "method": "GET",
-    "url": "https://...",
-    "params": {{}},
-    "headers": {{}},
-    "body": null,
-    "as_user": null,
-    "desc": "Brief description of what this probe tests"
-  }},
-  {{
-    "type": "form",
-    "url": "https://...",
-    "selector": "input[name='search']",
-    "payload": "<script>alert(1)</script>",
-    "submit_selector": "button[type=submit]",
-    "as_user": null,
-    "desc": "XSS in search field"
-  }},
-  {{
-    "type": "idor",
-    "url": "https://app.com/users/42",
-    "as_user": "bob",
-    "desc": "IDOR on user ID tested as low-privilege user"
-  }}
-]
-
-General rules:
-- Maximum 60 probes total. Prefer more targeted input-validation probes over repeating the same
-    authorization/IDOR pattern. If you cannot include everything, preserve coverage in this order:
-    SQL injection, XSS, object-reference tampering, authentication/authorization bypass, then other checks.
-- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL/query param injection, JSON/form body tampering, SSRF).
-- "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
-- "idor" probes: mark a URL that contains an object ID for IDOR testing. Use ONE per URL — the \
-scanner automatically finds peer IDs from the crawl and tests a ±500 range. \
-Do NOT generate individual http probes for each sequential ID.
-- Object references are not limited to REST-style path IDs. When testing authorization or IDOR, inspect and mutate IDs in:
-    - path segments such as /accounts/42 or /api/users/7;
-    - GET query parameters such as ?id=42, ?accountId=42, ?user_id=7;
-    - request bodies for POST/PUT/PATCH/DELETE, including JSON objects, nested JSON objects/arrays, and form-like fields.
-- For query-string IDs, put mutated values in the "params" object or in the URL query string.
-- For JSON body IDs, put a JSON object/array in "body" and include "Content-Type": "application/json" in "headers" when appropriate.
-- "as_user": set to a username from the available test users list to send the probe authenticated \
-as that specific user. Set to null to use the primary session. Use this for authorization bypass \
-testing — e.g. send a request as a low-privilege user to an endpoint that should be admin-only.
-- For auth bypass probes: include a version with empty Cookie and Authorization headers.
-- For injection probes, generate multiple payload variants per discovered input. Do not stop after one
-    generic payload. Cover reflected, stored-like, encoded, quote-breaking, numeric, boolean, and timing cases
-    where relevant. Keep payloads safe and non-destructive.
-    - SQLi boolean/string: ' OR '1'='1'--  /  " OR "1"="1"--  /  admin'--
-    - SQLi numeric: 1 OR 1=1--  /  0 OR 1=1  /  -1 OR 1=1
-    - SQLi error/union/order: ' UNION SELECT NULL--  /  1' ORDER BY 999--  /  ' AND extractvalue(1,concat(0x7e,version()))--
-    - SQLi timing: 1 AND SLEEP(1)--  /  '; WAITFOR DELAY '0:0:1'--  /  1); SELECT pg_sleep(1)--
-    - XSS HTML/script: <script>alert(1)</script>  /  "><script>alert(1)</script>
-    - XSS attribute breakouts: "><img src=x onerror=alert(1)>  /  ' autofocus onfocus=alert(1) x='
-    - XSS SVG/event: <svg onload=alert(1)>  /  <details open ontoggle=alert(1)>
-    - XSS encoded/url contexts: javascript:alert(1)  /  %3Cscript%3Ealert(1)%3C/script%3E
-  - SSTI: {{7*7}}  /  ${{7*7}}
-  - Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd
-  - SSRF: http://169.254.169.254/latest/meta-data/
-  - CMDi: ; echo aespa_probe  /  $(echo aespa_probe)
-- Do NOT generate probes for checks not in the applicable list.
-- Only generate probes relevant to this specific page."""
 
 
 def _build_users_section(users: list[dict] | None) -> str:
@@ -1145,78 +1063,6 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
         )
 
     return "\n\n".join(sections) if sections else ""
-
-_SEVERITY_CALIBRATION = """\
-Severity calibration:
-- Rate generic server or framework version disclosure as info by default, or low if the
-  disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
-- Rate verbose stack traces, file paths, class names, and framework error pages as low by
-  default. Raise to medium only when the response exposes secrets, credentials, tokens,
-  exploitable SQL details, or sensitive user/business data.
-- Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
-  as low by default unless a browser-based proof shows sensitive authenticated data can be
-  read cross-origin. Raise only when the evidence demonstrates real data exposure or account
-  impact, not merely permissive headers.
-- Do not rate informational disclosure as medium or high solely because it is remotely
-  reachable. Severity should follow demonstrated impact, not theoretical chaining.
-"""
-
-
-_ANALYSE_PROMPT = """\
-You are a web application penetration tester reviewing probe results for OWASP vulnerabilities.
-
-Page URL: {url}
-
-Probe results:
-{results}
-
-For each result, determine whether it indicates a real vulnerability. Consider:
-- Unexpected data disclosure (other users' data, admin data)
-- Injection indicators (SQL errors, reflected payloads, template evaluation)
-- Auth bypass (200 on a protected resource without credentials)
-- Misconfiguration (missing security headers, verbose errors, version disclosure)
-- SSRF responses (cloud metadata, internal IP responses)
-
-Return ONLY valid JSON — an array of findings (empty array [] if none found, no markdown fences):
-[
-  {{
-    "owasp_category": "A03",
-    "title": "Reflected XSS in search parameter",
-    "description": "The search parameter reflects user input without encoding.",
-    "impact": "An attacker could execute JavaScript in a victim's browser and act as that user.",
-    "likelihood": "Likely when attacker-controlled links can be delivered to authenticated users.",
-    "recommendation": "Encode output by context, validate input, and add regression tests for this parameter.",
-    "cvss_score": 6.1,
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
-    "severity": "medium",
-    "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
-    "evidence": "Short summary of the exact request and response evidence that proves the finding."
-  }}
-]
-
-The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
-Write each finding using the report headings represented by these JSON fields:
-- description: what is vulnerable and where.
-- impact: what an attacker could achieve.
-- likelihood: practical exploitability in this observed context.
-- recommendation: specific remediation steps.
-
-Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
-Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
-medium 4.0-6.9, low 0.1-3.9, info 0.0.
-
-{severity_calibration}
-
-Severity levels: critical, high, medium, low, info
-OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
-A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
-A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
-A09 (Logging/Monitoring), A10 (SSRF)
-
-Be conservative — only report confirmed or highly likely issues, not theoretical ones.
-If many findings are present, return the most important confirmed findings first. Keep each field
-concise enough for a security report table/detail view; do not include raw full responses when a
-short quoted excerpt proves the issue."""
 
 
 async def plan_probes(
@@ -1390,44 +1236,6 @@ async def _analyse_probe_batch(
 
 # ── Site-level test plan ──────────────────────────────────────────────────────
 
-_SITE_PLAN_PROMPT = """\
-You are a senior web application penetration tester preparing a security assessment.
-
-Below is a summary of all pages discovered during crawling of the target web application.
-Analyse the attack surface, reason through the application's architecture, and produce a
-structured test plan with specific, actionable vulnerability hypotheses.
-
-Target base URL: {base_url}
-
-Discovered pages ({page_count} total):
-{pages_summary}
-
-Consider:
-- What kind of application is this? (auth model, user roles, key data objects)
-- What are the highest-value attack targets? (admin panels, financial operations, \
-ID-bearing endpoints, privileged actions)
-- What systemic vulnerabilities are likely based on the observed structure and page categories?
-- What cross-endpoint attack chains deserve testing? For example: auth bypass by calling a \
-final step directly without going through a gated check step; IDOR across resource types; \
-privilege escalation by sending a lower-privilege token to an admin endpoint.
-
-Return ONLY valid JSON in this exact format:
-{{
-  "app_summary": "2-3 sentence description of the application, its key roles, and security-relevant features",
-  "attack_hypotheses": [
-    {{
-      "hypothesis": "Short label for this attack scenario",
-      "description": "What to test, why it may be vulnerable, and which endpoints are involved",
-      "target_pages": ["partial URL or pattern"],
-      "owasp": "A01"
-    }}
-  ],
-  "critical_areas": ["URL pattern or page type that deserves the most thorough testing"],
-  "test_notes": "Specific techniques, IDs, credentials, header patterns, or sequences the scanner should use"
-}}
-
-Limit to the 8 most valuable attack hypotheses. Be specific and actionable."""
-
 
 async def generate_site_test_plan(
     config: LLMConfig,
@@ -1464,59 +1272,6 @@ async def generate_site_test_plan(
 
 
 # ── Follow-up probe planning ──────────────────────────────────────────────────
-
-_FOLLOWUP_PROMPT = """\
-You are a senior web application penetration tester reviewing mid-scan probe results.
-
-You have just run an initial set of probes against the page below and received the results.
-Your task is to reason through what you observe, identify any promising leads, and generate
-targeted follow-up probes that would confirm, deepen, or chain from the potential issues.
-
-Page URL: {url}
-Page context: {context}
-
-Site-level test plan context:
-{site_context}
-
-Initial probe results:
-{initial_results}
-
-Think through:
-- Which results look anomalous or potentially vulnerable? (unexpected 200s on restricted pages, \
-error messages that disclose stack traces or internals, reflected or stored payloads, \
-differing responses for different input values, auth bypass indicators)
-- For each interesting result, what follow-up probe would confirm or rule out the issue?
-- Are there attack chains implied by multiple results together? In particular:
-  • If a check/validate/verify endpoint responded saying something is required (e.g. TOTP, pin,
-    2FA code, elevated privilege), probe the corresponding action endpoint DIRECTLY without
-    providing that requirement, to test whether enforcement is server-side or only client-side.
-  • If a response revealed a new endpoint URL, resource ID, token, or parameter — probe it.
-  • If a check returned requires_X: true but the action endpoint is not yet probed — add a probe
-    calling the action endpoint with the required field absent or empty.
-- Did any response reveal new endpoints, IDs, tokens, or parameters worth testing?
-
-Generate targeted follow-up probes. Prefer quality over quantity — a focused probe testing a
-specific hypothesis is more valuable than re-running broad coverage.
-
-Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [] if no leads):
-[
-  {{
-    "type": "http",
-    "method": "GET",
-    "url": "https://...",
-    "params": {{}},
-    "headers": {{}},
-    "body": null,
-    "as_user": null,
-        "interesting_result": "Specific response status/body/header/behavior that made this worth following up",
-        "hypothesis": "Specific vulnerability or enforcement behavior this probe is testing",
-        "payload_purpose": "What the generated URL/body/header payload is intended to confirm or rule out, or null",
-    "desc": "Follow-up: what this tests and why"
-  }}
-]
-
-Return [] if no results look promising enough to warrant follow-up investigation.
-Do not use vague wording like "looked interesting" without naming the exact signal and hypothesis."""
 
 
 async def plan_followup_probes(
@@ -1559,27 +1314,6 @@ async def plan_followup_probes(
 
 
 # ── Finding title normalisation ───────────────────────────────────────────────
-
-_NORMALIZE_TITLES_PROMPT = """\
-You are deduplicating security findings from a web application penetration test report.
-
-EXISTING confirmed findings for this test run:
-{existing_list}
-
-NEW candidate findings just discovered (normalize these):
-{new_list}
-
-Rules:
-- If a new finding is the same vulnerability class as an existing one (same OWASP category \
-and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
-- If two new findings in this batch are the same class, give them the SAME title (pick the \
-clearest one).
-- If a new finding is genuinely different, keep its title as-is.
-- Do NOT merge or drop findings — return one entry per new finding.
-
-Return ONLY a JSON array, one object per new finding in the same order:
-[{{"index": 0, "title": "..."}}, ...]
-"""
 
 
 async def normalize_finding_titles(
@@ -1665,41 +1399,6 @@ def _format_findings_as_text(findings: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-_DEDUPLICATE_FINDINGS_PROMPT = """\
-You are de-duplicating security findings from a web application penetration test.
-
-Findings below are candidate duplicates because they share the same vulnerability
-class and host target: {target}
-
-Candidate findings (sorted by severity):
-
-{findings_text}
-
-Decide which findings are substantially the same issue in substance and target.
-
-Rules:
-- Group findings when a knowledgeable human security reviewer would collapse them into one
-  report finding.
-- Treat differing object IDs, account numbers, UUIDs, record references, or example values as
-  duplicates when the vulnerability/root cause and target functionality are the same.
-- Titles and writeups may differ; judge by vulnerability class, root cause, affected
-  functionality, impact, and recommended fix.
-- Do NOT group findings that affect different URL paths or parameters — XSS on
-  /search and XSS on /login are separate vulnerable endpoints that must remain as
-  separate findings even if they share the same vulnerability class.
-- Do NOT group findings that are different vulnerability classes, different target
-  functionality, or require meaningfully different remediation.
-- Only include groups with at least two finding ids.
-
-Return ONLY valid JSON in this exact format:
-{{
-  "duplicate_groups": [
-    {{"ids": [1, 2], "reason": "short explanation"}}
-  ]
-}}
-"""
-
-
 async def deduplicate_finding_groups(
     config: "LLMConfig",
     *,
@@ -1754,36 +1453,6 @@ async def deduplicate_finding_groups(
     except Exception as exc:
         log.warning("deduplicate_finding_groups failed: %s", exc)
         return []
-
-
-_FINGERPRINT_PROMPT = """\
-You are classifying security findings from a web application penetration test.
-
-For each finding below, assign a short canonical "vulnerability fingerprint" that
-captures:
-  1. Vulnerability CLASS  (e.g. xss, sqli, idor, csrf, ssrf, broken-auth, ssti, xxe)
-  2. Root-cause MECHANISM (e.g. reflection, stored, blind, missing-check, misconfig)
-  3. Affected FUNCTIONALITY (e.g. login, search, user-profile, file-upload, admin-panel)
-
-Findings that represent the SAME underlying vulnerability — even when found on
-different URLs or paths — MUST receive IDENTICAL fingerprints.
-
-For example, reflected XSS found on /search and on /login should both get
-"xss:reflection:user-input" if the root cause is the same unescaped reflection.
-
-Findings (sorted by severity):
-
-{findings_text}
-
-Return ONLY valid JSON:
-{{
-  "fingerprints": [
-    {{"id": 1, "fingerprint": "xss:reflection:user-input"}},
-    {{"id": 2, "fingerprint": "xss:reflection:user-input"}},
-    {{"id": 3, "fingerprint": "sqli:error-based:login-form"}}
-  ]
-}}
-"""
 
 
 async def global_deduplicate_findings(
@@ -1845,249 +1514,6 @@ async def global_deduplicate_findings(
 
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
 
-_THINKING_PENTEST_PLAYBOOK = """\
-Recommended assessment strategy, distilled from effective manual pentest workflow:
-
-1. Passive recon and fingerprinting
-     - Start with the base URL, visible login/app/admin paths, robots.txt, sitemap.xml,
-         and response headers.
-     - Note missing or weak security headers, server/framework hints, public admin areas,
-         exposed account data, comments, forms, and route/link structure.
-
-2. Raw asset and JavaScript mining
-     - Fetch raw HTML for important pages and enumerate every script src and link href.
-     - Fetch JavaScript bundles and look for API base paths, endpoint lists, token storage
-         keys, hardcoded routes, feature flags, role-specific APIs, preflight/check endpoints,
-         and client-side-only enforcement.
-     - After fetching a JS file, search its content using history_search with short code
-         patterns like "fetch(", "axios.post(", "/api/", "baseUrl" — NOT English descriptions.
-     - For single-page applications using hash routing (#/route), API endpoints used by a
-         feature are ONLY discoverable by: (a) using the browser action to navigate to the
-         SPA route, interact with its form (fill + submit), and capture the real API call in
-         traffic logs, or (b) finding the path in a fetched JS source with history_search
-         using code patterns. If /api/transfers or similar returns 404, do NOT keep guessing
-         variations — use a browser action to navigate to #/transfers and submit the form.
-     - Build and maintain an endpoint inventory from the JS and crawl context before
-         spending too many steps on generic payloads.
-
-3. API map and authentication boundary checks
-     - Always check common unauthenticated operational endpoints early when in scope:
-         /api/health, /health, /status, /api/status, /api/config, /api/debug, and
-         /.well-known/security.txt. Treat jwt_secret, app keys, DB settings, phpinfo,
-         environment, server versions, or stack traces as high-priority leads.
-     - Test CORS on representative API endpoints by sending a harmless Origin header
-         such as https://evil.example and inspect Access-Control-Allow-Origin and
-         Access-Control-Allow-Credentials.
-     - Probe discovered API endpoints unauthenticated first, then with available user tokens.
-     - Compare 401/403/404/200 behavior on user, admin, account, profile, transaction,
-         address-book, settings, and system endpoints.
-     - Try lower-privilege tokens against admin endpoints and admin tokens against user
-         endpoints if both token types are available.
-     - If a public admin panel or admin login is discovered, try a very small set of obvious
-         default credentials derived from the app context, such as admin/admin, admin/password,
-         admin/admin123. Use credential_check for these bounded dictionaries. Do not brute-force.
-     - For demo/seeded customer apps, test a tiny bounded set of obvious seeded passwords
-         such as password and Password123! against discovered example users. Use at most a
-         handful of users and passwords.
-
-4. Account bootstrap and session/token analysis
-     - If registration is available, create or use a disposable test account to obtain a
-         legitimate session and inspect registration/login/profile responses for sensitive
-         fields such as password_hash, totp_secret, roles, IDs, balances, account numbers,
-         or JWTs.
-     - Decode JWT payloads client-side when visible, then test only low-impact JWT issues
-         such as alg=none rejection or issuer/role boundary confusion when appropriate.
-     - If a response exposes a JWT signing secret, use the jwt action to create a
-         controlled HS256 token for a small number of candidate customer IDs, then verify
-         access with read-only endpoints such as /api/profile and /api/accounts.
-
-5. Object ownership and IDOR testing
-     - Enumerate IDs from list endpoints, detail endpoints, admin views, account numbers,
-         transaction IDs, address-book IDs, and response bodies.
-     - Test both list endpoints and individual detail endpoints because one may be scoped
-         correctly while the other is vulnerable.
-     - For every object lookup, ask: does the server verify this object belongs to the
-         current user, or is it only fetching by numeric ID?
-
-6. Business-logic gate bypass
-     - Identify two-step flows with /check, /verify, /validate, /preflight, /setup, or
-         client-side UI gating before a sensitive action.
-     - First call the check endpoint to learn what it claims is required. Then call the
-         actual action endpoint directly without the required field (for example no totp_code,
-         pin, approval token, or confirmation) and verify whether the server enforces it.
-     - For money/account flows, use disposable accounts and low-impact amounts where possible.
-     - For banking apps, explicitly check loan/account creation rules, credit limits,
-         redraw/transfer limits, sufficient-funds behavior, and whether action endpoints
-         verify that source accounts belong to the authenticated user.
-
-7. Input validation, stored XSS, and SQL injection
-     - Prefer inputs discovered from actual forms/API bodies: search/filter/sort, name/title/
-         description/comment/message, email/username, IDs, amount/quantity.
-     - For SQLi, compare a baseline nonmatching search to quote-breaking, boolean, ORDER BY,
-         UNION, and low-delay timing probes. Treat SQL error disclosure as valuable evidence.
-     - For XSS, test both reflected and stored paths. If the server accepts raw HTML/JS in a
-         create/update response, follow up by viewing the listing/detail/admin page where the
-         value is rendered.
-
-8. Error disclosure, rate limiting, and configuration checks
-     - Send malformed-but-valid-shape requests to endpoints with typed parameters to look for
-         stack traces, SQL errors, absolute file paths, class names, and debug traces.
-     - Check login error differences for user enumeration, and use only a small bounded set
-         of failed login attempts to detect missing throttling/lockout.
-     - Re-check CSP, HSTS, X-Frame-Options, content sniffing, and referrer-policy headers on
-         representative HTML and API responses.
-
-Work like the transcript: recon → endpoint extraction → auth/session bootstrap → boundary tests →
-business-logic bypass → IDOR/injection/error disclosure → concise confirmation. When a response
-reveals a stronger lead than the current plan, follow that lead immediately.
-"""
-
-# ── WSTG technique quick-reference (distilled from OWASP WSTG skill prompts) ──
-# These blocks add specific payloads, indicators, and decision criteria not
-# already covered by the high-level playbook above.
-# ── WSTG technique blocks — keyed by category ────────────────────────────────
-# Each value is injected into the initial user message only when the selector
-# determines it is relevant to the discovered attack surface.
-
-WSTG_SKILLS: dict[str, str] = {
-    "sqli": r"""─── SQL INJECTION (WSTG-INPV-05) ───────────────────────────────────────────────
-Error-based probes: submit `'`, `''`, `1'`, `\`, `1 OR 1=1--`, `' OR ''='`
-DB error signatures:
-  MySQL:      "You have an error in your SQL syntax" / "Warning.*mysql"
-  PostgreSQL: "pg_query()" / "unterminated quoted string" / "PostgreSQL.*ERROR"
-  MSSQL:      "Microsoft OLE DB Provider" / "Unclosed quotation mark"
-  Oracle:     "ORA-\d{5}" / "quoted string not properly terminated"
-  SQLite:     "SQLite3::query" / "SQLITE_ERROR"
-  Generic:    "SQLSTATE[" / "syntax error at or near"
-Boolean-blind: send baseline → `1 AND 1=1--` (true) → `1 AND 1=2--` (false);
-  if true matches baseline and false differs significantly → injectable.
-Time-blind: MySQL `' AND SLEEP(5)--` | MSSQL `'; WAITFOR DELAY '0:0:5'--` |
-  PostgreSQL `'; SELECT pg_sleep(5)--` — confirm with baseline timing.
-UNION: find column count with `' ORDER BY N--`; find reflected column with
-  `' UNION SELECT NULL,NULL,'x',NULL--`; extract `' UNION SELECT NULL,@@version--`.
-Constraint: never DROP/INSERT/UPDATE/DELETE; limit to version/DB name for PoC.""",
-
-    "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
-Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
-  and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
-  evidence=code_context showing the unsanitized innerHTML assignment. For each sink:
-    a. Find the write endpoint: call target_inventory with kind="input" and filter by
-       the same field name (key) to get the URL and method that accepts that field.
-    b. POST a payload to that write endpoint as the attacker session.
-    c. Log in as a different user (victim session) and navigate to the page that loads
-       the JS file identified in the sink item — verify execution via browser DOM check.
-  This step finds cross-user stored XSS that generic fuzzing misses.
-Step 1 — inject a unique canary string; check if it appears in the response.
-Step 2 — identify rendering context, then use a context-matched payload:
-  HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>
-  HTML attribute: " onfocus="alert(1)" autofocus="  /  ' onmouseover='alert(1)
-  JS string:      ';alert(1)//  /  </script><script>alert(1)//
-  URL context:    javascript:alert(1)
-Filter bypass: case variation <ScRiPt>, HTML entities &#x3C;script&#x3E;,
-  tag alternatives <details open ontoggle=alert(1)>, double-encode %253C.
-Stored XSS: submit payload → navigate to every related rendering page → confirm.""",
-
-    "idor": r"""─── IDOR / AUTHORIZATION (WSTG-ATHZ-04) ────────────────────────────────────────
-Object references: URL path `/api/users/123`, query `?id=123`, POST body `{"user_id":123}`.
-Horizontal escalation: access own resource → swap ID to adjacent (+1/-1) or another user's.
-Vertical escalation: use low-privilege session on admin-only endpoints.
-Manipulation: sequential IDs, `?id=*`, `?id[]=100&id[]=101`, base64/hex IDs.
-Response comparison: same data = IDOR; same structure different data = partial; error = check msg.""",
-
-    "auth_bypass": r"""─── AUTHENTICATION BYPASS (WSTG-ATHN-04) ────────────────────────────────────────
-Forced browsing: send protected endpoint request without any auth headers.
-Bypass headers to add on protected endpoints:
-  X-Original-URL: /admin  |  X-Rewrite-URL: /admin  |  X-Forwarded-For: 127.0.0.1
-  X-Custom-IP-Authorization: 127.0.0.1  |  X-Real-IP: 127.0.0.1
-Path variation: /Admin, /ADMIN, /admin/, /admin/., /admin%2fpanel, /admin;foo=bar/panel,
-  /%61dmin (URL-encoded 'a'), /admin..
-Method override: try HEAD, OPTIONS; add X-HTTP-Method-Override: GET header.
-Parameter tampering: flip hidden `isAdmin=false` → true, `role=user` → admin in cookie/param.""",
-
-    "ssrf": r"""─── SSRF (WSTG-INPV-19) ──────────────────────────────────────────────────────────
-Candidate parameter names: url, uri, link, href, src, dest, redirect, target, path,
-  file, page, next, callback, feed, fetch, load, resource, proxy, imageurl, webhook.
-Internal targets:
-  http://127.0.0.1/  |  http://localhost/  |  http://[::1]/
-  http://169.254.169.254/latest/meta-data/              (AWS IMDSv1)
-  http://metadata.google.internal/computeMetadata/v1/   (GCP — add Metadata-Flavor: Google header)
-  http://169.254.169.254/metadata/instance?api-version=2021-02-01 (Azure — add Metadata: true)
-Evidence: "ami-id", "instance-id", "computeMetadata", "vmId", "Welcome to nginx".
-Filter bypass: hex IP `http://0x7f000001/`, octal `http://0177.0.0.1/`, decimal `http://2130706433/`,
-  short form `http://127.1/`, `http://evil.com@127.0.0.1/`, redirect chain via external 302.
-Constraint: if cloud credentials are found, report CRITICAL but do NOT use them.""",
-
-    "csrf": r"""─── CSRF (WSTG-SESS-05) ──────────────────────────────────────────────────────────
-Focus on state-changing endpoints (POST/PUT/DELETE): profile update, password/email change,
-  transactions, admin actions.
-Token validation tests (do each in turn):
-  1. Remove token entirely — if request succeeds, token not enforced.
-  2. Set token to empty string.  3. Replace with random same-length string.
-  4. Reuse token from a previous session.
-SameSite bypass: Lax permits top-level GET navigations; test if action works via GET/method-override.
-Referer bypass: omit header entirely; `Referer: https://evil.target.com`.""",
-
-    "cmdi": r"""─── COMMAND INJECTION (WSTG-INPV-12) ────────────────────────────────────────────
-Separators (prefix with valid value): `; echo CANARY` | `| echo CANARY` | `&& echo CANARY`
-  `` `echo CANARY` `` | `$(echo CANARY)` | `\necho CANARY`
-Time-based blind: Unix `; sleep 5` / `$(sleep 5)` | Windows `& timeout /T 5 /NOBREAK`
-  — measure baseline, inject, confirm with a different delay (3s) to rule out jitter.
-Filter bypass: `{echo,CANARY}`, `echo$IFS CANARY`, base64 decode `$(echo Y2F0|base64 -d)`.
-Constraint: limit to echo/sleep/id/whoami — no reverse shells, no rm/del.""",
-
-    "cors": r"""─── CORS (WSTG-CLNT-07) ─────────────────────────────────────────────────────────
-Test on every API endpoint that returns user data. Add `Origin: https://evil.com` to the request.
-Vulnerable: response contains `Access-Control-Allow-Origin: https://evil.com`.
-Default severity is low, including when `Access-Control-Allow-Credentials: true` is present.
-Escalate only with browser-enforceable proof that sensitive authenticated data is readable
-cross-origin, or when the permissive policy directly enables a confirmed account-impacting flow.
-Also test: `Origin: null` (sandbox), `Origin: https://evil.target.com` (subdomain trust),
-  `Origin: http://target.com` (scheme downgrade on HTTPS site).""",
-
-    "headers": r"""─── SECURITY HEADERS (WSTG-CONF-07) ──────────────────────────────────────────────
-Check main page, login page, API endpoints, and error pages. Expected values:
-  Strict-Transport-Security: max-age=31536000; includeSubDomains
-  Content-Security-Policy: restrictive — no unsafe-inline, no unsafe-eval, no *
-  X-Content-Type-Options: nosniff
-  X-Frame-Options: DENY or SAMEORIGIN
-  Referrer-Policy: strict-origin-when-cross-origin
-Should be absent: Server (with version), X-Powered-By, X-AspNet-Version.
-CSP weak patterns: unsafe-inline in script-src, *, data: in script-src, CDN hosting user content.""",
-
-    "sessions": r"""─── SESSION MANAGEMENT (WSTG-SESS-01/02/03/07) ────────────────────────────────────
-Cookie attributes — every session cookie must have: Secure (HTTPS), HttpOnly, SameSite=Strict|Lax.
-Session fixation: capture token before login → log in → compare token. If unchanged: fixation vuln.
-Logout invalidation: after clicking logout, re-send the old session cookie — if still valid, server
-  does not invalidate tokens.
-Token entropy: collect several tokens and check for sequential or timestamp-correlated patterns.""",
-
-    "workflow": r"""─── WORKFLOW BYPASS (WSTG-BUSL-06) ────────────────────────────────────────────────
-Multi-step flows: registration, checkout, password-reset, approval, onboarding wizards.
-Step skipping: jump directly to the final confirmation/submit step without completing earlier steps.
-Parameter tampering: modify hidden `step=3`, `status=approved`, `verified=true` fields.
-Price/quantity manipulation: change `price=0.01`, `qty=-1`, modify discount values in POST body.
-Race conditions: send the same state-changing request twice simultaneously.""",
-}
-
-# SSRF-indicative parameter names used by the selector.
-_SSRF_PARAM_NAMES: frozenset[str] = frozenset({
-    "url", "uri", "link", "href", "src", "dest", "destination", "redirect",
-    "redirecturl", "target", "path", "file", "page", "next", "return",
-    "returnurl", "callback", "feed", "fetch", "load", "resource", "proxy",
-    "imageurl", "image_url", "webhook", "endpoint", "host", "site",
-})
-
-# URL path fragments that imply auth-related pages.
-_AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
-    "/login", "/signin", "/sign-in", "/auth", "/authenticate",
-    "/register", "/signup", "/sign-up", "/logout", "/password",
-    "/account", "/profile", "/admin",
-})
-
-_SKILL_ORDER = (
-    "sqli", "xss", "cmdi", "ssrf", "idor", "auth_bypass",
-    "csrf", "sessions", "cors", "headers", "workflow",
-)
 
 
 def select_wstg_skills(
@@ -2230,285 +1656,6 @@ AGENTIC_LOOP_PROVIDERS = frozenset({
     "google",
 })
 
-_THINKING_AGENT_SYSTEM = (
-    "You are an expert web application penetration tester conducting a hands-on "
-    "security assessment.\n"
-    "Use the provided tools to investigate the target. Work iteratively — after each "
-    "tool result, reason about what you observed and decide the single most valuable "
-    "next action.\n\n"
-    "Your conversation contains every prior tool result verbatim. "
-    "You do NOT need reconstructed summaries — read your actual prior tool_result "
-    "messages to find cookies, tokens, response bodies, and IDs you captured earlier. "
-    "When you reference a prior response, quote the exact text from that tool_result.\n\n"
-    + _THINKING_PENTEST_PLAYBOOK
-    + "\n\nTool rules:\n"
-    "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
-    "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
-    "interaction is genuinely required.\n"
-    "- context_tool: look up crawl data, history, findings, or traffic without hitting "
-    "the target. After 3 consecutive calls, either execute a probe/write a finding or "
-    "include context_budget_reason with a concrete summary and why one more targeted "
-    "scan round will change the next action.\n"
-    "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
-    "No duplicates.\n"
-    "- agent_dispatch: delegate a confirmed high-confidence lead to a Specialist Agent that "
-    "runs concurrently so you can continue covering other attack surface. Call this as soon "
-    "as you have concrete evidence of a testable vector — e.g. a confirmed stored-XSS sink "
-    "with a verified injection point, an IDOR primitive where you can enumerate a foreign "
-    "object ID, an auth bypass with a reproducible proof, or a SQLi indicator with a "
-    "distinctive error or timing response. Set priority 7–10 based on severity. "
-    "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
-    "cors, crypto, config. Dispatch immediately — do NOT keep probing the same lead "
-    "yourself after dispatching.\n"
-    "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
-    "- Confirmed findings are CLOSED — do not re-probe them.\n"
-    "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
-    "attack surface.\n"
-    "- If a browser fill/click fails, immediately fall back to http_request with POST body.\n"
-)
-
-THINKING_AGENT_TOOLS: list[dict] = [
-    {
-        "name": "http_request",
-        "description": (
-            "Make one HTTP request to the target. Use for APIs, raw assets, "
-            "header checks, and direct endpoint testing."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "method": {"type": "string"},
-                "url": {"type": "string"},
-                "headers": {"type": "object"},
-                "body": {},
-                "use_session": {"type": ["string", "null"]},
-                "observation": {"type": "string"},
-                "hypothesis": {"type": "string"},
-                "payload_purpose": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["method", "url"],
-        },
-    },
-    {
-        "name": "browser",
-        "description": (
-            "Interact with the target using a real browser. Use when JavaScript "
-            "execution, hash routes, form interaction, or DOM rendering is required."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "use_session": {"type": ["string", "null"]},
-                "steps": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": (
-                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot, ...}. "
-                        "fill: selector+value. click: selector. press: selector+key. "
-                        "wait: state or ms."
-                    ),
-                },
-                "observation": {"type": "string"},
-                "hypothesis": {"type": "string"},
-                "payload_purpose": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["steps"],
-        },
-    },
-    {
-        "name": "context_tool",
-        "description": (
-            "Retrieve scanner context without hitting the target. "
-            "Available: site_map, page_detail, history_search, finding_list, "
-            "target_inventory, traffic_search, endpoint_detail, compare_responses, "
-            "mutate_request, auth_matrix, extract_entities. "
-            "After 3 consecutive calls, either act or include context_budget_reason "
-            "explaining why another targeted context scan round is needed."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tool": {"type": "string"},
-                "args": {"type": "object"},
-                "context_budget_reason": {"type": "string"},
-                "observation": {"type": "string"},
-                "hypothesis": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["tool"],
-        },
-    },
-    {
-        "name": "write_finding",
-        "description": (
-            "Record a confirmed security finding. Only call with concrete evidence "
-            "from prior tool results. Do not re-write confirmed findings."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "owasp_category": {"type": "string"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "impact": {"type": "string"},
-                "likelihood": {"type": "string"},
-                "recommendation": {"type": "string"},
-                "cvss_score": {"type": "number"},
-                "cvss_vector": {"type": "string"},
-                "severity": {
-                    "type": "string",
-                    "enum": ["critical", "high", "medium", "low", "info"],
-                },
-                "affected_url": {"type": "string"},
-                "evidence": {"type": "string"},
-                "request_evidence": {"type": "string"},
-                "response_evidence": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["title", "severity", "affected_url", "evidence"],
-        },
-    },
-    {
-        "name": "forge_jwt",
-        "description": (
-            "Forge a JWT with a modified payload after discovering an exposed "
-            "HS256 signing secret."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "secret": {"type": "string"},
-                "claims": {"type": "object"},
-                "header": {"type": "object"},
-                "store_as": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["secret", "claims"],
-        },
-    },
-    {
-        "name": "decode_jwt",
-        "description": (
-            "Decode a JWT to inspect its header and payload claims. "
-            "Optionally verify the HS256 signature with a known secret."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "token": {"type": "string", "description": "The raw JWT string to decode."},
-                "secret": {"type": "string", "description": "HMAC secret to verify the HS256 signature (optional)."},
-                "note": {"type": "string"},
-            },
-            "required": ["token"],
-        },
-    },
-    {
-        "name": "credential_check",
-        "description": "Test a small explicit list of credentials (max 20) against a login endpoint.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "method": {"type": "string"},
-                "username_field": {"type": "string"},
-                "password_field": {"type": "string"},
-                "candidates": {"type": "array", "items": {"type": "object"}},
-                "headers": {"type": "object"},
-                "success_statuses": {"type": "array", "items": {"type": "integer"}},
-                "note": {"type": "string"},
-            },
-            "required": ["url", "candidates"],
-        },
-    },
-    {
-        "name": "register_account",
-        "description": "Create one disposable account through a discovered registration endpoint.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "method": {"type": "string"},
-                "body_format": {"type": "string", "enum": ["json", "form"]},
-                "username_field": {"type": "string"},
-                "email_field": {"type": "string"},
-                "password_field": {"type": "string"},
-                "include_username": {"type": "boolean"},
-                "include_email": {"type": "boolean"},
-                "extra_fields": {"type": "object"},
-                "headers": {"type": "object"},
-                "success_statuses": {"type": "array", "items": {"type": "integer"}},
-                "store_as": {"type": "string"},
-                "use_session": {"type": "string"},
-                "note": {"type": "string"},
-            },
-            "required": ["url"],
-        },
-    },
-    {
-        "name": "done",
-        "description": (
-            "Finish the assessment when key attack areas are covered "
-            "or steps are nearly exhausted."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"summary": {"type": "string"}},
-            "required": ["summary"],
-        },
-    },
-    {
-        "name": "agent_dispatch",
-        "description": (
-            "Dispatch a Specialist Agent to deep-dive on a strong, specific lead. "
-            "Use when you have identified a high-confidence attack vector that warrants "
-            "focused follow-up investigation beyond a single HTTP probe — for example, "
-            "a confirmed IDOR primitive, an exposed signing secret, or a business-logic "
-            "path with suspicious parameter handling. The specialist runs concurrently "
-            "and reports back via context tools. Do not dispatch on speculative leads; "
-            "only dispatch after gathering concrete evidence of a testable vector."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "attack_class": {
-                    "type": "string",
-                    "description": (
-                        "One of: idor, auth_bypass, sqli, xss, business_logic, "
-                        "ssrf, path_traversal, cors, crypto, config"
-                    ),
-                },
-                "target_url": {
-                    "type": "string",
-                    "description": "The specific URL the specialist should focus on.",
-                },
-                "rationale": {
-                    "type": "string",
-                    "description": (
-                        "Concrete evidence from prior tool results that justifies "
-                        "dispatching this specialist."
-                    ),
-                },
-                "priority": {
-                    "type": "integer",
-                    "description": "Estimated priority 1-10 for this lead.",
-                },
-                "note": {"type": "string"},
-            },
-            "required": ["attack_class", "target_url", "rationale"],
-        },
-    },
-]
-
-# Subset of tools available to specialist agents — no agent_dispatch (prevent
-# recursive dispatch), no JWT/credential/register tools (specialist is narrowly
-# focused on a specific lead).
-SPECIALIST_AGENT_TOOLS: list[dict] = [
-    t for t in THINKING_AGENT_TOOLS
-    if t["name"] in {"http_request", "browser", "context_tool", "write_finding", "done"}
-]
 
 
 async def _call_with_tools(
@@ -2753,8 +1900,8 @@ async def _call_with_tools(
         ]
         _bdt_u = data.get("usage", {})
         _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0),
-                      cache_read_tokens=_bdt_u.get("cacheReadInputTokenCount", 0),
-                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokenCount", 0))
+                      cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0))
         return blocks, stop_reason, raw_content_ant
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
@@ -2836,7 +1983,7 @@ async def _call_with_tools(
                 if config.provider in ("azure_foundry", "azure_foundry_openai")
                 else base
             )
-        elif config.provider == "openai_compatible" and config.base_url:
+        elif config.provider in ("openai", "openai_compatible") and config.base_url:
             base = config.base_url.rstrip("/")
             if not base.endswith("/v1"):
                 base += "/v1"
@@ -2851,7 +1998,7 @@ async def _call_with_tools(
             messages=oai_messages,
         )
         call_kwargs["tools"] = oai_tools
-        call_kwargs["tool_choice"] = "auto"
+        call_kwargs["tool_choice"] = "required"
         resp = await _create_chat_completion(oai_client, call_kwargs)
         choice = resp.choices[0]
         msg = choice.message
@@ -2874,9 +2021,11 @@ async def _call_with_tools(
             })
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
         _oai_u = getattr(resp, "usage", None)
+        _oai_cached = getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0) if _oai_u else 0
         _record_usage(config.model,
                       getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
-                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0)
+                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+                      cache_read_tokens=_oai_cached)
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
@@ -2911,11 +2060,13 @@ async def _call_with_tools(
                         if btype == "text":
                             parts.append(_gtypes.Part(text=blk.get("text") or ""))
                         elif btype == "tool_use":
+                            _ts = blk.get("thought_signature")
                             parts.append(_gtypes.Part(
                                 function_call=_gtypes.FunctionCall(
                                     name=blk.get("name") or "",
                                     args=blk.get("input") or {},
-                                )
+                                ),
+                                **({'thought_signature': _ts} if _ts is not None else {}),
                             ))
                         elif btype == "tool_result":
                             rc = blk.get("content") or ""
@@ -2929,7 +2080,14 @@ async def _call_with_tools(
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
 
-        g_client = genai.Client(api_key=config.api_key)
+        _g_proxy = _llm_proxy_var.get()
+        _g_http_opts: dict = {}
+        if config.base_url:
+            _g_http_opts["base_url"] = config.base_url
+        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+            verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+        )
+        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
         g_resp = await g_client.aio.models.generate_content(
@@ -2955,6 +2113,7 @@ async def _call_with_tools(
                     "name": fc.name,
                     "input": dict(fc.args) if fc.args else {},
                     "text": None,
+                    "thought_signature": getattr(part, "thought_signature", None),
                 })
         stop_reason = (
             "tool_use"
@@ -3078,7 +2237,8 @@ async def thinking_agentic_loop(
                 "thinking_agentic_loop: API error at step %d: %s",
                 tool_call_count + 1, exc,
             )
-            _exc_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else type(exc).__name__
+            _exc_resp = getattr(exc, "response", None)
+            _exc_code = (_exc_resp.get("Error", {}).get("Code", "") if isinstance(_exc_resp, dict) else type(exc).__name__)
             _is_expired = "ExpiredToken" in _exc_code or "ExpiredToken" in type(exc).__name__ or "expired" in str(exc).lower()
             if emit_fn:
                 try:
@@ -3250,257 +2410,6 @@ async def thinking_agentic_loop(
     return final_summary
 
 
-_THINKING_NEXT_ACTION_PROMPT = """\
-You are an expert web application penetration tester conducting a hands-on security assessment.
-You are working iteratively: each turn you review everything learned so far and decide on ONE
-specific action to take next, exactly like a human tester switching between curl and a browser.
-
-Target base URL: {target_url}
-
-Application context discovered during crawling:
-{crawl_context}
-
-{credentials_section}
-{sessions_section}
-RULE: Any vulnerability listed under CONFIRMED VULNERABILITIES is CLOSED — do not probe
-it again or attempt to re-prove it. If you need an authenticated session to reach a NEW
-endpoint, pick an existing session label from the list above; do not re-fetch secrets or
-re-forge tokens for issues that are already confirmed.
-
-Step {current_step} of {max_steps}.
-
-{pentest_playbook}
-
-History of previous actions and responses:
-{history_text}
-
-────────────────────────────────────────────────────────────────────────────────
-TASK: What is the single most valuable action to take RIGHT NOW?
-
-Think like a human tester:
-- Use context tools to pull only the specific crawl/history/finding details you need. Do not
-  assume route details are available inline unless they appear in the compact context or history.
-- If a target-driven task graph is present in the crawl context, prefer high-priority queued
-  or running tasks and reference the matching hypothesis in your observation/note.
-- Start broad with site_map when route coverage is unclear, then use page_detail or
-  history_search before sending a probe that depends on precise parameters or prior evidence.
-- Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
-  API endpoints, error messages, and any other signals.
-- Use discovered tokens in Authorization headers for subsequent requests.
-- Test for IDOR by swapping IDs you found from one response into requests for another resource.
-- Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
-- Mine raw HTML and JavaScript for endpoint discovery before guessing paths blindly.
-- Use HTTP actions for APIs, raw assets, headers, and direct endpoint testing.
-- Use browser actions when the next probe depends on JavaScript execution, hash routes,
-    form interaction, client-side state, DOM rendering, or screenshot evidence.
-- Use register_account when a registration endpoint/form is discovered and a disposable
-    low-impact account would improve auth, IDOR, or business-logic coverage.
-- Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
-    followed by direct action endpoint calls that omit the supposedly required control.
-- When you find something interesting, follow it up immediately — don't move on too quickly.
-- Do not finish until you have covered the endpoint inventory, authentication boundaries,
-    object ownership, business-logic gates, input validation, error disclosure, and headers,
-    unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
-- If step count is getting high, prefer discovering new attack surfaces over re-testing already-confirmed findings.
-- Be explicit about what made the next request worthwhile. Do not use vague phrases like
-    "found something interesting" unless you also name the specific signal and hypothesis.
-
-{severity_calibration}
-
-Return ONLY valid JSON (no markdown, no prose):
-
-To fetch targeted scanner context without issuing a target request:
-{{
-  "action": "tool",
-  "tool": "site_map",
-  "args": {{"filter": "api takes-input", "limit": 20}},
-  "observation": "The compact context does not include enough endpoint detail.",
-  "hypothesis": "Input-taking API routes are the best next attack surface to enumerate.",
-  "payload_purpose": "Retrieve only relevant route inventory instead of resending the full crawl.",
-  "note": "Fetch the API site map before choosing the next probe."
-}}
-
-Context tools:
-- site_map: args may include filter/search/type ("api" or "page"), flags (array of
-  req_auth/takes_input/has_object_ref/has_business_logic), and limit.
-- page_detail: args may include page_id or url and include (array of context/page_text/title/flags).
-- history_search: args may include query and limit. Uses EXACT substring matching — use short
-  code patterns ("fetch(", "/api/", "axios.post", a URL fragment, or a field name), NOT English
-  descriptions. The query must appear verbatim in the stored request/response text.
-- finding_list: args may include severity, owasp_category, search, and limit.
-- target_inventory: args may include kind, source, search/filter, and limit; returns normalized
-  endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
-- search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
-- traffic_search: args may include method, status, search/filter, and limit; returns captured HTTP
-  request/response excerpts from crawl and scans.
-- endpoint_detail: args may include url or page_id and limit; returns page, intel, traffic, history,
-  and extracted entities for that endpoint.
-- compare_responses: args include left_step/baseline_step and right_step/variant_step from history;
-  returns status, length, similarity, and term deltas.
-- mutate_request: args may include step or url/method/body plus mutation ("input_validation",
-  "idor", or "business_logic"); returns proposed http probe objects. Execute one with an http action.
-- auth_matrix: args may include search/filter and limit; returns endpoints worth anonymous/user/role checks.
-- extract_entities: args may include text, step, or page_id; returns URLs, paths, IDs, UUIDs, emails,
-  redacted JWT hints, and error/debug lines.
-- Context tools have an adaptive checkpoint: after 3 consecutive context-only calls,
-  execute a probe/write a finding, or include context_budget_reason summarizing what
-  you learned, naming the current hypothesis, and explaining why another targeted
-  context scan round will change the next action.
-
-To record a confirmed finding using prior evidence handles or response excerpts:
-{{
-  "action": "finding_write",
-  "owasp_category": "A05",
-  "title": "Verbose debug configuration disclosure",
-  "description": "The health endpoint exposes runtime configuration fields.",
-  "impact": "Attackers can use leaked implementation details to plan targeted attacks.",
-  "likelihood": "Likely because the endpoint is publicly reachable.",
-  "recommendation": "Remove secrets and debug configuration from public responses.",
-  "cvss_score": 5.3,
-  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
-  "severity": "medium",
-  "affected_url": "https://.../api/health",
-  "evidence": "Step 3 returned a 200 response containing debug=true.",
-  "request_evidence": "GET https://.../api/health",
-  "response_evidence": "Status: 200\\n{{...short excerpt...}}",
-  "observation": "Specific response evidence that proves the issue",
-  "hypothesis": "Why this is a confirmed security issue",
-  "payload_purpose": "Persist the finding without another redundant probe",
-  "note": "Record the confirmed issue with concise evidence."
-}}
-
-To make one HTTP request:
-{{
-  "action": "http",
-  "method": "GET",
-  "url": "https://...",
-  "use_session": null,
-  "headers": {{}},
-  "body": null,
-    "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
-    "hypothesis": "Specific issue or behavior this request is investigating",
-    "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
-    "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
-}}
-
-HTTP body rules:
-- Omit or set null when there is no body.
-- Use a JSON object for JSON API payloads (Content-Type will be set automatically).
-- Use a plain string for form-encoded or raw bodies.
-- Set use_session to one of the reusable session labels when you want the scanner to
-  attach a discovered token/session automatically.
-
-To use the browser:
-{{
-  "action": "browser",
-  "url": "https://...",
-  "use_session": null,
-  "steps": [
-    {{"op": "goto", "url": "https://..."}},
-    {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
-    {{"op": "click", "selector": "button[type='submit']"}},
-    {{"op": "wait", "state": "networkidle"}},
-    {{"op": "snapshot"}}
-  ],
-  "observation": "Specific signal from prior responses that requires browser/DOM follow-up",
-  "hypothesis": "Specific issue or behavior this browser interaction is investigating",
-  "payload_purpose": "What the typed/clicked payload is meant to test, or null",
-  "note": "One sentence combining the observation, hypothesis, and why this browser action is valuable"
-}}
-
-Browser step rules:
-- Supported ops: goto, fill, type, click, press, wait, snapshot.
-- For press, include selector and key (for example "Enter").
-- For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
-- Keep browser actions short and targeted; do not browse aimlessly.
-- Browser use_session currently applies bearer tokens as extra HTTP headers for navigation
-  and fetches made after the session is selected.
-
-To forge a JWT after discovering an exposed HS256 signing secret:
-{{
-  "action": "jwt",
-  "secret": "secret-from-prior-response",
-  "claims": {{
-    "iss": "BankOfEd",
-    "sub": 1,
-    "jti": "aespa-test",
-    "iat": 1778072559,
-    "exp": 1778158959
-  }},
-  "header": {{"typ": "JWT", "alg": "HS256"}},
-  "store_as": "customer_sub_1_token",
-  "observation": "Specific response field that exposed the signing secret",
-  "hypothesis": "Changing sub may impersonate another customer because the API trusts HS256 JWTs",
-  "payload_purpose": "Create a controlled token for a read-only impersonation check",
-  "note": "Forge an HS256 token from the exposed secret, then use it in a follow-up Authorization header."
-}}
-
-JWT rules:
-- Only use this after a signing secret or equivalent HMAC key was observed in prior responses.
-- Keep claims minimal and use read-only follow-up endpoints first.
-- Do not forge admin tokens unless a distinct admin issuer/secret is observed.
-- The scanner stores successful forged tokens as reusable in-memory sessions under store_as.
-
-To test a tiny explicit login dictionary:
-{{
-  "action": "credential_check",
-  "url": "https://.../api/admin/auth/login",
-  "method": "POST",
-  "username_field": "username",
-  "password_field": "password",
-  "candidates": [
-    {{"username": "admin", "password": "admin"}},
-    {{"username": "admin", "password": "admin123"}}
-  ],
-  "headers": {{"Content-Type": "application/json"}},
-  "success_statuses": [200, 201],
-  "observation": "Specific login endpoint and account naming clue that justify this check",
-  "hypothesis": "The deployed demo/admin account may use default or seeded credentials",
-  "payload_purpose": "Try a tiny bounded dictionary, not a brute-force attack",
-  "note": "Check a small explicit credential list and stop after recording any successes."
-}}
-
-Credential-check rules:
-- Maximum 20 candidates. Use fewer when possible.
-- Only use obvious defaults, seeded/demo credentials, or credentials explicitly found in prior responses.
-- Do not use generated wordlists, mutations, high-rate retries, or password spraying.
-- Successful login responses with bearer tokens are stored as reusable in-memory sessions.
-- Later actions should reference those sessions with use_session rather than copying tokens.
-
-To create one disposable account through a discovered registration endpoint:
-{{
-    "action": "register_account",
-    "url": "https://.../api/users/register",
-    "method": "POST",
-    "body_format": "json",
-    "username_field": "username",
-    "email_field": "email",
-    "password_field": "password",
-    "include_username": true,
-    "include_email": true,
-    "extra_fields": {{"role": "user"}},
-    "headers": {{"Content-Type": "application/json"}},
-    "success_statuses": [200, 201, 204],
-    "store_as": "disposable_user_a",
-    "observation": "The target exposes a public registration endpoint.",
-    "hypothesis": "A fresh user account will allow authenticated boundary and IDOR checks.",
-    "payload_purpose": "Create one low-impact disposable account for controlled testing.",
-    "note": "Register a disposable user and store any returned cookies or bearer token as a reusable session."
-}}
-
-Register-account rules:
-- Only use this for explicit signup/registration endpoints or forms found in crawl/intelligence/history.
-- Create at most one account per distinct testing role unless a later IDOR/business-logic check needs a second user.
-- Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
-- Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
-- Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
-
-To finish the assessment (all key areas covered, or steps nearly exhausted):
-{{
-  "action": "done",
-  "summary": "2-3 sentence summary of notable findings and tested areas"
-}}
-"""
 
 
 async def thinking_next_action(
@@ -3675,126 +2584,6 @@ async def thinking_next_action(
     return action
 
 
-# ── Adversarial validator LLM config ─────────────────────────────────────────
-
-_ADVERSARIAL_VALIDATOR_SYSTEM = """\
-You are an adversarial security reviewer. A vulnerability scanner reported a potential finding.
-
-Your mandate is deliberately adversarial: your job is to DISPROVE the finding — to find the \
-innocent explanation, not the guilty one.
-
-You succeed when you find a concrete benign explanation for the evidence.
-You confirm only when you have exhausted all reasonable disproofs.
-
-Workflow
-────────
-1. Read the evidence with maximum scepticism. Identify the weakest assumption the scanner made \
-— the single assumption that, if wrong, makes this a false positive.
-2. Test that assumption first. Use the simplest, highest-information test you can devise.
-3. If your test provides a concrete innocent explanation → call done(verdict="false_positive"), \
-stating exactly what the innocent explanation is.
-4. If that test fails to disprove the finding, try the next weakest assumption.
-5. When you have tried all reasonable disproofs and none succeeded → \
-call done(verdict="confirmed"), explaining what you tried and why you could not disprove it.
-
-Hard rules
-──────────
-• A failed probe is NOT evidence of innocence. Network errors, rate-limiting, and \
-mis-specified probes are your problem to work around — keep trying with a different approach.
-• Never return false_positive based solely on failure to reproduce. You need a specific \
-innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
-so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
-• Stay focused on the finding's core claim. Do not explore adjacent attack surface.
-• You cannot write new findings. Your only output is a verdict via done().
-"""
-
-# Per-OWASP-category disproof strategies.  Keyed by two-character prefix (A01–A10).
-_DISPROOF_HINTS: dict[str, str] = {
-    "A01": """\
-Disproof checklist for A01 (Broken Access Control / IDOR):
-• Re-request the resource with no authentication at all (strip cookies and auth headers). \
-If you receive the same data, the endpoint may be intentionally public — not an access \
-control failure.
-• Verify the response is not a generic SPA shell (React/Vue root div + bundled script \
-tags with minimal readable text). A shell page is never sensitive data disclosure.
-• For IDOR claims: confirm the session token in the original evidence belonged to a \
-different user, not the legitimate owner. Session confusion in proxy tooling is a common \
-false-positive source.
-• Check whether the object ID appears in a public listing or URL. Sequential IDs on \
-public resources (blog posts, product catalogue) are not IDOR unless sensitive \
-user-specific data is returned.""",
-
-    "A02": """\
-Disproof checklist for A02 (Cryptographic Failures):
-• Missing HTTPS: the target may sit behind a TLS-terminating reverse proxy. Verify \
-whether the domain serves HTTPS on port 443 even if the scanner probed a direct backend \
-port (80 / 8080 / 8443).
-• Missing HSTS or weak cipher: re-request the URL directly without a proxy — intercepting \
-proxies sometimes strip or downgrade security headers. Use compare_responses against \
-a proxy-direct and a direct path if both are reachable.
-• Weak password storage: confirm the allegedly plaintext secret appears in a live response \
-body, not only in a static export or debug log that is already access-controlled.""",
-
-    "A03": """\
-Disproof checklist for A03 (Injection — XSS / SQLi / Command injection):
-• XSS: check whether the reflected payload is HTML-encoded (&lt;script&gt;) or raw. \
-HTML-encoding neutralises execution. Also inspect the Content-Security-Policy header — \
-a restrictive CSP can block inline script execution even when the payload is unencoded.
-• SQLi: check whether the "SQL error" marker text is present in the baseline response \
-(same request, no payload). Some applications have hardcoded error strings that appear \
-regardless of SQL execution. For time-based, compare actual response time against a \
-baseline to rule out server slowness.
-• Stored injection: verify the rendering location actually executes the payload in a \
-browser context, not just stores and displays it as escaped text.""",
-
-    "A04": """\
-Disproof checklist for A04 (Insecure Design / Business Logic):
-• Business logic flaws require precise preconditions. Reproduce the exact transaction \
-sequence: same starting state, same user role, same parameter values. Variation in \
-state often produces different results that look like a flaw but are not.
-• Check whether the "unexpected" behaviour is actually documented. Some applications \
-intentionally allow negative-value transactions, large transfers, or unusual role \
-combinations for operational reasons.
-• Race conditions require genuinely concurrent requests. Sequential probes cannot \
-reproduce them — if you suspect the scanner triggered one by accident, discard \
-the finding unless you can replicate it with actual concurrency.""",
-
-    "A05": """\
-Disproof checklist for A05 (Security Misconfiguration):
-• Missing headers (X-Frame-Options, CSP, HSTS): re-request the endpoint directly to rule \
-out proxy stripping. Check whether a meta-tag equivalent or a CDN-layer header covers \
-the same protection.
-• Exposed debug / admin endpoint: verify the endpoint returns meaningful sensitive data, \
-not just an HTTP 200 with an empty body or a redirect to a login page.
-• Default credentials: confirm the login actually succeeded with a privileged response \
-(token, redirect to authenticated area), not just an HTTP 200 on the login endpoint.""",
-
-    "A07": """\
-Disproof checklist for A07 (Identification and Authentication Failures):
-• Is the endpoint intentionally unauthenticated? Health checks (/health, /status, \
-/ping), metrics endpoints, OpenAPI specs (/swagger, /openapi.json), and CORS preflight \
-responses are typically public by design.
-• For JWT issues: was the signing secret actually extracted from an application response, \
-or is it a hypothesis? Verify by forging a token with the extracted secret and testing \
-whether it is accepted by a protected endpoint.
-• For missing auth on a sensitive endpoint: confirm the endpoint returns genuinely \
-sensitive data without a session, not just a 200 OK with a generic page body.
-• Was the scanner's "unauthenticated" request genuinely cookie-free? Some HTTP clients \
-carry session cookies from a prior authenticated step automatically.""",
-
-    "A10": """\
-Disproof checklist for A10 (Server-Side Request Forgery):
-• Does the application actually make an outbound request, or does it echo the URL in \
-an error message? Issue a request targeting a host you control and check for an inbound \
-connection to confirm real outbound activity.
-• Is the "internal IP response" genuinely from an internal host, or does the error \
-message coincidentally contain IP-like text in a static template?
-• Does the application validate or whitelist URLs before issuing requests? Test with \
-a valid external URL first to confirm the feature makes any outbound call at all, then \
-probe with an internal address.""",
-}
-
-
 def _disproof_hints_for_finding(owasp_category: str) -> str:
     """Return category-specific disproof strategies or an empty string."""
     cat = (owasp_category or "").upper()
@@ -3812,156 +2601,6 @@ def severity_meets_threshold(severity: str, min_severity: str) -> bool:
     rank = _SEVERITY_RANK.get((severity or "low").lower(), 3)
     threshold = _SEVERITY_RANK.get((min_severity or "low").lower(), 3)
     return rank <= threshold
-
-
-# Validator-specific tool: compare two requests side-by-side.
-_COMPARE_RESPONSES_TOOL: dict = {
-    "name": "compare_responses",
-    "description": (
-        "Send two HTTP requests (baseline and test) and compare their responses. "
-        "Use to detect whether a payload causes a meaningful difference vs. a benign "
-        "baseline. Returns both full responses with a status and body diff summary. "
-        "This is the primary tool for disproving injection and access-control findings."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "baseline": {
-                "type": "object",
-                "description": "Baseline request — benign input or no payload.",
-                "properties": {
-                    "method": {"type": "string"},
-                    "url": {"type": "string"},
-                    "headers": {"type": "object"},
-                    "body": {},
-                    "use_session": {"type": "string"},
-                },
-                "required": ["url"],
-            },
-            "test": {
-                "type": "object",
-                "description": "Test request — tampered or payload-bearing variant.",
-                "properties": {
-                    "method": {"type": "string"},
-                    "url": {"type": "string"},
-                    "headers": {"type": "object"},
-                    "body": {},
-                    "use_session": {"type": "string"},
-                },
-                "required": ["url"],
-            },
-            "note": {
-                "type": "string",
-                "description": "What you expect this comparison to reveal.",
-            },
-        },
-        "required": ["baseline", "test"],
-    },
-}
-
-# Validator done tool — carries verdict, reasoning, confidence instead of summary.
-_VALIDATOR_DONE_TOOL: dict = {
-    "name": "done",
-    "description": (
-        "Call when you have reached a verdict. "
-        "Provide a specific reason grounded in your probe results."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ["confirmed", "false_positive"],
-                "description": (
-                    "confirmed: you tried all reasonable disproofs and could not find "
-                    "an innocent explanation. "
-                    "false_positive: you found a concrete benign explanation."
-                ),
-            },
-            "reasoning": {
-                "type": "string",
-                "description": (
-                    "2–4 sentences. For false_positive: state the specific innocent "
-                    "explanation. For confirmed: state what you tried and why it failed."
-                ),
-            },
-            "confidence": {
-                "type": "string",
-                "enum": ["high", "medium", "low"],
-                "description": "Your confidence in the verdict.",
-            },
-        },
-        "required": ["verdict", "reasoning"],
-    },
-}
-
-# Tools available to the adversarial validator agent.
-VALIDATOR_AGENT_TOOLS: list[dict] = [
-    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "http_request"),
-    _COMPARE_RESPONSES_TOOL,
-    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "context_tool"),
-    _VALIDATOR_DONE_TOOL,
-]
-
-
-# ── Validation LLM functions ──────────────────────────────────────────────────
-
-_VALIDATION_PLAN_PROMPT = """\
-You are a web application penetration tester. A security scanner flagged a potential vulnerability.
-Generate targeted HTTP probes to CONFIRM or REFUTE this specific finding.
-
-Finding:
-- Title: {title}
-- OWASP Category: {owasp_category}
-- Severity: {severity}
-- Affected URL: {affected_url}
-- Description: {description}
-
-Original evidence:
-{evidence}
-
-{users_section}
-
-Strategy:
-- Reproduce the exact condition that triggered the finding.
-- For auth/access control issues: test with both privileged and unprivileged users (set as_user).
-- For injection findings: repeat the exact payload and look for the evaluation marker.
-- For missing header / config issues: re-request the URL and inspect the response.
-- For IDOR: re-request the affected URL with a different user's session (set as_user).
-
-Return ONLY valid JSON — an array of up to 10 probe objects (no markdown fences).
-Use the same probe format as scanning (type, method, url, params, headers, body, as_user, desc).
-Return [] if no targeted probes can be generated."""
-
-
-_VALIDATION_VERDICT_PROMPT = """\
-You are a web application penetration tester reviewing validation probe results.
-
-Original finding:
-- Title: {title}
-- Description: {description}
-
-Original evidence:
-{evidence}
-
-Validation probe results:
-{results}
-
-Based on the probe results, determine whether this finding is CONFIRMED or a FALSE POSITIVE.
-
-Consider:
-- Does any probe reproduce the vulnerability? (injection marker present, access granted, etc.)
-- Does the server behaviour match what the original finding described?
-- Could the original evidence have been a false positive (coincidental keyword, expected redirect)?
-
-Return ONLY valid JSON (no markdown fences):
-{{
-  "verdict": "confirmed",
-  "reasoning": "The validation probe reproduced the issue: the payload was reflected verbatim."
-}}
-
-"verdict" must be exactly "confirmed" or "false_positive".
-"reasoning" should be 1–3 sentences explaining the decision."""
 
 
 async def plan_validation_probes(
