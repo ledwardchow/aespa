@@ -2529,6 +2529,7 @@ async def _run_specialist_agent(
                 "status": "active",
                 "current_task": f"Writing: {_fw_title}",
                 "outcome": None,
+                "_persist": True,
             })
             result_dict = {
                 "source": "specialist_agent",
@@ -3078,6 +3079,7 @@ async def _run_post_scan_llm_review(
         "role": "Reporting",
         "status": "active",
         "current_task": f"Pre-screening {len(candidates)} finding(s) for false positives…",
+        "_persist": True,
     })
 
     BATCH = 10
@@ -3170,6 +3172,7 @@ async def _run_post_scan_llm_review(
             "role": "Reporting",
             "status": "active",
             "current_task": batch_msg,
+            "_persist": True,
         })
 
     if low_confidence_ids:
@@ -3426,6 +3429,9 @@ async def _do_thinking_scan(run_id: int) -> None:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
+        initial_headers = _playwright_global_headers()
+        if initial_headers:
+            await browser_ctx.set_extra_http_headers(initial_headers)
         traffic_svc.setup_playwright_logging(browser_ctx, run_id)
         pw_page = await browser_ctx.new_page()
 
@@ -4529,6 +4535,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             "role": "Reporting",
             "status": "active",
             "current_task": f"Analysing {len(all_results)} probe result(s) across {total_batches} LLM turn(s)…",
+            "_persist": True,
         })
         try:
             _reporting_batch_findings: list[dict] = []
@@ -4562,6 +4569,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "role": "Reporting",
                     "status": "active",
                     "current_task": msg,
+                    "_persist": True,
                 })
 
             raw_findings = await llm_svc.analyse_probes(
@@ -4635,6 +4643,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "status": "complete",
                 "current_task": "Probe analysis complete",
                 "outcome": message,
+                "_persist": True,
             })
         except Exception as exc:
             log.warning("Thinking scan analysis failed: %s", exc)
@@ -4899,6 +4908,7 @@ async def _do_agentic_thinking_loop(
                 "status": "active",
                 "current_task": f"Writing: {_fw_title}",
                 "outcome": None,
+                "_persist": True,
             })
             fw_result = {
                 "source": "finding_write",
