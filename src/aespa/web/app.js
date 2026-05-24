@@ -2296,17 +2296,21 @@ function TestRunDetail({ runId, initialTab }) {
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
                 const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4, low_confidence:4};
+                const DETERMINISTIC_GROUP_KEY = "__deterministic__";
                 const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
                 const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
                 const unconfirmedMap = {};
                 const fpMap = {};
+                const deterministicMap = {};
                 for (const f of findings) {
-                  const target = (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
-                    ? fpMap
-                    : f.validation_status === "unconfirmed"
-                      ? unconfirmedMap
-                      : activeMap;
+                  const target = (f.finding_source === "deterministic_probe")
+                    ? deterministicMap
+                    : (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
+                      ? fpMap
+                      : f.validation_status === "unconfirmed"
+                        ? unconfirmedMap
+                        : activeMap;
                   (target[f.title] = target[f.title]||[]).push(f);
                 }
                 const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
@@ -2325,6 +2329,7 @@ function TestRunDetail({ runId, initialTab }) {
                 const groups = makeGroups(activeMap);
                 const unconfirmedGroups = makeGroups(unconfirmedMap);
                 const fpGroups = makeGroups(fpMap);
+                const deterministicGroups = makeGroups(deterministicMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
                 const evidenceItemsFor = (f) => {
@@ -2445,6 +2450,7 @@ function TestRunDetail({ runId, initialTab }) {
                 });
                 const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
                 const fpRows = renderStatusRows(fpGroups, "fp");
+                const deterministicRows = renderStatusRows(deterministicGroups, "deterministic");
                 return html`
                 <table className="findings-table">
                   <colgroup>${findColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
@@ -2502,6 +2508,20 @@ function TestRunDetail({ runId, initialTab }) {
                         <td></td>
                       </tr>
                       ${expandedGroups.has(FP_GROUP_KEY) && fpRows}
+                    `}
+                    ${deterministicCount > 0 && html`
+                      <tr key=${DETERMINISTIC_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(DETERMINISTIC_GROUP_KEY)}>
+                        <td><span className="val-badge val-fp">deterministic</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(DETERMINISTIC_GROUP_KEY)?"▾":"▸"}</span>
+                          Deterministic Findings
+                        </td>
+                        <td><span className="finding-count-badge">${deterministicCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(DETERMINISTIC_GROUP_KEY) && deterministicRows}
                     `}
                   </tbody>
                 </table>`;
