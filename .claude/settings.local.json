@@ -26,7 +26,9 @@
       "Bash(awk '$1 > 6566 {print; exit}')",
       "Bash(python3)",
       "Bash(python -m pytest tests/ -x -q --tb=short)",
-      "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")"
+      "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")",
+      "Bash(python3 -c \"import sys, urllib.parse, json; data = sys.stdin.read\\(\\).strip\\(\\); decoded = urllib.parse.unquote\\(data\\); findings = json.loads\\(decoded\\); [print\\(f['owasp_category'], '|', f['title'], '|', f.get\\('validation_status',''\\)\\) for f in findings]\")",
+      "Bash(find /Users/ledwardchow -name \"vuln-scanner-comparison.md\" 2>/dev/null)"
     ]
   }
 }

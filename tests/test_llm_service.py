@@ -1230,3 +1230,203 @@ def test_analyse_probes_chunks_large_result_sets(monkeypatch):
 
     assert len(prompts) == 3
     assert findings[0]["title"] == "Verbose error response"
+
+
+def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 100,
+                    "cacheReadInputTokens": 400,
+                    "cacheWriteInputTokens": 200,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 200,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 150,
+                    "cacheReadInputTokens": 500,
+                    "cacheWriteInputTokens": 300,
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1200,
+        "output_tokens": 150,
+        "cache_read_tokens": 500,
+        "cache_write_tokens": 300,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content_ant = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 2000,
+        "output_tokens": 250,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 400,
+    }
+

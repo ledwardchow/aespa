@@ -936,8 +936,8 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         data = await loop.run_in_executor(None, _run_sync)
         _bd_u = data.get("usage", {})
         _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0),
-                      cache_read_tokens=_bd_u.get("cacheReadInputTokenCount", 0),
-                      cache_write_tokens=_bd_u.get("cacheWriteInputTokenCount", 0))
+                      cache_read_tokens=_bd_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bd_u.get("cacheWriteInputTokens", 0))
         return _extract_bedrock_text(data)
 
     if not config.base_url:
@@ -956,8 +956,8 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         _resp_data = resp.json()
     _bd_u2 = _resp_data.get("usage", {})
     _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0),
-                  cache_read_tokens=_bd_u2.get("cacheReadInputTokenCount", 0),
-                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokenCount", 0))
+                  cache_read_tokens=_bd_u2.get("cacheReadInputTokens", 0),
+                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokens", 0))
     return _extract_bedrock_text(_resp_data)
 
 
@@ -1900,8 +1900,8 @@ async def _call_with_tools(
         ]
         _bdt_u = data.get("usage", {})
         _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0),
-                      cache_read_tokens=_bdt_u.get("cacheReadInputTokenCount", 0),
-                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokenCount", 0))
+                      cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0))
         return blocks, stop_reason, raw_content_ant
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
