@@ -477,6 +477,42 @@ class ValidatorConfigOut(ValidatorConfigBase):
     updated_at: datetime
 
 
+# ── Global HTTP header config schemas ─────────────────────────────────────────
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    header_name: str | None = Field(default=None, max_length=200)
+    header_value: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("header_name")
+    @classmethod
+    def _normalize_header_name(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
+            raise ValueError(f"Invalid HTTP header name '{v}'")
+        return v
+
+    @field_validator("header_value")
+    @classmethod
+    def _normalize_header_value(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
+
+
+class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):
+    pass
+
+
+class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
+    updated_at: datetime
+
+
 # ── LLM config export / import schemas ───────────────────────────────────────
 
 class LLMExportProviderItem(BaseModel):

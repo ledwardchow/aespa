@@ -2060,11 +2060,13 @@ async def _call_with_tools(
                         if btype == "text":
                             parts.append(_gtypes.Part(text=blk.get("text") or ""))
                         elif btype == "tool_use":
+                            _ts = blk.get("thought_signature")
                             parts.append(_gtypes.Part(
                                 function_call=_gtypes.FunctionCall(
                                     name=blk.get("name") or "",
                                     args=blk.get("input") or {},
-                                )
+                                ),
+                                **({'thought_signature': _ts} if _ts is not None else {}),
                             ))
                         elif btype == "tool_result":
                             rc = blk.get("content") or ""
@@ -2111,6 +2113,7 @@ async def _call_with_tools(
                     "name": fc.name,
                     "input": dict(fc.args) if fc.args else {},
                     "text": None,
+                    "thought_signature": getattr(part, "thought_signature", None),
                 })
         stop_reason = (
             "tool_use"
@@ -2234,7 +2237,8 @@ async def thinking_agentic_loop(
                 "thinking_agentic_loop: API error at step %d: %s",
                 tool_call_count + 1, exc,
             )
-            _exc_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else type(exc).__name__
+            _exc_resp = getattr(exc, "response", None)
+            _exc_code = (_exc_resp.get("Error", {}).get("Code", "") if isinstance(_exc_resp, dict) else type(exc).__name__)
             _is_expired = "ExpiredToken" in _exc_code or "ExpiredToken" in type(exc).__name__ or "expired" in str(exc).lower()
             if emit_fn:
                 try:

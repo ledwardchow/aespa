@@ -198,6 +198,17 @@ class AdversarialValidatorConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class GlobalHttpHeaderConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for a global extra HTTP header added to all scanner/crawler requests."""
+
+    __tablename__ = "global_http_header_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    header_name: Optional[str] = Field(default=None, max_length=200)
+    header_value: Optional[str] = Field(default=None, max_length=2000)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Test runs ─────────────────────────────────────────────────────────────────
 
 class TestRunStatus(str, Enum):
