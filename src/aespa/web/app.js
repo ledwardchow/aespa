@@ -2332,6 +2332,7 @@ function TestRunDetail({ runId, initialTab }) {
                 const deterministicGroups = makeGroups(deterministicMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const deterministicCount = deterministicGroups.reduce((total,g)=>total+g.count,0);
                 const evidenceItemsFor = (f) => {
                   if (Array.isArray(f.evidence_items)) return f.evidence_items;
                   try {
