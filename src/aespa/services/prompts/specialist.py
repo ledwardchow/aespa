@@ -116,8 +116,9 @@ SPECIALIST_SYSTEM_PROMPTS: dict[str, str] = {
         "3. Also test: Origin: null (sandbox bypass), Origin: https://evil.target.com "
         "(subdomain trust), Origin: http://target.com (scheme downgrade on HTTPS sites).\n"
         "4. Focus on endpoints that return sensitive user data (profile, accounts, tokens). "
-        "A permissive CORS policy on a public endpoint with no auth is low severity; "
-        "the same on an authenticated endpoint with credentials allowed is high.\n\n"
+        "A permissive CORS policy is low severity by default, even if credentials are allowed, "
+        "unless a browser-based proof shows sensitive authenticated data can be read cross-origin "
+        "or it directly enables a confirmed account-impacting flow.\n\n"
         + WSTG_SKILLS["cors"] + "\n\n"
         + _SHARED_RULES
     ),
