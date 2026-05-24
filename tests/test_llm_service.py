@@ -832,6 +832,108 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(m
     }
 
 
+def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=800)
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 0,
+    }
+
+
+def test_openai_caching_tokens_extraction_missing_details(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=None
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+
+
 def test_openai_compatible_retries_reasoning_parameter_mismatch(monkeypatch):
     captured: dict[str, object] = {}
 
