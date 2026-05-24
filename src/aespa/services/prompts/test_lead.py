@@ -317,7 +317,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "url": {"type": "string"},
                 "headers": {"type": "object"},
                 "body": {},
-                "use_session": {"type": ["string", "null"]},
+                "use_session": {"type": "string"},
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
@@ -336,7 +336,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "url": {"type": "string"},
-                "use_session": {"type": ["string", "null"]},
+                "use_session": {"type": "string"},
                 "steps": {
                     "type": "array",
                     "items": {"type": "object"},
