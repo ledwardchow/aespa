@@ -2793,6 +2793,52 @@ function TestRunDetail({ runId, initialTab }) {
                         </div>`}
                     </div>`;
                 }
+                // ── Validator container row ────────────────────────────────
+                if (a.id === "validator") {
+                  const validatorAgents = agents.filter(ag => ag.id.startsWith("validator-")).map(normalizeAgentForRun);
+                  const anyActive = validatorAgents.some(ag => ag.status === "active");
+                  const activeCount = validatorAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = validatorAgents.length - activeCount;
+                  const summaryTask = validatorAgents.length === 0
+                    ? "No validation running"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} validating, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+                        : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+                  const canExpand = validatorAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+                  return html`
+                    <div key="validator" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("validator") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Validator</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (validatorAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${validatorAgents.map(va => {
+                            const vaActive = va.status === "active";
+                            const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            const vaOutcome = va.outcome || va.taskHistory?.slice(-1)[0]?.outcome;
+                            const findingNum = va.id.replace("validator-", "");
+                            return html`
+                              <div key=${va.id} className=${"agent-thread-row"+(vaActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(vaActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">Finding #${findingNum}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(vaActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${vaActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${vaTask}>${vaTask.length>90?vaTask.slice(0,89)+"…":vaTask}</span>
+                                ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
                 // ── Burp container row ──────────────────────────────────────
                 if (a.id === "burp") {
                   const burpAgents = agents.filter(ag => ag.id.startsWith("burp-")).map(normalizeAgentForRun);
@@ -3861,12 +3907,25 @@ const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openai:"https://api.openai.com/v1",
   openai_compatible:"http://localhost:1234/v1",
   openrouter:"https://openrouter.ai/api/v1",
-  google:"",
+  google:"https://generativelanguage.googleapis.com",
   bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
   azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
   azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
+};
+// Actual runtime defaults used by the backend when base_url is blank
+const PROVIDER_DEFAULT_BASE_URLS = {
+  anthropic:  "https://api.anthropic.com",
+  openai:     "https://api.openai.com/v1",
+  openai_compatible: null,           // no sensible default — must be set
+  openrouter: "https://openrouter.ai/api/v1",
+  google:     "https://generativelanguage.googleapis.com",
+  bedrock:    "AWS SDK default (us-east-1)",
+  azure_openai: null,                // must be set
+  azure_foundry: null,
+  azure_foundry_openai: null,
+  azure_foundry_anthropic: null,
 };
 const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
@@ -4190,7 +4249,7 @@ function SettingsPage() {
             <div className="settings-list-row" key=${p.id}>
               <div><strong>${p.name}</strong></div>
               <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
-              <div className="mono">${p.base_url || "Default"}</div>
+              <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
               <div className="mono">${(p.models||[]).join(", ")}</div>
               <div className="row settings-list-actions">
                 <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
