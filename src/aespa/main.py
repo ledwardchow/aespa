@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
+import httpx
+import jwt
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -23,6 +26,59 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
     yield
 
 
+_JWKS_CACHE: dict[str, tuple[dict, float]] = {}
+JWKS_CACHE_TTL = 3600.0
+
+
+def _get_cloudflare_jwks(issuer: str) -> dict:
+    now = time.time()
+    if issuer in _JWKS_CACHE:
+        keys, expiry = _JWKS_CACHE[issuer]
+        if now < expiry:
+            return keys
+
+    resp = httpx.get(f"{issuer.rstrip('/')}/cdn-cgi/access/certs")
+    resp.raise_for_status()
+    keys = resp.json()
+    _JWKS_CACHE[issuer] = (keys, now + JWKS_CACHE_TTL)
+    return keys
+
+
+def _verify_cloudflare_jwt(token: str) -> str | None:
+    try:
+        # 1. Unverified decode to extract the issuer
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        issuer = unverified.get("iss")
+        if not issuer or not issuer.startswith("https://") or not issuer.endswith(".cloudflareaccess.com"):
+            return None
+
+        # 2. Get JWKS dynamically from verified issuer
+        jwks = _get_cloudflare_jwks(issuer)
+
+        # 3. Get Key ID (kid) from header
+        headers = jwt.get_unverified_header(token)
+        kid = headers.get("kid")
+        if not kid:
+            return None
+
+        # 4. Find matching key
+        jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+        if not jwk:
+            return None
+
+        # 5. Decode and cryptographically verify
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwk)
+        decoded = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
+        return decoded.get("email")
+    except Exception:
+        return None
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
@@ -39,8 +95,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/version")
-    def version() -> dict[str, str]:
-        return {"version": settings.app_version}
+    def version(request: Request) -> dict[str, str | None]:
+        # Extract JWT assertion header if present
+        jwt_token = request.headers.get("cf-access-jwt-assertion") or request.headers.get("Cf-Access-Jwt-Assertion")
+        username = None
+        if jwt_token:
+            username = _verify_cloudflare_jwt(jwt_token)
+        return {"version": settings.app_version, "username": username}
 
     web_dir: Path = settings.web_dir
     if web_dir.exists() and (web_dir / "index.html").exists():
