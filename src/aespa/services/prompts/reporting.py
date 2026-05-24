@@ -135,12 +135,16 @@ Severity calibration:
 - Rate generic server or framework version disclosure as info by default, or low if the
   disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
 - Rate verbose stack traces, file paths, class names, and framework error pages as low by
-  default. Raise to medium only when the response exposes secrets, credentials, tokens,
-  exploitable SQL details, or sensitive user/business data.
+  default. Raise to medium ONLY when the response exposes high-entropy secrets, credentials,
+  or tokens. Do NOT raise to medium for generic database errors, query strings, or schema disclosures.
 - Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
   as low by default unless a browser-based proof shows sensitive authenticated data can be
-  read cross-origin. Raise only when the evidence demonstrates real data exposure or account
-  impact, not merely permissive headers.
+  read cross-origin. Do not escalate to medium or high solely because Access-Control-Allow-Credentials
+  is true.
+- Rate missing or weak security headers (Content-Security-Policy, HSTS, X-Frame-Options,
+  X-Content-Type-Options, Referrer-Policy, etc.) as low (or info) by default.
+- Rate user enumeration (via timing differences or distinct login/forgot-password error messages)
+  as low by default.
 - Do not rate informational disclosure as medium or high solely because it is remotely
   reachable. Severity should follow demonstrated impact, not theoretical chaining.
 """
