@@ -496,7 +496,7 @@ async def _validate_one(
         "type": "scanner_phase",
         "phase": "thinking_step",
         "status": "start",
-        "message": f"Validating finding: {finding.title!r} — {finding.url or 'no URL'}",
+        "message": f"Validating finding: {finding.title!r} — {finding.affected_url or 'no URL'}",
         "data": {"finding_id": finding.id},
     })
 
@@ -734,9 +734,11 @@ async def _persist_verdict(
 ) -> None:
     evidence_json = "[]"
     evidence_items: list[dict[str, Any]] = []
+    finding_title = f"Finding #{finding_id}"
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding_id)
         if row:
+            finding_title = row.title or finding_title
             existing_items = _evidence_items_from_json(row.evidence_json)
             evidence_items = existing_items + _validation_evidence_items(
                 verdict=verdict,
@@ -765,13 +767,14 @@ async def _persist_verdict(
         "false_positive": "False positive",
         "unconfirmed": "Unconfirmed",
     }
+    outcome_str = outcome_map.get(verdict, verdict.capitalize())
     events_svc.emit(run_id, {
         "type": "agent_status",
         "agent_id": f"validator-{finding_id}",
         "role": "Validator",
         "status": "complete",
-        "current_task": f"Verdict: {verdict}",
-        "outcome": outcome_map.get(verdict, verdict),
+        "current_task": finding_title,
+        "outcome": outcome_str,
         "_persist": True,
     })
 

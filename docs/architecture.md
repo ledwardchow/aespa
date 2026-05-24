@@ -300,7 +300,7 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
 
 ---
 
-## 7. Dynamic Scan (Thinking Mode)
+## 7. Dynamic Scan
 
 **File**: `src/aespa/services/scanner.py`  
 **Entry point**: `async start_thinking_scan(run_id)`

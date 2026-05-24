@@ -101,7 +101,7 @@ class SiteDetail(BaseModel):
 
 # ── LLM config schemas ────────────────────────────────────────────────────
 
-LLMProviderLiteral = Literal[
+LLMProviderAPILiteral = Literal[
     "anthropic",
     "openai",
     "openai_compatible",
@@ -190,48 +190,35 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
 }
 
 
-class LLMConfigIn(BaseModel):
+class LLMProviderConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str = Field(default="Default", min_length=1, max_length=120)
-    provider: LLMProviderLiteral = "anthropic"
-    api_key: str | None = None
+    name: str = Field(default="Default Provider", min_length=1, max_length=120)
+    api_format: LLMProviderAPILiteral = "anthropic"
     base_url: str | None = None
-    model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=64000)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    use_vision: bool = False
+    models: list[str] = Field(default_factory=list, min_length=1)
+    api_key: str | None = None
 
-    @model_validator(mode="after")
-    def _check_provider_fields(self) -> "LLMConfigIn":
-        _needs_key = (
-            "anthropic",
-            "openai",
-            "openrouter",
-            "google",
-            "azure_openai",
-            "azure_foundry",
-            "azure_foundry_openai",
-            "azure_foundry_anthropic",
-        )
-        _needs_url = (
-            "openai_compatible",
-            "azure_openai",
-            "azure_foundry",
-            "azure_foundry_openai",
-            "azure_foundry_anthropic",
-        )
-        if self.provider in _needs_key and not self.api_key:
-            raise ValueError(f"api_key is required for provider '{self.provider}'")
-        if self.provider in _needs_url and not self.base_url:
-            raise ValueError(f"base_url is required for provider '{self.provider}'")
-        if self.provider == "bedrock" and self.api_key and not self.base_url:
-            raise ValueError("base_url is required for provider 'bedrock' when api_key is set")
-        return self
+    @field_validator("models")
+    @classmethod
+    def _validate_models(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for model in v:
+            model = model.strip()
+            if not model:
+                continue
+            key = model.casefold()
+            if key not in seen:
+                cleaned.append(model)
+                seen.add(key)
+        if not cleaned:
+            raise ValueError("at least one model name is required")
+        return cleaned
 
     @field_validator("base_url")
     @classmethod
-    def _validate_base_url(cls, v: str | None) -> str | None:
+    def _validate_provider_base_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
         v = v.rstrip("/")
@@ -240,12 +227,37 @@ class LLMConfigIn(BaseModel):
         return v
 
 
+class LLMProviderConfigOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    api_format: str
+    base_url: str | None
+    models: list[str] = Field(default_factory=list)
+    api_key: str | None
+    updated_at: datetime
+
+
+class LLMConfigIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(default="Default", min_length=1, max_length=120)
+    provider_id: int
+    model: str = Field(min_length=1)
+    max_tokens: int = Field(default=4096, ge=1, le=64000)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    use_vision: bool = False
+
+
 class LLMConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     name: str
     is_active: bool
+    provider_id: int | None = None
+    provider_name: str | None = None
     provider: str
     api_key: str | None
     base_url: str | None
@@ -463,6 +475,76 @@ class ValidatorConfigIn(ValidatorConfigBase):
 
 class ValidatorConfigOut(ValidatorConfigBase):
     updated_at: datetime
+
+
+# ── Global HTTP header config schemas ─────────────────────────────────────────
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    header_name: str | None = Field(default=None, max_length=200)
+    header_value: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("header_name")
+    @classmethod
+    def _normalize_header_name(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
+            raise ValueError(f"Invalid HTTP header name '{v}'")
+        return v
+
+    @field_validator("header_value")
+    @classmethod
+    def _normalize_header_value(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
+
+
+class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):
+    pass
+
+
+class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
+    updated_at: datetime
+
+
+# ── LLM config export / import schemas ───────────────────────────────────────
+
+class LLMExportProviderItem(BaseModel):
+    name: str
+    api_format: str
+    base_url: str | None = None
+    models: list[str]
+    api_key: str | None = None
+
+
+class LLMExportProfileItem(BaseModel):
+    name: str
+    provider_name: str
+    model: str
+    max_tokens: int = 4096
+    temperature: float = 0.0
+    use_vision: bool = False
+    is_active: bool = False
+
+
+class LLMConfigExport(BaseModel):
+    version: int = 1
+    exported_at: datetime
+    providers: list[LLMExportProviderItem]
+    profiles: list[LLMExportProfileItem]
+
+
+class LLMImportResult(BaseModel):
+    providers_created: int = 0
+    providers_updated: int = 0
+    profiles_created: int = 0
+    profiles_updated: int = 0
 
 
 # ── Test run schemas ──────────────────────────────────────────────────────────
