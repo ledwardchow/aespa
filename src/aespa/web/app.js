@@ -2793,6 +2793,52 @@ function TestRunDetail({ runId, initialTab }) {
                         </div>`}
                     </div>`;
                 }
+                // ── Validator container row ────────────────────────────────
+                if (a.id === "validator") {
+                  const validatorAgents = agents.filter(ag => ag.id.startsWith("validator-")).map(normalizeAgentForRun);
+                  const anyActive = validatorAgents.some(ag => ag.status === "active");
+                  const activeCount = validatorAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = validatorAgents.length - activeCount;
+                  const summaryTask = validatorAgents.length === 0
+                    ? "No validation running"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} validating, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+                        : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+                  const canExpand = validatorAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+                  return html`
+                    <div key="validator" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("validator") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Validator</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (validatorAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${validatorAgents.map(va => {
+                            const vaActive = va.status === "active";
+                            const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            const vaOutcome = va.outcome || va.taskHistory?.slice(-1)[0]?.outcome;
+                            const findingNum = va.id.replace("validator-", "");
+                            return html`
+                              <div key=${va.id} className=${"agent-thread-row"+(vaActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(vaActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">Finding #${findingNum}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(vaActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${vaActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${vaTask}>${vaTask.length>90?vaTask.slice(0,89)+"…":vaTask}</span>
+                                ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
                 // ── Burp container row ──────────────────────────────────────
                 if (a.id === "burp") {
                   const burpAgents = agents.filter(ag => ag.id.startsWith("burp-")).map(normalizeAgentForRun);
