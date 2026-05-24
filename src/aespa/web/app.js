@@ -288,8 +288,19 @@ function App() {
   const onExternalIntegrations = route.name === "external-integrations";
   const onDebug      = route.name === "debug";
   const [appVersion, setAppVersion] = useState("");
+  const [username, setUsername] = useState("");
+  const [showUsername, setShowUsername] = useState(() => {
+    try { return localStorage.getItem("aespa_show_username") === "true"; } catch (_) { return false; }
+  });
   const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
+  useEffect(() => {
+    api.getVersion()
+      .then(d => {
+        setAppVersion(d.version);
+        setUsername(d.username || "");
+      })
+      .catch(()=>{});
+  }, []);
 
   return html`
     <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
@@ -324,11 +335,21 @@ function App() {
             <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
         </nav>
-        <div className="sidebar-footer">
-          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
-            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
-          </button>
-          ${!collapsed && (appVersion ? `v${appVersion}` : "")}
+        <div className="sidebar-footer" style=${{display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "6px", height: "auto"}}>
+          <div style=${{display: "flex", alignItems: "center", gap: "8px", width: "100%"}}>
+            <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+              ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+            </button>
+            ${!collapsed && appVersion && (!showUsername || !username) && html`v${appVersion}`}
+          </div>
+          ${!collapsed && showUsername && username && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", width: "100%", overflow: "hidden"}}>
+              <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                ${username}
+              </span>
+              ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "10px"}}>v${appVersion}</span>`}
+            </div>
+          `}
         </div>
       </aside>
 
@@ -343,7 +364,7 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
-        ${route.name==="debug"       && html`<${DebugPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username}/>`}
       </div>
     </div>
   `;
@@ -4472,7 +4493,7 @@ function ExternalIntegrationsPage() {
     </div>`;
 }
 
-function DebugPage() {
+function DebugPage({ showUsername, setShowUsername, username }) {
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -4580,6 +4601,27 @@ function DebugPage() {
           </div>
           ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
         </div>`}
+
+      <div className="card" style=${{marginTop: 16}}>
+        <div className="form-section-title">Cloudflare Access</div>
+        <div className="field-hint" style=${{marginBottom: 12}}>
+          Show the authenticated user's email/username above the application version on the bottom left of the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${showUsername}
+            onChange=${e => {
+              const checked = e.target.checked;
+              setShowUsername(checked);
+              try { localStorage.setItem("aespa_show_username", String(checked)); } catch(_) {}
+            }}/>
+          <span>Show Username in Sidebar</span>
+        </label>
+        ${showUsername && html`
+          <div className="field-hint" style=${{marginTop: 8}}>
+            Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
+          </div>
+        `}
+      </div>
     </div>`;
 }
 
