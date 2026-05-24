@@ -3426,6 +3426,9 @@ async def _do_thinking_scan(run_id: int) -> None:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
+        initial_headers = _playwright_global_headers()
+        if initial_headers:
+            await browser_ctx.set_extra_http_headers(initial_headers)
         traffic_svc.setup_playwright_logging(browser_ctx, run_id)
         pw_page = await browser_ctx.new_page()
 

@@ -549,6 +549,28 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
     """
     result = LLMImportResult()
 
+    # Fail fast on duplicate provider names in the payload
+    seen_providers = set()
+    for item in payload.providers:
+        name_key = item.name.strip().casefold()
+        if name_key in seen_providers:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Duplicate provider name '{item.name}' found in import payload",
+            )
+        seen_providers.add(name_key)
+
+    # Fail fast on duplicate profile names in the payload
+    seen_profiles = set()
+    for item in payload.profiles:
+        name_key = item.name.strip().casefold()
+        if name_key in seen_profiles:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Duplicate profile name '{item.name}' found in import payload",
+            )
+        seen_profiles.add(name_key)
+
     # ── 1. Upsert providers ───────────────────────────────────────────────────
     provider_name_to_id: dict[str, int] = {}
     existing_providers = {p.name.strip().casefold(): p for p in session.exec(select(LLMProviderConfig)).all()}
@@ -561,6 +583,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         if provider is None:
             provider = LLMProviderConfig()
             result.providers_created += 1
+            existing_providers[key] = provider
         else:
             result.providers_updated += 1
         provider.name = item.name
@@ -607,6 +630,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         if cfg is None:
             cfg = LLMConfig()
             result.profiles_created += 1
+            existing_profiles[key] = cfg
         else:
             result.profiles_updated += 1
 
