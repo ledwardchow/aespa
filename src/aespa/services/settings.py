@@ -53,8 +53,11 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         base_url=provider.base_url,
         models=_provider_models(provider),
         api_key=provider.api_key,
+        max_tpm=provider.max_tpm,
+        max_rpm=provider.max_rpm,
         updated_at=provider.updated_at,
     )
+
 
 
 def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
@@ -157,11 +160,14 @@ def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: 
     provider.api_key = payload.api_key
     provider.base_url = payload.base_url
     provider.models_json = _json_dumps(payload.models)
+    provider.max_tpm = payload.max_tpm
+    provider.max_rpm = payload.max_rpm
     provider.updated_at = _utcnow()
     session.add(provider)
     session.commit()
     session.refresh(provider)
     return _provider_out(provider)
+
 
 
 def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
@@ -517,6 +523,8 @@ def export_llm_config(session: Session) -> LLMConfigExport:
             base_url=p.base_url,
             models=_provider_models(p),
             api_key=p.api_key,
+            max_tpm=p.max_tpm,
+            max_rpm=p.max_rpm,
         )
         for p in providers_db
     ]
@@ -591,6 +599,8 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         provider.base_url = item.base_url
         provider.api_key = item.api_key
         provider.models_json = _json_dumps(item.models)
+        provider.max_tpm = item.max_tpm
+        provider.max_rpm = item.max_rpm
         provider.updated_at = _utcnow()
         session.add(provider)
         session.flush()  # assign id before we need it
@@ -598,6 +608,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             provider_name_to_id[item.name.strip().casefold()] = provider.id
 
     session.flush()
+
 
     # refresh the map with any newly-created providers
     for p in session.exec(select(LLMProviderConfig)).all():
