@@ -3948,7 +3948,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"" };
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
 const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
@@ -3995,6 +3995,8 @@ function providerToForm(provider) {
     base_url:provider.base_url || "",
     models:(provider.models || []).join("\n"),
     api_key:provider.api_key || "",
+    max_tpm:provider.max_tpm != null ? provider.max_tpm : "",
+    max_rpm:provider.max_rpm != null ? provider.max_rpm : "",
   } : {...DEFAULT_PROVIDER_FORM};
 }
 
@@ -4005,8 +4007,11 @@ function providerPayload(form) {
     base_url:form.base_url.trim() || null,
     models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
     api_key:form.api_key.trim() || null,
+    max_tpm:form.max_tpm !== "" ? Number(form.max_tpm) : null,
+    max_rpm:form.max_rpm !== "" ? Number(form.max_rpm) : null,
   };
 }
+
 
 function llmProfileToForm(cfg, providers=[]) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
@@ -4087,6 +4092,19 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
           onChange=${e=>upd({api_key:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
+      <div className="field-hint" style=${{marginBottom:"8px"}}>Set token and request limits to automatically pace requests and prevent API rate-limiting errors (429).</div>
+      <div className="two-col" style=${{gap:"16px", marginBottom:"8px"}}>
+        <div className="field">
+          <label>Max Tokens Per Minute (TPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_tpm} onChange=${e=>upd({max_tpm:e.target.value})}/>
+        </div>
+        <div className="field">
+          <label>Max Requests Per Minute (RPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_rpm} onChange=${e=>upd({max_rpm:e.target.value})}/>
+        </div>
       </div>
       <div className="divider"/>
       <div className="row spread">
@@ -4291,7 +4309,7 @@ function SettingsPage() {
       ${providers&&tab==="providers"&&screen==="list"&&html`
         <div className="settings-list settings-list-providers">
           <div className="settings-list-head">
-            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div></div>
+            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div>Limits</div><div></div>
           </div>
           ${providers.map(p=>html`
             <div className="settings-list-row" key=${p.id}>
@@ -4299,6 +4317,12 @@ function SettingsPage() {
               <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
               <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
               <div className="mono">${(p.models||[]).join(", ")}</div>
+              <div>
+                ${p.max_tpm || p.max_rpm ? html`
+                  ${p.max_tpm ? html`<div>${Number(p.max_tpm).toLocaleString()} TPM</div>` : ""}
+                  ${p.max_rpm ? html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:1}}>${Number(p.max_rpm).toLocaleString()} RPM</div>` : ""}
+                ` : html`<span className="subtle">Unlimited</span>`}
+              </div>
               <div className="row settings-list-actions">
                 <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
                 <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDeleteProvider(p)}>Delete</button>
