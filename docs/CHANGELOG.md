@@ -29,7 +29,7 @@ Introduces provider-level LLM API rate limiting, local timezone date formatting 
 
 Major re-architecture removing structured scans, introducing separate LLM providers/profiles with import/export, cryptographic Cloudflare Access JWT verification, prompt package modularisation, and reporting improvements (34 files, 4,300 lines changed).
 
-- **Structured Scan Mode fully removed** — 2,552 lines of code removed from scanner service, APIs, and UI, standardising entirely on the highly performant agentic scan architecture.
+- **Structured Scan Mode fully removed** — 2,552 lines of code removed from scanner service, APIs, and UI; the agentic scan is better.
 - **LLM Configuration & Credentials Refactor**:
   - Separated API credentials and endpoints from configuration profiles via new `LLMProviderConfig` entity.
   - Added export/import capability for providers and profiles via portable JSON bundle endpoints (`/llm/export` and `/llm/import`).
