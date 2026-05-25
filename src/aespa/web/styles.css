@@ -668,8 +668,9 @@ legend {
 
 .settings-list-providers .settings-list-head,
 .settings-list-providers .settings-list-row {
-  grid-template-columns: minmax(150px, 1.1fr) minmax(120px, 0.8fr) minmax(190px, 1.2fr) minmax(200px, 1.4fr) minmax(120px, auto);
+  grid-template-columns: minmax(130px, 1fr) minmax(110px, 0.8fr) minmax(170px, 1.1fr) minmax(170px, 1.1fr) minmax(120px, 0.9fr) minmax(120px, auto);
 }
+
 
 .settings-list-head {
   padding-top: 0;
