@@ -198,6 +198,8 @@ class LLMProviderConfigIn(BaseModel):
     base_url: str | None = None
     models: list[str] = Field(default_factory=list, min_length=1)
     api_key: str | None = None
+    max_tpm: int | None = Field(default=None, ge=1)
+    max_rpm: int | None = Field(default=None, ge=1)
 
     @field_validator("models")
     @classmethod
@@ -236,7 +238,10 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     models: list[str] = Field(default_factory=list)
     api_key: str | None
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     updated_at: datetime
+
 
 
 class LLMConfigIn(BaseModel):
@@ -521,6 +526,9 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     models: list[str]
     api_key: str | None = None
+    max_tpm: int | None = None
+    max_rpm: int | None = None
+
 
 
 class LLMExportProfileItem(BaseModel):

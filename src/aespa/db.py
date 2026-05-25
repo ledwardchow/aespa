@@ -82,6 +82,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
+    _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
+    _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS upstream_proxy_config (
