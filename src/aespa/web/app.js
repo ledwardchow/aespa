@@ -290,7 +290,10 @@ function App() {
   const [appVersion, setAppVersion] = useState("");
   const [username, setUsername] = useState("");
   const [showUsername, setShowUsername] = useState(() => {
-    try { return localStorage.getItem("aespa_show_username") === "true"; } catch (_) { return false; }
+    try {
+      const val = localStorage.getItem("aespa_show_username");
+      return val === null ? true : val === "true";
+    } catch (_) { return true; }
   });
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
@@ -1067,7 +1070,7 @@ function TestRunDetail({ runId, initialTab }) {
   const fmtEventTime = (value) => {
     if (!value) return "--:--:--";
     try {
-      return new Date(value).toLocaleTimeString("en-US", {
+      return parseDate(value).toLocaleTimeString("en-US", {
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
@@ -1221,7 +1224,7 @@ function TestRunDetail({ runId, initialTab }) {
       setActivityLog(
         entries.map(e => {
           const ts = e._persisted_at
-            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            ? parseDate(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
             : "--:--:--";
           return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
         })
@@ -1239,7 +1242,7 @@ function TestRunDetail({ runId, initialTab }) {
       const agentsMap = new Map();
       for (const e of entries) {
         const ts = e.created_at
-          ? new Date(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+          ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
           : "--:--:--";
         const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
         const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
@@ -1734,7 +1737,7 @@ function TestRunDetail({ runId, initialTab }) {
   );
   const sortArrow = (field) => trafficSort.field === field
     ? html`<span className="sort-arrow">${trafficSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
-  const fmtTs = (iso) => { try { const d = new Date(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
+  const fmtTs = (iso) => { try { const d = parseDate(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
 
   const onDeleteFinding = async (e, findingId) => {
     e.stopPropagation();
@@ -2332,6 +2335,7 @@ function TestRunDetail({ runId, initialTab }) {
                 const deterministicGroups = makeGroups(deterministicMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const deterministicCount = deterministicGroups.reduce((total,g)=>total+g.count,0);
                 const evidenceItemsFor = (f) => {
                   if (Array.isArray(f.evidence_items)) return f.evidence_items;
                   try {
@@ -3139,7 +3143,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     .sort(([a],[b]) => a.localeCompare(b));
   const fmtAge = (iso) => {
     if (!iso) return "—";
-    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    try { return parseDate(iso).toLocaleString(); } catch { return iso; }
   };
   const renameSession = async (session) => {
     const next = prompt("Session label", session.label);
@@ -3944,7 +3948,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"" };
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
 const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
@@ -3991,6 +3995,8 @@ function providerToForm(provider) {
     base_url:provider.base_url || "",
     models:(provider.models || []).join("\n"),
     api_key:provider.api_key || "",
+    max_tpm:provider.max_tpm != null ? provider.max_tpm : "",
+    max_rpm:provider.max_rpm != null ? provider.max_rpm : "",
   } : {...DEFAULT_PROVIDER_FORM};
 }
 
@@ -4001,8 +4007,11 @@ function providerPayload(form) {
     base_url:form.base_url.trim() || null,
     models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
     api_key:form.api_key.trim() || null,
+    max_tpm:form.max_tpm !== "" ? Number(form.max_tpm) : null,
+    max_rpm:form.max_rpm !== "" ? Number(form.max_rpm) : null,
   };
 }
+
 
 function llmProfileToForm(cfg, providers=[]) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
@@ -4083,6 +4092,19 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
           onChange=${e=>upd({api_key:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
+      <div className="field-hint" style=${{marginBottom:"8px"}}>Set token and request limits to automatically pace requests and prevent API rate-limiting errors (429).</div>
+      <div className="two-col" style=${{gap:"16px", marginBottom:"8px"}}>
+        <div className="field">
+          <label>Max Tokens Per Minute (TPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_tpm} onChange=${e=>upd({max_tpm:e.target.value})}/>
+        </div>
+        <div className="field">
+          <label>Max Requests Per Minute (RPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_rpm} onChange=${e=>upd({max_rpm:e.target.value})}/>
+        </div>
       </div>
       <div className="divider"/>
       <div className="row spread">
@@ -4287,7 +4309,7 @@ function SettingsPage() {
       ${providers&&tab==="providers"&&screen==="list"&&html`
         <div className="settings-list settings-list-providers">
           <div className="settings-list-head">
-            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div></div>
+            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div>Limits</div><div></div>
           </div>
           ${providers.map(p=>html`
             <div className="settings-list-row" key=${p.id}>
@@ -4295,6 +4317,12 @@ function SettingsPage() {
               <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
               <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
               <div className="mono">${(p.models||[]).join(", ")}</div>
+              <div>
+                ${p.max_tpm || p.max_rpm ? html`
+                  ${p.max_tpm ? html`<div>${Number(p.max_tpm).toLocaleString()} TPM</div>` : ""}
+                  ${p.max_rpm ? html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:1}}>${Number(p.max_rpm).toLocaleString()} RPM</div>` : ""}
+                ` : html`<span className="subtle">Unlimited</span>`}
+              </div>
               <div className="row settings-list-actions">
                 <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
                 <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDeleteProvider(p)}>Delete</button>
@@ -4648,8 +4676,21 @@ function DebugPage({ showUsername, setShowUsername, username }) {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+function parseDate(val) {
+  if (!val) return new Date(val);
+  if (val instanceof Date) return val;
+  let s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) {
+    s = s.replace(" ", "T");
+    if (!s.endsWith("Z")) {
+      s += "Z";
+    }
+  }
+  return new Date(s);
+}
+
 function fmtDate(iso) {
-  return iso ? new Date(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
+  return iso ? parseDate(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
 }
 
 function truncUrl(url, maxLen=40) {

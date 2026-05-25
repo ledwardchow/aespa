@@ -4,6 +4,59 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #94] LLM Rate Limiting, Local Timezone Display & UI Polish
+**Merged:** Pending (Open PR) | Branch: `develop`
+
+Introduces provider-level LLM API rate limiting, local timezone date formatting in the UI, and key frontend bug fixes and polish (9 files, 286 lines changed).
+
+- **LLM API Rate Limiting per Provider**:
+  - Implemented an `AsyncTokenBucketLimiter` for pacing calls based on TPM (Tokens Per Minute) and RPM (Requests Per Minute) configured in `LLMProviderConfig`.
+  - Added smart token count estimation for prompt text and image payloads (with vision-token scaling per provider).
+  - Emits real-time SSE pacing notifications ("LLM rate limit reached. Pacing and temporarily slowing down requests...") when limits are hit.
+  - Automatically reconciles pacing buckets against actual usage recorded post-call and on failures.
+- **Local Timezone Display**:
+  - Introduced `parseDate` utility on the frontend to parse UTC strings containing custom formats.
+  - Formats all event logs, active scanner sessions, and traffic timelines in the user's local timezone.
+- **UI & Configuration Polish**:
+  - **Findings Display Fix:** Fixed a reference error where `deterministicCount` was undefined, correcting deterministic findings rendering.
+  - **Cloudflare Username Toggle:** Defaulted the `showUsername` header toggle in localStorage to `true`.
+  - Version bump in `pyproject.toml` and updated lockfiles.
+
+---
+
+## [PR #89] LLM Refactor, Cloudflare Access Integration & Pure Agentic Scan
+**Merged:** 2026-05-24 21:55 AEST | Branch: `develop`
+
+Major re-architecture removing structured scans, introducing separate LLM providers/profiles with import/export, cryptographic Cloudflare Access JWT verification, prompt package modularisation, and reporting improvements (34 files, 4,300 lines changed).
+
+- **Structured Scan Mode fully removed** — 2,552 lines of code removed from scanner service, APIs, and UI, standardising entirely on the highly performant agentic scan architecture.
+- **LLM Configuration & Credentials Refactor**:
+  - Separated API credentials and endpoints from configuration profiles via new `LLMProviderConfig` entity.
+  - Added export/import capability for providers and profiles via portable JSON bundle endpoints (`/llm/export` and `/llm/import`).
+  - Redesigned LLM Settings UI allowing management of multiple providers and configuration profiles.
+  - Added database migrations and robust setting/profile APIs with test suites.
+- **Prompts Package Re-architecture** — Extracted all hardcoded prompt templates from core services into a new package (`src/aespa/services/prompts/`), cleaning up `llm.py` and `scanner.py`.
+- **Cloudflare Access JWT verification** — Implemented cryptographic verification of Cloudflare Access JWT assertion headers (`cf-access-jwt-assertion`) using dynamic JWKS retrieval to display the authenticated email in the UI breadcrumb.
+- **Reporting & UI Activity Log Improvements**:
+  - Ensured final agent activity logs persist when scans complete (`_persist=True`), fixing a bug where they vanished.
+  - Fine-tuned prompt instructions to rate low-risk/low-confidence issues as low severity.
+  - Set Google API default base URL to `https://generativelanguage.googleapis.com` and resolved UI placeholders.
+  - Fixed `validator` trigger where finding message used `finding.url` instead of `finding.affected_url`.
+- **New Scan Results & Documentation updates**:
+  - Added `scan-results-2026-05-24.md` detailing ground-truth coverage comparisons and new findings (e.g., default admin credentials `admin`/`admin123`).
+  - Refreshed comparison tables and other project documentation.
+
+---
+
+## [PR #79] Documentation Update
+**Merged:** 2026-05-21 22:34 AEST | Branch: `develop`
+
+- Created `docs/vuln-scanner-comparison.md` containing ground-truth analysis against 23 intentional OWASP Top 10 vulnerabilities in `BankOfEd` across multiple LLM configurations.
+- Substantially expanded `docs/architecture.md` (+291 lines) to document scan phases and LLM integration.
+- Minor updates to `README.md`.
+
+---
+
 ## [PR #78] Fix Duplicate Issue Findings
 **Merged:** 2026-05-21 22:03 AEST | Branch: `develop`
 

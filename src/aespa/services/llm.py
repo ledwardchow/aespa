@@ -52,12 +52,134 @@ log = logging.getLogger("aespa.llm")
 _llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
 _run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
 _emit_fn_var: ContextVar[Any | None] = ContextVar('_emit_fn', default=None)
+_last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar('last_call_tokens', default=None)
 
 # Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
 _run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
 
 # Tracks which run_ids have already been seeded from DB this process lifetime.
 _run_token_seeded: set[int] = set()
+
+
+# ── Rate Limiting Core ────────────────────────────────────────────────────────
+
+class AsyncTokenBucketLimiter:
+    def __init__(self, tpm: int, rpm: Optional[int] = None):
+        self.tpm = tpm
+        self.rpm = rpm
+        
+        self.max_tokens = float(tpm)
+        self.tokens_per_second = tpm / 60.0
+        self.available_tokens = float(tpm)
+        self.last_token_update = time.monotonic()
+        
+        self.max_requests = float(rpm) if rpm else 0.0
+        self.requests_per_second = (rpm / 60.0) if rpm else 0.0
+        self.available_requests = float(rpm) if rpm else 0.0
+        self.last_request_update = time.monotonic()
+        
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, estimated_tokens: int) -> bool:
+        slept = False
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                
+                # Refill tokens
+                elapsed_tokens = now - self.last_token_update
+                self.available_tokens = min(
+                    self.max_tokens,
+                    self.available_tokens + (elapsed_tokens * self.tokens_per_second)
+                )
+                self.last_token_update = now
+                
+                # Refill request slots
+                if self.rpm:
+                    elapsed_requests = now - self.last_request_update
+                    self.available_requests = min(
+                        self.max_requests,
+                        self.available_requests + (elapsed_requests * self.requests_per_second)
+                    )
+                    self.last_request_update = now
+
+                # Check availability
+                tokens_ready = self.available_tokens >= estimated_tokens
+                requests_ready = not self.rpm or self.available_requests >= 1.0
+                
+                if tokens_ready and requests_ready:
+                    self.available_tokens -= estimated_tokens
+                    if self.rpm:
+                        self.available_requests -= 1.0
+                    return slept
+                
+                wait_time_tokens = 0.0
+                if not tokens_ready:
+                    needed_tokens = estimated_tokens - self.available_tokens
+                    wait_time_tokens = needed_tokens / self.tokens_per_second
+                
+                wait_time_requests = 0.0
+                if self.rpm and not requests_ready:
+                    needed_requests = 1.0 - self.available_requests
+                    wait_time_requests = needed_requests / self.requests_per_second
+                
+                wait_time = max(wait_time_tokens, wait_time_requests)
+                slept = True
+                
+            await asyncio.sleep(wait_time)
+
+
+    async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
+        async with self._lock:
+            difference = estimated_tokens - actual_tokens
+            self.available_tokens = min(
+                self.max_tokens,
+                max(0.0, self.available_tokens + difference)
+            )
+
+
+def estimate_tokens(prompt: str, screenshot_b64: Optional[str] = None, provider: str = "openai") -> int:
+    text_tokens = int((len(prompt) / 4.0) * 1.1)
+    vision_tokens = 0
+    if screenshot_b64:
+        if provider == "anthropic":
+            vision_tokens = 1600
+        elif provider in ("openai", "azure_openai", "openrouter"):
+            vision_tokens = 765
+        else:
+            vision_tokens = 258
+    return text_tokens + vision_tokens
+
+
+_limiters: dict[str, AsyncTokenBucketLimiter] = {}
+
+def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimiter]:
+    if config.provider_id is None:
+        return None
+    
+    key = f"{config.provider}:{config.model}"
+    try:
+        from aespa.db import get_engine
+        from aespa.models import LLMProviderConfig
+        from sqlmodel import Session
+        
+        with Session(get_engine()) as session:
+            provider = session.get(LLMProviderConfig, config.provider_id)
+            if not provider or (not provider.max_tpm and not provider.max_rpm):
+                _limiters.pop(key, None)
+                return None
+            
+            tpm = provider.max_tpm or 10_000_000
+            rpm = provider.max_rpm
+            
+            limiter = _limiters.get(key)
+            if not limiter or limiter.tpm != tpm or limiter.rpm != rpm:
+                _limiters[key] = AsyncTokenBucketLimiter(tpm=tpm, rpm=rpm)
+    except Exception as e:
+        log.warning(f"Failed to lookup rate limit for provider: {e}")
+        
+    return _limiters.get(key)
+
 
 
 def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
@@ -125,6 +247,10 @@ def _record_usage(
     cache_write_tokens: int = 0,
 ) -> None:
     """Accumulate token counts for the active run and fire a SSE event."""
+    _last_call_tokens_var.set({
+        "input": input_tokens + cache_read_tokens,
+        "output": output_tokens
+    })
     run_id = _run_id_var.get()
     if run_id is None:
         return
@@ -428,21 +554,88 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    if config.provider == "anthropic":
-        return await _anthropic(config, prompt, screenshot_b64)
-    if config.provider == "google":
-        return await _google(config, prompt, screenshot_b64)
-    if config.provider == "azure_openai":
-        return await _azure_openai(config, prompt, screenshot_b64)
-    if config.provider in ("azure_foundry", "azure_foundry_openai"):
-        return await _azure_foundry_openai(config, prompt, screenshot_b64)
-    if config.provider == "azure_foundry_anthropic":
-        return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-    if config.provider == "openrouter":
-        return await _openrouter(config, prompt, screenshot_b64)
-    if config.provider == "bedrock":
-        return await _bedrock(config, prompt, screenshot_b64)
-    return await _openai_compat(config, prompt, screenshot_b64)
+    limiter = get_limiter_for_config(config)
+    if limiter is None:
+        if config.provider == "anthropic":
+            return await _anthropic(config, prompt, screenshot_b64)
+        if config.provider == "google":
+            return await _google(config, prompt, screenshot_b64)
+        if config.provider == "azure_openai":
+            return await _azure_openai(config, prompt, screenshot_b64)
+        if config.provider in ("azure_foundry", "azure_foundry_openai"):
+            return await _azure_foundry_openai(config, prompt, screenshot_b64)
+        if config.provider == "azure_foundry_anthropic":
+            return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+        if config.provider == "openrouter":
+            return await _openrouter(config, prompt, screenshot_b64)
+        if config.provider == "bedrock":
+            return await _bedrock(config, prompt, screenshot_b64)
+        return await _openai_compat(config, prompt, screenshot_b64)
+
+    estimated_input = estimate_tokens(prompt, screenshot_b64, config.provider)
+    estimated_output = config.max_tokens or 4096
+    total_estimated = estimated_input + estimated_output
+
+    _last_call_tokens_var.set(None)
+    slept = await limiter.acquire(total_estimated)
+
+    run_id = _run_id_var.get()
+    if slept and run_id is not None:
+        try:
+            from aespa.services import events
+            events.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "rate_limit",
+                "status": "active",
+                "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
+            })
+        except Exception:
+            pass
+
+    try:
+        if config.provider == "anthropic":
+            resp = await _anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "google":
+            resp = await _google(config, prompt, screenshot_b64)
+        elif config.provider == "azure_openai":
+            resp = await _azure_openai(config, prompt, screenshot_b64)
+        elif config.provider in ("azure_foundry", "azure_foundry_openai"):
+            resp = await _azure_foundry_openai(config, prompt, screenshot_b64)
+        elif config.provider == "azure_foundry_anthropic":
+            resp = await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "openrouter":
+            resp = await _openrouter(config, prompt, screenshot_b64)
+        elif config.provider == "bedrock":
+            resp = await _bedrock(config, prompt, screenshot_b64)
+        else:
+            resp = await _openai_compat(config, prompt, screenshot_b64)
+
+        usage = _last_call_tokens_var.get()
+        if usage:
+            actual_total = usage["input"] + usage["output"]
+            await limiter.reconcile(total_estimated, actual_total)
+        else:
+            actual_total = total_estimated
+            await limiter.reconcile(total_estimated, total_estimated)
+
+        if slept and run_id is not None:
+            try:
+                from aespa.services import events
+                events.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "rate_limit",
+                    "status": "complete",
+                    "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
+                })
+            except Exception:
+                pass
+
+        return resp
+    except Exception:
+        await limiter.reconcile(total_estimated, 0)
+        raise
+
+
 
 
 async def plain_completion(config: LLMConfig, prompt: str) -> str:

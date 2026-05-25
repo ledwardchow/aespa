@@ -71,7 +71,10 @@ class LLMProviderConfig(SQLModel, table=True):
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
+    max_tpm: Optional[int] = Field(default=None, nullable=True)
+    max_rpm: Optional[int] = Field(default=None, nullable=True)
     updated_at: datetime = Field(default_factory=_utcnow)
+
 
 
 class LLMConfig(SQLModel, table=True):
