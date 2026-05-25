@@ -290,7 +290,10 @@ function App() {
   const [appVersion, setAppVersion] = useState("");
   const [username, setUsername] = useState("");
   const [showUsername, setShowUsername] = useState(() => {
-    try { return localStorage.getItem("aespa_show_username") === "true"; } catch (_) { return false; }
+    try {
+      const val = localStorage.getItem("aespa_show_username");
+      return val === null ? true : val === "true";
+    } catch (_) { return true; }
   });
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
