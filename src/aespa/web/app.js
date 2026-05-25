@@ -1070,7 +1070,7 @@ function TestRunDetail({ runId, initialTab }) {
   const fmtEventTime = (value) => {
     if (!value) return "--:--:--";
     try {
-      return new Date(value).toLocaleTimeString("en-US", {
+      return parseDate(value).toLocaleTimeString("en-US", {
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
@@ -1224,7 +1224,7 @@ function TestRunDetail({ runId, initialTab }) {
       setActivityLog(
         entries.map(e => {
           const ts = e._persisted_at
-            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            ? parseDate(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
             : "--:--:--";
           return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
         })
@@ -1242,7 +1242,7 @@ function TestRunDetail({ runId, initialTab }) {
       const agentsMap = new Map();
       for (const e of entries) {
         const ts = e.created_at
-          ? new Date(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+          ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
           : "--:--:--";
         const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
         const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
@@ -1737,7 +1737,7 @@ function TestRunDetail({ runId, initialTab }) {
   );
   const sortArrow = (field) => trafficSort.field === field
     ? html`<span className="sort-arrow">${trafficSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
-  const fmtTs = (iso) => { try { const d = new Date(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
+  const fmtTs = (iso) => { try { const d = parseDate(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
 
   const onDeleteFinding = async (e, findingId) => {
     e.stopPropagation();
@@ -3143,7 +3143,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     .sort(([a],[b]) => a.localeCompare(b));
   const fmtAge = (iso) => {
     if (!iso) return "—";
-    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    try { return parseDate(iso).toLocaleString(); } catch { return iso; }
   };
   const renameSession = async (session) => {
     const next = prompt("Session label", session.label);
@@ -4652,8 +4652,21 @@ function DebugPage({ showUsername, setShowUsername, username }) {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+function parseDate(val) {
+  if (!val) return new Date(val);
+  if (val instanceof Date) return val;
+  let s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) {
+    s = s.replace(" ", "T");
+    if (!s.endsWith("Z")) {
+      s += "Z";
+    }
+  }
+  return new Date(s);
+}
+
 function fmtDate(iso) {
-  return iso ? new Date(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
+  return iso ? parseDate(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
 }
 
 function truncUrl(url, maxLen=40) {
