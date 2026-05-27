@@ -1430,3 +1430,80 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
         "cache_write_tokens": 400,
     }
 
+
+def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-r1-reasoning-model",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert "tool_choice" not in captured["completion"]
+
+
+def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            captured[f"call_{self.calls}"] = kwargs
+            if self.calls == 1:
+                raise ValueError("Thinking mode does not support this tool_choice")
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-v4-pro-custom",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert captured["call_1"]["tool_choice"] == "required"
+    assert "tool_choice" not in captured["call_2"]
+

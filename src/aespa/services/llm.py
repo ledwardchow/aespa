@@ -769,6 +769,9 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
         if "temperature" in retry_kwargs and "temperature" in message:
             retry_kwargs.pop("temperature", None)
             changed = True
+        if "tool_choice" in retry_kwargs and any(term in message for term in ("tool_choice", "tool choice", "thinking mode", "thinking_mode")):
+            retry_kwargs.pop("tool_choice", None)
+            changed = True
 
         if not changed:
             raise
@@ -2191,7 +2194,15 @@ async def _call_with_tools(
             messages=oai_messages,
         )
         call_kwargs["tools"] = oai_tools
-        call_kwargs["tool_choice"] = "required"
+        model_lower = (config.model or "").lower()
+        # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
+        if not getattr(config, "force_tool_choice", True):
+            pass
+        elif "r1" in model_lower or "reasoner" in model_lower or "thinking" in model_lower:
+            # Reasoning/thinking models do not support forced tool choice
+            pass
+        else:
+            call_kwargs["tool_choice"] = "required"
         resp = await _create_chat_completion(oai_client, call_kwargs)
         choice = resp.choices[0]
         msg = choice.message
