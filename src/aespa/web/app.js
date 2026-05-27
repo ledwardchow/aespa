@@ -3949,7 +3949,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
 const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
-const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
   openai:"https://api.openai.com/v1",
@@ -4023,6 +4023,7 @@ function llmProfileToForm(cfg, providers=[]) {
     max_tokens:cfg.max_tokens,
     temperature:cfg.temperature,
     use_vision:cfg.use_vision??false,
+    force_tool_choice:cfg.force_tool_choice??true,
   } : {
     ...DEFAULT_LLM_FORM,
     provider_id:provider?.id || "",
@@ -4038,6 +4039,7 @@ function llmPayload(form) {
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
     use_vision:form.use_vision,
+    force_tool_choice:form.force_tool_choice,
   };
 }
 
@@ -4172,6 +4174,17 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
         <input type="checkbox" checked=${form.use_vision} onChange=${e=>upd({use_vision:e.target.checked})}/>
         <span>Include page screenshots in LLM prompts (requires vision-capable model)</span>
       </label>
+      <div className="divider"/>
+      <div className="form-section-title">Advanced</div>
+      <label className="toggle-row">
+        <input type="checkbox" checked=${form.force_tool_choice} onChange=${e=>upd({force_tool_choice:e.target.checked})}/>
+        <span>Force tool execution</span>
+      </label>
+      <div className="field-hint" style=${{marginBottom:"12px"}}>
+        Enforces tool execution constraints on the LLM via standard OpenAI wire parameters. 
+        Recommended for standard models to maintain high scanning density. 
+        Disable if using custom reasoning/thinking models that reject forced tool choice (e.g. DeepSeek-R1, deepseek-reasoner).
+      </div>
       <div className="divider"/>
       <div className="row spread">
         <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
