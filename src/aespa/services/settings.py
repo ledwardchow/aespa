@@ -91,6 +91,7 @@ def llm_profile_out(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         max_tokens=resolved.max_tokens,
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
+        force_tool_choice=resolved.force_tool_choice,
         updated_at=resolved.updated_at,
     )
 
@@ -225,6 +226,7 @@ def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, ac
     cfg.max_tokens  = payload.max_tokens
     cfg.temperature = payload.temperature
     cfg.use_vision  = payload.use_vision
+    cfg.force_tool_choice = payload.force_tool_choice
     cfg.updated_at  = _utcnow()
 
     if cfg.is_active:
@@ -537,6 +539,7 @@ def export_llm_config(session: Session) -> LLMConfigExport:
             max_tokens=c.max_tokens,
             temperature=c.temperature,
             use_vision=c.use_vision,
+            force_tool_choice=c.force_tool_choice,
             is_active=c.is_active,
         )
         for c in profiles_db
@@ -654,6 +657,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.max_tokens = item.max_tokens
         cfg.temperature = item.temperature
         cfg.use_vision = item.use_vision
+        cfg.force_tool_choice = item.force_tool_choice
         cfg.is_active = False  # we handle activation below
         cfg.updated_at = _utcnow()
         session.add(cfg)
