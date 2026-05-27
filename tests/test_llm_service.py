@@ -1507,3 +1507,124 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
     assert captured["call_1"]["tool_choice"] == "required"
     assert "tool_choice" not in captured["call_2"]
 
+
+def test_anthropic_caching_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            captured["create_kwargs"] = kwargs
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="response text", id=None, name=None, input=None)],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=8, cache_creation_input_tokens=2)
+            )
+
+    class FakeAsyncAnthropic:
+        def __init__(self, **kwargs):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", FakeAsyncAnthropic)
+
+    config = LLMConfig(
+        provider="anthropic",
+        api_key="sk-test",
+        model="claude-3-5-sonnet",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+    tools = [{"name": "get_weather", "description": "Get the weather", "input_schema": {"type": "object"}}]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="you are a helpful assistant",
+        messages=messages,
+        tools=tools,
+    ))
+
+    assert blocks[0]["text"] == "response text"
+    create_kwargs = captured["create_kwargs"]
+
+    # Verify messages have cache_control on the last message's last content block
+    cached_messages = create_kwargs["messages"]
+    assert len(cached_messages) == 3
+    assert cached_messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original messages list was NOT mutated in-place
+    assert "cache_control" not in messages[-1]
+    if isinstance(messages[-1]["content"], list):
+        assert "cache_control" not in messages[-1]["content"][-1]
+
+    # Verify tools have cache_control on the last tool
+    cached_tools = create_kwargs["tools"]
+    assert len(cached_tools) == 1
+    assert cached_tools[-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original tools list was NOT mutated
+    assert "cache_control" not in tools[-1]
+
+
+def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse_kwargs"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system prompt",
+        messages=messages,
+        tools=[],
+    ))
+
+    converse_kwargs = captured["converse_kwargs"]
+    converse_messages = converse_kwargs["messages"]
+
+    # Verify first user message has cachePoint
+    assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
+    # Verify last user message has cachePoint
+    assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+
