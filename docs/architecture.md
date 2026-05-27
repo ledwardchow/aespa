@@ -44,6 +44,11 @@ src/aespa/
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Dynamic (agentic) scan + specialist agent dispatch
     ├── llm.py             # Multi-provider LLM client, agent tools, WSTG skills
+    ├── prompts/           # Extracted modular prompt templates
+    │   ├── reporting.py   # Reporting / post-scan review prompts
+    │   ├── specialist.py  # Specialist agent prompts
+    │   ├── test_lead.py   # Test Lead agent prompts
+    │   └── validator.py   # Adversarial validator prompts
     ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Deduplication, grouping, post-scan LLM pre-screen
@@ -118,17 +123,37 @@ A **test run** is the central unit of work. It ties together a target site, its 
 
 ## 4. Configuration
 
-### LLM Configuration (`LLMConfig` model)
+### LLM Configuration (`LLMProviderConfig` & `LLMConfig` models)
+
+LLM settings are split into two entities to separate reusable provider connections/credentials from configuration/execution profiles:
+
+#### 1. Reusable Provider Config (`LLMProviderConfig` model)
+
+Defines API connections and rate limits for different LLM backends:
 
 | Field | Default | Description |
 |---|---|---|
-| `provider` | `anthropic` | One of: anthropic, openai, google, bedrock, azure_openai, openai_compatible, openrouter |
-| `model` | `claude-opus-4-5` | Model identifier for the chosen provider |
-| `api_key` | — | Provider API key (stored in DB, never returned in API) |
-| `base_url` | — | Override endpoint URL (for openai_compatible / Azure) |
-| `max_tokens` | `4096` | Max tokens per LLM call (60000 recommended for Sonnet) |
+| `name` | `Default Provider` | Label for the provider |
+| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `azure_openai`, `azure_foundry` etc. |
+| `api_key` | — | Provider API key (stored securely in DB, never exposed in API) |
+| `base_url` | — | Override endpoint URL (e.g., custom OpenAI compatible base URLs or Azure Foundry endpoints) |
+| `models_json` | `[]` | JSON list of available model names for this provider |
+| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider (activates pacing) |
+| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider (activates pacing) |
+
+#### 2. Saved LLM Profile (`LLMConfig` model)
+
+Defines execution parameters linked to a provider:
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | `Default` | Profile name label |
+| `is_active` | `false` | Master active switch (only one profile active globally) |
+| `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
+| `model` | `claude-opus-4-5` | Specific model identifier to run |
+| `max_tokens` | `4096` | Max tokens per LLM call (60000+ recommended for Claude 3.5 Sonnet) |
 | `temperature` | `0.0` | Deterministic by default |
-| `enable_vision` | `false` | Include page screenshots in prompts |
+| `use_vision` | `false` | Include Playwright screenshots in prompts (requires vision-capable model) |
 
 ### Scanner Policy (`ScannerPolicy` model)
 
@@ -217,7 +242,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
-| `LLMConfig` | LLM provider settings for a test run |
+| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, rate limits) |
+| `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
 | `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
@@ -523,6 +549,18 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 ### Upstream proxy
 
 All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. SSL verification is disabled globally when a proxy is active to support HTTPS interception setups (e.g. Burp Suite's proxy listener).
+
+### Rate Limiting & Pacing
+
+To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
+
+- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
+- **Estimated Pre-allocation:**
+  - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider).
+  - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.
+  - If the bucket does not have enough capacity, the limiter sleeps until the required TPM (Tokens Per Minute) and RPM (Requests Per Minute) quotas are met.
+- **Real-Time Notification:** If pacing triggers, a `rate_limit` scanner-phase SSE event is emitted (e.g. *"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved X tokens)"*) to keep the user informed in the UI.
+- **Post-Call Reconciliation:** Once the API call returns, the exact actual token counts consumed are retrieved, and the bucket's pre-allocation is reconciled (refunding estimated but unused tokens). If the request fails, the estimated tokens are fully refunded.
 
 ---
 
