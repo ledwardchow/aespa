@@ -344,11 +344,11 @@ def test_migrate_preserves_bedrock_provider_format():
             conn.execute(text("""
                 INSERT INTO llm_config (
                     name, is_active, provider, api_key, base_url, model,
-                    max_tokens, temperature, use_vision, updated_at
+                    max_tokens, temperature, use_vision, force_tool_choice, updated_at
                 )
                 VALUES (
                     'Bedrock Profile', 1, 'bedrock', NULL, NULL,
-                    'global.anthropic.claude-sonnet-4-6', 4096, 0.0, 0,
+                    'global.anthropic.claude-sonnet-4-6', 4096, 0.0, 0, 1,
                     datetime('now')
                 )
             """))
@@ -390,11 +390,11 @@ def test_migrate_preserves_legacy_provider_formats():
                 conn.execute(text("""
                     INSERT INTO llm_config (
                         id, name, is_active, provider, api_key, base_url, model,
-                        max_tokens, temperature, use_vision, updated_at
+                        max_tokens, temperature, use_vision, force_tool_choice, updated_at
                     )
                     VALUES (
                         :id, :name, 0, :provider, 'key', 'https://example.test',
-                        :model, 4096, 0.0, 0, datetime('now')
+                        :model, 4096, 0.0, 0, 1, datetime('now')
                     )
                 """), {
                     "id": idx,
