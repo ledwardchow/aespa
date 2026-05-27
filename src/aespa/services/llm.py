@@ -1854,6 +1854,40 @@ AGENTIC_LOOP_PROVIDERS = frozenset({
 
 
 
+def _with_anthropic_cache(
+    messages: list[dict],
+    tools: list[dict] | None,
+) -> tuple[list[dict], list[dict] | None]:
+    """Helper to copy messages and tools, and attach ephemeral cache points
+    to the last item of each, avoiding in-place mutation of the caller's lists.
+    """
+    cached_messages = [dict(m) for m in messages]
+    if cached_messages:
+        last_msg = dict(cached_messages[-1])
+        content = last_msg.get("content")
+        if isinstance(content, str):
+            content_list = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            content_list = [dict(block) for block in content]
+        else:
+            content_list = []
+
+        if content_list:
+            # Attach cache_control to the last block in the content array
+            content_list[-1] = {**content_list[-1], "cache_control": {"type": "ephemeral"}}
+            last_msg["content"] = content_list
+            cached_messages[-1] = last_msg
+
+    cached_tools = None
+    if tools is not None:
+        cached_tools = [dict(t) for t in tools]
+        if cached_tools:
+            # Attach cache_control to the last tool definition
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+    return cached_messages, cached_tools
+
+
 async def _call_with_tools(
     config: "LLMConfig",
     system_message: str,
@@ -1879,13 +1913,14 @@ async def _call_with_tools(
         import anthropic as _ant
 
         client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
         resp = await client.messages.create(
             model=config.model,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             system=[{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
-            tools=_active_tools,
-            messages=messages,
+            tools=cached_tools,
+            messages=cached_messages,
         )
         blocks = [
             {
@@ -1906,13 +1941,14 @@ async def _call_with_tools(
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
     if config.provider == "azure_foundry_anthropic":
+        cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
         payload = {
             "model": config.model,
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
             "system": [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
-            "tools": _active_tools,
-            "messages": messages,
+            "tools": cached_tools,
+            "messages": cached_messages,
         }
         hdrs = {
             "Content-Type": "application/json",
@@ -2010,6 +2046,14 @@ async def _call_with_tools(
                 {**converse_messages[0], "content": first_content},
                 *converse_messages[1:],
             ]
+
+        # Cache the latest turn of the conversation history to enable prefix extension caching.
+        if len(converse_messages) > 1:
+            last_msg = converse_messages[-1]
+            last_content = list(last_msg.get("content") or [])
+            if not any("cachePoint" in blk for blk in last_content):
+                last_content = last_content + [{"cachePoint": {"type": "default"}}]
+            converse_messages[-1] = {**last_msg, "content": last_content}
 
         if config.api_key:
             # Bearer-token path (SAML / federated credentials stored as api_key).
