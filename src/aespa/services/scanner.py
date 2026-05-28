@@ -40,6 +40,9 @@ from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPTS as _SPECIALIST_SYSTEM_PROMPTS,
     get_specialist_tools as _get_specialist_tools,
 )
+from aespa.services.prompts.test_lead import (
+    _THINKING_AGENT_SYSTEM,
+)
 
 log = logging.getLogger("aespa.scanner")
 
@@ -106,6 +109,34 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# ── Browser traffic capture constants ────────────────────────────────────────
+_BROWSER_SKIP_RESOURCE_TYPES: frozenset[str] = frozenset({
+    "image", "media", "font", "stylesheet", "ping", "other",
+})
+_BROWSER_SKIP_EXTENSIONS: tuple[str, ...] = (
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".css", ".map",
+    ".mp4", ".webm", ".mp3", ".wav",
+)
+_BROWSER_TRAFFIC_BODY_LIMIT: int = 32 * 1024  # 32 KB per response body
+
+# ── Mutation probe payload lists ──────────────────────────────────────────────
+_SQLI_PAYLOADS: tuple[str, ...] = (
+    "' OR '1'='1'--",
+    '" OR "1"="1"--',
+    "1 OR 1=1--",
+    "' UNION SELECT NULL--",
+    "1 AND SLEEP(1)--",
+)
+_XSS_PAYLOADS: tuple[str, ...] = (
+    "<script>alert(1)</script>",
+    '"><script>alert(1)</script>',
+    "<svg onload=alert(1)>",
+    "<img src=x onerror=alert(1)>",
+    "<details open ontoggle=alert(1)>",
 )
 
 
@@ -2558,6 +2589,7 @@ async def _run_specialist_agent(
                     pages_snapshot=[],
                     first_page_id=None,
                     result_by_url={affected: result_dict},
+                    writeup_source=f"specialist:{agent_id}",
                 )
             if saved is not None:
                 findings_written[0] += 1
@@ -2817,6 +2849,7 @@ async def _persist_dynamic_finding(
     pages_snapshot: list[dict[str, Any]],
     first_page_id: int | None,
     result_by_url: dict[str, dict],
+    writeup_source: str | None = None,
 ) -> ScanFinding | None:
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
@@ -2880,7 +2913,119 @@ async def _persist_dynamic_finding(
             s.add(finding)
             s.commit()
             s.refresh(finding)
-            return finding
+            _capture_dynamic_writeup_if_enabled(
+                run_id=run_id,
+                source=writeup_source or str(raw.get("finding_source") or "test_lead"),
+                base_url=base_url,
+                raw=raw,
+                finding=finding,
+                result_by_url=result_by_url,
+            )
+            # Snapshot data needed for the rewrite before the session closes.
+            finding_id = finding.id
+            _rewrite_source = writeup_source or str(raw.get("finding_source") or "test_lead")
+            _rewrite_finding_dict = {
+                "owasp_category": finding.owasp_category,
+                "severity": finding.severity,
+                "title": finding.title,
+                "description": finding.description,
+                "impact": finding.impact,
+                "likelihood": finding.likelihood,
+                "recommendation": finding.recommendation,
+                "cvss_score": finding.cvss_score,
+                "cvss_vector": finding.cvss_vector,
+                "affected_url": finding.affected_url,
+                "evidence": finding.evidence,
+                "request_evidence": finding.request_evidence,
+                "response_evidence": finding.response_evidence,
+            }
+            _rewrite_evidence_dict = {
+                "result": result_by_url.get(finding.affected_url) or {},
+                "request_evidence": finding.request_evidence,
+                "response_evidence": finding.response_evidence,
+            }
+
+    # Rewrite the finding's prose through the writeup prompt before validation.
+    # Runs outside the persist lock so concurrent findings are not delayed.
+    try:
+        rewritten = await llm_svc.rewrite_finding_writeup(
+            llm_cfg,
+            source=_rewrite_source,
+            base_url=base_url,
+            finding_dict=_rewrite_finding_dict,
+            evidence_dict=_rewrite_evidence_dict,
+        )
+        if rewritten:
+            with Session(get_engine()) as s2:
+                db_finding = s2.get(ScanFinding, finding_id)
+                if db_finding is not None:
+                    db_finding.owasp_category = str(rewritten.get("owasp_category") or db_finding.owasp_category)
+                    db_finding.title = str(rewritten.get("title") or db_finding.title)
+                    db_finding.description = str(rewritten.get("description") or db_finding.description)
+                    db_finding.impact = str(rewritten.get("impact") or db_finding.impact)
+                    db_finding.likelihood = str(rewritten.get("likelihood") or db_finding.likelihood)
+                    db_finding.recommendation = str(rewritten.get("recommendation") or db_finding.recommendation)
+                    db_finding.cvss_score = _cvss_score(rewritten.get("cvss_score"))
+                    db_finding.cvss_vector = str(rewritten.get("cvss_vector") or db_finding.cvss_vector)
+                    db_finding.severity = _severity_from_cvss(db_finding.cvss_score)
+                    db_finding.evidence = str(rewritten.get("evidence") or db_finding.evidence)
+                    db_finding.affected_url = str(rewritten.get("affected_url") or db_finding.affected_url)
+                    s2.add(db_finding)
+                    s2.commit()
+                    s2.refresh(db_finding)
+                    finding = db_finding
+    except Exception as exc:
+        log.warning("rewrite_finding_writeup failed for finding %s: %s", finding_id, exc)
+
+    return finding
+
+
+def _capture_dynamic_writeup_if_enabled(
+    *,
+    run_id: int,
+    source: str,
+    base_url: str,
+    raw: dict,
+    finding: ScanFinding,
+    result_by_url: dict[str, dict],
+) -> None:
+    try:
+        from aespa.services import reporting_debug as reporting_debug_svc
+
+        if not reporting_debug_svc.is_capture_enabled():
+            return
+        affected = finding.affected_url or str(raw.get("affected_url") or base_url)
+        evidence = {
+            "result": result_by_url.get(affected) or result_by_url.get(str(affected)) or {},
+            "request_evidence": finding.request_evidence,
+            "response_evidence": finding.response_evidence,
+            "evidence_items": finding.evidence_items,
+        }
+        reporting_debug_svc.capture_writeup(
+            run_id=run_id,
+            source=source,
+            base_url=base_url,
+            url=affected,
+            finding={
+                "owasp_category": finding.owasp_category,
+                "severity": finding.severity,
+                "title": finding.title,
+                "description": finding.description,
+                "impact": finding.impact,
+                "likelihood": finding.likelihood,
+                "recommendation": finding.recommendation,
+                "cvss_score": finding.cvss_score,
+                "cvss_vector": finding.cvss_vector,
+                "affected_url": finding.affected_url,
+                "evidence": finding.evidence,
+                "request_evidence": finding.request_evidence,
+                "response_evidence": finding.response_evidence,
+                "finding_source": finding.finding_source,
+            },
+            evidence=evidence,
+        )
+    except Exception as exc:
+        log.warning("failed to capture dynamic writeup for replay: %s", exc)
 
 
 def get_active_sessions(run_id: int) -> dict[int, dict] | None:
@@ -3729,6 +3874,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         pages_snapshot=pages_snapshot,
                         first_page_id=first_page_id,
                         result_by_url={str(affected): result},
+                        writeup_source="test_lead",
                     )
                     if saved is not None:
                         progressive_findings_count += 1
@@ -4928,6 +5074,7 @@ async def _do_agentic_thinking_loop(
                 pages_snapshot=pages_snapshot,
                 first_page_id=first_page_id,
                 result_by_url={affected: fw_result},
+                writeup_source="test_lead",
             )
             if saved is not None:
                 progressive_findings_count += 1
@@ -5822,7 +5969,7 @@ async def _do_agentic_thinking_loop(
 
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
-        system_message=llm_svc._THINKING_AGENT_SYSTEM,
+        system_message=_THINKING_AGENT_SYSTEM,
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
