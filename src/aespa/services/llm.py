@@ -15,34 +15,28 @@ from urllib.parse import quote
 
 from aespa.models import LLMConfig
 from aespa.services.prompts.reporting import (
-    _ANALYSIS_PROMPT,
-    _PLAN_PROMPT,
     _SEVERITY_CALIBRATION,
     _ANALYSE_PROMPT,
-    _SITE_PLAN_PROMPT,
-    _FOLLOWUP_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
     _DEDUPLICATE_FINDINGS_PROMPT,
     _FINGERPRINT_PROMPT,
 )
 from aespa.services.prompts.test_lead import (
+    _ANALYSIS_PROMPT,
+    _PLAN_PROMPT,
     _THINKING_CORRECTION_PROMPT,
     _THINKING_PENTEST_PLAYBOOK,
     WSTG_SKILLS,
     _SSRF_PARAM_NAMES,
     _AUTH_PATH_FRAGMENTS,
     _SKILL_ORDER,
-    _THINKING_AGENT_SYSTEM,
     THINKING_AGENT_TOOLS,
+    _SITE_PLAN_PROMPT,
+    _FOLLOWUP_PROMPT,
     _THINKING_NEXT_ACTION_PROMPT,
 )
-from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS
 from aespa.services.prompts.validator import (
-    _ADVERSARIAL_VALIDATOR_SYSTEM,
     _DISPROOF_HINTS,
-    _COMPARE_RESPONSES_TOOL,
-    _VALIDATOR_DONE_TOOL,
-    VALIDATOR_AGENT_TOOLS,
     _VALIDATION_PLAN_PROMPT,
     _VALIDATION_VERDICT_PROMPT,
 )
@@ -1019,8 +1013,6 @@ async def _azure_foundry_anthropic(
     screenshot_b64: Optional[str],
 ) -> str:
     """Azure AI Foundry Claude deployments that expose Anthropic Messages semantics."""
-    import httpx
-
     content: list[dict[str, Any]] = []
     if screenshot_b64:
         content.append({
