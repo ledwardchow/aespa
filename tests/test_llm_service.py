@@ -1185,6 +1185,161 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert "HTTP/1.1 200" in captured["prompt"]
 
 
+def test_analyse_probes_writes_reporting_replay_capture(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        return """
+        [{
+          "owasp_category": "A03",
+          "severity": "medium",
+          "title": "Reflected XSS in search",
+          "description": "The q parameter is reflected without encoding.",
+          "impact": "An attacker can execute script in another user's browser.",
+          "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+          "recommendation": "Encode reflected output and validate the parameter.",
+          "cvss_score": 6.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          "affected_url": "https://target.local/search?q=<script>alert(1)</script>",
+          "evidence": "Payload is reflected in the response."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    captured: dict[str, object] = {}
+
+    from aespa.services import reporting_debug
+
+    monkeypatch.setattr(reporting_debug, "is_capture_enabled", lambda: True)
+    monkeypatch.setattr(
+        reporting_debug,
+        "capture_reporting_batch",
+        lambda **kwargs: captured.update(kwargs) or 1,
+    )
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
+        "desc": "XSS probe",
+        "url": "https://target.local/search?q=<script>alert(1)</script>",
+        "status": 200,
+        "headers": {"content-type": "text/html"},
+        "body": "<script>alert(1)</script>",
+        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+    }]))
+
+    assert captured["url"] == "https://target.local/search"
+    assert captured["result_texts"]
+    assert captured["prompt_sha256"]
+    assert captured["llm"]["model"] == "local"
+    assert captured["findings"] == findings
+
+
+def test_replay_reporting_capture_rebuilds_current_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        [{
+          "owasp_category": "A05",
+          "severity": "low",
+          "title": "Verbose error response",
+          "description": "A verbose framework error is returned.",
+          "impact": "Attackers can use implementation details to refine attacks.",
+          "likelihood": "Likely when the endpoint is reachable.",
+          "recommendation": "Return generic errors and log details server-side.",
+          "cvss_score": 3.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "affected_url": "https://target.local/error",
+          "evidence": "Stack trace was returned."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "capture_id": "cap-1",
+        "url": "https://target.local/error",
+        "result_texts": ["--- Probe: verbose error ---\nHTTP/1.1 500"],
+        "prompt": "old saved prompt",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_capture(config, capture))
+
+    assert prompts[0] != "old saved prompt"
+    assert "You are a web application penetration tester reviewing probe results" in prompts[0]
+    assert "HTTP/1.1 500" in prompts[0]
+    assert result["source_capture_id"] == "cap-1"
+    assert result["findings"][0]["title"] == "Verbose error response"
+
+
+def test_replay_reporting_capture_can_use_saved_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "url": "https://target.local",
+        "result_texts": ["result text"],
+        "prompt": "exact prompt from scan",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    asyncio.run(llm.replay_reporting_capture(config, capture, use_saved_prompt=True))
+
+    assert prompts == ["exact prompt from scan"]
+
+
+def test_replay_reporting_writeup_capture_uses_writeup_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        {
+          "owasp_category": "A01",
+          "severity": "high",
+          "title": "IDOR exposes account statement",
+          "description": "The statement endpoint returns another user's account data.",
+          "impact": "An attacker can read sensitive account statements.",
+          "likelihood": "Likely when account IDs are enumerable.",
+          "recommendation": "Enforce object ownership checks server-side.",
+          "cvss_score": 7.5,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+          "affected_url": "https://target.local/accounts/2/statement",
+          "evidence": "Captured response included another user's statement."
+        }
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "kind": "writeup",
+        "capture_id": 7,
+        "source": "test_lead",
+        "base_url": "https://target.local",
+        "url": "https://target.local/accounts/2/statement",
+        "finding": {
+            "title": "Account statement IDOR",
+            "affected_url": "https://target.local/accounts/2/statement",
+            "evidence": "Other account returned.",
+        },
+        "evidence": {"response_evidence": "HTTP/1.1 200\nAlice Statement"},
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_writeup_capture(config, capture))
+
+    assert "Original finding JSON" in prompts[0]
+    assert "Supporting evidence" in prompts[0]
+    assert result["source_capture_id"] == 7
+    assert result["findings"][0]["title"] == "IDOR exposes account statement"
+
+
 def test_analyse_probes_chunks_large_result_sets(monkeypatch):
     prompts: list[str] = []
 
