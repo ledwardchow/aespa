@@ -8,7 +8,18 @@ from fastapi import HTTPException
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
-from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, GlobalHttpHeaderConfig, LLMConfig, LLMProviderConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
+from aespa.models import (
+    AdversarialValidatorConfig,
+    BurpRestApiConfig,
+    GlobalHttpHeaderConfig,
+    LLMConfig,
+    LLMProviderConfig,
+    ReportingDebugConfig,
+    ScannerPolicy,
+    SpecialistAgentConfig,
+    TestRun,
+    UpstreamProxyConfig,
+)
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
@@ -22,6 +33,8 @@ from aespa.schemas import (
     LLMImportResult,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
+    ReportingDebugConfigIn,
+    ReportingDebugConfigOut,
     RunScannerPolicyOut,
     ScannerPolicyIn,
     ScannerPolicyOut,
@@ -507,6 +520,35 @@ def upsert_global_http_header_config(
     session.commit()
     session.refresh(cfg)
     return get_global_http_header_config(session)
+
+
+def get_reporting_debug_config(session: Session) -> ReportingDebugConfigOut:
+    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        return ReportingDebugConfigOut(
+            **ReportingDebugConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return ReportingDebugConfigOut(
+        capture_enabled=cfg.capture_enabled,
+        panel_enabled=cfg.panel_enabled,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_reporting_debug_config(
+    session: Session, payload: ReportingDebugConfigIn
+) -> ReportingDebugConfigOut:
+    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = ReportingDebugConfig(id=_SINGLETON_ID)
+    cfg.capture_enabled = payload.capture_enabled
+    cfg.panel_enabled = payload.panel_enabled
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_reporting_debug_config(session)
 
 
 # ── LLM config export / import ────────────────────────────────────────────────

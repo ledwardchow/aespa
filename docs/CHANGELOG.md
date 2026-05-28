@@ -4,8 +4,40 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #102] DeepSeek Support, Anthropic Caching & Reporting Lab
+**Merged:** Pending (Open PR) | Branch: `develop → main`
+
+Bundles three develop releases into main: DeepSeek model compatibility, improved Anthropic prompt caching, and the new Reporting Lab capture-replay debugging feature (24 files, 2,699 insertions, 556 deletions).
+
+### Included: PR #95 — DeepSeek Model Support & Provider Fixes
+*Merged to develop: 2026-05-27 14:56 AEST*
+
+- **DeepSeek / reasoning model support**: Added a `force_tool_choice` boolean toggle on LLM profiles. DeepSeek R1-series and other reasoning models (`r1`, `reasoner`, `thinking` in model name) cannot force tool execution, so the agentic loop now skips the `tool_choice: required` constraint for those models.
+- **Gemini over-commentary fix**: Removed extraneous preamble text that Gemini models were prepending to responses.
+- **Removed obsolete Bedrock API scripts**: Deleted `bedrock-api-scripts/` directory (PowerShell and shell credential helpers that are no longer used).
+- Test coverage added for `force_tool_choice` behaviour and new settings API paths.
+
+### Included: PR #96 — Improved Anthropic API Token Caching Strategy
+*Merged to develop: 2026-05-27 19:56 AEST*
+
+- **Sliding cache-point strategy**: Replaced the previous approach (only caching the static system prompt) with a `_with_anthropic_cache` helper that attaches an ephemeral `cache_control` block to the last message and the last tool definition on every turn. This enables Anthropic's prefix extension caching to carry forward the growing conversation context, not just the system prompt.
+- Cache points are applied non-destructively (copies, not in-place mutation) to avoid corrupting the caller's message lists.
+- Expanded `test_llm_service.py` with 121 lines of caching unit tests.
+
+### Included: PR #101 — Reporting Lab: Capture Replay & Prompt Debugging
+*Merged to develop: 2026-05-28 21:53 AEST*
+
+- **New Reporting Lab UI tab**: Full capture-replay debugging interface for the LLM reporting pipeline. Allows selecting a stored capture, replaying it against any saved prompt version, and comparing findings side-by-side across replays.
+- **`reporting_debug.py` service** (624 lines): Core logic for storing captures, running replays asynchronously, and computing finding-level diff statistics between replay runs.
+- **`/api/reporting-debug/` router** (176 lines): REST endpoints for captures, replays, prompt version management, and replay comparison.
+- **Prompts refactor**: Reporting prompt strings (`_ANALYSE_PROMPT`, `_WRITEUP_REPLAY_PROMPT`, etc.) extracted into `src/aespa/services/prompts/reporting.py`; `llm.py` imports and re-exports them for downstream consumers.
+- **`DebugFindingsTable` component**: New collapsible findings table in the frontend with severity ordering, CVSS inline display, and per-instance independent expand state — used in both the capture detail panel and the side-by-side replay comparison view.
+- `test_reporting_debug.py` (89 lines) and 155 lines added to `test_llm_service.py`.
+
+---
+
 ## [PR #94] LLM Rate Limiting, Local Timezone Display & UI Polish
-**Merged:** Pending (Open PR) | Branch: `develop`
+**Merged:** 2026-05-25 20:39 AEST | Branch: `develop`
 
 Introduces provider-level LLM API rate limiting, local timezone date formatting in the UI, and key frontend bug fixes and polish (9 files, 286 lines changed).
 
