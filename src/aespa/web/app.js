@@ -4765,7 +4765,7 @@ function ReportingDebugPage() {
   const [captureDbPath, setCaptureDbPath] = useState("");
   const [selectedCaptureId, setSelectedCaptureId] = useState("");
   const [selectedCaptureDetail, setSelectedCaptureDetail] = useState(null);
-  const [captureOriginalExpanded, setCaptureOriginalExpanded] = useState(null);
+
   const [selectedReplayVersionId, setSelectedReplayVersionId] = useState("");
   const [replay, setReplay] = useState(null);
   const [replayBusy, setReplayBusy] = useState(false);
@@ -4774,7 +4774,6 @@ function ReportingDebugPage() {
   const [compareReplayId, setCompareReplayId] = useState("");
   const [compareReplay, setCompareReplay] = useState(null);
   const [error, setError] = useState(null);
-  const [expandedFinding, setExpandedFinding] = useState(null);
 
   const selectedCapture = captures.find(c => String(c.id) === String(selectedCaptureId));
   const replayPromptKey = selectedCapture?.kind === "writeup" ? "reporting.writeup" : "reporting.analyse";
@@ -4860,7 +4859,6 @@ function ReportingDebugPage() {
   }, [compareReplayId]);
   useEffect(() => {
     if (!selectedCaptureId) { setSelectedCaptureDetail(null); return; }
-    setCaptureOriginalExpanded(null);
     api.getReportingCapture(selectedCaptureId).then(setSelectedCaptureDetail).catch(()=>{});
   }, [selectedCaptureId]);
 
@@ -5020,9 +5018,7 @@ function ReportingDebugPage() {
               <div style=${{marginBottom:12}}>
                 <div className="subtle" style=${{fontSize:11,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>Original findings in this capture</div>
                 <${DebugFindingsTable}
-                  findings=${selectedCaptureDetail.findings}
-                  expandedFinding=${captureOriginalExpanded}
-                  setExpandedFinding=${setCaptureOriginalExpanded}/>
+                  findings=${selectedCaptureDetail.findings}/>
               </div>`}
           `}
           ${replay && html`
@@ -5071,23 +5067,24 @@ function ReportingDebugPage() {
                   <div className="form-section-title">Replay #${replay?.id || "—"} · ${replay?.prompt_version_name || "unknown version"}</div>
                   ${currentFindings.length === 0
                     ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
-                    : html`<${DebugFindingsTable} findings=${currentFindings} expandedFinding=${expandedFinding} setExpandedFinding=${setExpandedFinding}/>`}
+                    : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
                 </div>
                 <div>
                   <div className="form-section-title">Replay #${compareReplay.id} · ${compareReplay.prompt_version_name || "unknown version"}</div>
                   ${compareFindings.length === 0
                     ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
-                    : html`<${DebugFindingsTable} findings=${compareFindings} expandedFinding=${expandedFinding} setExpandedFinding=${setExpandedFinding}/>`}
+                    : html`<${DebugFindingsTable} findings=${compareFindings}/>`}
                 </div>
               </div>`
             : currentFindings.length === 0
               ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
-              : html`<${DebugFindingsTable} findings=${currentFindings} expandedFinding=${expandedFinding} setExpandedFinding=${setExpandedFinding}/>`}
+              : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
         </div>`}
     </div>`;
 }
 
-function DebugFindingsTable({ findings, expandedFinding, setExpandedFinding }) {
+function DebugFindingsTable({ findings }) {
+  const [expandedFinding, setExpandedFinding] = useState(null);
   const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
   const sorted = [...findings].sort((a,b)=>(SEV_ORDER[a.severity]??99)-(SEV_ORDER[b.severity]??99));
   return html`
