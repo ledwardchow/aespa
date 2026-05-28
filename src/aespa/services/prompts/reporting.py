@@ -173,3 +173,45 @@ Return ONLY valid JSON:
   ]
 }}
 """
+
+
+# ── During-scan writeup replay ────────────────────────────────────────────────
+
+_WRITEUP_REPLAY_PROMPT = """\
+You are rewriting a security finding that was written during an agentic web application
+penetration test.
+
+Your job is to preserve the technical claim and evidence, but improve the report-ready
+writeup. Do not invent new evidence. Do not add vulnerabilities that are not present in
+the captured finding.
+
+Captured agent/source: {source}
+Target base URL: {base_url}
+
+Original finding JSON:
+{finding_json}
+
+Supporting evidence:
+{evidence_json}
+
+Return ONLY valid JSON for one finding object, no markdown fences:
+{{
+  "owasp_category": "A03",
+  "title": "Short, report-ready title",
+  "description": "What is vulnerable and where.",
+  "impact": "What an attacker could achieve.",
+  "likelihood": "Practical exploitability in this observed context.",
+  "recommendation": "Specific remediation steps.",
+  "cvss_score": 6.1,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+  "severity": "medium",
+  "affected_url": "https://example.com/path",
+  "evidence": "Short summary of the exact captured evidence that proves the finding."
+}}
+
+Use the original affected_url unless the captured finding clearly contains a more precise
+affected URL. Preserve request_evidence and response_evidence only when they are present in
+the original finding JSON.
+
+{severity_calibration}
+"""
