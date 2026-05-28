@@ -403,3 +403,25 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
     r = client.post("/api/settings/llm/import", json=payload_dup_profile)
     assert r.status_code == 422
     assert "Duplicate profile name" in r.json()["detail"]
+
+
+def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
+    provider = _make_provider(client).json()
+    
+    # Verify defaults to True
+    profile = _make_profile(client, provider["id"], name="Profile With Force").json()
+    assert profile["force_tool_choice"] is True
+
+    # Disable it explicitly
+    profile_disabled = _make_profile(
+        client, 
+        provider["id"], 
+        name="Profile Without Force", 
+        force_tool_choice=False
+    ).json()
+    assert profile_disabled["force_tool_choice"] is False
+
+    # Get active config to verify it resolves correctly
+    client.post(f"/api/settings/llm/profiles/{profile_disabled['id']}/activate")
+    active = client.get("/api/settings/llm").json()
+    assert active["force_tool_choice"] is False

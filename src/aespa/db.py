@@ -48,6 +48,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
@@ -84,6 +85,16 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS reporting_debug_config (
+                id INTEGER PRIMARY KEY,
+                capture_enabled INTEGER NOT NULL DEFAULT 0,
+                panel_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS upstream_proxy_config (
