@@ -4922,6 +4922,8 @@ function ReportingDebugPage() {
             Default versions load from reporting.py. New versions are saved in the Reporting Lab database and can be replayed against the same captures.
             <br />Reporting Lab uses the DEFAULT LLM setting and does not respect the overriden setting in the scan the data came from.
             <br />Set the Version name BEFORE clicking new version!
+            <br />Batch reporting has {url} and {results} placeholders. 
+            <br />During-scan writeups have {source}, {base_url}, {finding_json}, {evidence_json}.
           </div>
           <div className="form-row">
             <label className="form-label">Prompt</label>

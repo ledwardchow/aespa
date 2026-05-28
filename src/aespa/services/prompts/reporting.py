@@ -1,28 +1,6 @@
 """Prompts for reporting and finding analysis functions."""
 
 
-# ── Severity calibration (shared fragment, embedded in finding analysis prompts) ─
-
-_SEVERITY_CALIBRATION = """\
-Severity calibration:
-- Rate generic server or framework version disclosure as info by default, or low if the
-  disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
-- Rate verbose stack traces, file paths, class names, and framework error pages as low by
-  default. Raise to medium ONLY when the response exposes high-entropy secrets, credentials,
-  or tokens. Do NOT raise to medium for generic database errors, query strings, or schema disclosures.
-- Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
-  as low by default unless a browser-based proof shows sensitive authenticated data can be
-  read cross-origin. Do not escalate to medium or high solely because Access-Control-Allow-Credentials
-  is true.
-- Rate missing or weak security headers (Content-Security-Policy, HSTS, X-Frame-Options,
-  X-Content-Type-Options, Referrer-Policy, etc.) as low (or info) by default.
-- Rate user enumeration (via timing differences or distinct login/forgot-password error messages)
-  as low by default.
-- Do not rate informational disclosure as medium or high solely because it is remotely
-  reachable. Severity should follow demonstrated impact, not theoretical chaining.
-"""
-
-
 # ── Probe result analysis / finding generation ────────────────────────────────
 
 _ANALYSE_PROMPT = """\
@@ -68,7 +46,22 @@ Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
 Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
 medium 4.0-6.9, low 0.1-3.9, info 0.0.
 
-{severity_calibration}
+Severity calibration:
+- Rate generic server or framework version disclosure as info by default, or low if the
+  disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
+- Rate verbose stack traces, file paths, class names, and framework error pages as low by
+  default. Raise to medium ONLY when the response exposes high-entropy secrets, credentials,
+  or tokens. Do NOT raise to medium for generic database errors, query strings, or schema disclosures.
+- Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
+  as low by default unless a browser-based proof shows sensitive authenticated data can be
+  read cross-origin. Do not escalate to medium or high solely because Access-Control-Allow-Credentials
+  is true.
+- Rate missing or weak security headers (Content-Security-Policy, HSTS, X-Frame-Options,
+  X-Content-Type-Options, Referrer-Policy, etc.) as low (or info) by default.
+- Rate user enumeration (via timing differences or distinct login/forgot-password error messages)
+  as low by default.
+- Do not rate informational disclosure as medium or high solely because it is remotely
+  reachable. Severity should follow demonstrated impact, not theoretical chaining.
 
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
@@ -213,5 +206,20 @@ Use the original affected_url unless the captured finding clearly contains a mor
 affected URL. Preserve request_evidence and response_evidence only when they are present in
 the original finding JSON.
 
-{severity_calibration}
+Severity calibration:
+- Rate generic server or framework version disclosure as info by default, or low if the
+  disclosed component is demonstrably obsolete or materially helps exploit a confirmed issue.
+- Rate verbose stack traces, file paths, class names, and framework error pages as low by
+  default. Raise to medium ONLY when the response exposes high-entropy secrets, credentials,
+  or tokens. Do NOT raise to medium for generic database errors, query strings, or schema disclosures.
+- Rate CORS arbitrary Origin reflection, including Access-Control-Allow-Credentials: true,
+  as low by default unless a browser-based proof shows sensitive authenticated data can be
+  read cross-origin. Do not escalate to medium or high solely because Access-Control-Allow-Credentials
+  is true.
+- Rate missing or weak security headers (Content-Security-Policy, HSTS, X-Frame-Options,
+  X-Content-Type-Options, Referrer-Policy, etc.) as low (or info) by default.
+- Rate user enumeration (via timing differences or distinct login/forgot-password error messages)
+  as low by default.
+- Do not rate informational disclosure as medium or high solely because it is remotely
+  reachable. Severity should follow demonstrated impact, not theoretical chaining.
 """
