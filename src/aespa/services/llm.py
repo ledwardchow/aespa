@@ -22,7 +22,6 @@ from aespa.services.prompts.reporting import (
     _DEDUPLICATE_FINDINGS_PROMPT,
     _FINGERPRINT_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
-    _SEVERITY_CALIBRATION,
     _WRITEUP_REPLAY_PROMPT,
 )
 from aespa.services.prompts.test_lead import (
@@ -1431,7 +1430,6 @@ def build_reporting_analyse_prompt(
     return template.format(
         url=url,
         results="\n\n".join(result_texts),
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
 
 
@@ -1489,7 +1487,6 @@ def build_reporting_writeup_prompt(
         base_url=base_url,
         finding_json=json.dumps(finding, indent=2, ensure_ascii=False, default=str),
         evidence_json=json.dumps(evidence, indent=2, ensure_ascii=False, default=str),
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
 
 
@@ -2963,7 +2960,6 @@ async def thinking_next_action(
         max_steps=max_steps,
         pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
         history_text=history_text,
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
     if emit_fn:
         try:
