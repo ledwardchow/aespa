@@ -87,6 +87,16 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS reporting_debug_config (
+                id INTEGER PRIMARY KEY,
+                capture_enabled INTEGER NOT NULL DEFAULT 0,
+                panel_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS upstream_proxy_config (
                 id INTEGER PRIMARY KEY,
                 proxy_url TEXT,
