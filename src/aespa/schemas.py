@@ -520,6 +520,21 @@ class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
     updated_at: datetime
 
 
+# ── Reporting debug config schemas ───────────────────────────────────────────
+
+class ReportingDebugConfigBase(BaseModel):
+    capture_enabled: bool = False
+    panel_enabled: bool = False
+
+
+class ReportingDebugConfigIn(ReportingDebugConfigBase):
+    pass
+
+
+class ReportingDebugConfigOut(ReportingDebugConfigBase):
+    updated_at: datetime
+
+
 # ── LLM config export / import schemas ───────────────────────────────────────
 
 class LLMExportProviderItem(BaseModel):
