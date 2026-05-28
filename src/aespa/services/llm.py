@@ -3,51 +3,56 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import httpx
+import hashlib
 import json
 import logging
 import os
 import re
 import time
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
+import httpx
+
 from aespa.models import LLMConfig
 from aespa.services.prompts.reporting import (
-    _ANALYSIS_PROMPT,
-    _PLAN_PROMPT,
-    _SEVERITY_CALIBRATION,
     _ANALYSE_PROMPT,
-    _SITE_PLAN_PROMPT,
-    _FOLLOWUP_PROMPT,
-    _NORMALIZE_TITLES_PROMPT,
     _DEDUPLICATE_FINDINGS_PROMPT,
     _FINGERPRINT_PROMPT,
+    _NORMALIZE_TITLES_PROMPT,
+    _SEVERITY_CALIBRATION,
+    _WRITEUP_REPLAY_PROMPT,
 )
 from aespa.services.prompts.test_lead import (
-    _THINKING_CORRECTION_PROMPT,
-    _THINKING_PENTEST_PLAYBOOK,
-    WSTG_SKILLS,
-    _SSRF_PARAM_NAMES,
+    _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
+    _FOLLOWUP_PROMPT,
+    _PLAN_PROMPT,
+    _SITE_PLAN_PROMPT,
     _SKILL_ORDER,
-    _THINKING_AGENT_SYSTEM,
-    THINKING_AGENT_TOOLS,
+    _SSRF_PARAM_NAMES,
+    _THINKING_CORRECTION_PROMPT,
     _THINKING_NEXT_ACTION_PROMPT,
+    _THINKING_PENTEST_PLAYBOOK,
+    THINKING_AGENT_TOOLS,
+    WSTG_SKILLS,
 )
-from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS
+from aespa.services.prompts.specialist import (
+    SPECIALIST_AGENT_TOOLS,
+)
 from aespa.services.prompts.validator import (
     _ADVERSARIAL_VALIDATOR_SYSTEM,
     _DISPROOF_HINTS,
-    _COMPARE_RESPONSES_TOOL,
-    _VALIDATOR_DONE_TOOL,
-    VALIDATOR_AGENT_TOOLS,
     _VALIDATION_PLAN_PROMPT,
     _VALIDATION_VERDICT_PROMPT,
+    VALIDATOR_AGENT_TOOLS,
 )
 
 log = logging.getLogger("aespa.llm")
+
+REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
 _run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
@@ -159,9 +164,10 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     
     key = f"{config.provider}:{config.model}"
     try:
+        from sqlmodel import Session
+
         from aespa.db import get_engine
         from aespa.models import LLMProviderConfig
-        from sqlmodel import Session
         
         with Session(get_engine()) as session:
             provider = session.get(LLMProviderConfig, config.provider_id)
@@ -185,9 +191,10 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
 def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
     """Load persisted token usage for a run from the DB (best-effort)."""
     try:
+        from sqlmodel import Session as _Session
+
         from aespa.db import get_engine
         from aespa.models import TestRun
-        from sqlmodel import Session as _Session
         with _Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
             if run and run.token_usage_json:
@@ -200,9 +207,10 @@ def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
 def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
     """Write the current in-memory bucket for a run back to the DB (best-effort)."""
     try:
+        from sqlmodel import Session as _Session
+
         from aespa.db import get_engine
         from aespa.models import TestRun
-        from sqlmodel import Session as _Session
         with _Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
             if run:
@@ -1019,8 +1027,6 @@ async def _azure_foundry_anthropic(
     screenshot_b64: Optional[str],
 ) -> str:
     """Azure AI Foundry Claude deployments that expose Anthropic Messages semantics."""
-    import httpx
-
     content: list[dict[str, Any]] = []
     if screenshot_b64:
         content.append({
@@ -1096,6 +1102,7 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
     }
     if not config.api_key:
         import asyncio as _aio
+
         import boto3
         from botocore.config import Config as _BotocoreConfig
 
@@ -1396,31 +1403,14 @@ async def _analyse_probe_batch(
     url: str,
     result_texts: list[str],
 ) -> list[dict]:
-    results_text = "\n\n".join(result_texts)
-    prompt = _ANALYSE_PROMPT.format(
-        url=url,
-        results=results_text,
-        severity_calibration=_SEVERITY_CALIBRATION,
-    )
+    prompt = build_reporting_analyse_prompt(url, result_texts)
     raw = await _call(config, prompt, None)
     try:
-        findings = _extract_json(raw or "", expect=list)
-        if not isinstance(findings, list):
-            return []
-        required = {
-            "owasp_category",
-            "severity",
-            "title",
-            "description",
-            "impact",
-            "likelihood",
-            "recommendation",
-            "cvss_score",
-            "affected_url",
-            "evidence",
-        }
-        return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+        findings = parse_reporting_findings(raw or "")
+        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", findings)
+        return findings
     except Exception as exc:
+        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", [], parse_error=str(exc))
         log.warning(
             "analyse_probes: failed to extract findings from LLM response (%s). "
             "Raw response (first 500 chars): %r",
@@ -1428,6 +1418,212 @@ async def _analyse_probe_batch(
             (raw or "")[:500],
         )
         return []
+
+
+def build_reporting_analyse_prompt(
+    url: str,
+    result_texts: list[str],
+    *,
+    prompt_template: str | None = None,
+) -> str:
+    """Build the reporting/finding analysis prompt from replayable probe result text."""
+    template = prompt_template or _ANALYSE_PROMPT
+    return template.format(
+        url=url,
+        results="\n\n".join(result_texts),
+        severity_calibration=_SEVERITY_CALIBRATION,
+    )
+
+
+def parse_reporting_findings(raw: str) -> list[dict]:
+    """Parse the reporting LLM response into the structured findings shape."""
+    findings = _extract_json(raw or "", expect=list)
+    if not isinstance(findings, list):
+        return []
+    required = {
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "affected_url",
+        "evidence",
+    }
+    return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+
+
+def parse_reporting_finding(raw: str) -> dict:
+    """Parse one report finding object from an LLM response."""
+    finding = _extract_json(raw or "", expect=dict)
+    if not isinstance(finding, dict):
+        return {}
+    required = {
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "affected_url",
+        "evidence",
+    }
+    return finding if required.issubset(finding) else {}
+
+
+def build_reporting_writeup_prompt(
+    *,
+    source: str,
+    base_url: str,
+    finding: dict[str, Any],
+    evidence: dict[str, Any],
+    prompt_template: str | None = None,
+) -> str:
+    template = prompt_template or _WRITEUP_REPLAY_PROMPT
+    return template.format(
+        source=source,
+        base_url=base_url,
+        finding_json=json.dumps(finding, indent=2, ensure_ascii=False, default=str),
+        evidence_json=json.dumps(evidence, indent=2, ensure_ascii=False, default=str),
+        severity_calibration=_SEVERITY_CALIBRATION,
+    )
+
+
+async def rewrite_finding_writeup(
+    config: LLMConfig,
+    *,
+    source: str,
+    base_url: str,
+    finding_dict: dict[str, Any],
+    evidence_dict: dict[str, Any],
+) -> dict:
+    """Rewrite a persisted finding's prose through the writeup prompt.
+
+    Calls the LLM once with _WRITEUP_REPLAY_PROMPT and returns the parsed
+    finding dict on success, or an empty dict if the response cannot be parsed.
+    Does not invent evidence or create new findings — only improves wording.
+    """
+    prompt = build_reporting_writeup_prompt(
+        source=source,
+        base_url=base_url,
+        finding=finding_dict,
+        evidence=evidence_dict,
+    )
+    raw = await _call(config, prompt, None)
+    return parse_reporting_finding(raw or "")
+
+
+async def replay_reporting_writeup_capture(
+    config: LLMConfig,
+    capture: dict[str, Any],
+    *,
+    prompt_template: str | None = None,
+) -> dict[str, Any]:
+    """Replay one captured during-scan finding writeup through the reporting prompt."""
+    if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
+        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+    finding = capture.get("finding")
+    if not isinstance(finding, dict):
+        raise ValueError("writeup capture must contain finding")
+    evidence = capture.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    prompt = build_reporting_writeup_prompt(
+        source=str(capture.get("source") or "unknown"),
+        base_url=str(capture.get("base_url") or ""),
+        finding=finding,
+        evidence=evidence,
+        prompt_template=prompt_template,
+    )
+    raw = await _call(config, prompt, None)
+    parsed = parse_reporting_finding(raw or "")
+    findings = [parsed] if parsed else []
+    return {
+        "schema": "aespa.reporting.replay.result.v1",
+        "source_capture_schema": capture.get("schema"),
+        "source_capture_id": capture.get("capture_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "url": str(capture.get("url") or finding.get("affected_url") or ""),
+        "prompt": prompt,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "raw_response": raw or "",
+        "findings": findings,
+    }
+
+
+async def replay_reporting_capture(
+    config: LLMConfig,
+    capture: dict[str, Any],
+    *,
+    prompt_template: str | None = None,
+    use_saved_prompt: bool = False,
+) -> dict[str, Any]:
+    """Replay one captured reporting prompt payload through the configured LLM."""
+    if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
+        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+    url = str(capture.get("url") or "")
+    result_texts = capture.get("result_texts")
+    if not url or not isinstance(result_texts, list) or not all(isinstance(x, str) for x in result_texts):
+        raise ValueError("capture must contain url and result_texts")
+    if use_saved_prompt and prompt_template is None:
+        prompt = str(capture.get("prompt") or "")
+        if not prompt:
+            raise ValueError("capture does not contain a saved prompt")
+    else:
+        prompt = build_reporting_analyse_prompt(url, result_texts, prompt_template=prompt_template)
+    raw = await _call(config, prompt, None)
+    findings = parse_reporting_findings(raw or "")
+    return {
+        "schema": "aespa.reporting.replay.result.v1",
+        "source_capture_schema": capture.get("schema"),
+        "source_capture_id": capture.get("capture_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "url": url,
+        "prompt": prompt,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "raw_response": raw or "",
+        "findings": findings,
+    }
+
+
+def _capture_reporting_replay(
+    config: LLMConfig,
+    url: str,
+    result_texts: list[str],
+    prompt: str,
+    raw_response: str,
+    findings: list[dict],
+    *,
+    parse_error: str | None = None,
+) -> None:
+    try:
+        from aespa.services import reporting_debug as reporting_debug_svc
+
+        if not reporting_debug_svc.is_capture_enabled():
+            return
+        reporting_debug_svc.capture_reporting_batch(
+            run_id=_run_id_var.get(),
+            url=url,
+            result_texts=result_texts,
+            prompt=prompt,
+            prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            llm={
+                "provider": config.provider,
+                "base_url": config.base_url,
+                "model": config.model,
+                "max_tokens": config.max_tokens,
+                "temperature": config.temperature,
+            },
+            raw_response=raw_response,
+            findings=findings,
+            parse_error=parse_error,
+        )
+    except Exception as exc:
+        log.warning("failed to write reporting replay capture: %s", exc)
 
 
 # ── Site-level test plan ──────────────────────────────────────────────────────
