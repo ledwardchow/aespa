@@ -5,6 +5,7 @@ from sqlmodel import Session
 
 from aespa.db import get_session
 from aespa.schemas import (
+    PROVIDER_DEFAULT_MODELS,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
     GlobalHttpHeaderConfigIn,
@@ -15,7 +16,8 @@ from aespa.schemas import (
     LLMImportResult,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
-    PROVIDER_DEFAULT_MODELS,
+    ReportingDebugConfigIn,
+    ReportingDebugConfigOut,
     ScannerPolicyIn,
     ScannerPolicyOut,
     SpecialistAgentConfigIn,
@@ -25,9 +27,8 @@ from aespa.schemas import (
     ValidatorConfigIn,
     ValidatorConfigOut,
 )
-from aespa.services import settings as settings_service
 from aespa.services import burp_rest as burp_rest_svc
-
+from aespa.services import settings as settings_service
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -234,3 +235,18 @@ def upsert_global_http_header_config(
     session: Session = Depends(get_session),
 ) -> GlobalHttpHeaderConfigOut:
     return settings_service.upsert_global_http_header_config(session, payload)
+
+
+@router.get("/reporting-debug", response_model=ReportingDebugConfigOut)
+def get_reporting_debug_config(
+    session: Session = Depends(get_session),
+) -> ReportingDebugConfigOut:
+    return settings_service.get_reporting_debug_config(session)
+
+
+@router.put("/reporting-debug", response_model=ReportingDebugConfigOut)
+def upsert_reporting_debug_config(
+    payload: ReportingDebugConfigIn,
+    session: Session = Depends(get_session),
+) -> ReportingDebugConfigOut:
+    return settings_service.upsert_reporting_debug_config(session, payload)

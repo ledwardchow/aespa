@@ -94,6 +94,8 @@ class LLMConfig(SQLModel, table=True):
     temperature: float = Field(default=0.0)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
+    # Whether to force tool choice using the wire format tool_choice: required/any
+    force_tool_choice: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -209,6 +211,17 @@ class GlobalHttpHeaderConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     header_name: Optional[str] = Field(default=None, max_length=200)
     header_value: Optional[str] = Field(default=None, max_length=2000)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ReportingDebugConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for reporting prompt debug features."""
+
+    __tablename__ = "reporting_debug_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    capture_enabled: bool = Field(default=False)
+    panel_enabled: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
