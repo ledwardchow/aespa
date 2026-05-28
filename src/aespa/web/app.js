@@ -41,6 +41,21 @@ const api = {
   upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
   getGlobalHttpHeader: ()         => req("/api/settings/global-http-header"),
   upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
+  getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
+  upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),
+  listReportingDebugPrompts:()    => req("/api/reporting-debug/prompts"),
+  saveReportingDebugPrompt:(key,b)=> req(`/api/reporting-debug/prompt?key=${encodeURIComponent(key)}`, { method:"PUT", body:b }),
+  resetReportingDebugPrompt:(key) => req(`/api/reporting-debug/prompt/reset?key=${encodeURIComponent(key)}`, { method:"POST" }),
+  listReportingPromptVersions:(key)=> req(`/api/reporting-debug/prompt-versions?key=${encodeURIComponent(key)}`),
+  createReportingPromptVersion:(b)=> req("/api/reporting-debug/prompt-versions", { method:"POST", body:b }),
+  updateReportingPromptVersion:(id,b)=> req(`/api/reporting-debug/prompt-versions/${id}`, { method:"PUT", body:b }),
+  deleteReportingPromptVersion:(id)=> req(`/api/reporting-debug/prompt-versions/${id}`, { method:"DELETE" }),
+  listReportingCaptures: ()       => req("/api/reporting-debug/captures"),
+  getReportingCapture:(id)         => req(`/api/reporting-debug/captures/${id}`),
+  replayReportingCapture:(id,b={})=> req(`/api/reporting-debug/captures/${id}/replay`, { method:"POST", body:b }),
+  getReportingReplay:(id)         => req(`/api/reporting-debug/replays/${id}`),
+  listReportingReplays:()         => req("/api/reporting-debug/replays"),
   listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
@@ -135,6 +150,7 @@ function useRoute() {
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
   if (hash === "#/external-integrations")                return { name: "external-integrations" };
   if (hash === "#/debug")                                return { name: "debug" };
+  if (hash === "#/reporting-debug")                      return { name: "reporting-debug" };
 
   return { name: "list" };
 }
@@ -287,6 +303,7 @@ function App() {
   const onScanPolicy = route.name === "scan-policy";
   const onExternalIntegrations = route.name === "external-integrations";
   const onDebug      = route.name === "debug";
+  const onReportingDebug = route.name === "reporting-debug";
   const [appVersion, setAppVersion] = useState("");
   const [username, setUsername] = useState("");
   const [showUsername, setShowUsername] = useState(() => {
@@ -296,6 +313,7 @@ function App() {
     } catch (_) { return true; }
   });
   const [collapsed, setCollapsed] = useState(false);
+  const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   useEffect(() => {
     api.getVersion()
       .then(d => {
@@ -303,6 +321,7 @@ function App() {
         setUsername(d.username || "");
       })
       .catch(()=>{});
+    api.getReportingDebugConfig().then(setReportingDebugCfg).catch(()=>{});
   }, []);
 
   return html`
@@ -337,6 +356,11 @@ function App() {
           <a href="#/debug" className=${"nav-item"+(onDebug?" active":"")} title="Debug">
             <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
           </a>
+          ${reportingDebugCfg?.panel_enabled && html`
+            ${!collapsed && html`<div className="nav-section-label" style=${{marginTop:8}}>Testing Features</div>`}
+            <a href="#/reporting-debug" className=${"nav-item"+(onReportingDebug?" active":"")} title="Reporting Lab">
+              <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Reporting Lab"}
+            </a>`}
         </nav>
         <div className="sidebar-footer">
           <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
@@ -368,7 +392,8 @@ function App() {
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
         ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
-        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username}/>`}
+        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username} reportingDebugCfg=${reportingDebugCfg} setReportingDebugCfg=${setReportingDebugCfg}/>`}
+        ${route.name==="reporting-debug" && html`<${ReportingDebugPage}/>`}
       </div>
     </div>
   `;
@@ -982,7 +1007,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [dedupeBusy, setDedupeBusy]         = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
-  const [expandedGroups, setExpandedGroups]   = useState(new Set());
+  const [expandedGroups, setExpandedGroups]   = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = (title) => setExpandedGroups(prev => {
     const next = new Set(prev);
     next.has(title) ? next.delete(title) : next.add(title);
@@ -3949,7 +3974,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
 const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
-const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
   openai:"https://api.openai.com/v1",
@@ -4023,6 +4048,7 @@ function llmProfileToForm(cfg, providers=[]) {
     max_tokens:cfg.max_tokens,
     temperature:cfg.temperature,
     use_vision:cfg.use_vision??false,
+    force_tool_choice:cfg.force_tool_choice??true,
   } : {
     ...DEFAULT_LLM_FORM,
     provider_id:provider?.id || "",
@@ -4038,6 +4064,7 @@ function llmPayload(form) {
     max_tokens:Number(form.max_tokens),
     temperature:Number(form.temperature),
     use_vision:form.use_vision,
+    force_tool_choice:form.force_tool_choice,
   };
 }
 
@@ -4172,6 +4199,17 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
         <input type="checkbox" checked=${form.use_vision} onChange=${e=>upd({use_vision:e.target.checked})}/>
         <span>Include page screenshots in LLM prompts (requires vision-capable model)</span>
       </label>
+      <div className="divider"/>
+      <div className="form-section-title">Advanced</div>
+      <label className="toggle-row">
+        <input type="checkbox" checked=${form.force_tool_choice} onChange=${e=>upd({force_tool_choice:e.target.checked})}/>
+        <span>Force tool execution</span>
+      </label>
+      <div className="field-hint" style=${{marginBottom:"12px"}}>
+        Enforces tool execution constraints on the LLM via standard OpenAI wire parameters. 
+        Recommended for standard models to maintain high scanning density. 
+        Disable if using custom reasoning/thinking models that reject forced tool choice (e.g. DeepSeek-R1, deepseek-reasoner).
+      </div>
       <div className="divider"/>
       <div className="row spread">
         <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
@@ -4542,7 +4580,7 @@ function ExternalIntegrationsPage() {
     </div>`;
 }
 
-function DebugPage({ showUsername, setShowUsername, username }) {
+function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg, setReportingDebugCfg }) {
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -4553,6 +4591,9 @@ function DebugPage({ showUsername, setShowUsername, username }) {
   const [hdrSaving, setHdrSaving] = useState(false);
   const [hdrSaved, setHdrSaved] = useState(false);
   const [hdrError, setHdrError] = useState(null);
+  const [repSaving, setRepSaving] = useState(false);
+  const [repSaved, setRepSaved] = useState(false);
+  const [repError, setRepError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -4565,6 +4606,10 @@ function DebugPage({ showUsername, setShowUsername, username }) {
         setHdrCfg(h);
         setHdrForm({ header_name: h.header_name || "", header_value: h.header_value || "" });
       } catch(e) { setHdrError(e.message); }
+    })();
+    (async () => {
+      try { setReportingDebugCfg(await api.getReportingDebugConfig()); }
+      catch(e) { setRepError(e.message); }
     })();
   }, []);
 
@@ -4589,6 +4634,16 @@ function DebugPage({ showUsername, setShowUsername, username }) {
       setHdrForm({ header_name: updated.header_name || "", header_value: updated.header_value || "" });
       setHdrSaved(true);
     } catch(e) { setHdrError(e.message); } finally { setHdrSaving(false); }
+  };
+
+  const toggleReportingDebug = async (patch) => {
+    const base = reportingDebugCfg || { capture_enabled:false, panel_enabled:false };
+    setRepSaving(true); setRepSaved(false); setRepError(null);
+    try {
+      const updated = await api.upsertReportingDebugConfig({ ...base, ...patch });
+      setReportingDebugCfg(updated);
+      setRepSaved(true);
+    } catch(e) { setRepError(e.message); } finally { setRepSaving(false); }
   };
 
   return html`
@@ -4651,6 +4706,29 @@ function DebugPage({ showUsername, setShowUsername, username }) {
           ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
         </div>`}
 
+      <div className="card" style=${{marginTop:16}}>
+        <div className="form-section-title">Reporting Lab</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Capture reporting LLM messages from real scans and expose the replay lab in the sidebar.
+          Captures include final reporting batches and during-scan writeups, and are stored
+          in a separate SQLite database next to the main AESPA database.
+        </div>
+        ${repError && html`<div className="alert error">${repError}</div>`}
+        <label className="toggle-row">
+          <input type="checkbox" checked=${reportingDebugCfg?.capture_enabled ?? false}
+            disabled=${repSaving}
+            onChange=${e=>toggleReportingDebug({ capture_enabled:e.target.checked })}/>
+          <span>Capture reporting LLM messages during scans</span>
+        </label>
+        <label className="toggle-row" style=${{marginTop:8}}>
+          <input type="checkbox" checked=${reportingDebugCfg?.panel_enabled ?? false}
+            disabled=${repSaving}
+            onChange=${e=>toggleReportingDebug({ panel_enabled:e.target.checked })}/>
+          <span>Show Reporting Lab in the sidebar</span>
+        </label>
+        ${repSaved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
+      </div>
+
       <div className="card" style=${{marginTop: 16}}>
         <div className="form-section-title">Cloudflare Access</div>
         <div className="field-hint" style=${{marginBottom: 12}}>
@@ -4671,6 +4749,384 @@ function DebugPage({ showUsername, setShowUsername, username }) {
           </div>
         `}
       </div>
+    </div>`;
+}
+
+function ReportingDebugPage() {
+  const [tab, setTab] = useState("prompt");
+  const [promptKey, setPromptKey] = useState("reporting.analyse");
+  const [promptVersions, setPromptVersions] = useState([]);
+  const [selectedPromptVersionId, setSelectedPromptVersionId] = useState("");
+  const [promptVersionName, setPromptVersionName] = useState("");
+  const [promptText, setPromptText] = useState("");
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptSaved, setPromptSaved] = useState(false);
+  const [captures, setCaptures] = useState([]);
+  const [captureDbPath, setCaptureDbPath] = useState("");
+  const [selectedCaptureId, setSelectedCaptureId] = useState("");
+  const [selectedCaptureDetail, setSelectedCaptureDetail] = useState(null);
+
+  const [selectedReplayVersionId, setSelectedReplayVersionId] = useState("");
+  const [replay, setReplay] = useState(null);
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replays, setReplays] = useState([]);
+  const [selectedReplayId, setSelectedReplayId] = useState("");
+  const [compareReplayId, setCompareReplayId] = useState("");
+  const [compareReplay, setCompareReplay] = useState(null);
+  const [error, setError] = useState(null);
+
+  const selectedCapture = captures.find(c => String(c.id) === String(selectedCaptureId));
+  const replayPromptKey = selectedCapture?.kind === "writeup" ? "reporting.writeup" : "reporting.analyse";
+  const selectedPromptVersion = promptVersions.find(v => String(v.id) === String(selectedPromptVersionId));
+  const promptKeyVersions = promptVersions.filter(v => v.key === promptKey);
+  const replayPromptVersions = promptVersions.filter(v => v.key === replayPromptKey);
+  const selectedReplayVersion = replayPromptVersions.find(v => String(v.id) === String(selectedReplayVersionId));
+  const currentFindings = replay?.findings || [];
+  const compareFindings = compareReplay?.findings || [];
+
+  const setEditorVersion = (version) => {
+    if (!version) return;
+    setSelectedPromptVersionId(String(version.id));
+    setPromptVersionName(version.name || "");
+    setPromptText(version.prompt_text || "");
+  };
+  const loadPromptVersions = useCallback(async (key, selectedId = "") => {
+    const d = await api.listReportingPromptVersions(key);
+    const versions = d.versions || [];
+    setPromptVersions(prev => [...prev.filter(v => v.key !== key), ...versions]);
+    const current = versions.find(v => String(v.id) === String(selectedId)) || versions[0];
+    if (key === promptKey) setEditorVersion(current);
+    return versions;
+  }, [promptKey]);
+  const loadCaptures = useCallback(async () => {
+    const d = await api.listReportingCaptures();
+    setCaptures(d.captures || []);
+    setCaptureDbPath(d.db_path || "");
+    if (!selectedCaptureId && d.captures?.[0]) setSelectedCaptureId(String(d.captures[0].id));
+  }, [selectedCaptureId]);
+  const loadReplays = useCallback(async () => {
+    const d = await api.listReportingReplays();
+    setReplays(d.replays || []);
+    if (!selectedReplayId && d.replays?.[0]) setSelectedReplayId(String(d.replays[0].id));
+  }, [selectedReplayId]);
+
+  useEffect(() => {
+    loadPromptVersions("reporting.analyse").catch(e=>setError(e.message));
+    loadPromptVersions("reporting.writeup").catch(e=>setError(e.message));
+    loadCaptures().catch(e=>setError(e.message));
+    loadReplays().catch(e=>setError(e.message));
+  }, []);
+  useEffect(() => {
+    setSelectedPromptVersionId("");
+    loadPromptVersions(promptKey).catch(e=>setError(e.message));
+  }, [promptKey]);
+  useEffect(() => {
+    if (replayPromptVersions.length === 0) {
+      loadPromptVersions(replayPromptKey).catch(e=>setError(e.message));
+      return;
+    }
+    if (!selectedReplayVersionId || !replayPromptVersions.some(v => String(v.id) === String(selectedReplayVersionId))) {
+      const builtin = replayPromptVersions.find(v => v.is_builtin) || replayPromptVersions[0];
+      setSelectedReplayVersionId(String(builtin.id));
+    }
+  }, [replayPromptKey, selectedReplayVersionId, replayPromptVersions.length]);
+
+  useEffect(() => {
+    if (!replay || !["queued","running"].includes(replay.status)) return;
+    const iv = setInterval(async () => {
+      try {
+        const next = await api.getReportingReplay(replay.id);
+        setReplay(next);
+        if (!["queued","running"].includes(next.status)) {
+          setReplayBusy(false);
+          setSelectedReplayId(String(next.id));
+          loadReplays().catch(()=>{});
+        }
+      } catch(e) {
+        setError(e.message);
+        setReplayBusy(false);
+      }
+    }, 1500);
+    return () => clearInterval(iv);
+  }, [replay?.id, replay?.status]);
+  useEffect(() => {
+    if (!selectedReplayId) return;
+    api.getReportingReplay(selectedReplayId).then(setReplay).catch(()=>{});
+  }, [selectedReplayId]);
+  useEffect(() => {
+    if (!compareReplayId) { setCompareReplay(null); return; }
+    api.getReportingReplay(compareReplayId).then(setCompareReplay).catch(()=>{});
+  }, [compareReplayId]);
+  useEffect(() => {
+    if (!selectedCaptureId) { setSelectedCaptureDetail(null); return; }
+    api.getReportingCapture(selectedCaptureId).then(setSelectedCaptureDetail).catch(()=>{});
+  }, [selectedCaptureId]);
+
+  const savePrompt = async () => {
+    if (!selectedPromptVersion || selectedPromptVersion.is_builtin) return;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      const p = await api.updateReportingPromptVersion(selectedPromptVersion.id, {
+        name: promptVersionName,
+        prompt_text: promptText,
+      });
+      await loadPromptVersions(promptKey, p.id);
+      setPromptSaved(true);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const createPromptVersion = async () => {
+    const name = promptVersionName.trim() || `Version ${new Date().toLocaleString()}`;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      const p = await api.createReportingPromptVersion({ key: promptKey, name, prompt_text: promptText });
+      await loadPromptVersions(promptKey, p.id);
+      setPromptSaved(true);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const deletePromptVersion = async () => {
+    if (!selectedPromptVersion || selectedPromptVersion.is_builtin) return;
+    if (!confirm(`Delete prompt version "${selectedPromptVersion.name}"? Saved replay findings remain available.`)) return;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      await api.deleteReportingPromptVersion(selectedPromptVersion.id);
+      await loadPromptVersions(promptKey);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const startReplay = async () => {
+    if (!selectedCaptureId || !selectedReplayVersion?.id) return;
+    setReplayBusy(true); setError(null); setReplay(null);
+    try {
+      const r = await api.replayReportingCapture(selectedCaptureId, { prompt_version_id: Number(selectedReplayVersion.id) });
+      setReplay(r);
+      setSelectedReplayId(String(r.id));
+      setTab("replay");
+    } catch(e) { setError(e.message); setReplayBusy(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Reporting Lab</div>
+    </div>
+    <div className="content scroll-content settings-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn"+(tab==="prompt"?" active":"")} onClick=${()=>setTab("prompt")}>Prompt</button>
+        <button className=${"tab-btn"+(tab==="replay"?" active":"")} onClick=${()=>{ setTab("replay"); loadCaptures().catch(()=>{}); }}>Replay</button>
+        <button className=${"tab-btn"+(tab==="findings"?" active":"")} onClick=${()=>{ setTab("findings"); loadReplays().catch(()=>{}); }}>Debug Findings</button>
+      </div>
+      ${error && html`<div className="alert error">${error}</div>`}
+
+      ${tab==="prompt" && html`
+        <div className="card">
+          <div className="form-section-title">Reporting Prompt Versions</div>
+          <div className="field-hint" style=${{marginBottom:12}}>
+            Default versions load from reporting.py. New versions are saved in the Reporting Lab database and can be replayed against the same captures.
+            <br />Reporting Lab uses the DEFAULT LLM setting and does not respect the overriden setting in the scan the data came from.
+            <br />Set the Version name BEFORE clicking new version!
+          </div>
+          <div className="form-row">
+            <label className="form-label">Prompt</label>
+            <select className="form-input" value=${promptKey}
+              onChange=${e=>{ setPromptKey(e.target.value); setPromptSaved(false); }}>
+              <option value="reporting.analyse">Final reporting batch</option>
+              <option value="reporting.writeup">During-scan writeup replay</option>
+            </select>
+          </div>
+          <div className="form-row">
+            <label className="form-label">Version</label>
+            <select className="form-input" value=${selectedPromptVersionId}
+              onChange=${e=>{
+                const v = promptVersions.find(p=>String(p.id)===String(e.target.value));
+                setEditorVersion(v);
+                setPromptSaved(false);
+              }}>
+              ${promptKeyVersions.map(v=>html`
+                <option key=${v.id} value=${String(v.id)}>
+                  ${v.name}${v.is_builtin ? " (from reporting.py)" : ""}
+                </option>`)}
+            </select>
+          </div>
+          <div className="form-row">
+            <label className="form-label">Version name</label>
+            <input className="form-input" value=${promptVersionName}
+              disabled=${promptSaving}
+              onInput=${e=>{ setPromptSaved(false); setPromptVersionName(e.target.value); }} />
+          </div>
+          ${selectedPromptVersion && html`
+            <div className="row" style=${{gap:8,marginBottom:8}}>
+              <span className="source-badge">${selectedPromptVersion.is_builtin ? "from reporting.py" : "DB version"}</span>
+              ${selectedPromptVersion.updated_at && html`<span className="subtle">Updated ${fmtDate(selectedPromptVersion.updated_at)}</span>`}
+            </div>`}
+          <textarea className="form-input mono" style=${{minHeight:520,whiteSpace:"pre",fontSize:12}}
+            value=${promptText}
+            disabled=${promptSaving}
+            onInput=${e=>{ setPromptSaved(false); setPromptText(e.target.value); }} />
+          <div className="row" style=${{gap:8,marginTop:12}}>
+            <button className="btn" onClick=${savePrompt} disabled=${promptSaving || !promptText.trim() || selectedPromptVersion?.is_builtin}>
+              ${promptSaving ? "Saving…" : "Save Prompt"}
+            </button>
+            <button className="btn secondary" onClick=${createPromptVersion} disabled=${promptSaving || !promptText.trim()}>
+              New Version
+            </button>
+            <button className="btn danger-outline" onClick=${deletePromptVersion} disabled=${promptSaving || selectedPromptVersion?.is_builtin}>
+              Delete Version
+            </button>
+            ${promptSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+          </div>
+        </div>`}
+
+      ${tab==="replay" && html`
+        <div className="card">
+          <div className="form-section-title">Replay Captured Reporting Batch</div>
+          <div className="field-hint" style=${{marginBottom:12}}>
+            Captures are read from <span className="mono">${captureDbPath || "reporting debug DB"}</span>.
+          </div>
+          <div className="row" style=${{gap:8,alignItems:"center",marginBottom:12}}>
+            <select className="form-input" style=${{maxWidth:520}} value=${selectedCaptureId}
+              onChange=${e=>{ setSelectedCaptureId(e.target.value); setSelectedReplayVersionId(""); }}>
+              <option value="">Select a capture…</option>
+              ${captures.map(c=>html`
+                <option key=${c.id} value=${String(c.id)}>
+                  #${c.id} · ${c.kind === "writeup" ? "during-scan writeup" : "final reporting"} · ${fmtDate(c.created_at)} · ${truncUrl(c.url, 52)} · ${c.finding_count} findings
+                </option>`)}
+            </select>
+            <select className="form-input" style=${{maxWidth:300}} value=${selectedReplayVersionId}
+              onChange=${e=>setSelectedReplayVersionId(e.target.value)}>
+              <option value="">Select prompt version…</option>
+              ${replayPromptVersions.map(v=>html`
+                <option key=${v.id} value=${String(v.id)}>
+                  ${v.name}${v.is_builtin ? " (default)" : ""}
+                </option>`)}
+            </select>
+            <button className="btn secondary" onClick=${()=>loadCaptures().catch(e=>setError(e.message))}>Refresh</button>
+            <button className="btn" onClick=${startReplay} disabled=${replayBusy || !selectedCaptureId || !selectedReplayVersion?.id}>
+              ${replayBusy ? "Replaying…" : "Replay"}
+            </button>
+          </div>
+          ${selectedCapture && html`
+            <div className="settings-list-row" style=${{marginBottom:8}}>
+              <div>
+                <strong>Capture #${selectedCapture.id}</strong>
+                <div className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${selectedCapture.url}</div>
+                <div className="subtle">
+                  ${selectedCapture.kind === "writeup" ? `Source ${selectedCapture.source || "unknown"}` : `Model ${selectedCapture.llm?.model || "unknown"} · ${selectedCapture.llm?.provider || "unknown"}`}
+                </div>
+                <div className="subtle">Prompt version ${selectedReplayVersion?.name || "unknown"}</div>
+              </div>
+              <div><span className="finding-count-badge">${selectedCapture.finding_count}</span></div>
+            </div>
+            ${selectedCaptureDetail?.findings?.length > 0 && html`
+              <div style=${{marginBottom:12}}>
+                <div className="subtle" style=${{fontSize:11,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>Original findings in this capture</div>
+                <${DebugFindingsTable}
+                  findings=${selectedCaptureDetail.findings}/>
+              </div>`}
+          `}
+          ${replay && html`
+            <div className="activity-token-bar" style=${{cursor:"default"}}>
+              ${["queued","running"].includes(replay.status) && html`<span className="inline-spinner"></span>`}
+              <span className="token-bar-label">${replay.status}</span>
+              <span>${replay.progress_message || ""}</span>
+              ${replay.prompt_version_name && html`<span className="source-badge">${replay.prompt_version_name}</span>`}
+              ${replay.error && html`<span className="alert error" style=${{marginLeft:8}}>${replay.error}</span>`}
+            </div>
+            ${replay.status==="complete" && html`
+              <div className="row" style=${{gap:8,marginTop:12}}>
+                <button className="btn" onClick=${()=>setTab("findings")}>
+                  View ${replay.finding_count} Debug Finding${replay.finding_count===1?"":"s"}
+                </button>
+              </div>`}
+          `}
+        </div>`}
+
+      ${tab==="findings" && html`
+        <div className="card">
+          <div className="form-section-title">Debug Reporter Findings</div>
+          <div className="row" style=${{gap:8,alignItems:"center",marginBottom:12}}>
+            <select className="form-input" style=${{maxWidth:460}} value=${selectedReplayId}
+              onChange=${e=>setSelectedReplayId(e.target.value)}>
+              <option value="">Select a replay…</option>
+              ${replays.map(r=>html`
+                <option key=${r.id} value=${String(r.id)}>
+                  Replay #${r.id} · ${r.prompt_version_name || "unknown version"} · ${r.status} · ${fmtDate(r.started_at)} · ${r.finding_count} findings
+                </option>`)}
+            </select>
+            <select className="form-input" style=${{maxWidth:460}} value=${compareReplayId}
+              onChange=${e=>setCompareReplayId(e.target.value)}>
+              <option value="">Compare with…</option>
+              ${replays.filter(r=>String(r.id)!==String(selectedReplayId)).map(r=>html`
+                <option key=${r.id} value=${String(r.id)}>
+                  Replay #${r.id} · ${r.prompt_version_name || "unknown version"} · ${r.status} · ${fmtDate(r.started_at)}
+                </option>`)}
+            </select>
+            <button className="btn secondary" onClick=${()=>loadReplays().catch(e=>setError(e.message))}>Refresh</button>
+          </div>
+          ${compareReplay
+            ? html`
+              <div style=${{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:16}}>
+                <div>
+                  <div className="form-section-title">Replay #${replay?.id || "—"} · ${replay?.prompt_version_name || "unknown version"}</div>
+                  ${currentFindings.length === 0
+                    ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+                    : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
+                </div>
+                <div>
+                  <div className="form-section-title">Replay #${compareReplay.id} · ${compareReplay.prompt_version_name || "unknown version"}</div>
+                  ${compareFindings.length === 0
+                    ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+                    : html`<${DebugFindingsTable} findings=${compareFindings}/>`}
+                </div>
+              </div>`
+            : currentFindings.length === 0
+              ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+              : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
+        </div>`}
+    </div>`;
+}
+
+function DebugFindingsTable({ findings }) {
+  const [expandedFinding, setExpandedFinding] = useState(null);
+  const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
+  const sorted = [...findings].sort((a,b)=>(SEV_ORDER[a.severity]??99)-(SEV_ORDER[b.severity]??99));
+  return html`
+    <div className="findings-table-wrap">
+      <table className="findings-table" style=${{tableLayout:"fixed",width:"100%"}}>
+        <colgroup><col style=${{width:80}}/><col/></colgroup>
+        <thead>
+          <tr><th>Sev</th><th>Title</th></tr>
+        </thead>
+        <tbody>
+          ${sorted.map((f,idx)=>html`
+            <tr key=${idx} className="finding-group-row"
+              onClick=${()=>setExpandedFinding(expandedFinding===idx?null:idx)}>
+              <td><span className=${"sev-badge sev-"+(f.severity||"info")}>${f.severity||"info"}</span></td>
+              <td className="finding-title" style=${{width:"100%"}}>
+                <div className="row" style=${{alignItems:"flex-start",gap:8}}>
+                  <div style=${{flex:1,minWidth:0}}>
+                    <span className="group-chevron">${expandedFinding===idx?"▾":"▸"}</span>
+                    ${f.title || "Untitled finding"}
+                    <div className="mono" style=${{fontSize:11,wordBreak:"break-all",marginTop:4}}>${f.affected_url || ""}</div>
+                  </div>
+                  ${f.cvss_score != null && html`<span className="subtle" style=${{whiteSpace:"nowrap",fontSize:11,paddingTop:2}}>${f.cvss_score}</span>`}
+                </div>
+              </td>
+            </tr>
+            ${expandedFinding===idx && html`
+              <tr className="finding-evidence-row">
+                <td colSpan="2">
+                  <div className="finding-description">
+                    <div><strong>Description</strong></div><div>${f.description || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${f.impact || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${f.likelihood || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${f.recommendation || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
+                    <div>${f.cvss_score ?? "—"} ${f.cvss_vector && html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>`}</div>
+                  </div>
+                  ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                </td>
+              </tr>`}
+          `)}
+        </tbody>
+      </table>
     </div>`;
 }
 
@@ -4708,6 +5164,7 @@ function sourceLabel(source) {
     burp_mcp: "Burp MCP",
     deterministic_probe: "Deterministic",
     manual_import: "Imported",
+    debug_reporter: "Debug Reporter",
     unknown: "Unknown",
   };
   return labels[source] || String(source || "Unknown").replace(/_/g, " ");

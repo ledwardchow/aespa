@@ -8,7 +8,18 @@ from fastapi import HTTPException
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
-from aespa.models import AdversarialValidatorConfig, BurpRestApiConfig, GlobalHttpHeaderConfig, LLMConfig, LLMProviderConfig, ScannerPolicy, SpecialistAgentConfig, TestRun, UpstreamProxyConfig
+from aespa.models import (
+    AdversarialValidatorConfig,
+    BurpRestApiConfig,
+    GlobalHttpHeaderConfig,
+    LLMConfig,
+    LLMProviderConfig,
+    ReportingDebugConfig,
+    ScannerPolicy,
+    SpecialistAgentConfig,
+    TestRun,
+    UpstreamProxyConfig,
+)
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
@@ -22,6 +33,8 @@ from aespa.schemas import (
     LLMImportResult,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
+    ReportingDebugConfigIn,
+    ReportingDebugConfigOut,
     RunScannerPolicyOut,
     ScannerPolicyIn,
     ScannerPolicyOut,
@@ -91,6 +104,7 @@ def llm_profile_out(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         max_tokens=resolved.max_tokens,
         temperature=resolved.temperature,
         use_vision=resolved.use_vision,
+        force_tool_choice=resolved.force_tool_choice,
         updated_at=resolved.updated_at,
     )
 
@@ -225,6 +239,7 @@ def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, ac
     cfg.max_tokens  = payload.max_tokens
     cfg.temperature = payload.temperature
     cfg.use_vision  = payload.use_vision
+    cfg.force_tool_choice = payload.force_tool_choice
     cfg.updated_at  = _utcnow()
 
     if cfg.is_active:
@@ -507,6 +522,35 @@ def upsert_global_http_header_config(
     return get_global_http_header_config(session)
 
 
+def get_reporting_debug_config(session: Session) -> ReportingDebugConfigOut:
+    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        return ReportingDebugConfigOut(
+            **ReportingDebugConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return ReportingDebugConfigOut(
+        capture_enabled=cfg.capture_enabled,
+        panel_enabled=cfg.panel_enabled,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_reporting_debug_config(
+    session: Session, payload: ReportingDebugConfigIn
+) -> ReportingDebugConfigOut:
+    cfg = session.get(ReportingDebugConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = ReportingDebugConfig(id=_SINGLETON_ID)
+    cfg.capture_enabled = payload.capture_enabled
+    cfg.panel_enabled = payload.panel_enabled
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_reporting_debug_config(session)
+
+
 # ── LLM config export / import ────────────────────────────────────────────────
 
 def export_llm_config(session: Session) -> LLMConfigExport:
@@ -537,6 +581,7 @@ def export_llm_config(session: Session) -> LLMConfigExport:
             max_tokens=c.max_tokens,
             temperature=c.temperature,
             use_vision=c.use_vision,
+            force_tool_choice=c.force_tool_choice,
             is_active=c.is_active,
         )
         for c in profiles_db
@@ -654,6 +699,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.max_tokens = item.max_tokens
         cfg.temperature = item.temperature
         cfg.use_vision = item.use_vision
+        cfg.force_tool_choice = item.force_tool_choice
         cfg.is_active = False  # we handle activation below
         cfg.updated_at = _utcnow()
         session.add(cfg)

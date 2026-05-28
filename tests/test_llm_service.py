@@ -1185,6 +1185,161 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert "HTTP/1.1 200" in captured["prompt"]
 
 
+def test_analyse_probes_writes_reporting_replay_capture(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        return """
+        [{
+          "owasp_category": "A03",
+          "severity": "medium",
+          "title": "Reflected XSS in search",
+          "description": "The q parameter is reflected without encoding.",
+          "impact": "An attacker can execute script in another user's browser.",
+          "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+          "recommendation": "Encode reflected output and validate the parameter.",
+          "cvss_score": 6.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          "affected_url": "https://target.local/search?q=<script>alert(1)</script>",
+          "evidence": "Payload is reflected in the response."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    captured: dict[str, object] = {}
+
+    from aespa.services import reporting_debug
+
+    monkeypatch.setattr(reporting_debug, "is_capture_enabled", lambda: True)
+    monkeypatch.setattr(
+        reporting_debug,
+        "capture_reporting_batch",
+        lambda **kwargs: captured.update(kwargs) or 1,
+    )
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
+        "desc": "XSS probe",
+        "url": "https://target.local/search?q=<script>alert(1)</script>",
+        "status": 200,
+        "headers": {"content-type": "text/html"},
+        "body": "<script>alert(1)</script>",
+        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+    }]))
+
+    assert captured["url"] == "https://target.local/search"
+    assert captured["result_texts"]
+    assert captured["prompt_sha256"]
+    assert captured["llm"]["model"] == "local"
+    assert captured["findings"] == findings
+
+
+def test_replay_reporting_capture_rebuilds_current_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        [{
+          "owasp_category": "A05",
+          "severity": "low",
+          "title": "Verbose error response",
+          "description": "A verbose framework error is returned.",
+          "impact": "Attackers can use implementation details to refine attacks.",
+          "likelihood": "Likely when the endpoint is reachable.",
+          "recommendation": "Return generic errors and log details server-side.",
+          "cvss_score": 3.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "affected_url": "https://target.local/error",
+          "evidence": "Stack trace was returned."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "capture_id": "cap-1",
+        "url": "https://target.local/error",
+        "result_texts": ["--- Probe: verbose error ---\nHTTP/1.1 500"],
+        "prompt": "old saved prompt",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_capture(config, capture))
+
+    assert prompts[0] != "old saved prompt"
+    assert "You are a web application penetration tester reviewing probe results" in prompts[0]
+    assert "HTTP/1.1 500" in prompts[0]
+    assert result["source_capture_id"] == "cap-1"
+    assert result["findings"][0]["title"] == "Verbose error response"
+
+
+def test_replay_reporting_capture_can_use_saved_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "url": "https://target.local",
+        "result_texts": ["result text"],
+        "prompt": "exact prompt from scan",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    asyncio.run(llm.replay_reporting_capture(config, capture, use_saved_prompt=True))
+
+    assert prompts == ["exact prompt from scan"]
+
+
+def test_replay_reporting_writeup_capture_uses_writeup_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        {
+          "owasp_category": "A01",
+          "severity": "high",
+          "title": "IDOR exposes account statement",
+          "description": "The statement endpoint returns another user's account data.",
+          "impact": "An attacker can read sensitive account statements.",
+          "likelihood": "Likely when account IDs are enumerable.",
+          "recommendation": "Enforce object ownership checks server-side.",
+          "cvss_score": 7.5,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+          "affected_url": "https://target.local/accounts/2/statement",
+          "evidence": "Captured response included another user's statement."
+        }
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "kind": "writeup",
+        "capture_id": 7,
+        "source": "test_lead",
+        "base_url": "https://target.local",
+        "url": "https://target.local/accounts/2/statement",
+        "finding": {
+            "title": "Account statement IDOR",
+            "affected_url": "https://target.local/accounts/2/statement",
+            "evidence": "Other account returned.",
+        },
+        "evidence": {"response_evidence": "HTTP/1.1 200\nAlice Statement"},
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_writeup_capture(config, capture))
+
+    assert "Original finding JSON" in prompts[0]
+    assert "Supporting evidence" in prompts[0]
+    assert result["source_capture_id"] == 7
+    assert result["findings"][0]["title"] == "IDOR exposes account statement"
+
+
 def test_analyse_probes_chunks_large_result_sets(monkeypatch):
     prompts: list[str] = []
 
@@ -1429,4 +1584,202 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
         "cache_read_tokens": 800,
         "cache_write_tokens": 400,
     }
+
+
+def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-r1-reasoning-model",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert "tool_choice" not in captured["completion"]
+
+
+def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            captured[f"call_{self.calls}"] = kwargs
+            if self.calls == 1:
+                raise ValueError("Thinking mode does not support this tool_choice")
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-v4-pro-custom",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert captured["call_1"]["tool_choice"] == "required"
+    assert "tool_choice" not in captured["call_2"]
+
+
+def test_anthropic_caching_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            captured["create_kwargs"] = kwargs
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="response text", id=None, name=None, input=None)],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=8, cache_creation_input_tokens=2)
+            )
+
+    class FakeAsyncAnthropic:
+        def __init__(self, **kwargs):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", FakeAsyncAnthropic)
+
+    config = LLMConfig(
+        provider="anthropic",
+        api_key="sk-test",
+        model="claude-3-5-sonnet",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+    tools = [{"name": "get_weather", "description": "Get the weather", "input_schema": {"type": "object"}}]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="you are a helpful assistant",
+        messages=messages,
+        tools=tools,
+    ))
+
+    assert blocks[0]["text"] == "response text"
+    create_kwargs = captured["create_kwargs"]
+
+    # Verify messages have cache_control on the last message's last content block
+    cached_messages = create_kwargs["messages"]
+    assert len(cached_messages) == 3
+    assert cached_messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original messages list was NOT mutated in-place
+    assert "cache_control" not in messages[-1]
+    if isinstance(messages[-1]["content"], list):
+        assert "cache_control" not in messages[-1]["content"][-1]
+
+    # Verify tools have cache_control on the last tool
+    cached_tools = create_kwargs["tools"]
+    assert len(cached_tools) == 1
+    assert cached_tools[-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original tools list was NOT mutated
+    assert "cache_control" not in tools[-1]
+
+
+def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse_kwargs"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system prompt",
+        messages=messages,
+        tools=[],
+    ))
+
+    converse_kwargs = captured["converse_kwargs"]
+    converse_messages = converse_kwargs["messages"]
+
+    # Verify first user message has cachePoint
+    assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
+    # Verify last user message has cachePoint
+    assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
 
