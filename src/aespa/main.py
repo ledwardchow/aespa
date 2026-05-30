@@ -110,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         @app.middleware("http")
         async def _no_cache_web_assets(request, call_next):
             response = await call_next(request)
-            if request.url.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+            if request.url.path in {"/", "/index.html", "/app.js", "/styles.css", "/sw.js", "/manifest.json"}:
                 response.headers["Cache-Control"] = "no-store, max-age=0"
                 response.headers["Pragma"] = "no-cache"
             return response
