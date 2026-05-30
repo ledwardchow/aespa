@@ -4,8 +4,60 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #114] A.L.I.C.E. — Interactive Pentesting Chat Agent
+**Merged:** 2026-05-30 | Branch: `tester-chat → main`
+
+Introduces A.L.I.C.E. (AI LLM-Integrated Chat Engine), an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
+
+### Architecture
+
+- **Background task registry** (`services/alice_tasks.py`): ALICE agentic loops now run as `asyncio.create_task` entries in a module-level registry keyed by `run_id`, fully decoupled from the HTTP connection. The agent keeps executing tools on the server even when the browser refreshes or navigates away.
+- **SSE event buffer with cursor-based replay**: Every event emitted by the task is appended to `AliceTask.events` (capped at 2,000 entries). On reconnect `GET /alice/stream?cursor=N` replays buffered events from position N, then switches to live delivery — no missed events after a page refresh.
+- **Stream resume on page load**: `GET /alice/status` is polled on component mount; if a task is running the client automatically reconnects to the event stream and rebuilds the chat UI from the buffer.
+
+### New API endpoints (`api/alice.py`)
+
+| Endpoint | Description |
+|---|---|
+| `POST /alice/run` | Start a background ALICE task (returns immediately; agent runs server-side) |
+| `GET /alice/stream?cursor=N` | SSE stream with replay from position N |
+| `DELETE /alice/run` | Cancel the running task; emits a final `done` event with partial content |
+| `GET /alice/status` | Check whether a task is running; returns `tab_id`, `think_msg_id`, `reply_msg_id` |
+| `GET /alice/sessions` | Load persisted chat sessions (returns `updated_at` for cache-freshness comparison) |
+| `PUT /alice/sessions` | Save chat sessions (debounced 800 ms on the client) |
+
+### Server-side chat persistence
+
+- **Normalised schema**: `AliceChatSession` (one row per tab) + `AliceChatMessage` (one row per bubble) replace a blob-per-run design. Message text is updated in-place; large streaming responses produce a single row update rather than a full JSON rewrite.
+- **Multi-user support**: Any browser opening the same scan URL sees the full conversation history immediately.
+- **Freshness comparison**: `GET /alice/sessions` returns `updated_at`; the client compares it against a local `savedAt` timestamp so a same-user page refresh keeps the fresher local state while a different-user load correctly takes the server version.
+
+### UI
+
+- **ALICE chat panel** in the run detail Activity tab: multi-session tabs, collapsible thought-process bubbles, tool-call cards, markdown reply rendering.
+- **Stop A.L.I.C.E. button**: appears in the run topbar whenever a background task is running; aborts the local SSE connection and sends `DELETE /alice/run` to cancel the server task.
+- **Thought process renders graphically during streaming**: subscriber writes `session.accumulatedThought` (the complete running total) to React state on each chunk, so `parseAliceThinking` always receives a parseable string rather than partial text.
+- **ALICE panel open by default** (removed from the initially-collapsed agent set).
+- **Newline separation**: each new LLM text block is preceded by `\n\n` when prior message content exists, preventing consecutive paragraphs from running together.
+
+### Bug fixes
+
+- **`write_finding` false deduplication** (`skip_normalize=True`): `normalize_finding_titles` was renaming ALICE findings to match existing titles of unrelated findings that share an OWASP category, causing them to be dropped as duplicates. ALICE findings now bypass normalisation; exact-title dedup still applies.
+- **`agent_dispatch` was a no-op**: `dispatch_specialist_agent` was imported but never defined; the import raised `ImportError` which was silently swallowed. Added the public wrapper `dispatch_specialist_agent` in `scanner.py` that bootstraps LLM config, scanner policy, specialist config, session vault and recon summary from the DB before calling `_schedule_specialist_agent`.
+- **`browser` tool import error**: Was importing `_execute_browser_steps` (non-existent); replaced with a direct `httpx` page fetch using the same client as `http_request`.
+- **`get_run_scanner_policy` wrong call signature**: Was called as `get_run_scanner_policy(run_id)` but requires `(session, run)`; replaced with `_get_alice_timeout(run_id)` helper that opens its own session.
+- **`_scope_err` typo**: Variable `scope_err` was referenced as `_scope_err` in the HTTP request scope-check path.
+- **`\\n` vs `\n` in SSE deltas**: Thinking chunk deltas contained literal `\n` (backslash-n) rather than actual newlines, causing `parseAliceThinking`'s line-split to produce no separators and rendering all status blocks as raw text.
+- **304 Not Modified caching bug** (`main.py`): `app.js` and `styles.css` are now served as explicit FastAPI routes that read and return the file directly, bypassing `StaticFiles`' ETag/conditional-GET handling. A normal browser refresh (Cmd-R) no longer serves a stale cached version of the JavaScript bundle.
+
+### Documentation
+
+- `docs/architecture.md`: new §15 A.L.I.C.E. documenting the background task registry, reconnect/replay mechanics, agentic loop, all 10 tools, finding persistence design, client-side streaming state model, and Stop A.L.I.C.E. flow. Other sections updated: repository layout, system overview, data models, multi-agent diagram, API layer, frontend tabs, concurrency.
+
+---
+
 ## [PR #102] DeepSeek Support, Anthropic Caching & Reporting Lab
-**Merged:** Pending (Open PR) | Branch: `develop → main`
+**Merged:** 2026-05-30 22:33 AEST | Branch: `develop → main`
 
 Bundles three develop releases into main: DeepSeek model compatibility, improved Anthropic prompt caching, and the new Reporting Lab capture-replay debugging feature (24 files, 2,699 insertions, 556 deletions).
 
