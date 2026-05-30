@@ -330,7 +330,7 @@ function App() {
         <div className="sidebar-brand">
           <div className="logo">
             ${!collapsed && html`<div className="logo-codename"><span>CODE</span><span>NAME</span></div>`}
-            <div className="logo-icon">A</div>
+            <img src="/icon-sm.png" className="logo-icon" alt="AESPA" />
             ${!collapsed && html`<span className="logo-text">ESPA</span>`}
           </div>
           ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
