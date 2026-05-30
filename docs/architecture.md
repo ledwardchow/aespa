@@ -20,6 +20,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web appl
 12. [API Layer](#12-api-layer)
 13. [Frontend & Real-time Events](#13-frontend--real-time-events)
 14. [Concurrency & State Management](#14-concurrency--state-management)
+15. [A.L.I.C.E. — Interactive Pentesting Chat](#15-alice--interactive-pentesting-chat)
 
 ---
 
@@ -49,6 +50,8 @@ src/aespa/
     │   ├── specialist.py  # Specialist agent prompts
     │   ├── test_lead.py   # Test Lead agent prompts
     │   └── validator.py   # Adversarial validator prompts
+    ├── alice.py           # A.L.I.C.E. agentic loop & tool executor
+    ├── alice_tasks.py     # Background task registry — survives client disconnects
     ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Deduplication, grouping, post-scan LLM pre-screen
@@ -113,7 +116,8 @@ AESPA_PORT         = 8000
 │  Sites · Credentials · TestRuns · CrawledPages · PageLinks  │
 │  TrafficEntries · ScanFindings · ScannerSessions            │
 │  TargetIntelItems · PentestHypotheses · PentestTasks        │
-│  ScanLogs · BurpRestApiConfig · UpstreamProxyConfig         │
+│  ScanLogs · AliceChatSessions · AliceChatMessages           │
+│  BurpRestApiConfig · UpstreamProxyConfig                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -257,6 +261,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
 | `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
+| `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
+| `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -440,6 +446,10 @@ Dynamic scan
                                            (mandate to disprove the finding;
                                             different system prompt;
                                             cannot create new findings)
+
+A.L.I.C.E. (Interactive chat — user-directed, runs as persistent background task)
+  └── Can dispatch Specialist Agents via agent_dispatch tool
+  └── Can write findings directly via write_finding tool
 
 Burp active scans  (dispatched from scanner, surfaced in Agents panel)
 Reporting agent    (post-scan LLM pre-screen pass over new findings)
@@ -653,6 +663,10 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
 | `/api/test-runs/{id}/findings/` | `test_runs.py` | List, import, validate findings |
 | `/api/test-runs/{id}/thinking-log/export` | `scan.py` | Export the full scan activity log |
+| `/api/test-runs/{id}/alice/run` | `alice.py` | `POST` start · `DELETE` stop background ALICE task |
+| `/api/test-runs/{id}/alice/stream` | `alice.py` | SSE event stream with cursor-based replay |
+| `/api/test-runs/{id}/alice/status` | `alice.py` | Check whether an ALICE task is running |
+| `/api/test-runs/{id}/alice/sessions` | `alice.py` | `GET`/`PUT` chat session persistence |
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
 | `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
 
@@ -691,6 +705,7 @@ The run view has seven top-level tabs:
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
 | **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, and validation controls |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |
+| **A.L.I.C.E.** | Interactive chat panel; supports multiple named sessions (tabs); see §15 |
 
 ---
 
@@ -700,7 +715,154 @@ The run view has seven top-level tabs:
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
+- **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
+
+---
+
+## 15. A.L.I.C.E. — Interactive Pentesting Chat
+
+**Files**: `src/aespa/services/alice.py`, `src/aespa/services/alice_tasks.py`, `src/aespa/api/alice.py`
+
+A.L.I.C.E. (Automated LLM-Integrated Chat Engine) is an **interactive, user-directed pentesting agent** embedded in the run detail view. Unlike the autonomous dynamic scan, ALICE responds to natural-language instructions typed by the user and conducts targeted investigations in real time — probing specific endpoints, testing hypotheses, and writing confirmed findings directly to the scan report.
+
+### Architecture overview
+
+```
+User types instruction in chat UI
+  │
+  ▼
+POST /api/test-runs/{id}/alice/run
+  └─ alice_tasks.start(run_id, tab_id, think_msg_id, reply_msg_id, message, history)
+       └─ asyncio.create_task(_run(...))   ← background task, survives client disconnects
+            └─ alice.run_alice_turn_stream(run_id, message, history)
+                 └─ Agentic loop: LLM → tool → result → repeat until done/steps exhausted
+
+Browser subscribes to event stream
+  │
+  ▼
+GET /api/test-runs/{id}/alice/stream?cursor=N
+  └─ alice_tasks.stream_events(run_id, cursor)
+       ├─ Replay buffered events[cursor:]  ← catches up missed events (page refresh)
+       └─ Live events from asyncio.Queue   ← pushed by _append() as they arrive
+```
+
+### Background task registry (`alice_tasks.py`)
+
+The key design decision: **the agentic loop runs independently of the HTTP connection**. When a user refreshes the page, navigates away, or loses network for a moment, the agent keeps thinking and executing tools on the server.
+
+```python
+@dataclass
+class AliceTask:
+    run_id: int
+    tab_id: str           # which chat session tab started this turn
+    think_msg_id: str     # client-assigned ID for the thinking bubble
+    reply_msg_id: str     # client-assigned ID for the reply bubble
+    events: list[dict]    # all SSE events since task start (capped at BUFFER_LIMIT=2000)
+    waiters: set[asyncio.Queue]  # one queue per connected SSE client
+    asyncio_task: asyncio.Task
+    done: bool
+    accumulated_thought: str     # running total for a valid done event on cancel
+    accumulated_message: str
+```
+
+`_append(task, event)` is synchronous and called from within the async task loop:
+- Updates `accumulated_thought` / `accumulated_message` running totals
+- Appends to `task.events` (trims oldest if over `BUFFER_LIMIT`)
+- Pushes to every connected client queue via `q.put_nowait(event)` (non-blocking)
+
+On `asyncio.CancelledError` (user hits Stop A.L.I.C.E.), a final `done` event is appended with the thought/message accumulated so far, so the UI always receives a clean terminal state.
+
+### Reconnect and replay
+
+When a client reconnects (page refresh, SPA navigation back to the run), it calls `GET /alice/stream?cursor=0`. The server replays `task.events[0:]` as SSE lines immediately, then switches to live delivery. The client re-accumulates `accumulatedThought` and `accumulatedMessage` from these replayed events, so the chat UI rebuilds the correct state even if the page was refreshed mid-stream.
+
+`GET /alice/status` is polled on page load. If `running: true`, the client automatically calls `aliceSessionConnect` to start receiving events.
+
+### Agentic loop (`alice.py`)
+
+`run_alice_turn_stream` implements the multi-turn agentic loop as an async generator that yields SSE lines:
+
+```
+1. Load run/site config; verify scope of the user's instruction
+2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
+3. Convert chat history → Anthropic messages format
+4. Loop (max ALICE_MAX_STEPS = 40):
+     a. Emit [Step N] Calling LLM... thinking chunk
+     b. Call LLM with tools (ALICE tool set — see below)
+     c. Stream thinking blocks → thinking_chunk SSE events
+     d. Stream text blocks → message_chunk SSE events
+        (prepend \n\n separator if prior message content exists)
+     e. Execute tool calls → emit step status + tool result chunks
+     f. If model calls done tool → break
+     g. If 3 consecutive text-only turns → break (nudge model back to tools)
+5. Emit done SSE event with final accumulated thought + message
+```
+
+### Tools available to ALICE
+
+| Tool | Description |
+|---|---|
+| `http_request` | Issue arbitrary HTTP requests; scope-checked; traffic logged |
+| `browser` | Simple page fetch via httpx with browser-like headers |
+| `context_tool` | Read-only access to crawl data (site map, page details, traffic) |
+| `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
+| `decode_jwt` | Decode a JWT's header and payload |
+| `credential_check` | Test a login URL with a list of candidate credential pairs |
+| `register_account` | Create a test account and store the resulting session |
+| `agent_dispatch` | Dispatch a Specialist Agent (see below) |
+| `done` | End the turn with a summary |
+
+#### `write_finding` deduplication
+
+ALICE findings bypass the `normalize_finding_titles` LLM call (`skip_normalize=True`). The automated scanner uses title normalisation to group near-identical probe results under a canonical title; ALICE already generates specific, human-readable titles. Running normalisation against ALICE findings can rename a distinct finding to match an existing title at the same URL, causing it to be silently dropped as a duplicate.
+
+Exact-title deduplication (`_dynamic_finding_exists`) still runs — genuinely identical findings are still rejected.
+
+#### `agent_dispatch` — dispatching Specialist Agents from ALICE
+
+The `dispatch_specialist_agent` function (public wrapper in `scanner.py`) bootstraps all required scanner context from the database (LLM config, scanner policy, specialist config, session vault, recon summary) and calls `_schedule_specialist_agent`. This allows ALICE to dispatch focused specialist agents on high-confidence leads just as the autonomous Test Lead does.
+
+The specialist runs as an independent `asyncio.Task` under the same `run_id` and writes findings directly to the database.
+
+### Chat session persistence
+
+Chat history is stored server-side in a **normalised two-table schema** so any browser opening the same scan sees the full conversation history.
+
+| Table | Purpose |
+|---|---|
+| `AliceChatSession` | One row per chat tab (`session_key`, `title`, `position`, `is_active`) |
+| `AliceChatMessage` | One row per message bubble (`message_key`, `sender`, `type`, `text`, `ts`, `position`) |
+
+The frontend saves state via `PUT /alice/sessions` with a debounce of 800 ms. Message text is updated in place (`message_key` is the client-assigned stable ID), so a long streaming response produces only a single row update rather than rewriting a full JSON blob.
+
+`GET /alice/sessions` returns `{ chats, active_tab_id, updated_at }`. The `updated_at` timestamp (max across all sessions for the run) lets the client compare server state against local `savedAt` to decide which source is fresher — critical for the page-refresh case where local state is current but the server's debounced save is a few seconds behind.
+
+### Client-side streaming state
+
+The frontend maintains a module-level `aliceSessionStore` (keyed by `runId:tabId`) for within-page-session state:
+
+```js
+AliceSession {
+  active: bool
+  thinkMsgId, replyMsgId       // IDs of the in-progress bubbles
+  accumulatedThought, accumulatedMessage  // growing totals (re-built from cursor=0 on reconnect)
+  waiters: Set<handlers>       // subscriber pattern for multi-component updates
+}
+```
+
+Subscribers update React state using `session.accumulatedThought` (the running total) rather than appending individual deltas — this ensures that even mid-stream, `parseAliceThinking` always receives a complete, parseable string and renders status blocks and tool-call cards rather than raw text.
+
+A localStorage key `alice_recover_{runId}:{tabId}` is written on every chunk (bypassing React state). On page remount this key is used as a fallback if the module-level session was cleared (e.g. hard refresh, HMR).
+
+### Stop A.L.I.C.E.
+
+A **Stop A.L.I.C.E.** button appears in the run topbar whenever `aliceGlobalRunning` is true. Clicking it:
+1. Aborts the local SSE connection (`AbortController.abort()`)
+2. Calls `DELETE /alice/run` → `alice_tasks.stop(run_id)` → `asyncio.Task.cancel()`
+3. The cancelled task appends a `done` event with partial content before exiting
+4. All connected SSE clients receive the `done` event and close their streams
 
