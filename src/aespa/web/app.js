@@ -306,6 +306,553 @@ const IconBrain = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fil
 </svg>`;
 
 
+const parseToolArgs = (text) => {
+  const args = {};
+  const jsonMatch = text.match(/\{.*\}/s);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (_) {}
+  }
+  
+  // Extract key-value parameter pairs (e.g. url='http://...')
+  const kvRegex = /([a-zA-Z0-9_]+)\s*=\s*(['"][^'"]*['"]|[^,)]+)/g;
+  let match;
+  while ((match = kvRegex.exec(text)) !== null) {
+    let key = match[1];
+    let val = match[2].trim();
+    if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+      val = val.slice(1, -1);
+    }
+    args[key] = val;
+  }
+  return Object.keys(args).length > 0 ? args : null;
+};
+
+
+const parseAliceThinking = (text) => {
+  if (!text) return [];
+  
+  const blocks = [];
+  const lines = text.split("\n");
+  let currentParagraph = [];
+  let inCodeBlock = false;
+  let codeLang = "";
+  let codeContent = [];
+  
+  let inToolCall = false;
+  let toolCallContent = [];
+  let inToolResponse = false;
+  let toolResponseContent = [];
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    
+    // Code block transition
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        // End of code block
+        blocks.push({
+          type: "code",
+          lang: codeLang,
+          text: codeContent.join("\n")
+        });
+        inCodeBlock = false;
+        codeContent = [];
+      } else {
+        // Start of code block
+        // Flush existing paragraph first
+        if (currentParagraph.length > 0) {
+          blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+          currentParagraph = [];
+        }
+        inCodeBlock = true;
+        codeLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeContent.push(line);
+      continue;
+    }
+
+    // Tool Call tag handling (multi-line)
+    if (inToolCall) {
+      if (trimmed.includes("</tool_call>")) {
+        const parts = line.split("</tool_call>");
+        if (parts[0]) toolCallContent.push(parts[0]);
+        inToolCall = false;
+        
+        const rawText = toolCallContent.join("\n");
+        let toolName = "unknown";
+        let toolArgsText = rawText;
+        try {
+          const parsed = JSON.parse(rawText.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = rawText.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+        toolCallContent = [];
+      } else {
+        toolCallContent.push(line);
+      }
+      continue;
+    }
+
+    // Tool Response tag handling (multi-line)
+    if (inToolResponse) {
+      if (trimmed.includes("</tool_response>")) {
+        const parts = line.split("</tool_response>");
+        if (parts[0]) toolResponseContent.push(parts[0]);
+        inToolResponse = false;
+        
+        blocks.push({
+          type: "tool_response",
+          text: toolResponseContent.join("\n")
+        });
+        toolResponseContent = [];
+      } else {
+        toolResponseContent.push(line);
+      }
+      continue;
+    }
+
+    // Start of Tool Call block
+    if (trimmed.includes("<tool_call>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_call>")) {
+        const startIndex = line.indexOf("<tool_call>");
+        const endIndex = line.indexOf("</tool_call>");
+        const content = line.substring(startIndex + 11, endIndex);
+        
+        let toolName = "unknown";
+        let toolArgsText = content;
+        try {
+          const parsed = JSON.parse(content.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = content.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+      } else {
+        inToolCall = true;
+        const parts = line.split("<tool_call>");
+        if (parts[1]) toolCallContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Start of Tool Response block
+    if (trimmed.includes("<tool_response>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_response>")) {
+        const startIndex = line.indexOf("<tool_response>");
+        const endIndex = line.indexOf("</tool_response>");
+        const content = line.substring(startIndex + 15, endIndex);
+        
+        blocks.push({
+          type: "tool_response",
+          text: content
+        });
+      } else {
+        inToolResponse = true;
+        const parts = line.split("<tool_response>");
+        if (parts[1]) toolResponseContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Step/Status logs
+    if (trimmed.startsWith("[A.L.I.C.E. Initializing]") || trimmed.includes("Mapped target sitemap")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "initializing", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Evaluating prompt scope compliance:") || trimmed.includes("In-Scope verified")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Routing directives to the LLM agent model:") || trimmed.includes("Routing directives")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("[A.L.I.C.E. Boundary Violation Alert]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "danger", title: "Boundary Violation", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("[ALICE Error]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "error", title: "Error", text: trimmed });
+      continue;
+    }
+
+    // Legacy Tool Call detection
+    const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
+    const match = trimmed.match(toolCallRegex);
+    if (match) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const toolName = match[1] || match[2];
+      blocks.push({ type: "tool_call", tool: toolName, text: trimmed });
+      continue;
+    }
+
+    // Standard text line
+    if (trimmed !== "") {
+      currentParagraph.push(line);
+    } else if (currentParagraph.length > 0) {
+      blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+      currentParagraph = [];
+    }
+  }
+
+  // Flush remaining paragraphs or code blocks
+  if (inCodeBlock && codeContent.length > 0) {
+    blocks.push({ type: "code", lang: codeLang, text: codeContent.join("\n") });
+  } else if (inToolCall && toolCallContent.length > 0) {
+    blocks.push({ type: "tool_call", tool: "unknown", text: toolCallContent.join("\n") });
+  } else if (inToolResponse && toolResponseContent.length > 0) {
+    blocks.push({ type: "tool_response", text: toolResponseContent.join("\n") });
+  } else if (currentParagraph.length > 0) {
+    blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+  }
+
+  return blocks;
+};
+
+
+const renderMarkdown = (text) => {
+  if (!text) return "";
+  
+  const lines = text.split("\n");
+  const elements = [];
+  let inList = false;
+  let listItems = [];
+  let codeBlockContent = [];
+  let inCodeBlock = false;
+  let codeBlockLang = "";
+
+  const renderTextWithFormatting = (txt) => {
+    const inlineRegex = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    const segments = txt.split(inlineRegex);
+    
+    return segments.map((seg, idx) => {
+      if (seg.startsWith("`") && seg.endsWith("`")) {
+        return html`<code className="alice-inline-code">${seg.slice(1, -1)}</code>`;
+      }
+      if (seg.startsWith("**") && seg.endsWith("**")) {
+        return html`<strong className="alice-bold-text">${seg.slice(2, -2)}</strong>`;
+      }
+      return seg;
+    });
+  };
+
+  const parseTableRow = (rowText) => {
+    const cells = rowText.split("|").map(c => c.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Code blocks
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        elements.push(html`
+          <div className="alice-code-block-wrapper">
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+          </div>
+        `);
+        codeBlockContent = [];
+      } else {
+        if (inList) {
+          elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+          inList = false;
+          listItems = [];
+        }
+        inCodeBlock = true;
+        codeBlockLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeBlockContent.push(line);
+      continue;
+    }
+
+    // Tables
+    if (trimmed.startsWith("|")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+
+      const tableLines = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
+      i--; // Adjust loop counter
+
+      if (tableLines.length >= 2) {
+        const headers = parseTableRow(tableLines[0]);
+        const rows = [];
+        const bodyLines = tableLines.slice(2);
+        for (const rLine of bodyLines) {
+          if (rLine.includes("---")) continue;
+          rows.push(parseTableRow(rLine));
+        }
+
+        elements.push(html`
+          <div className="alice-table-wrapper">
+            <table className="alice-table">
+              <thead>
+                <tr>
+                  ${headers.map(h => html`<th>${renderTextWithFormatting(h)}</th>`)}
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map(row => html`
+                  <tr>
+                    ${row.map(cell => html`<td>${renderTextWithFormatting(cell)}</td>`)}
+                  </tr>
+                `)}
+              </tbody>
+            </table>
+          </div>
+        `);
+        continue;
+      }
+    }
+
+    // Headers
+    if (trimmed.startsWith("### ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h4 className="alice-md-h3">${renderTextWithFormatting(trimmed.slice(4))}</h4>`);
+      continue;
+    }
+    if (trimmed.startsWith("## ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h3 className="alice-md-h2">${renderTextWithFormatting(trimmed.slice(3))}</h3>`);
+      continue;
+    }
+
+    // Lists
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      inList = true;
+      listItems.push(trimmed.slice(2));
+      continue;
+    }
+
+    // Paragraph
+    if (trimmed === "") {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<div className="alice-md-space"></div>`);
+    } else {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<p className="alice-md-p">${renderTextWithFormatting(line)}</p>`);
+    }
+  }
+
+  if (inList) {
+    elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+  }
+  if (inCodeBlock && codeBlockContent.length > 0) {
+    elements.push(html`
+      <div className="alice-code-block-wrapper">
+        <div className="alice-code-block-header">
+          <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+        </div>
+        <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+      </div>
+    `);
+  }
+
+  return elements;
+};
+
+
+const renderAliceBlocks = (text, isThinking) => {
+  const blocks = parseAliceThinking(text);
+  return blocks.map((block, idx) => {
+    if (block.type === "status") {
+      let icon = html`<span className="alice-status-dot"></span>`;
+      if (block.status === "initializing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--init">⚙️</span>`;
+      } else if (block.status === "scope_check") {
+        icon = html`<span className="alice-status-icon alice-status-icon--success">🛡️</span>`;
+      } else if (block.status === "routing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--routing">⚡</span>`;
+      }
+      return html`
+        <div key=${idx} className=${"alice-thinking-status-row alice-thinking-status-row--" + block.status} style=${isThinking ? {} : { margin: "6px 0" }}>
+          ${icon}
+          <span className="alice-status-text">${block.text}</span>
+        </div>
+      `;
+    }
+    if (block.type === "alert") {
+      return html`
+        <div key=${idx} className=${"alice-thinking-alert alice-thinking-alert--" + block.level} style=${isThinking ? {} : { margin: "6px 0" }}>
+          <span className="alice-alert-icon">⚠️</span>
+          <div className="alice-alert-content">
+            <div className="alice-alert-title">${block.title}</div>
+            <div className="alice-alert-text">${block.text}</div>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "tool_call") {
+      const parsedArgs = parseToolArgs(block.text);
+      return html`
+        <div key=${idx} className="alice-thinking-tool-call" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row">
+            <span className="alice-tool-prompt">$</span>
+            <span className="alice-tool-badge">CALL TOOL</span>
+            <span className="alice-tool-name">${block.tool}</span>
+          </div>
+          ${parsedArgs ? html`
+            <div className="alice-tool-args-card">
+              ${Object.entries(parsedArgs).map(([key, val]) => html`
+                <div key=${key} className="alice-tool-arg-row">
+                  <span className="alice-tool-arg-key">${key}:</span>
+                  <span className="alice-tool-arg-val">${String(val)}</span>
+                </div>
+              `)}
+            </div>
+          ` : html`
+            <div className="alice-tool-text">${block.text}</div>
+          `}
+        </div>
+      `;
+    }
+    if (block.type === "tool_response") {
+      let isJson = false;
+      let formattedResponse = block.text;
+      try {
+        const parsed = JSON.parse(block.text.trim());
+        formattedResponse = JSON.stringify(parsed, null, 2);
+        isJson = true;
+      } catch (_) {}
+      return html`
+        <div key=${idx} className="alice-thinking-tool-response" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row" style=${{ borderLeft: "3px solid #10b981", paddingLeft: "10px" }}>
+            <span className="alice-tool-prompt" style=${{ color: "#10b981" }}>←</span>
+            <span className="alice-tool-badge" style=${{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399" }}>RESPONSE</span>
+          </div>
+          <div className="alice-code-block-wrapper" style=${{ marginTop: "4px" }}>
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${isJson ? "json" : "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code style=${{ fontSize: "10.5px" }}>${formattedResponse}</code></pre>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "code") {
+      return html`
+        <div key=${idx} className="alice-code-block-wrapper">
+          <div className="alice-code-block-header">
+            <span className="alice-code-block-lang">${block.lang || "json"}</span>
+          </div>
+          <pre className="alice-code-block"><code>${block.text}</code></pre>
+        </div>
+      `;
+    }
+    if (isThinking) {
+      return html`
+        <p key=${idx} className="alice-thinking-paragraph">${block.text}</p>
+      `;
+    } else {
+      return html`
+        <div key=${idx} className="alice-reply-paragraph-wrapper">${renderMarkdown(block.text)}</div>
+      `;
+    }
+  });
+};
+
+
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -1009,31 +1556,105 @@ function TestRunDetail({ runId, initialTab }) {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
 
-  const [aliceMessages, setAliceMessages] = useState(() => {
+  const [aliceChats, setAliceChats] = useState(() => {
     try {
-      const saved = localStorage.getItem(`alice_chat_${runId}`);
+      const saved = localStorage.getItem(`alice_chats_${runId}`);
       if (saved) return JSON.parse(saved);
     } catch (_) {}
     return [
       {
-        id: "welcome",
-        sender: "alice",
-        type: "message",
-        text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
-        ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+        id: "tab-default",
+        title: "Session 1",
+        messages: [
+          {
+            id: "welcome",
+            sender: "alice",
+            type: "message",
+            text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+            ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+          }
+        ]
       }
     ];
   });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`alice_active_tab_${runId}`);
+      if (saved) return saved;
+    } catch (_) {}
+    return "tab-default";
+  });
+
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
   const [aliceIsThinking, setAliceIsThinking] = useState(false);
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+  const aliceAbortControllerRef = useRef(null);
 
   useEffect(() => {
     try {
-      localStorage.setItem(`alice_chat_${runId}`, JSON.stringify(aliceMessages));
+      localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`alice_active_tab_${runId}`, activeAliceTabId);
     } catch (_) {}
-  }, [aliceMessages, runId]);
+  }, [aliceChats, activeAliceTabId, runId]);
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages = activeAliceTab ? activeAliceTab.messages : [];
+
+  const createAliceTab = () => {
+    const newTabId = "tab-" + Date.now().toString();
+    const newTab = {
+      id: newTabId,
+      title: `Session ${aliceChats.length + 1}`,
+      messages: [
+        {
+          id: "welcome-" + newTabId,
+          sender: "alice",
+          type: "message",
+          text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+          ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+        }
+      ]
+    };
+    setAliceChats(prev => [...prev, newTab]);
+    setActiveAliceTabId(newTabId);
+  };
+
+  const deleteAliceTab = (tabId, e) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    if (aliceChats.length <= 1) {
+      const resetTab = {
+        id: "tab-default",
+        title: "Session 1",
+        messages: [
+          {
+            id: "welcome-reset",
+            sender: "alice",
+            type: "message",
+            text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+            ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+          }
+        ]
+      };
+      setAliceChats([resetTab]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+
+    const index = aliceChats.findIndex(t => t.id === tabId);
+    if (index === -1) return;
+
+    const remainingChats = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remainingChats);
+
+    if (activeAliceTabId === tabId) {
+      const nextActiveIndex = Math.max(0, index - 1);
+      setActiveAliceTabId(remainingChats[nextActiveIndex].id);
+    }
+  };
 
   const startAliceResize = useCallback((e) => {
     e.preventDefault();
@@ -1052,12 +1673,18 @@ function TestRunDetail({ runId, initialTab }) {
     document.addEventListener("mouseup", onUp);
   }, [aliceChatHeight]);
 
-  const handleAliceSend = () => {
+  const handleAliceStop = () => {
+    if (aliceAbortControllerRef.current) {
+      aliceAbortControllerRef.current.abort();
+    }
+  };
+
+  const handleAliceSend = async () => {
     if (!aliceInputText.trim() || aliceIsThinking) return;
     const userText = aliceInputText;
     setAliceInputText("");
 
-    const newMsg = {
+    const userMsg = {
       id: Date.now().toString(),
       sender: "user",
       type: "message",
@@ -1065,71 +1692,190 @@ function TestRunDetail({ runId, initialTab }) {
       ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
     };
 
-    setAliceMessages(prev => [...prev, newMsg]);
+    const thinkMsgId = (Date.now() + 1).toString();
+    const replyMsgId = (Date.now() + 2).toString();
+
+    const thinkMsg = {
+      id: thinkMsgId,
+      sender: "alice",
+      type: "thinking",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    const replyMsg = {
+      id: replyMsgId,
+      sender: "alice",
+      type: "message",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setAliceChats(prev => prev.map(tab => {
+      if (tab.id === activeAliceTabId) {
+        const isFirstPrompt = tab.messages.length <= 1;
+        let newTitle = tab.title;
+        if (isFirstPrompt) {
+          const truncated = userText.trim().slice(0, 16);
+          newTitle = truncated + (userText.trim().length > 16 ? "..." : "");
+        }
+        return {
+          ...tab,
+          title: newTitle,
+          messages: [...tab.messages, userMsg, thinkMsg, replyMsg]
+        };
+      }
+      return tab;
+    }));
     setAliceIsThinking(true);
 
-    // Simulate thinking/planning step first
-    setTimeout(() => {
-      const thinkMsg = {
-        id: (Date.now() + 1).toString(),
-        sender: "alice",
-        type: "thinking",
-        text: `[ALICE Pentest Coordinator Directive]
-Analyzing user command: "${userText}"
-Identified target scope parameters...
-Formulating attack strategies...
-Routing custom prompt configuration to Test Lead scanner agent...`,
-        ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
-      };
+    setAliceExpandedThinkIds(prev => {
+      const next = new Set(prev);
+      next.add(thinkMsgId);
+      return next;
+    });
 
-      setAliceMessages(prev => [...prev, thinkMsg]);
+    const controller = new AbortController();
+    aliceAbortControllerRef.current = controller;
 
-      // Expand the thought block automatically
-      setAliceExpandedThinkIds(prev => {
-        const next = new Set(prev);
-        next.add(thinkMsg.id);
-        return next;
+    try {
+      const historyPayload = aliceMessages.map(m => ({
+        sender: m.sender,
+        text: m.text
+      }));
+
+      const response = await fetch(`/api/test-runs/${runId}/alice/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: userText,
+          history: historyPayload
+        }),
+        signal: controller.signal
       });
 
-      // After thinking is done, respond with a professional agent coordination statement
-      setTimeout(() => {
-        setAliceIsThinking(false);
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}`);
+      }
 
-        let aliceReplyText = `Understood. I've re-aligned our testing policy based on your instruction: "${userText}".
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-I have directed the **Test Lead** to prioritize probes on the requested path/parameters. I've also queued deep checks for relevant vulnerabilities on this interface. Probes are executing concurrently.`;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
 
-        // Context-aware replies
-        const lower = userText.toLowerCase();
-        if (lower.includes("sqli") || lower.includes("sql injection") || lower.includes("database")) {
-          aliceReplyText = `Acknowledged. I've instructed the **Test Lead** to immediately prioritize deep SQL injection (SQLi) fuzzing against endpoints in this scope. 
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-Probing will focus on parameter variations, boolean-based, error-based, and time-based blind SQLi payloads. I'm actively filtering incoming traffic patterns to verify DB errors or latency changes.`;
-        } else if (lower.includes("xss") || lower.includes("cross site") || lower.includes("script")) {
-          aliceReplyText = `Directive received. I have configured a custom XSS probe vector sheet for the **Test Lead**. 
-
-Probes will target active reflection on parameters and headers. Payloads include standard tag reflections, nested bypass filters, and DOM-based triggers. I will alert you immediately if any execution hooks reflect successfully in the Validator agent.`;
-        } else if (lower.includes("auth") || lower.includes("login") || lower.includes("password") || lower.includes("credential")) {
-          aliceReplyText = `Understood. Broken authentication and session management checks are now prioritized on target login endpoints. 
-
-I have instructed the **Test Lead** to fuzz login fields, check session token randomness, and test credential stuffing pathways. Crawler sessions are being actively monitored for privilege escalation.`;
-        } else if (lower.includes("port") || lower.includes("scan") || lower.includes("vuln")) {
-          aliceReplyText = `Command recognized. Elevating intelligence-gathering probes. 
-
-I've instructed the **Test Lead** to expand attack-surface mapping and verify services on the active ports. Let me know if you would like me to dispatch a **Specialist** thread for dedicated port-exploit payload mapping.`;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data: ")) {
+            try {
+              const event = JSON.parse(trimmed.slice(6));
+              if (event.type === "thinking_chunk") {
+                setAliceChats(prev => prev.map(tab => {
+                  if (tab.id === activeAliceTabId) {
+                    return {
+                      ...tab,
+                      messages: tab.messages.map(m =>
+                        m.id === thinkMsgId ? { ...m, text: m.text + event.delta } : m
+                      )
+                    };
+                  }
+                  return tab;
+                }));
+              } else if (event.type === "message_chunk") {
+                setAliceChats(prev => prev.map(tab => {
+                  if (tab.id === activeAliceTabId) {
+                    return {
+                      ...tab,
+                      messages: tab.messages.map(m =>
+                        m.id === replyMsgId ? { ...m, text: m.text + event.delta } : m
+                      )
+                    };
+                  }
+                  return tab;
+                }));
+              } else if (event.type === "warning") {
+                setAliceChats(prev => prev.map(tab => {
+                  if (tab.id === activeAliceTabId) {
+                    return {
+                      ...tab,
+                      messages: tab.messages.map(m =>
+                        m.id === replyMsgId ? { ...m, text: event.message } : m
+                      )
+                    };
+                  }
+                  return tab;
+                }));
+              } else if (event.type === "done") {
+                setAliceChats(prev => prev.map(tab => {
+                  if (tab.id === activeAliceTabId) {
+                    return {
+                      ...tab,
+                      messages: tab.messages.map(m => {
+                        if (m.id === thinkMsgId && event.thought) {
+                          return { ...m, text: event.thought };
+                        }
+                        if (m.id === replyMsgId && event.message) {
+                          return { ...m, text: event.message };
+                        }
+                        return m;
+                      })
+                    };
+                  }
+                  return tab;
+                }));
+              }
+            } catch (err) {
+              console.error("Failed to parse SSE event chunk", err);
+            }
+          }
         }
-
-        const replyMsg = {
-          id: (Date.now() + 2).toString(),
-          sender: "alice",
-          type: "message",
-          text: aliceReplyText,
-          ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
-        };
-
-        setAliceMessages(prev => [...prev, replyMsg]);
-      }, 1800);
-    }, 1200);
+      }
+    } catch (err) {
+      if (err.name === "AbortError") {
+        console.log("A.L.I.C.E generation aborted by user.");
+        setAliceChats(prev => prev.map(tab => {
+          if (tab.id === activeAliceTabId) {
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === thinkMsgId && !m.text) {
+                  return { ...m, text: "[Generation Aborted]" };
+                }
+                if (m.id === replyMsgId && !m.text) {
+                  return { ...m, text: "Generation stopped by user." };
+                }
+                return m;
+              })
+            };
+          }
+          return tab;
+        }));
+      } else {
+        console.error("A.L.I.C.E stream execution failed", err);
+        setAliceChats(prev => prev.map(tab => {
+          if (tab.id === activeAliceTabId) {
+            return {
+              ...tab,
+              messages: tab.messages.map(m =>
+                m.id === replyMsgId ? { ...m, text: `I encountered an error trying to connect to the agent: ${err.message}` } : m
+              )
+            };
+          }
+          return tab;
+        }));
+      }
+    } finally {
+      setAliceIsThinking(false);
+      aliceAbortControllerRef.current = null;
+    }
   };
 
 
@@ -3120,6 +3866,34 @@ I've instructed the **Test Lead** to expand attack-surface mapping and verify se
                       <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
                       ${isExpanded && html`
                         <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                          <div className="alice-chat-tabs-bar">
+                            ${aliceChats.map(tab => {
+                              const isActiveTab = tab.id === activeAliceTabId;
+                              return html`
+                                <div
+                                  key=${tab.id}
+                                  className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                                  onClick=${() => setActiveAliceTabId(tab.id)}
+                                >
+                                  <span>${tab.title}</span>
+                                  <span
+                                    className="alice-chat-tab-close"
+                                    onClick=${(e) => deleteAliceTab(tab.id, e)}
+                                    title="Close Session"
+                                  >
+                                    ×
+                                  </span>
+                                </div>
+                              `;
+                            })}
+                            <button
+                              className="alice-chat-add-tab-btn"
+                              onClick=${createAliceTab}
+                              title="New Session"
+                            >
+                              +
+                            </button>
+                          </div>
                           <div className="alice-chat-history" style=${{ height: `${aliceChatHeight}px` }} ref=${(el) => { if (el) { el.scrollTop = el.scrollHeight; } }}>
                             ${aliceMessages.map((msg) => {
                               if (msg.type === "thinking") {
@@ -3139,7 +3913,9 @@ I've instructed the **Test Lead** to expand attack-surface mapping and verify se
                                         <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
                                       </div>
                                       ${isThinkExpanded && html`
-                                        <div className="alice-thinking-body">${msg.text}</div>
+                                        <div className="alice-thinking-body">
+                                          ${renderAliceBlocks(msg.text, true)}
+                                        </div>
                                       `}
                                     </div>
                                   </div>
@@ -3149,7 +3925,9 @@ I've instructed the **Test Lead** to expand attack-surface mapping and verify se
                               return html`
                                 <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                                   <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
-                                    <div style=${{ whiteSpace: "pre-wrap" }}>${msg.text}</div>
+                                    <div>
+                                      ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false)}
+                                    </div>
                                     <div className="alice-msg-meta">
                                       <span>${msg.ts}</span>
                                     </div>
@@ -3184,14 +3962,26 @@ I've instructed the **Test Lead** to expand attack-surface mapping and verify se
                               }}
                               onInput=${e => setAliceInputText(e.target.value)}
                             />
-                            <button
-                              className="alice-chat-input-btn"
-                              disabled=${aliceIsThinking || !aliceInputText.trim()}
-                              onClick=${handleAliceSend}
-                              title="Send Instruction"
-                            >
-                              <${IconSend}/>
-                            </button>
+                            ${aliceIsThinking ? html`
+                              <button
+                                className="alice-chat-stop-btn"
+                                onClick=${handleAliceStop}
+                                title="Stop Generation"
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                  <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                                </svg>
+                              </button>
+                            ` : html`
+                              <button
+                                className="alice-chat-input-btn"
+                                disabled=${!aliceInputText.trim()}
+                                onClick=${handleAliceSend}
+                                title="Send Instruction"
+                              >
+                                <${IconSend}/>
+                              </button>
+                            `}
                           </div>
                         </div>
                       `}
@@ -5403,6 +6193,7 @@ function truncUrl(url, maxLen=40) {
 
 function sourceLabel(source) {
   const labels = {
+    alice: "A.L.I.C.E",
     dynamic_scan: "Dynamic",
     burp_active_scan: "Burp",
     burp_mcp: "Burp MCP",

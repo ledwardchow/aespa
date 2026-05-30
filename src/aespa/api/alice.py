@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session
 
@@ -22,8 +23,16 @@ async def alice_chat(
     run_id: int,
     req: AliceChatRequest,
     session: Session = Depends(get_session),
-) -> dict:
+) -> StreamingResponse:
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     
-    return await alice_svc.run_alice_turn(run_id, req.message, req.history)
+    return StreamingResponse(
+        alice_svc.run_alice_turn_stream(run_id, req.message, req.history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
