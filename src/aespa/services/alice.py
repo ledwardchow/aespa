@@ -4,24 +4,34 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun
+from aespa.models import CrawledPage, LLMConfig, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
     get_llm_config_for_run,
     get_run_scanner_policy,
-    get_upstream_proxy_config,
 )
 from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT
+from aespa.services.prompts.specialist import get_specialist_tools, SPECIALIST_AGENT_TOOLS
 
 log = logging.getLogger(__name__)
+
+# Hard step limit to prevent runaway loops regardless of model behaviour.
+ALICE_MAX_STEPS = 40
+
+# Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
+_ALICE_TOOL_NAMES = {
+    "http_request", "browser", "context_tool",
+    "write_finding", "forge_jwt", "decode_jwt",
+    "credential_check", "register_account", "agent_dispatch", "done",
+}
 
 
 def _extract_user_directive(history: list[dict]) -> str:
@@ -32,97 +42,370 @@ def _extract_user_directive(history: list[dict]) -> str:
     return "Prioritize general penetration testing."
 
 
-async def _execute_alice_tool_calls(run_id: int, llm_cfg: LLMConfig, base_url: str, thought: str, message: str) -> None:
-    """Parse and execute any dynamic tool calls (like write_finding) in ALICE's output.
+def _get_alice_tools() -> list[dict]:
+    """Return the full THINKING_AGENT_TOOLS list filtered to ALICE's allowed set."""
+    from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
+    return [t for t in THINKING_AGENT_TOOLS if t["name"] in _ALICE_TOOL_NAMES]
 
-    Allows A.L.I.C.E. to actually execute vulnerability writes, persisting them and triggering validator agents.
-    """
-    import re
-    from aespa.services.scanner import _persist_dynamic_finding
 
-    combined = thought + "\n" + message
-    
-    # 1. Extract all blocks wrapped in <tool_call>...</tool_call>
-    tool_call_tags = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", combined, re.DOTALL)
-    
-    # 2. Extract markdown JSON code blocks
-    markdown_json_blocks = re.findall(r"```json\s*(.*?)\s*```", combined, re.DOTALL)
-    
-    candidates = []
-    candidates.extend(tool_call_tags)
-    candidates.extend(markdown_json_blocks)
-    
-    # 3. Fallback: if no candidates found, extract all brace-enclosed JSON objects {...}
-    if not candidates:
-        matches = re.finditer(r"(\{.*?\})", combined, re.DOTALL)
-        for match in matches:
-            candidates.append(match.group(1))
+async def _execute_alice_tool(
+    run_id: int,
+    llm_cfg: LLMConfig,
+    base_url: str,
+    site_id: int,
+    tool_name: str,
+    tool_input: dict,
+    step: int,
+) -> str:
+    """Execute a single ALICE tool call and return the result string."""
 
-    for block in candidates:
-        try:
-            data = json.loads(block.strip())
-            if not isinstance(data, dict):
-                continue
-                
-            finding_raw = None
-            
-            # Map standard tool calls like {"name": "write_finding", "arguments": {...}}
-            name = data.get("name") or data.get("tool") or data.get("action")
-            args = data.get("arguments") or data.get("args")
-            
-            if name == "write_finding" or name == "finding_write":
-                finding_raw = args if isinstance(args, dict) else data
-            elif "title" in data and ("affected_url" in data or "url" in data or "description" in data):
-                finding_raw = data
-                
-            if finding_raw:
-                # Map url parameter to affected_url if present
-                if "url" in finding_raw and "affected_url" not in finding_raw:
-                    finding_raw["affected_url"] = finding_raw["url"]
-                
-                finding_raw["finding_source"] = "alice"
-                
-                with Session(get_engine()) as s:
-                    pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
-                    pages_snapshot = [p.model_dump() for p in pages]
-                    first_page_id = pages[0].id if pages else None
-                
-                affected = (finding_raw.get("affected_url") or base_url).strip() or base_url
-                
-                events_svc.emit(run_id, {
-                    "type": "agent_status",
-                    "agent_id": "reporting",
-                    "role": "Reporting",
-                    "status": "active",
-                    "current_task": f"A.L.I.C.E. Writing: {finding_raw.get('title', 'Untitled')}",
-                    "outcome": None,
-                    "_persist": True,
-                })
-                
-                fw_result = {
-                    "source": "finding_write",
-                    "desc": finding_raw.get("description", "A.L.I.C.E. dynamic finding"),
-                    "url": affected,
-                    "status": 200,
-                    "headers": {"content-type": "application/json"},
-                    "body": str(finding_raw.get("evidence") or "")[:1000],
-                    "request_evidence": str(finding_raw.get("request_evidence") or ""),
-                    "response_evidence": str(finding_raw.get("response_evidence") or ""),
-                }
-                
-                await _persist_dynamic_finding(
-                    run_id=run_id,
-                    llm_cfg=llm_cfg,
-                    raw=finding_raw,
-                    base_url=base_url,
-                    pages_snapshot=pages_snapshot,
-                    first_page_id=first_page_id,
-                    result_by_url={str(affected): fw_result},
-                    writeup_source="test_lead",
+    # ── http_request ─────────────────────────────────────────────────────────
+    if tool_name == "http_request":
+        from aespa.services.scanner import (
+            _make_scanner_client,
+            REQUEST_TIMEOUT,
+        )
+        from aespa.services import traffic as traffic_svc
+
+        _url = str(tool_input.get("url") or base_url)
+        scope_err = check_scope(_url, site_id, run_id)
+        if scope_err:
+            return f"[SCOPE BLOCK] {_scope_err}"
+
+        method = str(tool_input.get("method") or "GET").upper()
+        headers = dict(tool_input.get("headers") or {})
+        body = tool_input.get("body")
+
+        scanner_policy = get_run_scanner_policy(run_id)
+        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+
+        async with _make_scanner_client(
+            cookies={},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
+            timeout=timeout,
+            follow_redirects=True,
+            verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+        ) as hx:
+            try:
+                kwargs: dict = {}
+                if body is not None:
+                    if isinstance(body, dict):
+                        kwargs["json"] = body
+                    else:
+                        kwargs["content"] = str(body).encode()
+                if headers:
+                    kwargs["headers"] = headers
+                resp = await hx.request(method, _url, **kwargs)
+                resp_body = resp.text[:8192]
+                return (
+                    f"HTTP {resp.status_code} {method} {_url}\n"
+                    f"Response Headers: {dict(resp.headers)}\n"
+                    f"Response Body ({len(resp_body)} chars):\n{resp_body}"
                 )
-                log.info("A.L.I.C.E. successfully executed write_finding for run_id=%s: %r", run_id, finding_raw.get("title"))
-        except Exception as e:
-            log.warning("Failed to parse and execute A.L.I.C.E tool call block: %s", e)
+            except Exception as exc:
+                return f"Request failed: {exc}"
+
+    # ── context_tool ─────────────────────────────────────────────────────────
+    if tool_name == "context_tool":
+        from aespa.services.scanner import _run_thinking_context_tool
+
+        ctx_tool = str(tool_input.get("tool") or "")
+        ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+        try:
+            with Session(get_engine()) as s:
+                pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+                pages_snapshot = [p.model_dump() for p in pages]
+
+            output = _run_thinking_context_tool(
+                ctx_tool, ctx_args,
+                pages_snapshot=pages_snapshot,
+                findings_snapshot=[],
+                history=[],
+                run_id=run_id,
+                base_url=base_url,
+            )
+            result = json.dumps(output, separators=(",", ":"), default=str)
+            return result[:8192]
+        except Exception as exc:
+            return f"Context tool error: {exc}"
+
+    # ── write_finding ─────────────────────────────────────────────────────────
+    if tool_name == "write_finding":
+        from aespa.services.scanner import _persist_dynamic_finding
+
+        finding_raw = dict(tool_input)
+        finding_raw["finding_source"] = "alice"
+
+        if "url" in finding_raw and "affected_url" not in finding_raw:
+            finding_raw["affected_url"] = finding_raw.pop("url")
+
+        affected = (finding_raw.get("affected_url") or base_url).strip() or base_url
+
+        with Session(get_engine()) as s:
+            pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+            pages_snapshot = [p.model_dump() for p in pages]
+            first_page_id = pages[0].id if pages else None
+
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            "status": "active",
+            "current_task": f"A.L.I.C.E. Writing: {finding_raw.get('title', 'Untitled')}",
+            "outcome": None,
+            "_persist": True,
+        })
+
+        fw_result = {
+            "source": "finding_write",
+            "desc": finding_raw.get("description", "A.L.I.C.E. dynamic finding"),
+            "url": affected,
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": str(finding_raw.get("evidence") or "")[:1000],
+            "request_evidence": str(finding_raw.get("request_evidence") or ""),
+            "response_evidence": str(finding_raw.get("response_evidence") or ""),
+        }
+
+        try:
+            await _persist_dynamic_finding(
+                run_id=run_id,
+                llm_cfg=llm_cfg,
+                raw=finding_raw,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+                result_by_url={str(affected): fw_result},
+                writeup_source="test_lead",
+            )
+            log.info("A.L.I.C.E. write_finding run_id=%s title=%r", run_id, finding_raw.get("title"))
+            return f"Finding '{finding_raw.get('title')}' recorded successfully."
+        except Exception as exc:
+            log.warning("A.L.I.C.E. write_finding failed: %s", exc)
+            return f"write_finding failed: {exc}"
+
+    # ── forge_jwt ─────────────────────────────────────────────────────────────
+    if tool_name == "forge_jwt":
+        from aespa.services.scanner import _sign_hs256_jwt, _record_session, _session_label, _mark_session_pending
+        import time
+
+        jwt_secret = str(tool_input.get("secret") or "")
+        jwt_claims = tool_input.get("claims") if isinstance(tool_input.get("claims"), dict) else {}
+        jwt_header = tool_input.get("header") if isinstance(tool_input.get("header"), dict) else None
+        store_as = tool_input.get("store_as")
+
+        try:
+            jwt_token = _sign_hs256_jwt(jwt_secret, jwt_claims, jwt_header)
+            label = store_as or f"alice_jwt_{step}"
+            _record_session(
+                run_id,
+                label=label,
+                session_data={
+                    "label": label,
+                    "kind": "bearer",
+                    "username": f"sub:{jwt_claims.get('sub')}" if jwt_claims.get("sub") is not None else None,
+                    "source": "forge_jwt tool",
+                    "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
+                    "cookies": {},
+                },
+                source="alice_jwt_action",
+                metadata={"claims": jwt_claims, "header": jwt_header or {"typ": "JWT", "alg": "HS256"}},
+            )
+            _mark_session_pending(label)
+            return json.dumps({"store_as": label, "claims": jwt_claims, "token": jwt_token[:80] + "..."})
+        except Exception as exc:
+            return f"JWT signing failed: {exc}"
+
+    # ── decode_jwt ─────────────────────────────────────────────────────────────
+    if tool_name == "decode_jwt":
+        import base64 as _b64
+
+        token = str(tool_input.get("token") or "")
+        parts = token.split(".")
+        if len(parts) < 2:
+            return "Invalid JWT: expected at least 2 parts separated by '.'"
+        decoded = {}
+        for i, part_name in enumerate(["header", "payload"]):
+            try:
+                padding = "=" * (-len(parts[i]) % 4)
+                decoded[part_name] = json.loads(_b64.urlsafe_b64decode(parts[i] + padding))
+            except Exception as exc:
+                decoded[part_name] = f"decode error: {exc}"
+        return json.dumps(decoded)
+
+    # ── credential_check ──────────────────────────────────────────────────────
+    if tool_name == "credential_check":
+        from aespa.services.scanner import _make_scanner_client, REQUEST_TIMEOUT
+        from aespa.services import traffic as traffic_svc
+
+        cred_url = str(tool_input.get("url") or base_url)
+        scope_err = check_scope(cred_url, site_id, run_id)
+        if scope_err:
+            return f"[SCOPE BLOCK] {scope_err}"
+
+        method = str(tool_input.get("method") or "POST").upper()
+        candidates = tool_input.get("candidates") or []
+        username_field = str(tool_input.get("username_field") or "username")
+        password_field = str(tool_input.get("password_field") or "password")
+        req_headers = dict(tool_input.get("headers") or {})
+        success_statuses = set(tool_input.get("success_statuses") or [200, 201, 302])
+
+        results = []
+        scanner_policy = get_run_scanner_policy(run_id)
+        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+
+        async with _make_scanner_client(
+            cookies={},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
+            timeout=timeout,
+            follow_redirects=False,
+            verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+        ) as hx:
+            for cand in candidates[:20]:
+                body = {
+                    username_field: cand.get("username", ""),
+                    password_field: cand.get("password", ""),
+                }
+                try:
+                    if "application/json" in req_headers.get("Content-Type", ""):
+                        resp = await hx.request(method, cred_url, json=body, headers=req_headers)
+                    else:
+                        resp = await hx.request(method, cred_url, data=body, headers=req_headers)
+                    success = resp.status_code in success_statuses
+                    results.append({
+                        "username": cand.get("username"),
+                        "password": cand.get("password"),
+                        "status": resp.status_code,
+                        "success": success,
+                        "location": resp.headers.get("location", ""),
+                        "set_cookie": resp.headers.get("set-cookie", "")[:200],
+                        "body_excerpt": resp.text[:300],
+                    })
+                except Exception as exc:
+                    results.append({"username": cand.get("username"), "error": str(exc)})
+
+        hits = [r for r in results if r.get("success")]
+        summary = f"{len(hits)}/{len(results)} succeeded"
+        return json.dumps({"summary": summary, "results": results[:20]}, default=str)
+
+    # ── register_account ──────────────────────────────────────────────────────
+    if tool_name == "register_account":
+        from aespa.services.scanner import (
+            _make_scanner_client, REQUEST_TIMEOUT,
+            _session_label, _record_session, _mark_session_pending,
+        )
+        from aespa.services import traffic as traffic_svc
+        import secrets as _secrets
+
+        reg_url = str(tool_input.get("url") or base_url)
+        scope_err = check_scope(reg_url, site_id, run_id)
+        if scope_err:
+            return f"[SCOPE BLOCK] {scope_err}"
+
+        method = str(tool_input.get("method") or "POST").upper()
+        body_format = str(tool_input.get("body_format") or "json")
+        username_field = str(tool_input.get("username_field") or "username")
+        email_field = str(tool_input.get("email_field") or "email")
+        password_field = str(tool_input.get("password_field") or "password")
+        store_as = tool_input.get("store_as") or _session_label("alice_user", {})
+        rand_suffix = _secrets.token_hex(4)
+        req_headers = dict(tool_input.get("headers") or {})
+        extra_fields = dict(tool_input.get("extra_fields") or {})
+
+        body: dict = {**extra_fields}
+        if tool_input.get("include_username", True):
+            body[username_field] = f"alice_test_{rand_suffix}"
+        if tool_input.get("include_email", True):
+            body[email_field] = f"alice_{rand_suffix}@pentest.invalid"
+        body[password_field] = f"AliceTest1!{rand_suffix}"
+
+        success_statuses = set(tool_input.get("success_statuses") or [200, 201])
+        scanner_policy = get_run_scanner_policy(run_id)
+        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+
+        async with _make_scanner_client(
+            cookies={},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
+            timeout=timeout,
+            follow_redirects=True,
+            verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+        ) as hx:
+            try:
+                if body_format == "json":
+                    resp = await hx.request(method, reg_url, json=body, headers=req_headers)
+                else:
+                    resp = await hx.request(method, reg_url, data=body, headers=req_headers)
+                success = resp.status_code in success_statuses
+                session_data: dict = {
+                    "label": store_as,
+                    "kind": "cookie",
+                    "username": body.get(username_field) or body.get(email_field),
+                    "source": "register_account tool",
+                    "extra_headers": {},
+                    "cookies": dict(resp.cookies),
+                }
+                if success:
+                    _record_session(run_id, label=store_as, session_data=session_data, source="alice_register")
+                    _mark_session_pending(store_as)
+                return json.dumps({
+                    "success": success,
+                    "status": resp.status_code,
+                    "store_as": store_as if success else None,
+                    "body_excerpt": resp.text[:500],
+                }, default=str)
+            except Exception as exc:
+                return f"Registration failed: {exc}"
+
+    # ── agent_dispatch ────────────────────────────────────────────────────────
+    if tool_name == "agent_dispatch":
+        from aespa.services.scanner import dispatch_specialist_agent
+
+        attack_class = str(tool_input.get("attack_class") or "")
+        target_url = str(tool_input.get("target_url") or base_url)
+        rationale = str(tool_input.get("rationale") or "")
+        priority = int(tool_input.get("priority") or 7)
+
+        try:
+            asyncio.ensure_future(
+                dispatch_specialist_agent(
+                    run_id=run_id,
+                    attack_class=attack_class,
+                    target_url=target_url,
+                    rationale=rationale,
+                    priority=priority,
+                )
+            )
+            return f"Specialist agent dispatched for {attack_class} on {target_url}."
+        except Exception as exc:
+            return f"agent_dispatch error: {exc}"
+
+    # ── browser ───────────────────────────────────────────────────────────────
+    if tool_name == "browser":
+        from aespa.services.scanner import _execute_browser_steps
+
+        steps = tool_input.get("steps") or []
+        url = str(tool_input.get("url") or base_url)
+
+        scope_err = check_scope(url, site_id, run_id)
+        if scope_err:
+            return f"[SCOPE BLOCK] {scope_err}"
+
+        try:
+            result = await _execute_browser_steps(
+                run_id=run_id,
+                url=url,
+                steps=steps,
+                extra_headers={},
+                cookies={},
+            )
+            return result[:8192]
+        except Exception as exc:
+            return f"Browser action failed: {exc}"
+
+    return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
 
 async def run_alice_turn_stream(
@@ -130,9 +413,13 @@ async def run_alice_turn_stream(
     user_instruction: str,
     history: list[dict],
 ) -> AsyncGenerator[str, None]:
-    """Execute a single interactive penetration testing Turn for A.L.I.C.E. with streaming response.
+    """Execute an interactive penetration testing turn for A.L.I.C.E. with streaming response.
 
-    Validates scope compliance, and streams the reasoning and message chunks back as SSE event lines.
+    Runs a proper multi-turn agentic loop: each LLM response is checked for
+    tool_use blocks, those tools are executed, and the results are fed back into
+    the next turn.  Text blocks are streamed immediately as message_chunk SSE
+    events.  The loop terminates when the model calls `done`, when ALICE_MAX_STEPS
+    is reached, or when a scope violation is detected.
     """
     log.info("ALICE streaming turn started for run_id=%s instruction=%r", run_id, user_instruction)
 
@@ -149,7 +436,7 @@ async def run_alice_turn_stream(
         site_id = site.id
         base_url = str(site.base_url or "").strip()
 
-    # Yield initial thinking chunk immediately to show responsiveness (0ms time-to-first-event!)
+    # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\\n'})}\n\n"
     await asyncio.sleep(0.01)
 
@@ -165,113 +452,192 @@ async def run_alice_turn_stream(
                 if parsed.netloc:
                     scope_error = check_scope(clean_url, site_id, run_id)
                     if scope_error:
-                        warning_msg = f"I cannot perform testing on '{clean_url}' because it is outside the authorized scope for this scan target. {scope_error}"
+                        warning_msg = f"I cannot perform testing on '{clean_url}' because it is outside the authorized scope. {scope_error}"
                         yield f"data: {json.dumps({'type': 'warning', 'message': warning_msg})}\n\n"
-                        done_msg = f"I cannot perform testing on '{clean_url}' because it is outside the authorized scope. {scope_error}"
-                        yield f"data: {json.dumps({'type': 'done', 'thought': '[A.L.I.C.E. Boundary Violation Alert]\\nUser requested target is out-of-scope.', 'message': done_msg})}\n\n"
+                        done_msg = warning_msg
+                        yield f"data: {json.dumps({'type': 'done', 'thought': '[A.L.I.C.E. Boundary Violation]', 'message': done_msg})}\n\n"
                         return
             except Exception:
                 pass
 
-    # Yield next thinking chunk
-    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Evaluating prompt scope compliance: In-Scope verified.\\nRouting directives to the LLM agent model...\\n'})}\n\n"
+    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Scope compliance verified. Starting agentic assessment loop...\\n'})}\n\n"
     await asyncio.sleep(0.01)
 
-    # 3. Format ALICE System Prompt
+    # 3. Build system prompt and initial message list
     system_message = ALICE_SYSTEM_PROMPT.format(
         user_directive=user_instruction,
         base_url=base_url,
     )
 
-    # Convert conversation history to message format for LLM
-    formatted_messages = []
+    # Convert conversation history to Anthropic-format messages.
+    # History items from the chat UI have sender/text; convert to role/content.
+    messages: list[dict] = []
     for h in history:
         sender = h.get("sender")
-        text = h.get("text")
+        text = h.get("text", "")
         if sender and text:
             role = "user" if sender == "user" else "assistant"
-            formatted_messages.append({"role": role, "content": text})
+            messages.append({"role": role, "content": text})
 
-    # Append current user prompt
-    formatted_messages.append({"role": "user", "content": user_instruction})
+    # Append the current instruction as the latest user message.
+    messages.append({"role": "user", "content": user_instruction})
 
-    # 4. Stream LLM completion and parse tags
+    alice_tools = _get_alice_tools()
+
     accumulated_thought = ""
     accumulated_message = ""
-    buffer = ""
-    in_thinking = False
+    step_count = 0
+    consecutive_text_only = 0
 
+    # 4. Agentic loop
     try:
-        async for chunk in llm_svc.stream_chat_completion(llm_cfg, system_message, formatted_messages):
-            buffer += chunk
+        while step_count < ALICE_MAX_STEPS:
+            step_count += 1
 
-            # Check if transitioning into thinking
-            if "<thinking>" in buffer:
-                parts = buffer.split("<thinking>", 1)
-                before = parts[0]
-                if before:
-                    accumulated_message += before
-                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': before})}\n\n"
-                in_thinking = True
-                buffer = parts[1]
+            yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\\n'})}\n\n"
 
-            # Check if transitioning out of thinking
-            if "</thinking>" in buffer:
-                parts = buffer.split("</thinking>", 1)
-                thinking_content = parts[0]
-                if thinking_content:
-                    accumulated_thought += thinking_content
-                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': thinking_content})}\n\n"
-                in_thinking = False
-                buffer = parts[1]
+            try:
+                content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
+                    llm_cfg, system_message, messages, tools=alice_tools
+                )
+            except Exception as exc:
+                log.exception("ALICE agentic loop: LLM call failed at step %d", step_count)
+                err = f"LLM error at step {step_count}: {exc}"
+                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err}'})}\n\n"
+                break
 
-            # Flush standard text from buffer if stable
-            if buffer:
-                is_partial = False
-                for tag in ["<thinking>", "</thinking>"]:
-                    for i in range(1, len(tag)):
-                        if buffer.endswith(tag[:i]):
-                            is_partial = True
-                            break
-                if not is_partial:
-                    if in_thinking:
-                        accumulated_thought += buffer
-                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': buffer})}\n\n"
-                    else:
-                        accumulated_message += buffer
-                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': buffer})}\n\n"
-                    buffer = ""
-                    
-        # Flush any remaining buffer content
-        if buffer:
-            if in_thinking:
-                accumulated_thought += buffer
-                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': buffer})}\n\n"
-            else:
-                accumulated_message += buffer
-                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': buffer})}\n\n"
-                
+            # Append assistant turn to the growing conversation
+            messages.append({"role": "assistant", "content": raw_content})
+
+            # Extract text and tool blocks
+            tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+            text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
+            thinking_blocks = [b for b in content_blocks if b.get("type") == "thinking" and b.get("thinking")]
+
+            # Stream thinking blocks (Claude extended thinking)
+            for tb in thinking_blocks:
+                think_text = tb.get("thinking") or ""
+                if think_text:
+                    accumulated_thought += think_text
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
+                    await asyncio.sleep(0)
+
+            # Stream text blocks
+            for tb in text_blocks:
+                text_content = tb.get("text") or ""
+                if not text_content:
+                    continue
+
+                # Parse out <thinking>...</thinking> from text if model embeds it there
+                import re as _re
+                think_match = _re.search(r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL)
+                if think_match:
+                    think_part = think_match.group(1).strip()
+                    outer_text = _re.sub(r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL).strip()
+                    if think_part:
+                        accumulated_thought += think_part
+                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
+                    if outer_text:
+                        accumulated_message += outer_text
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
+                else:
+                    accumulated_message += text_content
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                await asyncio.sleep(0)
+
+            # Handle no tool use (text-only turn)
+            if not tool_use_blocks:
+                consecutive_text_only += 1
+                if consecutive_text_only >= 3:
+                    log.warning("ALICE: %d consecutive text-only turns; ending loop", consecutive_text_only)
+                    break
+                # Nudge the model back to using tools
+                messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Your previous response did not call a tool. "
+                            "Please continue by calling exactly one tool now — "
+                            "http_request, context_tool, write_finding, forge_jwt, "
+                            "decode_jwt, credential_check, browser, agent_dispatch, or done."
+                        ),
+                    }],
+                })
+                continue
+
+            consecutive_text_only = 0
+
+            # Execute each tool call
+            tool_results = []
+            session_done = False
+
+            for block in tool_use_blocks:
+                tool_name = block.get("name") or ""
+                tool_input = block.get("input") or {}
+                tool_use_id = block.get("id") or ""
+
+                if tool_name == "done":
+                    summary = str(tool_input.get("summary") or "Assessment complete.")
+                    log.info("ALICE done at step %d: %s", step_count, summary[:200])
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "Assessment complete.",
+                    })
+                    session_done = True
+                    break
+
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Executing tool: {tool_name}\\n'})}\n\n"
+
+                try:
+                    result_str = await _execute_alice_tool(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        base_url=base_url,
+                        site_id=site_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        step=step_count,
+                    )
+                except Exception as exc:
+                    log.warning("ALICE tool %r step %d failed: %s", tool_name, step_count, exc)
+                    result_str = f"Tool execution error: {exc}"
+
+                # Cap result length to avoid blowing up context
+                if len(result_str) > 16000:
+                    omitted = len(result_str) - 16000
+                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\\n'})}\n\n"
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": result_str,
+                })
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+
+            if session_done:
+                break
+
     except Exception as exc:
-        log.exception("ALICE streaming turn failed")
-        err_msg = f"I encountered an error trying to orchestrate this turn: {exc}"
+        log.exception("ALICE agentic loop failed")
+        err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'thought': f'[ALICE Error]\\nLoop failed: {exc}', 'message': err_msg})}\n\n"
-        return
+        accumulated_message += err_msg
 
-    # Parse and execute any dynamic tool calls (such as write_finding)
-    try:
-        await _execute_alice_tool_calls(run_id, llm_cfg, base_url, accumulated_thought, accumulated_message)
-    except Exception as exc:
-        log.exception("A.L.I.C.E. tool call execution failed")
-
-    # Yield done event carrying completed history content
+    # 5. Emit done event
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
 
 
 async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]) -> dict[str, Any]:
-    """Execute a single interactive penetration testing Turn for the A.L.I.C.E. agent.
+    """Execute a single interactive penetration testing turn for A.L.I.C.E.
 
-    Backwards-compatible wrapper that consumes run_alice_turn_stream and returns the final dictionary.
+    Backwards-compatible wrapper that consumes run_alice_turn_stream and returns
+    the final dictionary.
     """
     thought = ""
     message = ""
@@ -291,7 +657,6 @@ async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]
 
     return {
         "thought_process": thought or "[ALICE Pentest Coordinator Turn Summary]\nCompleted Turn.",
-        "message": message or "I have aligned our testing policy.",
-        "status": status
+        "message": message or "I have completed the assessment step.",
+        "status": status,
     }
-

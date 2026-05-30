@@ -306,7 +306,101 @@ const IconBrain = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fil
 </svg>`;
 
 
+
+// ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
+// Module-level singleton: keeps the stream reader loop alive even when the
+// TestRunDetail component unmounts (user navigates away). Subscribers
+// (React setState callbacks) are registered/deregistered as the component
+// mounts and unmounts. On re-mount, the component can re-subscribe and
+// immediately get the current live state.
+const aliceSessionStore = {};
+
+function getAliceSession(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  if (!aliceSessionStore[key]) {
+    aliceSessionStore[key] = {
+      active: false,
+      abortController: null,
+      thinkMsgId: null,
+      replyMsgId: null,
+      subscribers: new Set(), // set of { onChunk(type, delta), onDone(), onError(err) }
+    };
+  }
+  return aliceSessionStore[key];
+}
+
+function aliceSessionSubscribe(runId, tabId, handlers) {
+  const session = getAliceSession(runId, tabId);
+  session.subscribers.add(handlers);
+  return () => session.subscribers.delete(handlers);
+}
+
+function aliceSessionAbort(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  const session = aliceSessionStore[key];
+  if (session?.abortController) {
+    session.abortController.abort();
+  }
+}
+
+async function aliceSessionStart(runId, tabId, { userText, historyPayload, thinkMsgId, replyMsgId, onChunkUpdate, onFinish, onFail }) {
+  const session = getAliceSession(runId, tabId);
+  if (session.active) return; // already streaming
+  session.active = true;
+  session.thinkMsgId = thinkMsgId;
+  session.replyMsgId = replyMsgId;
+
+  const controller = new AbortController();
+  session.abortController = controller;
+
+  try {
+    const response = await fetch(`/api/test-runs/${runId}/alice/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: userText, history: historyPayload }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(trimmed.slice(6));
+          // Notify all currently subscribed components
+          session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
+          // Also call the direct callback for the originating tab (persists to localStorage)
+          if (onChunkUpdate) onChunkUpdate(event);
+        } catch (_) {}
+      }
+    }
+
+    session.subscribers.forEach(h => h.onDone && h.onDone());
+    if (onFinish) onFinish();
+  } catch (err) {
+    session.subscribers.forEach(h => h.onError && h.onError(err));
+    if (onFail) onFail(err);
+  } finally {
+    session.active = false;
+    session.abortController = null;
+  }
+}
+
 const parseToolArgs = (text) => {
+
   const args = {};
   const jsonMatch = text.match(/\{.*\}/s);
   if (jsonMatch) {
@@ -1589,7 +1683,41 @@ function TestRunDetail({ runId, initialTab }) {
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
   const [aliceIsThinking, setAliceIsThinking] = useState(false);
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
-  const aliceAbortControllerRef = useRef(null);
+  // Subscribe to in-flight stream on mount/tab-switch so navigating back
+  // shows the spinner and receives live chunks from the singleton reader loop.
+  useEffect(() => {
+    const session = getAliceSession(runId, activeAliceTabId);
+    if (session.active) {
+      setAliceIsThinking(true);
+    }
+    const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
+      onChunk: (event) => {
+        const { thinkMsgId, replyMsgId } = session;
+        setAliceChats(prev => prev.map(tab => {
+          if (tab.id !== activeAliceTabId) return tab;
+          return {
+            ...tab,
+            messages: tab.messages.map(m => {
+              if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+                return { ...m, text: m.text + event.delta };
+              if (event.type === "message_chunk" && m.id === replyMsgId)
+                return { ...m, text: m.text + event.delta };
+              if (event.type === "warning" && m.id === replyMsgId)
+                return { ...m, text: event.message };
+              if (event.type === "done") {
+                if (m.id === thinkMsgId && event.thought) return { ...m, text: event.thought };
+                if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
+              }
+              return m;
+            })
+          };
+        }));
+      },
+      onDone: () => setAliceIsThinking(false),
+      onError: () => setAliceIsThinking(false),
+    });
+    return unsub;
+  }, [runId, activeAliceTabId]);
 
   useEffect(() => {
     try {
@@ -1674,15 +1802,14 @@ function TestRunDetail({ runId, initialTab }) {
   }, [aliceChatHeight]);
 
   const handleAliceStop = () => {
-    if (aliceAbortControllerRef.current) {
-      aliceAbortControllerRef.current.abort();
-    }
+    aliceSessionAbort(runId, activeAliceTabId);
   };
 
   const handleAliceSend = async () => {
     if (!aliceInputText.trim() || aliceIsThinking) return;
     const userText = aliceInputText;
     setAliceInputText("");
+    const currentTabId = activeAliceTabId;
 
     const userMsg = {
       id: Date.now().toString(),
@@ -1735,147 +1862,73 @@ function TestRunDetail({ runId, initialTab }) {
       return next;
     });
 
-    const controller = new AbortController();
-    aliceAbortControllerRef.current = controller;
+    const historyPayload = aliceMessages.map(m => ({
+      sender: m.sender,
+      text: m.text
+    }));
 
-    try {
-      const historyPayload = aliceMessages.map(m => ({
-        sender: m.sender,
-        text: m.text
-      }));
-
-      const response = await fetch(`/api/test-runs/${runId}/alice/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: userText,
-          history: historyPayload
-        }),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("data: ")) {
-            try {
-              const event = JSON.parse(trimmed.slice(6));
-              if (event.type === "thinking_chunk") {
-                setAliceChats(prev => prev.map(tab => {
-                  if (tab.id === activeAliceTabId) {
-                    return {
-                      ...tab,
-                      messages: tab.messages.map(m =>
-                        m.id === thinkMsgId ? { ...m, text: m.text + event.delta } : m
-                      )
-                    };
-                  }
-                  return tab;
-                }));
-              } else if (event.type === "message_chunk") {
-                setAliceChats(prev => prev.map(tab => {
-                  if (tab.id === activeAliceTabId) {
-                    return {
-                      ...tab,
-                      messages: tab.messages.map(m =>
-                        m.id === replyMsgId ? { ...m, text: m.text + event.delta } : m
-                      )
-                    };
-                  }
-                  return tab;
-                }));
-              } else if (event.type === "warning") {
-                setAliceChats(prev => prev.map(tab => {
-                  if (tab.id === activeAliceTabId) {
-                    return {
-                      ...tab,
-                      messages: tab.messages.map(m =>
-                        m.id === replyMsgId ? { ...m, text: event.message } : m
-                      )
-                    };
-                  }
-                  return tab;
-                }));
-              } else if (event.type === "done") {
-                setAliceChats(prev => prev.map(tab => {
-                  if (tab.id === activeAliceTabId) {
-                    return {
-                      ...tab,
-                      messages: tab.messages.map(m => {
-                        if (m.id === thinkMsgId && event.thought) {
-                          return { ...m, text: event.thought };
-                        }
-                        if (m.id === replyMsgId && event.message) {
-                          return { ...m, text: event.message };
-                        }
-                        return m;
-                      })
-                    };
-                  }
-                  return tab;
-                }));
-              }
-            } catch (err) {
-              console.error("Failed to parse SSE event chunk", err);
+    // Helper that writes a chunk event into localStorage-backed state, so the
+    // update is durable even if the component unmounts mid-stream.
+    const onChunkUpdate = (event) => {
+      setAliceChats(prev => prev.map(tab => {
+        if (tab.id !== currentTabId) return tab;
+        return {
+          ...tab,
+          messages: tab.messages.map(m => {
+            if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+              return { ...m, text: m.text + event.delta };
+            if (event.type === "message_chunk" && m.id === replyMsgId)
+              return { ...m, text: m.text + event.delta };
+            if (event.type === "warning" && m.id === replyMsgId)
+              return { ...m, text: event.message };
+            if (event.type === "done") {
+              if (m.id === thinkMsgId && event.thought) return { ...m, text: event.thought };
+              if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
             }
-          }
-        }
-      }
-    } catch (err) {
-      if (err.name === "AbortError") {
-        console.log("A.L.I.C.E generation aborted by user.");
-        setAliceChats(prev => prev.map(tab => {
-          if (tab.id === activeAliceTabId) {
+            return m;
+          })
+        };
+      }));
+    };
+
+    // Delegate all I/O to the module-level singleton so the stream survives
+    // component unmounts caused by hash navigation.
+    aliceSessionStart(runId, currentTabId, {
+      userText,
+      historyPayload,
+      thinkMsgId,
+      replyMsgId,
+      onChunkUpdate,
+      onFinish: () => setAliceIsThinking(false),
+      onFail: (err) => {
+        if (err.name === "AbortError") {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
             return {
               ...tab,
               messages: tab.messages.map(m => {
-                if (m.id === thinkMsgId && !m.text) {
-                  return { ...m, text: "[Generation Aborted]" };
-                }
-                if (m.id === replyMsgId && !m.text) {
-                  return { ...m, text: "Generation stopped by user." };
-                }
+                if (m.id === thinkMsgId && !m.text) return { ...m, text: "[Generation Aborted]" };
+                if (m.id === replyMsgId && !m.text) return { ...m, text: "Generation stopped by user." };
                 return m;
               })
             };
-          }
-          return tab;
-        }));
-      } else {
-        console.error("A.L.I.C.E stream execution failed", err);
-        setAliceChats(prev => prev.map(tab => {
-          if (tab.id === activeAliceTabId) {
+          }));
+        } else {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
             return {
               ...tab,
               messages: tab.messages.map(m =>
-                m.id === replyMsgId ? { ...m, text: `I encountered an error trying to connect to the agent: ${err.message}` } : m
+                m.id === replyMsgId
+                  ? { ...m, text: `I encountered an error connecting to the agent: ${err.message}` }
+                  : m
               )
             };
-          }
-          return tab;
-        }));
-      }
-    } finally {
-      setAliceIsThinking(false);
-      aliceAbortControllerRef.current = null;
-    }
+          }));
+        }
+        setAliceIsThinking(false);
+      },
+    });
   };
 
 
