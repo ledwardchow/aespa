@@ -87,6 +87,11 @@ const api = {
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
   getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
+  getAliceSessions:  (id)          => req(`/api/test-runs/${id}/alice/sessions`),
+  saveAliceSessions: (id, b)       => req(`/api/test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getAliceStatus:    (id)          => req(`/api/test-runs/${id}/alice/status`),
+  startAliceRun:     (id, b)       => req(`/api/test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopAliceRun:      (id)          => req(`/api/test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -323,7 +328,9 @@ function getAliceSession(runId, tabId) {
       abortController: null,
       thinkMsgId: null,
       replyMsgId: null,
-      subscribers: new Set(), // set of { onChunk(type, delta), onDone(), onError(err) }
+      accumulatedThought: "",
+      accumulatedMessage: "",
+      subscribers: new Set(),
     };
   }
   return aliceSessionStore[key];
@@ -343,24 +350,35 @@ function aliceSessionAbort(runId, tabId) {
   }
 }
 
-async function aliceSessionStart(runId, tabId, { userText, historyPayload, thinkMsgId, replyMsgId, onChunkUpdate, onFinish, onFail }) {
+const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
+  try {
+    localStorage.setItem(
+      `alice_recover_${runId}:${tabId}`,
+      JSON.stringify({ thinkMsgId, replyMsgId, thought, message })
+    );
+  } catch (_) {}
+};
+
+// Connect to /alice/stream?cursor=N and pump events through the session.
+// Called both for fresh sessions (cursor=0) and reconnects after a page refresh.
+async function aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor = 0, onFinish, onFail }) {
   const session = getAliceSession(runId, tabId);
-  if (session.active) return; // already streaming
+  if (session.active) return;
   session.active = true;
   session.thinkMsgId = thinkMsgId;
   session.replyMsgId = replyMsgId;
+  // Re-accumulate from cursor 0 on every connect so the totals are always correct.
+  session.accumulatedThought = "";
+  session.accumulatedMessage = "";
 
   const controller = new AbortController();
   session.abortController = controller;
 
   try {
-    const response = await fetch(`/api/test-runs/${runId}/alice/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: userText, history: historyPayload }),
-      signal: controller.signal,
-    });
-
+    const response = await fetch(
+      `/api/test-runs/${runId}/alice/stream?cursor=${cursor}`,
+      { signal: controller.signal }
+    );
     if (!response.ok) throw new Error(`HTTP error ${response.status}`);
 
     const reader = response.body.getReader();
@@ -380,10 +398,17 @@ async function aliceSessionStart(runId, tabId, { userText, historyPayload, think
         if (!trimmed.startsWith("data: ")) continue;
         try {
           const event = JSON.parse(trimmed.slice(6));
-          // Notify all currently subscribed components
+          if (event.type === "thinking_chunk" && event.delta)
+            session.accumulatedThought += event.delta;
+          else if (event.type === "message_chunk" && event.delta)
+            session.accumulatedMessage += event.delta;
+          else if (event.type === "done") {
+            if (event.thought) session.accumulatedThought = event.thought;
+            if (event.message) session.accumulatedMessage = event.message;
+          }
+          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId,
+            session.accumulatedThought, session.accumulatedMessage);
           session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
-          // Also call the direct callback for the originating tab (persists to localStorage)
-          if (onChunkUpdate) onChunkUpdate(event);
         } catch (_) {}
       }
     }
@@ -397,6 +422,33 @@ async function aliceSessionStart(runId, tabId, { userText, historyPayload, think
     session.active = false;
     session.abortController = null;
   }
+}
+
+// Start a new ALICE turn: POST to /alice/run (starts background task on server),
+// then open the event stream so the client receives events in real time.
+async function aliceSessionStart(runId, tabId, { userText, historyPayload, thinkMsgId, replyMsgId, onFinish, onFail }) {
+  // Seed recovery immediately so a fast refresh can find the message IDs.
+  _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, "", "");
+
+  try {
+    const resp = await fetch(`/api/test-runs/${runId}/alice/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: userText,
+        history: historyPayload,
+        tab_id: tabId,
+        think_msg_id: thinkMsgId,
+        reply_msg_id: replyMsgId,
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
+  } catch (err) {
+    if (onFail) onFail(err);
+    return;
+  }
+
+  await aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor: 0, onFinish, onFail });
 }
 
 const parseToolArgs = (text) => {
@@ -607,7 +659,26 @@ const parseAliceThinking = (text) => {
       continue;
     }
 
+    if (trimmed.startsWith("Scope compliance verified") || trimmed.includes("Starting agentic assessment loop")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
     if (trimmed.startsWith("Routing directives to the LLM agent model:") || trimmed.includes("Routing directives")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed });
+      continue;
+    }
+
+    // [Step N] Calling LLM... / [Step N] Tool result (N chars)
+    if (/^\[Step \d+\] (Calling LLM|Tool result)/.test(trimmed)) {
       if (currentParagraph.length > 0) {
         blocks.push({ type: "thought", text: currentParagraph.join("\n") });
         currentParagraph = [];
@@ -634,8 +705,8 @@ const parseAliceThinking = (text) => {
       continue;
     }
 
-    // Legacy Tool Call detection
-    const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
+    // Step-level tool execution detection (e.g. "[Step 1] Executing tool: http_request")
+    const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool:?\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
     const match = trimmed.match(toolCallRegex);
     if (match) {
       if (currentParagraph.length > 0) {
@@ -1645,31 +1716,30 @@ function TestRunDetail({ runId, initialTab }) {
   });
   const [activitySubTab, setActivitySubTab] = useState("agents");
   const [agents, setAgents]                = useState([]);
-  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set(["alice"]));
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
   const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
 
+  const _aliceDefaultChats = () => [{
+    id: "tab-default",
+    title: "Session 1",
+    messages: [{
+      id: "welcome",
+      sender: "alice",
+      type: "message",
+      text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    }]
+  }];
+
   const [aliceChats, setAliceChats] = useState(() => {
+    // Seed from localStorage for instant display; server load will overwrite below.
     try {
       const saved = localStorage.getItem(`alice_chats_${runId}`);
       if (saved) return JSON.parse(saved);
     } catch (_) {}
-    return [
-      {
-        id: "tab-default",
-        title: "Session 1",
-        messages: [
-          {
-            id: "welcome",
-            sender: "alice",
-            type: "message",
-            text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
-            ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
-          }
-        ]
-      }
-    ];
+    return _aliceDefaultChats();
   });
   const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
     try {
@@ -1679,10 +1749,90 @@ function TestRunDetail({ runId, initialTab }) {
     return "tab-default";
   });
 
+  // Load sessions from the server on mount.
+  // Strategy: use whichever source is more recent.
+  //   - Local is newer  → page-refresh by the same user; keep local (it has the
+  //     latest streaming content) and apply the recovery key on top.
+  //   - Server is newer → a different user opened the scan, or another browser
+  //     tab saved after this one last wrote; accept the server state.
+  useEffect(() => {
+    api.getAliceSessions(runId).then(data => {
+      if (!data.chats || data.chats.length === 0) return;
+
+      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localSavedAt = parseInt(
+        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
+      );
+      const activeTabId = data.active_tab_id || "tab-default";
+
+      // Helper: patch messages with the latest recovery-key text.
+      const applyRecovery = (chats, tabId) => {
+        try {
+          const rec = JSON.parse(
+            localStorage.getItem(`alice_recover_${runId}:${tabId}`) || "null"
+          );
+          if (!rec || !rec.thinkMsgId) return chats;
+          return chats.map(tab => {
+            if (tab.id !== tabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === rec.thinkMsgId && rec.thought) return { ...m, text: rec.thought };
+                if (m.id === rec.replyMsgId && rec.message) return { ...m, text: rec.message };
+                return m;
+              }),
+            };
+          });
+        } catch (_) { return chats; }
+      };
+
+      if (serverUpdatedAt > localSavedAt) {
+        // Server has newer state (another user/tab made changes).
+        const merged = applyRecovery(data.chats, activeTabId);
+        setAliceChats(merged);
+        setActiveAliceTabId(activeTabId);
+        try {
+          localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
+          localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
+          localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
+        } catch (_) {}
+      }
+      // else: local is fresher (page refresh mid-stream) — keep it as-is;
+      // the recovery useEffect below will patch the latest text.
+    }).catch(() => {});
+  }, [runId]);
+
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
   const [aliceIsThinking, setAliceIsThinking] = useState(false);
+  const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+
+  // On mount: check whether a background ALICE task is already running (e.g.
+  // after a page refresh) and reconnect to its event stream if so.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAliceStatus(runId).then(st => {
+      if (cancelled || !st.running) return;
+      const { tab_id, think_msg_id, reply_msg_id } = st;
+      setAliceGlobalRunning(true);
+      setAliceIsThinking(true);
+      setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(think_msg_id); return s; });
+      // Pre-populate session so the subscriber can find the right messages.
+      const sess = getAliceSession(runId, tab_id);
+      sess.thinkMsgId = think_msg_id;
+      sess.replyMsgId = reply_msg_id;
+      const done = () => { setAliceIsThinking(false); setAliceGlobalRunning(false); };
+      aliceSessionConnect(runId, tab_id, {
+        thinkMsgId: think_msg_id,
+        replyMsgId: reply_msg_id,
+        cursor: 0,
+        onFinish: done,
+        onFail: done,
+      });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [runId]);
   // Subscribe to in-flight stream on mount/tab-switch so navigating back
   // shows the spinner and receives live chunks from the singleton reader loop.
   useEffect(() => {
@@ -1690,18 +1840,63 @@ function TestRunDetail({ runId, initialTab }) {
     if (session.active) {
       setAliceIsThinking(true);
     }
+
+    // Resolve the best available accumulated text: prefer the in-memory session
+    // (same page load), fall back to the localStorage recovery key written
+    // directly by aliceSessionStart (survives navigation + module resets).
+    let recThinkId = session.thinkMsgId;
+    let recReplyId = session.replyMsgId;
+    let recThought = session.accumulatedThought;
+    let recMessage = session.accumulatedMessage;
+
+    if (!recThinkId || (!recThought && !recMessage)) {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null"
+        );
+        if (saved && saved.thinkMsgId) {
+          recThinkId  = recThinkId  || saved.thinkMsgId;
+          recReplyId  = recReplyId  || saved.replyMsgId;
+          recThought  = recThought  || saved.thought;
+          recMessage  = recMessage  || saved.message;
+        }
+      } catch (_) {}
+    }
+
+    if (recThinkId && (recThought || recMessage)) {
+      setAliceChats(prev => prev.map(tab => {
+        if (tab.id !== activeAliceTabId) return tab;
+        return {
+          ...tab,
+          messages: tab.messages.map(m => {
+            if (m.id === recThinkId && recThought) return { ...m, text: recThought };
+            if (m.id === recReplyId && recMessage)  return { ...m, text: recMessage };
+            return m;
+          })
+        };
+      }));
+      // Auto-expand the thinking bubble so recovered progress is visible
+      if (recThinkId) {
+        setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(recThinkId); return s; });
+      }
+    }
+
     const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
       onChunk: (event) => {
         const { thinkMsgId, replyMsgId } = session;
+        // Use session's running totals (not m.text + delta) so every render
+        // sees the complete accumulated text — identical to the catch-up sync
+        // on navigation-back, which ensures blocks parse and render graphically
+        // rather than as an in-progress incremental string.
         setAliceChats(prev => prev.map(tab => {
           if (tab.id !== activeAliceTabId) return tab;
           return {
             ...tab,
             messages: tab.messages.map(m => {
               if (event.type === "thinking_chunk" && m.id === thinkMsgId)
-                return { ...m, text: m.text + event.delta };
+                return { ...m, text: session.accumulatedThought };
               if (event.type === "message_chunk" && m.id === replyMsgId)
-                return { ...m, text: m.text + event.delta };
+                return { ...m, text: session.accumulatedMessage };
               if (event.type === "warning" && m.id === replyMsgId)
                 return { ...m, text: event.message };
               if (event.type === "done") {
@@ -1713,17 +1908,28 @@ function TestRunDetail({ runId, initialTab }) {
           };
         }));
       },
-      onDone: () => setAliceIsThinking(false),
-      onError: () => setAliceIsThinking(false),
+      onDone: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+      onError: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
     });
     return unsub;
   }, [runId, activeAliceTabId]);
 
+  const _aliceSaveTimer = useRef(null);
   useEffect(() => {
+    // Keep localStorage in sync for fast initial render on next mount.
+    // savedAt lets the server-load effect decide which source is fresher.
+    const now = Date.now();
     try {
       localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
       localStorage.setItem(`alice_active_tab_${runId}`, activeAliceTabId);
+      localStorage.setItem(`alice_chats_${runId}_savedAt`, now.toString());
     } catch (_) {}
+    // Debounce server save so rapid streaming chunks don't hammer the API.
+    if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    _aliceSaveTimer.current = setTimeout(() => {
+      api.saveAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId })
+        .catch(() => {});
+    }, 800);
   }, [aliceChats, activeAliceTabId, runId]);
 
   const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
@@ -1803,6 +2009,9 @@ function TestRunDetail({ runId, initialTab }) {
 
   const handleAliceStop = () => {
     aliceSessionAbort(runId, activeAliceTabId);
+    api.stopAliceRun(runId).catch(() => {});
+    setAliceIsThinking(false);
+    setAliceGlobalRunning(false);
   };
 
   const handleAliceSend = async () => {
@@ -1855,6 +2064,7 @@ function TestRunDetail({ runId, initialTab }) {
       return tab;
     }));
     setAliceIsThinking(true);
+    setAliceGlobalRunning(true);
 
     setAliceExpandedThinkIds(prev => {
       const next = new Set(prev);
@@ -1867,39 +2077,15 @@ function TestRunDetail({ runId, initialTab }) {
       text: m.text
     }));
 
-    // Helper that writes a chunk event into localStorage-backed state, so the
-    // update is durable even if the component unmounts mid-stream.
-    const onChunkUpdate = (event) => {
-      setAliceChats(prev => prev.map(tab => {
-        if (tab.id !== currentTabId) return tab;
-        return {
-          ...tab,
-          messages: tab.messages.map(m => {
-            if (event.type === "thinking_chunk" && m.id === thinkMsgId)
-              return { ...m, text: m.text + event.delta };
-            if (event.type === "message_chunk" && m.id === replyMsgId)
-              return { ...m, text: m.text + event.delta };
-            if (event.type === "warning" && m.id === replyMsgId)
-              return { ...m, text: event.message };
-            if (event.type === "done") {
-              if (m.id === thinkMsgId && event.thought) return { ...m, text: event.thought };
-              if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
-            }
-            return m;
-          })
-        };
-      }));
-    };
-
     // Delegate all I/O to the module-level singleton so the stream survives
     // component unmounts caused by hash navigation.
+    // State updates are handled by the useEffect subscriber above.
     aliceSessionStart(runId, currentTabId, {
       userText,
       historyPayload,
       thinkMsgId,
       replyMsgId,
-      onChunkUpdate,
-      onFinish: () => setAliceIsThinking(false),
+      onFinish: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
       onFail: (err) => {
         if (err.name === "AbortError") {
           setAliceChats(prev => prev.map(tab => {
@@ -1927,6 +2113,7 @@ function TestRunDetail({ runId, initialTab }) {
           }));
         }
         setAliceIsThinking(false);
+        setAliceGlobalRunning(false);
       },
     });
   };
@@ -2207,24 +2394,36 @@ function TestRunDetail({ runId, initialTab }) {
   }, [runId]);
 
   // Seed agents panel from persisted DB entries on mount.
+  // Also fetches the live scan status so stale "active" agents left by a
+  // force-killed process are reconciled back to "idle" immediately.
   useEffect(() => {
-    api.getAgentLog(runId).then(entries => {
-      if (!entries || entries.length === 0) return;
-      const agentsMap = new Map();
-      for (const e of entries) {
-        const ts = e.created_at
-          ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
-          : "--:--:--";
-        const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
-        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
-        existing.status = e.status;
-        existing.role = role;
-        existing.currentTask = e.current_task;
-        existing.taskHistory.push({ ts, task: e.current_task, outcome: e.outcome });
-        agentsMap.set(e.agent_id, existing);
-      }
-      setAgents([...agentsMap.values()]);
-    }).catch(() => {});
+    Promise.all([api.getAgentLog(runId), api.getThinkingStatus(runId)])
+      .then(([entries, scanStatus]) => {
+        if (!entries || entries.length === 0) return;
+        const scanRunning = isDynamicScanActive(scanStatus?.status);
+        const agentsMap = new Map();
+        for (const e of entries) {
+          const entryTs = e.created_at
+            ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+          const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
+          existing.status = e.status;
+          existing.role = role;
+          existing.currentTask = e.current_task;
+          existing.taskHistory.push({ ts: entryTs, task: e.current_task, outcome: e.outcome });
+          agentsMap.set(e.agent_id, existing);
+        }
+        // If no scan is running, reset any stale "active" agents to "idle".
+        if (!scanRunning) {
+          for (const [id, agent] of agentsMap) {
+            if (agent.status === "active" && id !== "crawler") {
+              agentsMap.set(id, { ...agent, status: "idle" });
+            }
+          }
+        }
+        setAgents([...agentsMap.values()]);
+      }).catch(() => {});
   }, [runId]);
 
   // Load token usage from the API on mount (in-process memory, best effort).
@@ -2950,6 +3149,14 @@ function TestRunDetail({ runId, initialTab }) {
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
         ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
+        ${aliceGlobalRunning && html`
+          <button
+            className="btn danger-outline"
+            style=${{ borderColor: "var(--danger)", color: "var(--danger)", background: "rgba(239,68,68,.08)" }}
+            onClick=${handleAliceStop}
+            title="Stop the running A.L.I.C.E. agent"
+          ><${IconStop}/> Stop A.L.I.C.E.</button>
+        `}
       </div>
     </div>
 

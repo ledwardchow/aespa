@@ -2840,6 +2840,62 @@ def _schedule_specialist_agent(
     return agent_id
 
 
+def dispatch_specialist_agent(
+    run_id: int,
+    attack_class: str,
+    target_url: str,
+    rationale: str,
+    priority: int = 7,
+) -> str | None:
+    """Public entry-point for dispatching a specialist agent from ALICE or other callers.
+
+    Bootstraps all scanner context (LLM config, policy, session vault, recon
+    summary) from the database so callers only need run_id + attack parameters.
+    Returns the agent_id string if dispatched, or None if gated out.
+    """
+    from aespa.services import scanner_sessions as session_svc
+    from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy, get_specialist_agent_config
+
+    with Session(get_engine()) as s:
+        run = s.get(TestRun, run_id)
+        if run is None:
+            return None
+        llm_cfg = get_llm_config_for_run(s, run)
+        scanner_policy = get_run_scanner_policy(s, run)
+        specialist_config = get_specialist_agent_config(s)
+        site = s.get(Site, run.site_id)
+        base_url = str(site.base_url or "").strip() if site else ""
+        site_id = site.id if site else 0
+        recon_summary: dict | None = None
+        if run.recon_summary:
+            try:
+                import json as _json
+                recon_summary = _json.loads(run.recon_summary)
+            except Exception:
+                pass
+
+    session_vault = _merge_persisted_sessions(run_id, {})
+
+    dispatch = {
+        "attack_class": attack_class,
+        "target_url": target_url,
+        "rationale": rationale,
+        "priority": priority,
+    }
+
+    return _schedule_specialist_agent(
+        run_id=run_id,
+        dispatch=dispatch,
+        session_vault=session_vault,
+        llm_cfg=llm_cfg,
+        base_url=base_url,
+        scanner_policy=scanner_policy,
+        specialist_config=specialist_config,
+        recon_summary=recon_summary,
+        site_id=site_id,
+    )
+
+
 async def _persist_dynamic_finding(
     *,
     run_id: int,
@@ -2850,35 +2906,42 @@ async def _persist_dynamic_finding(
     first_page_id: int | None,
     result_by_url: dict[str, dict],
     writeup_source: str | None = None,
+    skip_normalize: bool = False,
 ) -> ScanFinding | None:
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
     raw = {**raw, "affected_url": affected}
 
-    try:
-        with Session(get_engine()) as s:
-            existing = s.exec(
-                select(ScanFinding).where(ScanFinding.test_run_id == run_id)
-            ).all()
-            existing_summaries = [
-                {
-                    "title": f.title,
-                    "owasp_category": f.owasp_category,
-                    "severity": f.severity,
-                }
-                for f in existing
-            ]
-        if existing_summaries:
-            normalized = await llm_svc.normalize_finding_titles(
-                llm_cfg,
-                existing_summaries,
-                [raw],
-            )
-            if normalized:
-                raw = normalized[0]
-                affected = (raw.get("affected_url") or affected).strip() or affected
-    except Exception as exc:
-        log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
+    # normalize_finding_titles renames new findings to match existing titles when
+    # they share the same OWASP category — useful for the automated scanner, but
+    # harmful for ALICE which already produces specific titles.  When the rename
+    # produces a title that matches an existing finding at the same URL the finding
+    # is silently dropped as a duplicate even though it is a distinct issue.
+    if not skip_normalize:
+        try:
+            with Session(get_engine()) as s:
+                existing = s.exec(
+                    select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                ).all()
+                existing_summaries = [
+                    {
+                        "title": f.title,
+                        "owasp_category": f.owasp_category,
+                        "severity": f.severity,
+                    }
+                    for f in existing
+                ]
+            if existing_summaries:
+                normalized = await llm_svc.normalize_finding_titles(
+                    llm_cfg,
+                    existing_summaries,
+                    [raw],
+                )
+                if normalized:
+                    raw = normalized[0]
+                    affected = (raw.get("affected_url") or affected).strip() or affected
+        except Exception as exc:
+            log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
 
     lock = _persist_write_locks.setdefault(run_id, asyncio.Lock())
     async with lock:
