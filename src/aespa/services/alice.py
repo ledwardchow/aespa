@@ -16,12 +16,23 @@ from aespa.services import llm as llm_svc
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
     get_llm_config_for_run,
-    get_run_scanner_policy,
+    get_scanner_policy,
 )
 from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT
 from aespa.services.prompts.specialist import get_specialist_tools, SPECIALIST_AGENT_TOOLS
 
 log = logging.getLogger(__name__)
+
+
+def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
+    """Return the configured request timeout, falling back to the scanner default."""
+    from aespa.services.scanner import REQUEST_TIMEOUT
+    try:
+        with Session(get_engine()) as _s:
+            return get_scanner_policy(_s).request_timeout_s
+    except Exception:
+        return REQUEST_TIMEOUT
+
 
 # Hard step limit to prevent runaway loops regardless of model behaviour.
 ALICE_MAX_STEPS = 40
@@ -70,14 +81,13 @@ async def _execute_alice_tool(
         _url = str(tool_input.get("url") or base_url)
         scope_err = check_scope(_url, site_id, run_id)
         if scope_err:
-            return f"[SCOPE BLOCK] {_scope_err}"
+            return f"[SCOPE BLOCK] {scope_err}"
 
         method = str(tool_input.get("method") or "GET").upper()
         headers = dict(tool_input.get("headers") or {})
         body = tool_input.get("body")
 
-        scanner_policy = get_run_scanner_policy(run_id)
-        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+        timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
             cookies={},
@@ -178,6 +188,7 @@ async def _execute_alice_tool(
                 first_page_id=first_page_id,
                 result_by_url={str(affected): fw_result},
                 writeup_source="test_lead",
+                skip_normalize=True,
             )
             log.info("A.L.I.C.E. write_finding run_id=%s title=%r", run_id, finding_raw.get("title"))
             return f"Finding '{finding_raw.get('title')}' recorded successfully."
@@ -252,8 +263,7 @@ async def _execute_alice_tool(
         success_statuses = set(tool_input.get("success_statuses") or [200, 201, 302])
 
         results = []
-        scanner_policy = get_run_scanner_policy(run_id)
-        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+        timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
             cookies={},
@@ -322,8 +332,7 @@ async def _execute_alice_tool(
         body[password_field] = f"AliceTest1!{rand_suffix}"
 
         success_statuses = set(tool_input.get("success_statuses") or [200, 201])
-        scanner_policy = get_run_scanner_policy(run_id)
-        timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
+        timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
             cookies={},
@@ -369,41 +378,53 @@ async def _execute_alice_tool(
         priority = int(tool_input.get("priority") or 7)
 
         try:
-            asyncio.ensure_future(
-                dispatch_specialist_agent(
-                    run_id=run_id,
-                    attack_class=attack_class,
-                    target_url=target_url,
-                    rationale=rationale,
-                    priority=priority,
-                )
+            agent_id = dispatch_specialist_agent(
+                run_id=run_id,
+                attack_class=attack_class,
+                target_url=target_url,
+                rationale=rationale,
+                priority=priority,
             )
-            return f"Specialist agent dispatched for {attack_class} on {target_url}."
+            if agent_id:
+                return f"Specialist agent {agent_id} dispatched for {attack_class} on {target_url}."
+            return f"Specialist agent for {attack_class} was not dispatched (gated by policy or at capacity)."
         except Exception as exc:
             return f"agent_dispatch error: {exc}"
 
     # ── browser ───────────────────────────────────────────────────────────────
     if tool_name == "browser":
-        from aespa.services.scanner import _execute_browser_steps
+        from aespa.services.scanner import _make_scanner_client
+        from aespa.services import traffic as traffic_svc
 
-        steps = tool_input.get("steps") or []
         url = str(tool_input.get("url") or base_url)
 
         scope_err = check_scope(url, site_id, run_id)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
-        try:
-            result = await _execute_browser_steps(
-                run_id=run_id,
-                url=url,
-                steps=steps,
-                extra_headers={},
-                cookies={},
-            )
-            return result[:8192]
-        except Exception as exc:
-            return f"Browser action failed: {exc}"
+        timeout = _get_alice_timeout(run_id)
+        async with _make_scanner_client(
+            cookies={},
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=timeout,
+            follow_redirects=True,
+            verify=False,
+            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+        ) as hx:
+            try:
+                resp = await hx.get(url)
+                body = resp.text[:8192]
+                return (
+                    f"Page: {url}\n"
+                    f"Status: {resp.status_code}\n"
+                    f"Headers: {dict(resp.headers)}\n"
+                    f"Body ({len(resp.text)} chars):\n{body}"
+                )
+            except Exception as exc:
+                return f"Browser fetch failed: {exc}"
 
     return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
@@ -437,7 +458,7 @@ async def run_alice_turn_stream(
         base_url = str(site.base_url or "").strip()
 
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
-    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\\n'})}\n\n"
+    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
 
     # 2. Scope compliance checks on user directive
@@ -460,7 +481,7 @@ async def run_alice_turn_stream(
             except Exception:
                 pass
 
-    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Scope compliance verified. Starting agentic assessment loop...\\n'})}\n\n"
+    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': 'Scope compliance verified. Starting agentic assessment loop...\n'})}\n\n"
     await asyncio.sleep(0.01)
 
     # 3. Build system prompt and initial message list
@@ -494,7 +515,7 @@ async def run_alice_turn_stream(
         while step_count < ALICE_MAX_STEPS:
             step_count += 1
 
-            yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\\n'})}\n\n"
+            yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\n'})}\n\n"
 
             try:
                 content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
@@ -503,7 +524,7 @@ async def run_alice_turn_stream(
             except Exception as exc:
                 log.exception("ALICE agentic loop: LLM call failed at step %d", step_count)
                 err = f"LLM error at step {step_count}: {exc}"
-                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\n\n⚠️ {err}'})}\n\n"
                 break
 
             # Append assistant turn to the growing conversation
@@ -523,13 +544,13 @@ async def run_alice_turn_stream(
                     await asyncio.sleep(0)
 
             # Stream text blocks
+            import re as _re
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
                     continue
 
                 # Parse out <thinking>...</thinking> from text if model embeds it there
-                import re as _re
                 think_match = _re.search(r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL)
                 if think_match:
                     think_part = think_match.group(1).strip()
@@ -538,9 +559,15 @@ async def run_alice_turn_stream(
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
                     if outer_text:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
                         accumulated_message += outer_text
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 else:
+                    if accumulated_message and not accumulated_message.endswith("\n"):
+                        accumulated_message += "\n\n"
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
                     accumulated_message += text_content
                     yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
                 await asyncio.sleep(0)
@@ -588,7 +615,7 @@ async def run_alice_turn_stream(
                     session_done = True
                     break
 
-                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Executing tool: {tool_name}\\n'})}\n\n"
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Executing tool: {tool_name}\n'})}\n\n"
 
                 try:
                     result_str = await _execute_alice_tool(
@@ -609,7 +636,7 @@ async def run_alice_turn_stream(
                     omitted = len(result_str) - 16000
                     result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
 
-                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\\n'})}\n\n"
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
 
                 tool_results.append({
                     "type": "tool_result",
