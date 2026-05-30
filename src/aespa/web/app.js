@@ -1757,7 +1757,10 @@ function TestRunDetail({ runId, initialTab }) {
   //     tab saved after this one last wrote; accept the server state.
   useEffect(() => {
     api.getAliceSessions(runId).then(data => {
-      if (!data.chats || data.chats.length === 0) return;
+      if (!data.chats || data.chats.length === 0) {
+        _aliceServerLoaded.current = true;
+        return;
+      }
 
       const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
       const localSavedAt = parseInt(
@@ -1789,6 +1792,7 @@ function TestRunDetail({ runId, initialTab }) {
       if (serverUpdatedAt > localSavedAt) {
         // Server has newer state (another user/tab made changes).
         const merged = applyRecovery(data.chats, activeTabId);
+        _aliceServerLoaded.current = true;
         setAliceChats(merged);
         setActiveAliceTabId(activeTabId);
         try {
@@ -1796,10 +1800,14 @@ function TestRunDetail({ runId, initialTab }) {
           localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
           localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
         } catch (_) {}
+      } else {
+        // Local is fresher (page refresh mid-stream) — keep it as-is;
+        // but still mark loaded so the save effect is unblocked.
+        _aliceServerLoaded.current = true;
       }
-      // else: local is fresher (page refresh mid-stream) — keep it as-is;
-      // the recovery useEffect below will patch the latest text.
-    }).catch(() => {});
+    }).catch(() => {
+      _aliceServerLoaded.current = true; // unblock saves even if the API fails
+    });
   }, [runId]);
 
   const [aliceInputText, setAliceInputText] = useState("");
@@ -1915,9 +1923,13 @@ function TestRunDetail({ runId, initialTab }) {
   }, [runId, activeAliceTabId]);
 
   const _aliceSaveTimer = useRef(null);
+  const _aliceServerLoaded = useRef(false);
   useEffect(() => {
     // Keep localStorage in sync for fast initial render on next mount.
     // savedAt lets the server-load effect decide which source is fresher.
+    // Guard: skip until the initial server load has resolved so we don't
+    // stamp a fresh localSavedAt timestamp before the comparison happens.
+    if (!_aliceServerLoaded.current) return;
     const now = Date.now();
     try {
       localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
