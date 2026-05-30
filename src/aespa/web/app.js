@@ -87,6 +87,11 @@ const api = {
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
   getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
   getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
+  getAliceSessions:  (id)          => req(`/api/test-runs/${id}/alice/sessions`),
+  saveAliceSessions: (id, b)       => req(`/api/test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getAliceStatus:    (id)          => req(`/api/test-runs/${id}/alice/status`),
+  startAliceRun:     (id, b)       => req(`/api/test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopAliceRun:      (id)          => req(`/api/test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
@@ -293,6 +298,726 @@ const IconBug = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill=
   <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 </svg>`;
 
+const IconMessageSquare = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+</svg>`;
+const IconSend = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="22" y1="2" x2="11" y2="13"></line>
+  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+</svg>`;
+const IconBrain = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z"/>
+  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2Z"/>
+</svg>`;
+
+
+
+// ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
+// Module-level singleton: keeps the stream reader loop alive even when the
+// TestRunDetail component unmounts (user navigates away). Subscribers
+// (React setState callbacks) are registered/deregistered as the component
+// mounts and unmounts. On re-mount, the component can re-subscribe and
+// immediately get the current live state.
+const aliceSessionStore = {};
+
+function getAliceSession(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  if (!aliceSessionStore[key]) {
+    aliceSessionStore[key] = {
+      active: false,
+      abortController: null,
+      thinkMsgId: null,
+      replyMsgId: null,
+      accumulatedThought: "",
+      accumulatedMessage: "",
+      subscribers: new Set(),
+    };
+  }
+  return aliceSessionStore[key];
+}
+
+function aliceSessionSubscribe(runId, tabId, handlers) {
+  const session = getAliceSession(runId, tabId);
+  session.subscribers.add(handlers);
+  return () => session.subscribers.delete(handlers);
+}
+
+function aliceSessionAbort(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  const session = aliceSessionStore[key];
+  if (session?.abortController) {
+    session.abortController.abort();
+  }
+}
+
+const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
+  try {
+    localStorage.setItem(
+      `alice_recover_${runId}:${tabId}`,
+      JSON.stringify({ thinkMsgId, replyMsgId, thought, message })
+    );
+  } catch (_) {}
+};
+
+// Connect to /alice/stream?cursor=N and pump events through the session.
+// Called both for fresh sessions (cursor=0) and reconnects after a page refresh.
+async function aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor = 0, onFinish, onFail }) {
+  const session = getAliceSession(runId, tabId);
+  if (session.active) return;
+  session.active = true;
+  session.thinkMsgId = thinkMsgId;
+  session.replyMsgId = replyMsgId;
+  // Re-accumulate from cursor 0 on every connect so the totals are always correct.
+  session.accumulatedThought = "";
+  session.accumulatedMessage = "";
+
+  const controller = new AbortController();
+  session.abortController = controller;
+
+  try {
+    const response = await fetch(
+      `/api/test-runs/${runId}/alice/stream?cursor=${cursor}`,
+      { signal: controller.signal }
+    );
+    if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(trimmed.slice(6));
+          if (event.type === "thinking_chunk" && event.delta)
+            session.accumulatedThought += event.delta;
+          else if (event.type === "message_chunk" && event.delta)
+            session.accumulatedMessage += event.delta;
+          else if (event.type === "done") {
+            if (event.thought) session.accumulatedThought = event.thought;
+            if (event.message) session.accumulatedMessage = event.message;
+          }
+          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId,
+            session.accumulatedThought, session.accumulatedMessage);
+          session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
+        } catch (_) {}
+      }
+    }
+
+    session.subscribers.forEach(h => h.onDone && h.onDone());
+    if (onFinish) onFinish();
+  } catch (err) {
+    session.subscribers.forEach(h => h.onError && h.onError(err));
+    if (onFail) onFail(err);
+  } finally {
+    session.active = false;
+    session.abortController = null;
+  }
+}
+
+// Start a new ALICE turn: POST to /alice/run (starts background task on server),
+// then open the event stream so the client receives events in real time.
+async function aliceSessionStart(runId, tabId, { userText, historyPayload, thinkMsgId, replyMsgId, onFinish, onFail }) {
+  // Seed recovery immediately so a fast refresh can find the message IDs.
+  _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, "", "");
+
+  try {
+    const resp = await fetch(`/api/test-runs/${runId}/alice/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: userText,
+        history: historyPayload,
+        tab_id: tabId,
+        think_msg_id: thinkMsgId,
+        reply_msg_id: replyMsgId,
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
+  } catch (err) {
+    if (onFail) onFail(err);
+    return;
+  }
+
+  await aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor: 0, onFinish, onFail });
+}
+
+const parseToolArgs = (text) => {
+
+  const args = {};
+  const jsonMatch = text.match(/\{.*\}/s);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (_) {}
+  }
+  
+  // Extract key-value parameter pairs (e.g. url='http://...')
+  const kvRegex = /([a-zA-Z0-9_]+)\s*=\s*(['"][^'"]*['"]|[^,)]+)/g;
+  let match;
+  while ((match = kvRegex.exec(text)) !== null) {
+    let key = match[1];
+    let val = match[2].trim();
+    if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+      val = val.slice(1, -1);
+    }
+    args[key] = val;
+  }
+  return Object.keys(args).length > 0 ? args : null;
+};
+
+
+const parseAliceThinking = (text) => {
+  if (!text) return [];
+  
+  const blocks = [];
+  const lines = text.split("\n");
+  let currentParagraph = [];
+  let inCodeBlock = false;
+  let codeLang = "";
+  let codeContent = [];
+  
+  let inToolCall = false;
+  let toolCallContent = [];
+  let inToolResponse = false;
+  let toolResponseContent = [];
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    
+    // Code block transition
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        // End of code block
+        blocks.push({
+          type: "code",
+          lang: codeLang,
+          text: codeContent.join("\n")
+        });
+        inCodeBlock = false;
+        codeContent = [];
+      } else {
+        // Start of code block
+        // Flush existing paragraph first
+        if (currentParagraph.length > 0) {
+          blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+          currentParagraph = [];
+        }
+        inCodeBlock = true;
+        codeLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeContent.push(line);
+      continue;
+    }
+
+    // Tool Call tag handling (multi-line)
+    if (inToolCall) {
+      if (trimmed.includes("</tool_call>")) {
+        const parts = line.split("</tool_call>");
+        if (parts[0]) toolCallContent.push(parts[0]);
+        inToolCall = false;
+        
+        const rawText = toolCallContent.join("\n");
+        let toolName = "unknown";
+        let toolArgsText = rawText;
+        try {
+          const parsed = JSON.parse(rawText.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = rawText.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+        toolCallContent = [];
+      } else {
+        toolCallContent.push(line);
+      }
+      continue;
+    }
+
+    // Tool Response tag handling (multi-line)
+    if (inToolResponse) {
+      if (trimmed.includes("</tool_response>")) {
+        const parts = line.split("</tool_response>");
+        if (parts[0]) toolResponseContent.push(parts[0]);
+        inToolResponse = false;
+        
+        blocks.push({
+          type: "tool_response",
+          text: toolResponseContent.join("\n")
+        });
+        toolResponseContent = [];
+      } else {
+        toolResponseContent.push(line);
+      }
+      continue;
+    }
+
+    // Start of Tool Call block
+    if (trimmed.includes("<tool_call>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_call>")) {
+        const startIndex = line.indexOf("<tool_call>");
+        const endIndex = line.indexOf("</tool_call>");
+        const content = line.substring(startIndex + 11, endIndex);
+        
+        let toolName = "unknown";
+        let toolArgsText = content;
+        try {
+          const parsed = JSON.parse(content.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = content.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+      } else {
+        inToolCall = true;
+        const parts = line.split("<tool_call>");
+        if (parts[1]) toolCallContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Start of Tool Response block
+    if (trimmed.includes("<tool_response>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_response>")) {
+        const startIndex = line.indexOf("<tool_response>");
+        const endIndex = line.indexOf("</tool_response>");
+        const content = line.substring(startIndex + 15, endIndex);
+        
+        blocks.push({
+          type: "tool_response",
+          text: content
+        });
+      } else {
+        inToolResponse = true;
+        const parts = line.split("<tool_response>");
+        if (parts[1]) toolResponseContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Step/Status logs
+    if (trimmed.startsWith("[A.L.I.C.E. Initializing]") || trimmed.includes("Mapped target sitemap")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "initializing", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Evaluating prompt scope compliance:") || trimmed.includes("In-Scope verified")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Scope compliance verified") || trimmed.includes("Starting agentic assessment loop")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Routing directives to the LLM agent model:") || trimmed.includes("Routing directives")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed });
+      continue;
+    }
+
+    // [Step N] Calling LLM... / [Step N] Tool result (N chars)
+    if (/^\[Step \d+\] (Calling LLM|Tool result)/.test(trimmed)) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("[A.L.I.C.E. Boundary Violation Alert]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "danger", title: "Boundary Violation", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("[ALICE Error]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "error", title: "Error", text: trimmed });
+      continue;
+    }
+
+    // Step-level tool execution detection (e.g. "[Step 1] Executing tool: http_request")
+    const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool:?\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
+    const match = trimmed.match(toolCallRegex);
+    if (match) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const toolName = match[1] || match[2];
+      blocks.push({ type: "tool_call", tool: toolName, text: trimmed });
+      continue;
+    }
+
+    // Standard text line
+    if (trimmed !== "") {
+      currentParagraph.push(line);
+    } else if (currentParagraph.length > 0) {
+      blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+      currentParagraph = [];
+    }
+  }
+
+  // Flush remaining paragraphs or code blocks
+  if (inCodeBlock && codeContent.length > 0) {
+    blocks.push({ type: "code", lang: codeLang, text: codeContent.join("\n") });
+  } else if (inToolCall && toolCallContent.length > 0) {
+    blocks.push({ type: "tool_call", tool: "unknown", text: toolCallContent.join("\n") });
+  } else if (inToolResponse && toolResponseContent.length > 0) {
+    blocks.push({ type: "tool_response", text: toolResponseContent.join("\n") });
+  } else if (currentParagraph.length > 0) {
+    blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+  }
+
+  return blocks;
+};
+
+
+const renderMarkdown = (text) => {
+  if (!text) return "";
+  
+  const lines = text.split("\n");
+  const elements = [];
+  let inList = false;
+  let listItems = [];
+  let codeBlockContent = [];
+  let inCodeBlock = false;
+  let codeBlockLang = "";
+
+  const renderTextWithFormatting = (txt) => {
+    const inlineRegex = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    const segments = txt.split(inlineRegex);
+    
+    return segments.map((seg, idx) => {
+      if (seg.startsWith("`") && seg.endsWith("`")) {
+        return html`<code className="alice-inline-code">${seg.slice(1, -1)}</code>`;
+      }
+      if (seg.startsWith("**") && seg.endsWith("**")) {
+        return html`<strong className="alice-bold-text">${seg.slice(2, -2)}</strong>`;
+      }
+      return seg;
+    });
+  };
+
+  const parseTableRow = (rowText) => {
+    const cells = rowText.split("|").map(c => c.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Code blocks
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        elements.push(html`
+          <div className="alice-code-block-wrapper">
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+          </div>
+        `);
+        codeBlockContent = [];
+      } else {
+        if (inList) {
+          elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+          inList = false;
+          listItems = [];
+        }
+        inCodeBlock = true;
+        codeBlockLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeBlockContent.push(line);
+      continue;
+    }
+
+    // Tables
+    if (trimmed.startsWith("|")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+
+      const tableLines = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
+      i--; // Adjust loop counter
+
+      if (tableLines.length >= 2) {
+        const headers = parseTableRow(tableLines[0]);
+        const rows = [];
+        const bodyLines = tableLines.slice(2);
+        for (const rLine of bodyLines) {
+          if (rLine.includes("---")) continue;
+          rows.push(parseTableRow(rLine));
+        }
+
+        elements.push(html`
+          <div className="alice-table-wrapper">
+            <table className="alice-table">
+              <thead>
+                <tr>
+                  ${headers.map(h => html`<th>${renderTextWithFormatting(h)}</th>`)}
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map(row => html`
+                  <tr>
+                    ${row.map(cell => html`<td>${renderTextWithFormatting(cell)}</td>`)}
+                  </tr>
+                `)}
+              </tbody>
+            </table>
+          </div>
+        `);
+        continue;
+      }
+    }
+
+    // Headers
+    if (trimmed.startsWith("### ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h4 className="alice-md-h3">${renderTextWithFormatting(trimmed.slice(4))}</h4>`);
+      continue;
+    }
+    if (trimmed.startsWith("## ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h3 className="alice-md-h2">${renderTextWithFormatting(trimmed.slice(3))}</h3>`);
+      continue;
+    }
+
+    // Lists
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      inList = true;
+      listItems.push(trimmed.slice(2));
+      continue;
+    }
+
+    // Paragraph
+    if (trimmed === "") {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<div className="alice-md-space"></div>`);
+    } else {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<p className="alice-md-p">${renderTextWithFormatting(line)}</p>`);
+    }
+  }
+
+  if (inList) {
+    elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+  }
+  if (inCodeBlock && codeBlockContent.length > 0) {
+    elements.push(html`
+      <div className="alice-code-block-wrapper">
+        <div className="alice-code-block-header">
+          <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+        </div>
+        <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+      </div>
+    `);
+  }
+
+  return elements;
+};
+
+
+const renderAliceBlocks = (text, isThinking) => {
+  const blocks = parseAliceThinking(text);
+  return blocks.map((block, idx) => {
+    if (block.type === "status") {
+      let icon = html`<span className="alice-status-dot"></span>`;
+      if (block.status === "initializing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--init">⚙️</span>`;
+      } else if (block.status === "scope_check") {
+        icon = html`<span className="alice-status-icon alice-status-icon--success">🛡️</span>`;
+      } else if (block.status === "routing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--routing">⚡</span>`;
+      }
+      return html`
+        <div key=${idx} className=${"alice-thinking-status-row alice-thinking-status-row--" + block.status} style=${isThinking ? {} : { margin: "6px 0" }}>
+          ${icon}
+          <span className="alice-status-text">${block.text}</span>
+        </div>
+      `;
+    }
+    if (block.type === "alert") {
+      return html`
+        <div key=${idx} className=${"alice-thinking-alert alice-thinking-alert--" + block.level} style=${isThinking ? {} : { margin: "6px 0" }}>
+          <span className="alice-alert-icon">⚠️</span>
+          <div className="alice-alert-content">
+            <div className="alice-alert-title">${block.title}</div>
+            <div className="alice-alert-text">${block.text}</div>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "tool_call") {
+      const parsedArgs = parseToolArgs(block.text);
+      return html`
+        <div key=${idx} className="alice-thinking-tool-call" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row">
+            <span className="alice-tool-prompt">$</span>
+            <span className="alice-tool-badge">CALL TOOL</span>
+            <span className="alice-tool-name">${block.tool}</span>
+          </div>
+          ${parsedArgs ? html`
+            <div className="alice-tool-args-card">
+              ${Object.entries(parsedArgs).map(([key, val]) => html`
+                <div key=${key} className="alice-tool-arg-row">
+                  <span className="alice-tool-arg-key">${key}:</span>
+                  <span className="alice-tool-arg-val">${String(val)}</span>
+                </div>
+              `)}
+            </div>
+          ` : html`
+            <div className="alice-tool-text">${block.text}</div>
+          `}
+        </div>
+      `;
+    }
+    if (block.type === "tool_response") {
+      let isJson = false;
+      let formattedResponse = block.text;
+      try {
+        const parsed = JSON.parse(block.text.trim());
+        formattedResponse = JSON.stringify(parsed, null, 2);
+        isJson = true;
+      } catch (_) {}
+      return html`
+        <div key=${idx} className="alice-thinking-tool-response" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row" style=${{ borderLeft: "3px solid #10b981", paddingLeft: "10px" }}>
+            <span className="alice-tool-prompt" style=${{ color: "#10b981" }}>←</span>
+            <span className="alice-tool-badge" style=${{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399" }}>RESPONSE</span>
+          </div>
+          <div className="alice-code-block-wrapper" style=${{ marginTop: "4px" }}>
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${isJson ? "json" : "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code style=${{ fontSize: "10.5px" }}>${formattedResponse}</code></pre>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "code") {
+      return html`
+        <div key=${idx} className="alice-code-block-wrapper">
+          <div className="alice-code-block-header">
+            <span className="alice-code-block-lang">${block.lang || "json"}</span>
+          </div>
+          <pre className="alice-code-block"><code>${block.text}</code></pre>
+        </div>
+      `;
+    }
+    if (isThinking) {
+      return html`
+        <p key=${idx} className="alice-thinking-paragraph">${block.text}</p>
+      `;
+    } else {
+      return html`
+        <div key=${idx} className="alice-reply-paragraph-wrapper">${renderMarkdown(block.text)}</div>
+      `;
+    }
+  });
+};
+
+
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -330,10 +1055,27 @@ function App() {
         <div className="sidebar-brand">
           <div className="logo">
             ${!collapsed && html`<div className="logo-codename"><span>CODE</span><span>NAME</span></div>`}
-            <div className="logo-icon">A</div>
+            <img src="/icon-sm.png" className="logo-icon" alt="AESPA" />
             ${!collapsed && html`<span className="logo-text">ESPA</span>`}
           </div>
           ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
+        </div>
+        <div className="sidebar-meta">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
+              ${showUsername && username ? html`
+                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                  ${username}
+                </span>
+                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
+              ` : html`
+                ${appVersion && html`<span>v${appVersion}</span>`}
+              `}
+            </div>
+          `}
         </div>
         <nav className="sidebar-nav">
           ${!collapsed && html`<div className="nav-section-label">Targets</div>`}
@@ -362,24 +1104,8 @@ function App() {
               <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Reporting Lab"}
             </a>`}
         </nav>
-        <div className="sidebar-footer">
-          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
-            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
-          </button>
-          ${!collapsed && html`
-            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
-              ${showUsername && username ? html`
-                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
-                  ${username}
-                </span>
-                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
-              ` : html`
-                ${appVersion && html`<span>v${appVersion}</span>`}
-              `}
-            </div>
-          `}
-        </div>
       </aside>
+
 
       <div className="main">
         ${route.name==="list"        && html`<${SitesList}/>`}
@@ -994,6 +1720,405 @@ function TestRunDetail({ runId, initialTab }) {
   const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
+
+  const _aliceDefaultChats = () => [{
+    id: "tab-default",
+    title: "Session 1",
+    messages: [{
+      id: "welcome",
+      sender: "alice",
+      type: "message",
+      text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    }]
+  }];
+
+  const [aliceChats, setAliceChats] = useState(() => {
+    // Seed from localStorage for instant display; server load will overwrite below.
+    try {
+      const saved = localStorage.getItem(`alice_chats_${runId}`);
+      if (saved) return JSON.parse(saved);
+    } catch (_) {}
+    return _aliceDefaultChats();
+  });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`alice_active_tab_${runId}`);
+      if (saved) return saved;
+    } catch (_) {}
+    return "tab-default";
+  });
+
+  // Load sessions from the server on mount.
+  // Strategy: use whichever source is more recent.
+  //   - Local is newer  → page-refresh by the same user; keep local (it has the
+  //     latest streaming content) and apply the recovery key on top.
+  //   - Server is newer → a different user opened the scan, or another browser
+  //     tab saved after this one last wrote; accept the server state.
+  useEffect(() => {
+    api.getAliceSessions(runId).then(data => {
+      if (!data.chats || data.chats.length === 0) return;
+
+      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localSavedAt = parseInt(
+        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
+      );
+      const activeTabId = data.active_tab_id || "tab-default";
+
+      // Helper: patch messages with the latest recovery-key text.
+      const applyRecovery = (chats, tabId) => {
+        try {
+          const rec = JSON.parse(
+            localStorage.getItem(`alice_recover_${runId}:${tabId}`) || "null"
+          );
+          if (!rec || !rec.thinkMsgId) return chats;
+          return chats.map(tab => {
+            if (tab.id !== tabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === rec.thinkMsgId && rec.thought) return { ...m, text: rec.thought };
+                if (m.id === rec.replyMsgId && rec.message) return { ...m, text: rec.message };
+                return m;
+              }),
+            };
+          });
+        } catch (_) { return chats; }
+      };
+
+      if (serverUpdatedAt > localSavedAt) {
+        // Server has newer state (another user/tab made changes).
+        const merged = applyRecovery(data.chats, activeTabId);
+        setAliceChats(merged);
+        setActiveAliceTabId(activeTabId);
+        try {
+          localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
+          localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
+          localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
+        } catch (_) {}
+      }
+      // else: local is fresher (page refresh mid-stream) — keep it as-is;
+      // the recovery useEffect below will patch the latest text.
+    }).catch(() => {});
+  }, [runId]);
+
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const [aliceIsThinking, setAliceIsThinking] = useState(false);
+  const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+
+  // On mount: check whether a background ALICE task is already running (e.g.
+  // after a page refresh) and reconnect to its event stream if so.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAliceStatus(runId).then(st => {
+      if (cancelled || !st.running) return;
+      const { tab_id, think_msg_id, reply_msg_id } = st;
+      setAliceGlobalRunning(true);
+      setAliceIsThinking(true);
+      setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(think_msg_id); return s; });
+      // Pre-populate session so the subscriber can find the right messages.
+      const sess = getAliceSession(runId, tab_id);
+      sess.thinkMsgId = think_msg_id;
+      sess.replyMsgId = reply_msg_id;
+      const done = () => { setAliceIsThinking(false); setAliceGlobalRunning(false); };
+      aliceSessionConnect(runId, tab_id, {
+        thinkMsgId: think_msg_id,
+        replyMsgId: reply_msg_id,
+        cursor: 0,
+        onFinish: done,
+        onFail: done,
+      });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [runId]);
+  // Subscribe to in-flight stream on mount/tab-switch so navigating back
+  // shows the spinner and receives live chunks from the singleton reader loop.
+  useEffect(() => {
+    const session = getAliceSession(runId, activeAliceTabId);
+    if (session.active) {
+      setAliceIsThinking(true);
+    }
+
+    // Resolve the best available accumulated text: prefer the in-memory session
+    // (same page load), fall back to the localStorage recovery key written
+    // directly by aliceSessionStart (survives navigation + module resets).
+    let recThinkId = session.thinkMsgId;
+    let recReplyId = session.replyMsgId;
+    let recThought = session.accumulatedThought;
+    let recMessage = session.accumulatedMessage;
+
+    if (!recThinkId || (!recThought && !recMessage)) {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null"
+        );
+        if (saved && saved.thinkMsgId) {
+          recThinkId  = recThinkId  || saved.thinkMsgId;
+          recReplyId  = recReplyId  || saved.replyMsgId;
+          recThought  = recThought  || saved.thought;
+          recMessage  = recMessage  || saved.message;
+        }
+      } catch (_) {}
+    }
+
+    if (recThinkId && (recThought || recMessage)) {
+      setAliceChats(prev => prev.map(tab => {
+        if (tab.id !== activeAliceTabId) return tab;
+        return {
+          ...tab,
+          messages: tab.messages.map(m => {
+            if (m.id === recThinkId && recThought) return { ...m, text: recThought };
+            if (m.id === recReplyId && recMessage)  return { ...m, text: recMessage };
+            return m;
+          })
+        };
+      }));
+      // Auto-expand the thinking bubble so recovered progress is visible
+      if (recThinkId) {
+        setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(recThinkId); return s; });
+      }
+    }
+
+    const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
+      onChunk: (event) => {
+        const { thinkMsgId, replyMsgId } = session;
+        // Use session's running totals (not m.text + delta) so every render
+        // sees the complete accumulated text — identical to the catch-up sync
+        // on navigation-back, which ensures blocks parse and render graphically
+        // rather than as an in-progress incremental string.
+        setAliceChats(prev => prev.map(tab => {
+          if (tab.id !== activeAliceTabId) return tab;
+          return {
+            ...tab,
+            messages: tab.messages.map(m => {
+              if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+                return { ...m, text: session.accumulatedThought };
+              if (event.type === "message_chunk" && m.id === replyMsgId)
+                return { ...m, text: session.accumulatedMessage };
+              if (event.type === "warning" && m.id === replyMsgId)
+                return { ...m, text: event.message };
+              if (event.type === "done") {
+                if (m.id === thinkMsgId && event.thought) return { ...m, text: event.thought };
+                if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
+              }
+              return m;
+            })
+          };
+        }));
+      },
+      onDone: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+      onError: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+    });
+    return unsub;
+  }, [runId, activeAliceTabId]);
+
+  const _aliceSaveTimer = useRef(null);
+  useEffect(() => {
+    // Keep localStorage in sync for fast initial render on next mount.
+    // savedAt lets the server-load effect decide which source is fresher.
+    const now = Date.now();
+    try {
+      localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`alice_active_tab_${runId}`, activeAliceTabId);
+      localStorage.setItem(`alice_chats_${runId}_savedAt`, now.toString());
+    } catch (_) {}
+    // Debounce server save so rapid streaming chunks don't hammer the API.
+    if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    _aliceSaveTimer.current = setTimeout(() => {
+      api.saveAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId })
+        .catch(() => {});
+    }, 800);
+  }, [aliceChats, activeAliceTabId, runId]);
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages = activeAliceTab ? activeAliceTab.messages : [];
+
+  const createAliceTab = () => {
+    const newTabId = "tab-" + Date.now().toString();
+    const newTab = {
+      id: newTabId,
+      title: `Session ${aliceChats.length + 1}`,
+      messages: [
+        {
+          id: "welcome-" + newTabId,
+          sender: "alice",
+          type: "message",
+          text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+          ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+        }
+      ]
+    };
+    setAliceChats(prev => [...prev, newTab]);
+    setActiveAliceTabId(newTabId);
+  };
+
+  const deleteAliceTab = (tabId, e) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    if (aliceChats.length <= 1) {
+      const resetTab = {
+        id: "tab-default",
+        title: "Session 1",
+        messages: [
+          {
+            id: "welcome-reset",
+            sender: "alice",
+            type: "message",
+            text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+            ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+          }
+        ]
+      };
+      setAliceChats([resetTab]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+
+    const index = aliceChats.findIndex(t => t.id === tabId);
+    if (index === -1) return;
+
+    const remainingChats = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remainingChats);
+
+    if (activeAliceTabId === tabId) {
+      const nextActiveIndex = Math.max(0, index - 1);
+      setActiveAliceTabId(remainingChats[nextActiveIndex].id);
+    }
+  };
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+    const startH = aliceChatHeight;
+    const onMove = ev => {
+      const newH = Math.max(150, Math.min(800, startH + (ev.clientY - startY)));
+      setAliceChatHeight(newH);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  const handleAliceStop = () => {
+    aliceSessionAbort(runId, activeAliceTabId);
+    api.stopAliceRun(runId).catch(() => {});
+    setAliceIsThinking(false);
+    setAliceGlobalRunning(false);
+  };
+
+  const handleAliceSend = async () => {
+    if (!aliceInputText.trim() || aliceIsThinking) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+    const currentTabId = activeAliceTabId;
+
+    const userMsg = {
+      id: Date.now().toString(),
+      sender: "user",
+      type: "message",
+      text: userText,
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    const thinkMsgId = (Date.now() + 1).toString();
+    const replyMsgId = (Date.now() + 2).toString();
+
+    const thinkMsg = {
+      id: thinkMsgId,
+      sender: "alice",
+      type: "thinking",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    const replyMsg = {
+      id: replyMsgId,
+      sender: "alice",
+      type: "message",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setAliceChats(prev => prev.map(tab => {
+      if (tab.id === activeAliceTabId) {
+        const isFirstPrompt = tab.messages.length <= 1;
+        let newTitle = tab.title;
+        if (isFirstPrompt) {
+          const truncated = userText.trim().slice(0, 16);
+          newTitle = truncated + (userText.trim().length > 16 ? "..." : "");
+        }
+        return {
+          ...tab,
+          title: newTitle,
+          messages: [...tab.messages, userMsg, thinkMsg, replyMsg]
+        };
+      }
+      return tab;
+    }));
+    setAliceIsThinking(true);
+    setAliceGlobalRunning(true);
+
+    setAliceExpandedThinkIds(prev => {
+      const next = new Set(prev);
+      next.add(thinkMsgId);
+      return next;
+    });
+
+    const historyPayload = aliceMessages.map(m => ({
+      sender: m.sender,
+      text: m.text
+    }));
+
+    // Delegate all I/O to the module-level singleton so the stream survives
+    // component unmounts caused by hash navigation.
+    // State updates are handled by the useEffect subscriber above.
+    aliceSessionStart(runId, currentTabId, {
+      userText,
+      historyPayload,
+      thinkMsgId,
+      replyMsgId,
+      onFinish: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+      onFail: (err) => {
+        if (err.name === "AbortError") {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === thinkMsgId && !m.text) return { ...m, text: "[Generation Aborted]" };
+                if (m.id === replyMsgId && !m.text) return { ...m, text: "Generation stopped by user." };
+                return m;
+              })
+            };
+          }));
+        } else {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m =>
+                m.id === replyMsgId
+                  ? { ...m, text: `I encountered an error connecting to the agent: ${err.message}` }
+                  : m
+              )
+            };
+          }));
+        }
+        setAliceIsThinking(false);
+        setAliceGlobalRunning(false);
+      },
+    });
+  };
+
+
   const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [sitePlanData, setSitePlanData]     = useState(null);
@@ -1047,6 +2172,7 @@ function TestRunDetail({ runId, initialTab }) {
   const agentRoleLabel = (agent) => {
     if (agent?.id === "crawler") return "Crawler";
     if (agent?.id === "scanner") return "Test Lead";
+    if (agent?.id === "alice") return "A.L.I.C.E";
     return agent?.role || "Agent";
   };
   const normalizeAgentForRun = (agent) => {
@@ -1062,6 +2188,12 @@ function TestRunDetail({ runId, initialTab }) {
     };
   };
   const defaultAgentRoster = () => [
+    {
+      id: "alice",
+      role: "A.L.I.C.E",
+      status: aliceIsThinking ? "active" : "idle",
+      currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
+    },
     {
       id: "crawler",
       role: "Crawler",
@@ -1084,6 +2216,7 @@ function TestRunDetail({ runId, initialTab }) {
       currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by",
     },
   ];
+
   const representsAgent = (agent, placeholder) => {
     if (agent.id === placeholder.id) return true;
     if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
@@ -1261,24 +2394,36 @@ function TestRunDetail({ runId, initialTab }) {
   }, [runId]);
 
   // Seed agents panel from persisted DB entries on mount.
+  // Also fetches the live scan status so stale "active" agents left by a
+  // force-killed process are reconciled back to "idle" immediately.
   useEffect(() => {
-    api.getAgentLog(runId).then(entries => {
-      if (!entries || entries.length === 0) return;
-      const agentsMap = new Map();
-      for (const e of entries) {
-        const ts = e.created_at
-          ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
-          : "--:--:--";
-        const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
-        const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
-        existing.status = e.status;
-        existing.role = role;
-        existing.currentTask = e.current_task;
-        existing.taskHistory.push({ ts, task: e.current_task, outcome: e.outcome });
-        agentsMap.set(e.agent_id, existing);
-      }
-      setAgents([...agentsMap.values()]);
-    }).catch(() => {});
+    Promise.all([api.getAgentLog(runId), api.getThinkingStatus(runId)])
+      .then(([entries, scanStatus]) => {
+        if (!entries || entries.length === 0) return;
+        const scanRunning = isDynamicScanActive(scanStatus?.status);
+        const agentsMap = new Map();
+        for (const e of entries) {
+          const entryTs = e.created_at
+            ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+          const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
+          existing.status = e.status;
+          existing.role = role;
+          existing.currentTask = e.current_task;
+          existing.taskHistory.push({ ts: entryTs, task: e.current_task, outcome: e.outcome });
+          agentsMap.set(e.agent_id, existing);
+        }
+        // If no scan is running, reset any stale "active" agents to "idle".
+        if (!scanRunning) {
+          for (const [id, agent] of agentsMap) {
+            if (agent.status === "active" && id !== "crawler") {
+              agentsMap.set(id, { ...agent, status: "idle" });
+            }
+          }
+        }
+        setAgents([...agentsMap.values()]);
+      }).catch(() => {});
   }, [runId]);
 
   // Load token usage from the API on mount (in-process memory, best effort).
@@ -2004,6 +3149,14 @@ function TestRunDetail({ runId, initialTab }) {
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
         ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
+        ${aliceGlobalRunning && html`
+          <button
+            className="btn danger-outline"
+            style=${{ borderColor: "var(--danger)", color: "var(--danger)", background: "rgba(239,68,68,.08)" }}
+            onClick=${handleAliceStop}
+            title="Stop the running A.L.I.C.E. agent"
+          ><${IconStop}/> Stop A.L.I.C.E.</button>
+        `}
       </div>
     </div>
 
@@ -2955,6 +4108,145 @@ function TestRunDetail({ runId, initialTab }) {
                           })}
                         </div>`}
                     </div>`;
+                }
+                // ── A.L.I.C.E custom row ────────────────────────────────────
+                if (a.id === "alice") {
+                  const isExpanded = !collapsedAgentIds.has("alice");
+                  const isActive = a.status === "active";
+                  const currentTask = a.currentTask;
+                  return html`
+                    <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                         onClick=${() => toggleAgentId("alice")}>
+                      <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E</span>
+                      <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                        ${isActive ? "ACTIVE" : "STANDBY"}
+                      </span>
+                      <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                      <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+                      ${isExpanded && html`
+                        <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                          <div className="alice-chat-tabs-bar">
+                            ${aliceChats.map(tab => {
+                              const isActiveTab = tab.id === activeAliceTabId;
+                              return html`
+                                <div
+                                  key=${tab.id}
+                                  className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                                  onClick=${() => setActiveAliceTabId(tab.id)}
+                                >
+                                  <span>${tab.title}</span>
+                                  <span
+                                    className="alice-chat-tab-close"
+                                    onClick=${(e) => deleteAliceTab(tab.id, e)}
+                                    title="Close Session"
+                                  >
+                                    ×
+                                  </span>
+                                </div>
+                              `;
+                            })}
+                            <button
+                              className="alice-chat-add-tab-btn"
+                              onClick=${createAliceTab}
+                              title="New Session"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <div className="alice-chat-history" style=${{ height: `${aliceChatHeight}px` }} ref=${(el) => { if (el) { el.scrollTop = el.scrollHeight; } }}>
+                            ${aliceMessages.map((msg) => {
+                              if (msg.type === "thinking") {
+                                const isThinkExpanded = aliceExpandedThinkIds.has(msg.id);
+                                return html`
+                                  <div key=${msg.id} className="alice-msg-row">
+                                    <div className="alice-msg-bubble--thinking">
+                                      <div className="alice-thinking-header" onClick=${() => {
+                                        setAliceExpandedThinkIds(prev => {
+                                          const next = new Set(prev);
+                                          next.has(msg.id) ? next.delete(msg.id) : next.add(msg.id);
+                                          return next;
+                                        });
+                                      }}>
+                                        <${IconBrain}/>
+                                        <span>Thought Process ${isThinkExpanded ? "▲" : "▼"}</span>
+                                        <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                                      </div>
+                                      ${isThinkExpanded && html`
+                                        <div className="alice-thinking-body">
+                                          ${renderAliceBlocks(msg.text, true)}
+                                        </div>
+                                      `}
+                                    </div>
+                                  </div>
+                                `;
+                              }
+                              const isUser = msg.sender === "user";
+                              return html`
+                                <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                                  <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                                    <div>
+                                      ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false)}
+                                    </div>
+                                    <div className="alice-msg-meta">
+                                      <span>${msg.ts}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              `;
+                            })}
+                            ${aliceIsThinking && html`
+                              <div className="alice-msg-row alice-msg-row--alice">
+                                <div className="alice-typing-bubble">
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                </div>
+                              </div>
+                            `}
+                          </div>
+                          
+                          <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                          
+                          <div className="alice-chat-input-bar">
+                            <input
+                              className="alice-chat-input"
+                              placeholder="Direct A.L.I.C.E. on what to test..."
+                              value=${aliceInputText}
+                              disabled=${aliceIsThinking}
+                              onKeyDown=${(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleAliceSend();
+                                }
+                              }}
+                              onInput=${e => setAliceInputText(e.target.value)}
+                            />
+                            ${aliceIsThinking ? html`
+                              <button
+                                className="alice-chat-stop-btn"
+                                onClick=${handleAliceStop}
+                                title="Stop Generation"
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                  <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                                </svg>
+                              </button>
+                            ` : html`
+                              <button
+                                className="alice-chat-input-btn"
+                                disabled=${!aliceInputText.trim()}
+                                onClick=${handleAliceSend}
+                                title="Send Instruction"
+                              >
+                                <${IconSend}/>
+                              </button>
+                            `}
+                          </div>
+                        </div>
+                      `}
+                    </div>
+                  `;
                 }
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
@@ -4922,6 +6214,8 @@ function ReportingDebugPage() {
             Default versions load from reporting.py. New versions are saved in the Reporting Lab database and can be replayed against the same captures.
             <br />Reporting Lab uses the DEFAULT LLM setting and does not respect the overriden setting in the scan the data came from.
             <br />Set the Version name BEFORE clicking new version!
+            <br />Batch reporting has {url} and {results} placeholders. 
+            <br />During-scan writeups have {source}, {base_url}, {finding_json}, {evidence_json}.
           </div>
           <div className="form-row">
             <label className="form-label">Prompt</label>
@@ -5159,6 +6453,7 @@ function truncUrl(url, maxLen=40) {
 
 function sourceLabel(source) {
   const labels = {
+    alice: "A.L.I.C.E",
     dynamic_scan: "Dynamic",
     burp_active_scan: "Burp",
     burp_mcp: "Burp MCP",
