@@ -4,13 +4,21 @@
 
 An **exploration** into whether a fully LLM-driven, automated web application "penetration test" could work. 
 
-Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner:
+Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
 * AESPA + Sonnet 4.6 (AWS Bedrock - account NOT in Cyber Verification Program)
 * Claude Code + Sonnet 4.6 (account in Cyber Verification Program)
 * Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
 * Claude Code + Qwen3.6-35b-A3b (Abliterated)
 
-And a [comparison](docs/vuln-scanner-comparison.md) of a single vs multi-agent scan. A single-agent scan on Bank of Ed costs ~$15 USD with Sonnet 4.6, and a multi-agent scan costs ~$50 USD. The result is better, but not worth additional cost? 
+And a [comparison](docs/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+
+Quick comparsion summary of a single vs multi-agent scan on the Bank of Ed below. There are 23 vulnerabilities deliberately injected into the app, of which I'd consider 18 of them "findable" by a scanner:
+
+| Model | Finding Count | Price |
+|---|---|---|
+| Sonnet 4.6 | 14 | $7.50 |
+| Deepseek v4 Flash | 10 | $1.50 |
+| Qwen3.6 35b-A3b | 2 | "Free" (run locally) |
 
 ## How does it work?
 
@@ -27,6 +35,8 @@ Also, the [changelog](docs/CHANGELOG.md).
 - A local model - some suggestions at the bottom
 
 Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
+
+If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts (inclusive of cached tokens). 
 
 ## Setup
 
@@ -46,9 +56,9 @@ uv run aespa
 
 The UI is available at `http://127.0.0.1:8000` by default.
 
-Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6. (I've never tried Opus4.6/4.7/GPT 5.5 due to cost). 
+Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
 
-Structured scans are low quality compared to the dynamic scan and will be removed in a later version. (It does, however, provide some usable results on local models.)
+If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 
 ## Configuration
 
