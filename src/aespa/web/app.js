@@ -293,6 +293,19 @@ const IconBug = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill=
   <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
 </svg>`;
 
+const IconMessageSquare = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+</svg>`;
+const IconSend = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="22" y1="2" x2="11" y2="13"></line>
+  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+</svg>`;
+const IconBrain = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z"/>
+  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2Z"/>
+</svg>`;
+
+
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -991,10 +1004,135 @@ function TestRunDetail({ runId, initialTab }) {
   });
   const [activitySubTab, setActivitySubTab] = useState("agents");
   const [agents, setAgents]                = useState([]);
-  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set(["alice"]));
   const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
+
+  const [aliceMessages, setAliceMessages] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`alice_chat_${runId}`);
+      if (saved) return JSON.parse(saved);
+    } catch (_) {}
+    return [
+      {
+        id: "welcome",
+        sender: "alice",
+        type: "message",
+        text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+        ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+      }
+    ];
+  });
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const [aliceIsThinking, setAliceIsThinking] = useState(false);
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`alice_chat_${runId}`, JSON.stringify(aliceMessages));
+    } catch (_) {}
+  }, [aliceMessages, runId]);
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+    const startH = aliceChatHeight;
+    const onMove = ev => {
+      const newH = Math.max(150, Math.min(800, startH + (ev.clientY - startY)));
+      setAliceChatHeight(newH);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  const handleAliceSend = () => {
+    if (!aliceInputText.trim() || aliceIsThinking) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+
+    const newMsg = {
+      id: Date.now().toString(),
+      sender: "user",
+      type: "message",
+      text: userText,
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setAliceMessages(prev => [...prev, newMsg]);
+    setAliceIsThinking(true);
+
+    // Simulate thinking/planning step first
+    setTimeout(() => {
+      const thinkMsg = {
+        id: (Date.now() + 1).toString(),
+        sender: "alice",
+        type: "thinking",
+        text: `[ALICE Pentest Coordinator Directive]
+Analyzing user command: "${userText}"
+Identified target scope parameters...
+Formulating attack strategies...
+Routing custom prompt configuration to Test Lead scanner agent...`,
+        ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+      };
+
+      setAliceMessages(prev => [...prev, thinkMsg]);
+
+      // Expand the thought block automatically
+      setAliceExpandedThinkIds(prev => {
+        const next = new Set(prev);
+        next.add(thinkMsg.id);
+        return next;
+      });
+
+      // After thinking is done, respond with a professional agent coordination statement
+      setTimeout(() => {
+        setAliceIsThinking(false);
+
+        let aliceReplyText = `Understood. I've re-aligned our testing policy based on your instruction: "${userText}".
+
+I have directed the **Test Lead** to prioritize probes on the requested path/parameters. I've also queued deep checks for relevant vulnerabilities on this interface. Probes are executing concurrently.`;
+
+        // Context-aware replies
+        const lower = userText.toLowerCase();
+        if (lower.includes("sqli") || lower.includes("sql injection") || lower.includes("database")) {
+          aliceReplyText = `Acknowledged. I've instructed the **Test Lead** to immediately prioritize deep SQL injection (SQLi) fuzzing against endpoints in this scope. 
+
+Probing will focus on parameter variations, boolean-based, error-based, and time-based blind SQLi payloads. I'm actively filtering incoming traffic patterns to verify DB errors or latency changes.`;
+        } else if (lower.includes("xss") || lower.includes("cross site") || lower.includes("script")) {
+          aliceReplyText = `Directive received. I have configured a custom XSS probe vector sheet for the **Test Lead**. 
+
+Probes will target active reflection on parameters and headers. Payloads include standard tag reflections, nested bypass filters, and DOM-based triggers. I will alert you immediately if any execution hooks reflect successfully in the Validator agent.`;
+        } else if (lower.includes("auth") || lower.includes("login") || lower.includes("password") || lower.includes("credential")) {
+          aliceReplyText = `Understood. Broken authentication and session management checks are now prioritized on target login endpoints. 
+
+I have instructed the **Test Lead** to fuzz login fields, check session token randomness, and test credential stuffing pathways. Crawler sessions are being actively monitored for privilege escalation.`;
+        } else if (lower.includes("port") || lower.includes("scan") || lower.includes("vuln")) {
+          aliceReplyText = `Command recognized. Elevating intelligence-gathering probes. 
+
+I've instructed the **Test Lead** to expand attack-surface mapping and verify services on the active ports. Let me know if you would like me to dispatch a **Specialist** thread for dedicated port-exploit payload mapping.`;
+        }
+
+        const replyMsg = {
+          id: (Date.now() + 2).toString(),
+          sender: "alice",
+          type: "message",
+          text: aliceReplyText,
+          ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+        };
+
+        setAliceMessages(prev => [...prev, replyMsg]);
+      }, 1800);
+    }, 1200);
+  };
+
+
   const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [sitePlanData, setSitePlanData]     = useState(null);
@@ -1048,6 +1186,7 @@ function TestRunDetail({ runId, initialTab }) {
   const agentRoleLabel = (agent) => {
     if (agent?.id === "crawler") return "Crawler";
     if (agent?.id === "scanner") return "Test Lead";
+    if (agent?.id === "alice") return "A.L.I.C.E";
     return agent?.role || "Agent";
   };
   const normalizeAgentForRun = (agent) => {
@@ -1063,6 +1202,12 @@ function TestRunDetail({ runId, initialTab }) {
     };
   };
   const defaultAgentRoster = () => [
+    {
+      id: "alice",
+      role: "A.L.I.C.E",
+      status: aliceIsThinking ? "active" : "idle",
+      currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
+    },
     {
       id: "crawler",
       role: "Crawler",
@@ -1085,6 +1230,7 @@ function TestRunDetail({ runId, initialTab }) {
       currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by",
     },
   ];
+
   const representsAgent = (agent, placeholder) => {
     if (agent.id === placeholder.id) return true;
     if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
@@ -2956,6 +3102,101 @@ function TestRunDetail({ runId, initialTab }) {
                           })}
                         </div>`}
                     </div>`;
+                }
+                // ── A.L.I.C.E custom row ────────────────────────────────────
+                if (a.id === "alice") {
+                  const isExpanded = !collapsedAgentIds.has("alice");
+                  const isActive = a.status === "active";
+                  const currentTask = a.currentTask;
+                  return html`
+                    <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                         onClick=${() => toggleAgentId("alice")}>
+                      <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E</span>
+                      <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                        ${isActive ? "ACTIVE" : "STANDBY"}
+                      </span>
+                      <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                      <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+                      ${isExpanded && html`
+                        <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                          <div className="alice-chat-history" style=${{ height: `${aliceChatHeight}px` }} ref=${(el) => { if (el) { el.scrollTop = el.scrollHeight; } }}>
+                            ${aliceMessages.map((msg) => {
+                              if (msg.type === "thinking") {
+                                const isThinkExpanded = aliceExpandedThinkIds.has(msg.id);
+                                return html`
+                                  <div key=${msg.id} className="alice-msg-row">
+                                    <div className="alice-msg-bubble--thinking">
+                                      <div className="alice-thinking-header" onClick=${() => {
+                                        setAliceExpandedThinkIds(prev => {
+                                          const next = new Set(prev);
+                                          next.has(msg.id) ? next.delete(msg.id) : next.add(msg.id);
+                                          return next;
+                                        });
+                                      }}>
+                                        <${IconBrain}/>
+                                        <span>Thought Process ${isThinkExpanded ? "▲" : "▼"}</span>
+                                        <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                                      </div>
+                                      ${isThinkExpanded && html`
+                                        <div className="alice-thinking-body">${msg.text}</div>
+                                      `}
+                                    </div>
+                                  </div>
+                                `;
+                              }
+                              const isUser = msg.sender === "user";
+                              return html`
+                                <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                                  <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                                    <div style=${{ whiteSpace: "pre-wrap" }}>${msg.text}</div>
+                                    <div className="alice-msg-meta">
+                                      <span>${msg.ts}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              `;
+                            })}
+                            ${aliceIsThinking && html`
+                              <div className="alice-msg-row alice-msg-row--alice">
+                                <div className="alice-typing-bubble">
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                </div>
+                              </div>
+                            `}
+                          </div>
+                          
+                          <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                          
+                          <div className="alice-chat-input-bar">
+                            <input
+                              className="alice-chat-input"
+                              placeholder="Direct A.L.I.C.E. on what to test..."
+                              value=${aliceInputText}
+                              disabled=${aliceIsThinking}
+                              onKeyDown=${(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleAliceSend();
+                                }
+                              }}
+                              onInput=${e => setAliceInputText(e.target.value)}
+                            />
+                            <button
+                              className="alice-chat-input-btn"
+                              disabled=${aliceIsThinking || !aliceInputText.trim()}
+                              onClick=${handleAliceSend}
+                              title="Send Instruction"
+                            >
+                              <${IconSend}/>
+                            </button>
+                          </div>
+                        </div>
+                      `}
+                    </div>
+                  `;
                 }
                 const isActive = a.status==="active";
                 const roleLabel = agentRoleLabel(a);
