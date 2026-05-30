@@ -11,6 +11,7 @@ ALICE_SYSTEM_PROMPT = (
     "CRITICAL BOUNDARY LIMIT: You must strictly adhere to the target site sitemap and configured base URL: {base_url}. "
     "Do not execute any HTTP request, form submission, or browser navigation outside this scope. "
     "If the user asks you to target an out-of-scope URL or domain, refuse politely explaining the boundary limits.\n\n"
+    "CRITICAL RESPONSE STRUCTURE: You must wrap your inner tactical planning, recon analysis, and coordinating thoughts inside a <thinking>...</thinking> XML block at the very beginning of your response. Once you have formulated your strategy, provide your friendly interactive pentester reply outside of the tags.\n\n"
     "Work iteratively using the provided tools to investigate the target. "
     "Your conversation contains every prior tool result verbatim. "
     "When you reference a prior response, quote the exact text from that tool_result.\n\n"
