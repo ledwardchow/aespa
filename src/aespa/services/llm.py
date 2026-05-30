@@ -11,7 +11,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, AsyncGenerator
 from urllib.parse import quote
 
 import httpx
@@ -22,7 +22,6 @@ from aespa.services.prompts.reporting import (
     _DEDUPLICATE_FINDINGS_PROMPT,
     _FINGERPRINT_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
-    _SEVERITY_CALIBRATION,
     _WRITEUP_REPLAY_PROMPT,
 )
 from aespa.services.prompts.test_lead import (
@@ -649,6 +648,184 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
 async def plain_completion(config: LLMConfig, prompt: str) -> str:
     """Send a plain text prompt and return the raw response text."""
     return await _call(config, prompt, None)
+
+
+async def stream_chat_completion(
+    config: LLMConfig,
+    system_message: str,
+    messages: list[dict],
+) -> AsyncGenerator[str, None]:
+    """Stream a chat completion from the configured LLM provider in real-time."""
+    if config.provider == "anthropic":
+        import anthropic as _ant
+
+        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        formatted_messages = []
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                formatted_messages.append({"role": m["role"], "content": m["content"]})
+
+        async with client.messages.stream(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            system=[{"type": "text", "text": system_message}],
+            messages=formatted_messages,
+        ) as stream:
+            async for event in stream:
+                if event.type == "text":
+                    yield event.text
+
+    elif config.provider == "bedrock":
+        import threading
+
+        converse_messages = []
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                converse_messages.append({
+                    "role": m["role"],
+                    "content": [{"text": m["content"]}]
+                })
+        system_list = [{"text": system_message}]
+
+        if config.api_key:
+            model_id = quote(config.model, safe="")
+            url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse-stream"
+            payload = {
+                "messages": converse_messages,
+                "system": system_list,
+                "inferenceConfig": {
+                    "maxTokens": config.max_tokens,
+                    "temperature": config.temperature,
+                },
+            }
+            headers = {
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            try:
+                async with _make_llm_http_client(timeout=120) as client:
+                    async with client.stream("POST", url, headers=headers, json=payload) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            try:
+                                chunk = json.loads(line)
+                                if "contentBlockDelta" in chunk:
+                                    delta = chunk["contentBlockDelta"]["delta"]
+                                    if "text" in delta:
+                                        yield delta["text"]
+                            except Exception:
+                                pass
+            except Exception as e:
+                log.exception("Error in Bedrock API key stream completion")
+                raise RuntimeError(f"Bedrock API key stream failed: {e}") from e
+        else:
+            _proxy_url = _llm_proxy_var.get()
+            _model = config.model
+            _messages = converse_messages
+            _system = system_list
+            _infer = {
+                "maxTokens": config.max_tokens,
+                "temperature": config.temperature,
+            }
+            _endpoint = config.base_url or None
+
+            def _run_converse_stream():
+                import boto3
+                from botocore.config import Config as _BotocoreConfig
+
+                region = (
+                    os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or _bedrock_region_from_url(config.base_url or "")
+                )
+                profile = os.getenv("AWS_PROFILE")
+                session_kwargs = {"profile_name": profile} if profile else {}
+                session = boto3.Session(**session_kwargs)
+                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+                client = session.client(
+                    "bedrock-runtime",
+                    region_name=region,
+                    endpoint_url=_endpoint,
+                    verify=not _proxy_url,
+                    **{"config": _boto_cfg} if _boto_cfg else {},
+                )
+                return client.converse_stream(
+                    modelId=_model,
+                    system=_system,
+                    messages=_messages,
+                    inferenceConfig=_infer,
+                )
+
+            q = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _producer():
+                try:
+                    res = _run_converse_stream()
+                    stream = res.get("stream")
+                    if stream:
+                        for chunk in stream:
+                            if "contentBlockDelta" in chunk:
+                                delta = chunk["contentBlockDelta"]["delta"]
+                                if "text" in delta:
+                                    loop.call_soon_threadsafe(q.put_nowait, ("text", delta["text"]))
+                    loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+                except Exception as e:
+                    loop.call_soon_threadsafe(q.put_nowait, ("error", e))
+
+            thread = threading.Thread(target=_producer, daemon=True)
+            thread.start()
+
+            while True:
+                item_type, val = await q.get()
+                if item_type == "text":
+                    yield val
+                elif item_type == "done":
+                    break
+                elif item_type == "error":
+                    raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
+
+    else:
+        from openai import AsyncOpenAI
+
+        kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            kwargs["base_url"] = base
+        kwargs.update(_llm_client_kwargs())
+        client = AsyncOpenAI(**kwargs)
+
+        formatted_messages = [{"role": "system", "content": system_message}]
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                formatted_messages.append({"role": m["role"], "content": m["content"]})
+
+        call_kwargs = {
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "messages": formatted_messages,
+            "stream": True,
+        }
+        
+        try:
+            response = await client.chat.completions.create(**call_kwargs)
+            async for chunk in response:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            log.exception("Error in OpenAI-compatible stream completion")
+            raise RuntimeError(f"OpenAI-compatible stream failed: {e}") from e
+
 
 
 def _content_part_text(part: Any) -> str:
@@ -1431,7 +1608,6 @@ def build_reporting_analyse_prompt(
     return template.format(
         url=url,
         results="\n\n".join(result_texts),
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
 
 
@@ -1489,7 +1665,6 @@ def build_reporting_writeup_prompt(
         base_url=base_url,
         finding_json=json.dumps(finding, indent=2, ensure_ascii=False, default=str),
         evidence_json=json.dumps(evidence, indent=2, ensure_ascii=False, default=str),
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
 
 
@@ -2963,7 +3138,6 @@ async def thinking_next_action(
         max_steps=max_steps,
         pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
         history_text=history_text,
-        severity_calibration=_SEVERITY_CALIBRATION,
     )
     if emit_fn:
         try:
