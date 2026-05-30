@@ -335,6 +335,23 @@ function App() {
           </div>
           ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
         </div>
+        <div className="sidebar-meta">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
+              ${showUsername && username ? html`
+                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                  ${username}
+                </span>
+                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
+              ` : html`
+                ${appVersion && html`<span>v${appVersion}</span>`}
+              `}
+            </div>
+          `}
+        </div>
         <nav className="sidebar-nav">
           ${!collapsed && html`<div className="nav-section-label">Targets</div>`}
           <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
@@ -362,24 +379,8 @@ function App() {
               <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Reporting Lab"}
             </a>`}
         </nav>
-        <div className="sidebar-footer">
-          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
-            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
-          </button>
-          ${!collapsed && html`
-            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
-              ${showUsername && username ? html`
-                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
-                  ${username}
-                </span>
-                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
-              ` : html`
-                ${appVersion && html`<span>v${appVersion}</span>`}
-              `}
-            </div>
-          `}
-        </div>
       </aside>
+
 
       <div className="main">
         ${route.name==="list"        && html`<${SitesList}/>`}
