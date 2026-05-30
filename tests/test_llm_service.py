@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from types import SimpleNamespace
+import pytest
 
 from aespa.models import LLMConfig
 from aespa.services import llm
@@ -1138,6 +1139,136 @@ def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blan
         "endpoint_url": None,
     }.items() <= captured["client"].items()
     assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+
+
+@pytest.mark.anyio
+async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
+    captured = {}
+
+    class FakeBedrockClient:
+        def converse_stream(self, **kwargs):
+            captured["converse_stream"] = kwargs
+            return {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "delta": {"text": "streaming "}
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "delta": {"text": "response"}
+                        }
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    chunks = []
+    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "streaming response"
+    assert captured["session"] == {}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "ap-southeast-2",
+        "endpoint_url": None,
+    }.items() <= captured["client"].items()
+    assert captured["converse_stream"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+    assert captured["converse_stream"]["messages"] == [{"role": "user", "content": [{"text": "hello"}]}]
+    assert captured["converse_stream"]["system"] == [{"text": "system prompt"}]
+
+
+@pytest.mark.anyio
+async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"contentBlockDelta": {"delta": {"text": "streaming "}}}'
+            yield '{"contentBlockDelta": {"delta": {"text": "response"}}}'
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            captured["request"] = kwargs
+            class StreamContext:
+                async def __aenter__(self):
+                    return FakeResponse()
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+            return StreamContext()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    chunks = []
+    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "streaming response"
+    assert {"timeout": 120}.items() <= captured["client"].items()
+    assert captured["method"] == "POST"
+    assert captured["url"] == (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
+        "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse-stream"
+    )
+    assert captured["request"] == {
+        "headers": {
+            "Authorization": "Bearer bedrock-test-key",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        "json": {
+            "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+            "system": [{"text": "system prompt"}],
+            "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
+        },
+    }
 
 
 def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
