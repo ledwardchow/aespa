@@ -515,6 +515,37 @@ class ScanCheckpoint(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class AliceChatSession(SQLModel, table=True):
+    """One ALICE chat tab per test run (many per run)."""
+
+    __tablename__ = "alice_chat_session"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    session_key: str = Field(index=True)   # client-assigned tab ID, e.g. "tab-default"
+    title: str = Field(default="Session 1")
+    position: int = Field(default=0)       # tab ordering
+    is_active: bool = Field(default=False) # which tab is currently selected
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class AliceChatMessage(SQLModel, table=True):
+    """One chat bubble inside an AliceChatSession."""
+
+    __tablename__ = "alice_chat_message"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="alice_chat_session.id", index=True)
+    message_key: str = Field(index=True)   # client-assigned message ID
+    sender: str                            # "user" | "alice"
+    type: str = Field(default="message")   # "message" | "thinking"
+    text: str = Field(default="")
+    ts: str = Field(default="")
+    position: int = Field(default=0)       # ordering within session
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class AgentLog(SQLModel, table=True):
     """Persisted agent_status event so the Agents panel survives page navigation.
 
