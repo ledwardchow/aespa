@@ -372,6 +372,41 @@ def _migrate(engine: Engine) -> None:
         "trigger_specialist_on_burp",
         "INTEGER NOT NULL DEFAULT 0",
     )
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS alice_chat_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                session_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'Session 1',
+                position INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_alice_chat_session_test_run_id "
+            "ON alice_chat_session (test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS alice_chat_message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES alice_chat_session(id),
+                message_key TEXT NOT NULL,
+                sender TEXT NOT NULL DEFAULT 'alice',
+                type TEXT NOT NULL DEFAULT 'message',
+                text TEXT NOT NULL DEFAULT '',
+                ts TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_alice_chat_message_session_id "
+            "ON alice_chat_message (session_id)"
+        ))
+        conn.commit()
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:
