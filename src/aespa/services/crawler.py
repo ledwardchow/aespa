@@ -35,6 +35,8 @@ _active_tasks: dict[int, asyncio.Task] = {}
 
 # Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
 _guided_registry: dict[int, asyncio.Event] = {}
+# Ready registry: credential_id -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
+_guided_ready_registry: dict[int, asyncio.Event] = {}
 # Per-run lock: ensures guided logins happen one at a time (no simultaneous browser windows)
 _guided_locks: dict[int, asyncio.Lock] = {}
 # Captured guided-session cookies/headers keyed by (run_id, credential_id) so reconcile
@@ -2607,29 +2609,63 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         or bool(os.environ.get("WAYLAND_DISPLAY"))
     )
     if not has_display:
-        raise RuntimeError(
-            f"Guided login for '{credential.username}' requires a graphical display. "
-            "Running headless: use 'guided' auth mode with a display, or contact your admin."
+        events_svc.emit(run_id, {
+            "type": "guided_login_failed",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "message": (
+                f"Guided login for '{credential.username}' requires a graphical display. "
+                "This scanner appears to be running on a headless host. "
+                "Guided browser login only works when the scanner is running locally with a GUI."
+            ),
+        })
+        log.warning(
+            "  _authenticate_guided: no display available for '%s' (cred_id=%s) — skipping",
+            credential.username, credential.id,
         )
+        return
 
     # Acquire the per-run lock so only one guided browser opens at a time
     if run_id not in _guided_locks:
         _guided_locks[run_id] = asyncio.Lock()
     async with _guided_locks[run_id]:
-        event = asyncio.Event()
-        _guided_registry[credential.id] = event
+        ready_event = asyncio.Event()
+        done_event = asyncio.Event()
+        _guided_ready_registry[credential.id] = ready_event
+        _guided_registry[credential.id] = done_event
 
+        # Phase 1: notify the UI — browser is NOT yet open; user must click "I'm Ready" first
         events_svc.emit(run_id, {
             "type": "guided_login_required",
             "credential_id": credential.id,
             "username": credential.username,
             "message": (
-                f"A browser window has opened for '{credential.username}'. "
-                "Complete login in the browser window, then click 'Done' in the UI."
+                f"Login required for '{credential.username}'. "
+                "Click \"I'm Ready\" in the UI when you are ready to log in."
             ),
         })
 
-        log.info("  _authenticate_guided: waiting for user login for %s (cred_id=%s)",
+        log.info("  _authenticate_guided: waiting for ready signal from UI for %s (cred_id=%s)",
+                 credential.username, credential.id)
+
+        # Wait for user to click "I'm Ready" (5 min timeout)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            log.warning("  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)", credential.id)
+            _guided_ready_registry.pop(credential.id, None)
+            _guided_registry.pop(credential.id, None)
+            return
+        _guided_ready_registry.pop(credential.id, None)
+
+        # Phase 2: open the browser and let the user log in
+        events_svc.emit(run_id, {
+            "type": "guided_login_browser_open",
+            "credential_id": credential.id,
+            "username": credential.username,
+        })
+
+        log.info("  _authenticate_guided: opening browser for %s (cred_id=%s)",
                  credential.username, credential.id)
 
         captured_cookies: list = []
@@ -2657,7 +2693,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
                 # Wait for user to confirm (5 min timeout)
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=300)
+                    await asyncio.wait_for(done_event.wait(), timeout=300)
                 except asyncio.TimeoutError:
                     log.warning("  _authenticate_guided: timed out waiting for user confirmation (cred_id=%s)", credential.id)
 
@@ -2723,6 +2759,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
             finally:
                 await browser.close()
                 _guided_registry.pop(credential.id, None)
+                _guided_ready_registry.pop(credential.id, None)
 
         # Build the injectable list regardless of whether cookies were captured.
         # We always write to the cache so subsequent _authenticate calls for this

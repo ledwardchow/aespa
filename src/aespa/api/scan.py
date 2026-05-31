@@ -546,10 +546,32 @@ def export_thinking_log(
 @router.get("/api/test-runs/{run_id}/guided-login/status")
 def guided_login_status(run_id: int) -> dict:
     """Return which credential IDs are currently waiting for guided-login confirmation."""
-    from aespa.services.crawler import _guided_registry
+    from aespa.services.crawler import _guided_registry, _guided_ready_registry
     return {
         "pending_credential_ids": list(_guided_registry.keys()),
+        "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),
     }
+
+
+@router.post("/api/test-runs/{run_id}/guided-login/{credential_id}/ready")
+async def ready_guided_login(run_id: int, credential_id: int) -> dict:
+    """Signal that the user is ready to log in \u2014 this triggers the browser window to open.
+
+    Must be async for the same reason as confirm_guided_login.
+    """
+    from aespa.services.crawler import _guided_ready_registry
+    event = _guided_ready_registry.get(credential_id)
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No guided login awaiting a ready signal for credential {credential_id}. "
+                "Either the crawl is not running, the credential is not in 'guided' mode, "
+                "or the ready window already timed out."
+            ),
+        )
+    event.set()
+    return {"status": "ready", "credential_id": credential_id}
 
 
 @router.post("/api/test-runs/{run_id}/guided-login/{credential_id}/confirm")
