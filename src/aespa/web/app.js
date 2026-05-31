@@ -1526,7 +1526,11 @@ function SiteDetail({ siteId }) {
                     ${c.login_url || site.login_url || "No login URL"}
                   </div>
                 </div>`)}
-            </div>`}
+            </div>
+            ${site.credentials.some(c => c.auth_mode === "guided") && html`
+              <div style=${{marginTop:8,padding:"8px 12px",background:"var(--surface-2,#2a2a2a)",border:"1px solid var(--warn,#f59e0b)",borderRadius:5,fontSize:12,color:"var(--warn,#f59e0b)"}}>
+                ⚠️ This site is configured with interactive browser login credentials, which only works if you're running this scanner on your local machine with a GUI. It will not function if the scanner is installed on a headless host (i.e. server).
+              </div>`}`}
         </div>`}
 
       <div>
@@ -1588,26 +1592,31 @@ function SiteForm({ siteId }) {
         const d = await api.getSite(siteId);
         setForm({ name:d.name, base_url:d.base_url, requires_auth:d.requires_auth,
           login_url:d.login_url||"", notes:d.notes||"",
-          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||""})) });
+          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||"",auth_mode:c.auth_mode||"auto",totp_seed:""})) });
       } catch(e) { setError(e.message); } finally { setLoading(false); }
     })();
   }, [isEdit, siteId]);
 
   const upd = p => { setForm(f=>({...f,...p})); };
   const updC = (i,p) => setForm(f=>({...f,credentials:f.credentials.map((c,j)=>j===i?{...c,...p}:c)}));
-  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:""}] });
+  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:"",auth_mode:"auto",totp_seed:""}] });
   const rmC  = i  => upd({ credentials:form.credentials.filter((_,j)=>j!==i) });
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true);
     const payload = { name:form.name.trim(), base_url:form.base_url.trim(), requires_auth:form.requires_auth,
       login_url:form.requires_auth?(form.login_url.trim()||null):null, notes:form.notes.trim()||null,
-      credentials:form.requires_auth?form.credentials.map(c=>({
-        username:c.username,
-        password:c.password,
-        label:c.label||null,
-        login_url:c.login_url?.trim()||null,
-      })):[] };
+      credentials:form.requires_auth?form.credentials.map(c=>{
+        const base = {
+          username:c.username,
+          password:c.password,
+          label:c.label||null,
+          login_url:c.login_url?.trim()||null,
+          auth_mode:c.auth_mode||"auto",
+        };
+        if (c.totp_seed?.trim()) base.totp_seed = c.totp_seed.trim();
+        return base;
+      }):[] };
     try {
       if (isEdit) { await api.updateSite(siteId,payload); nav(`#/sites/${siteId}`); }
       else        { const s = await api.createSite(payload); nav(`#/sites/${s.id}`); }
@@ -1643,14 +1652,45 @@ function SiteForm({ siteId }) {
               <input type="url" value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
             <fieldset><legend>Credentials</legend>
               ${form.credentials.length===0&&html`<div className="subtle">No credentials yet.</div>`}
-              ${form.credentials.map((c,i)=>html`
+              ${form.credentials.map((c,i)=>{
+                const parseCurl = (text) => {
+                  const cookies = {}; const headers = {};
+                  try {
+                    [...text.matchAll(/-H\s+['"]([^'"]+)['"]/g)].forEach(m => {
+                      const [n,...rest] = m[1].split(":"); const v = rest.join(":").trim();
+                      if (n.trim().toLowerCase()==="cookie") { v.split(";").forEach(p=>{ const [k,...vs]=p.trim().split("="); if(k) cookies[k.trim()]=vs.join("=").trim(); }); }
+                      else { headers[n.trim()]=v; }
+                    });
+                    const bMatch = text.match(/-b\s+['"]([^'"]+)['"]/) || text.match(/--cookie\s+['"]([^'"]+)['"]/);
+                    if (bMatch) bMatch[1].split(";").forEach(p=>{ const [k,...vs]=p.trim().split("="); if(k) cookies[k.trim()]=vs.join("=").trim(); });
+                  } catch(_){}
+                  return {
+                    cookies: Object.keys(cookies).length ? JSON.stringify(Object.entries(cookies).map(([name,value])=>({name,value})),null,2) : c.seed_cookies_json,
+                    headers: Object.keys(headers).length ? JSON.stringify(headers,null,2) : c.seed_headers_json,
+                  };
+                };
+                return html`
                 <div className="cred-row" key=${i}>
                   <div className="field"><label>Username</label><input type="text" required value=${c.username} onChange=${e=>updC(i,{username:e.target.value})}/></div>
                   <div className="field"><label>Password</label><input type="text" required value=${c.password} onChange=${e=>updC(i,{password:e.target.value})}/></div>
                   <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value=${c.login_url||""} placeholder=${form.login_url?`Uses default: ${form.login_url}`:"Required if no default login URL"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
                   <div className="field"><label>Label</label><input type="text" value=${c.label} placeholder="admin" onChange=${e=>updC(i,{label:e.target.value})}/></div>
+                  <div className="field"><label>Auth Mode</label>
+                    <select value=${c.auth_mode||"auto"} onChange=${e=>updC(i,{auth_mode:e.target.value})}>
+                      <option value="auto">auto — single-page form fill</option>
+                      <option value="totp">totp — form fill + TOTP 2FA</option>
+                      <option value="guided">guided — interactive browser login</option>
+                    </select></div>
+                  ${(c.auth_mode||"auto")==="totp" && html`
+                    <div className="field"><label>TOTP Seed <span className="field-optional">(base32 secret from authenticator app)</span></label>
+                      <input type="text" value=${c.totp_seed||""} placeholder="JBSWY3DPEHPK3PXP…" onChange=${e=>updC(i,{totp_seed:e.target.value})}/></div>`}
+                  ${(c.auth_mode||"auto")==="guided" && html`
+                    <div className="field"><div style=${{background:"var(--surface-2,#2a2a2a)",border:"1px solid var(--border)",borderRadius:4,padding:"8px 10px",fontSize:12,color:"var(--text-2)"}}>
+                      🖥️ A browser window will open when a crawl or dynamic scan starts. Complete the login (including any SSO / MFA / push notifications), then click <strong>I'm Done</strong> in the run detail view. ALICE reuses the session captured by whichever phase runs first.
+                    </div></div>`}
                   <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
-                </div>`)}
+                </div>`;
+              })}
               <button type="button" className="btn secondary sm" onClick=${addC}><${IconPlus}/> Add credential</button>
             </fieldset>`}
           <div className="divider"/>
@@ -1807,6 +1847,61 @@ function useColResize(storageKey, defaults) {
   return [widths, startResize];
 }
 
+function GuidedLoginItem({ item, runId, onConfirmed }) {
+  const [browserOpen, setBrowserOpen] = useState(item.browserOpen || false);
+  const [launching, setLaunching]     = useState(false);
+  const [confirming, setConfirming]   = useState(false);
+  const [err, setErr]                 = useState(null);
+  const [copied, setCopied]           = useState(false);
+
+  // Keep in sync if parent state flips (e.g. SSE fires guided_login_browser_open)
+  useEffect(() => { if (item.browserOpen) setBrowserOpen(true); }, [item.browserOpen]);
+
+  const copyUsername = async () => {
+    try {
+      await navigator.clipboard.writeText(item.username);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch(_) {
+      setErr("Clipboard unavailable \u2014 copy manually: " + item.username);
+    }
+  };
+
+  const launch = async () => {
+    setLaunching(true); setErr(null);
+    try {
+      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/ready`, {method:"POST"});
+      setBrowserOpen(true);
+    } catch(e) { setErr(e.message); }
+    setLaunching(false);
+  };
+
+  const confirm = async () => {
+    setConfirming(true); setErr(null);
+    try {
+      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/confirm`, {method:"POST"});
+      onConfirmed();
+    } catch(e) { setErr(e.message); setConfirming(false); }
+  };
+
+  if (!browserOpen) {
+    return html`
+      <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style=${{fontSize:13}}>Login required for <strong>${item.username}</strong>. Click <strong>I'm Ready</strong> to open a browser window, then log in and come back here.</span>
+        <button className="btn sm" style=${{background:"transparent",border:"1px solid var(--accent)",color:"var(--accent)"}} onClick=${copyUsername}>${copied ? "Copied!" : "Copy username"}</button>
+        ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+        <button className="btn sm" disabled=${launching} onClick=${launch}>${launching ? "Opening browser\u2026" : "I'm Ready"}</button>
+      </div>`;
+  }
+
+  return html`
+    <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span style=${{fontSize:13}}>Browser is open for <strong>${item.username}</strong>. Complete login (including any SSO, MFA, or push approval), then click <strong>I'm Done</strong>. Leave the browser window open, it will automatically close after credentials are captured.</span>
+      ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+      <button className="btn sm" disabled=${confirming} onClick=${confirm}>${confirming ? "Confirming\u2026" : "I'm Done"}</button>
+    </div>`;
+}
+
 function TestRunDetail({ runId, initialTab }) {
   const [run, setRun]           = useState(null);
   const [siteName, setSiteName] = useState(null);
@@ -1835,6 +1930,10 @@ function TestRunDetail({ runId, initialTab }) {
   const [editPages, setEditPages] = useState("");
   const [editLlmProfileId, setEditLlmProfileId] = useState(null);
   const [runProfiles, setRunProfiles] = useState([]);
+
+  // Guided login: list of {credential_id, username} waiting for "I'm Done" confirmation
+  const [guidedLoginPending, setGuidedLoginPending] = useState([]);
+  const [guidedLoginErrors, setGuidedLoginErrors]   = useState([]);
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
@@ -2711,6 +2810,23 @@ function TestRunDetail({ runId, initialTab }) {
         setTokenUsage(evt.totals);
       } else if (evt.type === "scope_hosts_updated") {
         setScopeHosts(evt.scope_hosts || []);
+      } else if (evt.type === "guided_login_required") {
+        setGuidedLoginPending(prev => {
+          if (prev.some(p => p.credential_id === evt.credential_id)) return prev;
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, browserOpen: false }];
+        });
+      } else if (evt.type === "guided_login_browser_open") {
+        setGuidedLoginPending(prev =>
+          prev.map(p => p.credential_id === evt.credential_id ? { ...p, browserOpen: true } : p)
+        );
+      } else if (evt.type === "guided_login_failed") {
+        setGuidedLoginErrors(prev => {
+          if (prev.some(e => e.credential_id === evt.credential_id)) return prev;
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, message: evt.message }];
+        });
+        setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
+      } else if (evt.type === "guided_login_confirmed") {
+        setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -3312,6 +3428,22 @@ function TestRunDetail({ runId, initialTab }) {
 
     <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+
+      ${guidedLoginErrors.length > 0 && html`
+        <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--danger)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:6}}>
+          <div style=${{fontWeight:600,fontSize:13,color:"var(--danger)"}}>⚠️ Guided Browser Login Failed</div>
+          ${guidedLoginErrors.map(e => html`
+            <div key=${e.credential_id} style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <span style=${{fontSize:13}}>${e.message}</span>
+              <button className="btn sm ghost" onClick=${()=>setGuidedLoginErrors(prev=>prev.filter(x=>x.credential_id!==e.credential_id))}>Dismiss</button>
+            </div>`)}
+        </div>`}
+
+      ${guidedLoginPending.length > 0 && html`
+        <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--warn,#f59e0b)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:8}}>
+          <div style=${{fontWeight:600,fontSize:13,color:"var(--warn,#f59e0b)"}}>🖥️ Guided Login Required</div>
+          ${guidedLoginPending.map(p => html`<${GuidedLoginItem} key=${p.credential_id} item=${p} runId=${runId} onConfirmed=${() => setGuidedLoginPending(prev => prev.filter(x => x.credential_id !== p.credential_id))}/>`)}
+        </div>`}
 
       <div className="tab-bar">
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
