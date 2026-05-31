@@ -4,8 +4,21 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #119] ALICE Bug Fixes
+**Opened:** 2026-05-31 | Branch: `develop → main`
+
+Four targeted fixes addressing ALICE session persistence, job visibility, token attribution, and adds expandable step-detail blocks to the thought-process panel (8 files changed).
+
+- **Cross-machine session race condition** (`app.js`): On a new machine, all chat messages were being overwritten with the default welcome message. Root cause — on mount, the save `useEffect` ran synchronously and wrote `Date.now()` (T1) to `localStorage.alice_chats_${runId}_savedAt` before the async `getAliceSessions` call resolved. The server's `updated_at` (T0, an older timestamp) was always less than T1, so the server data was silently discarded and the 800 ms debounce then overwrote the server's history. Fix: added an `_aliceServerLoaded` ref (initially `false`); the save effect returns early until the ref is set; the load effect sets it to `true` in all exit paths (server-wins, local-wins, empty response, and `.catch()`), so comparisons always run against a `localSavedAt` written by a *previous* session rather than the current mount.
+- **ALICE jobs now appear in active jobs panel** (`api/test_runs.py`): `list_active_jobs` checks `alice_tasks.get(run.id)` and appends an `ActiveJobSummary` with `job_type="A.L.I.C.E."` when a background task is running, so in-progress ALICE conversations are surfaced alongside scanner jobs.
+- **Token counters now attributed to the correct run** (`services/alice.py`): `llm_svc.set_run_context(run_id, ...)` is called at the start of `run_alice_turn_stream` so all LLM calls inside the agentic loop increment the per-run token usage counters; `llm_svc.clear_run_context()` is called in the `done` event path to release the context.
+- **`write_finding` validation + activity-log events** (`services/alice.py`): The `write_finding` tool handler now captures the returned `saved` object. If a finding was saved, `validate_finding_inline` is scheduled as a background task and a persisted `agent_status` event (role `Reporting`) is emitted with the finding ID. If the write fails an error event is also persisted, making both successes and failures visible in the activity log.
+- **Expandable step-detail blocks** (`services/alice.py`, `app.js`, `styles.css`): Three new SSE event types are emitted during the agentic loop — `step_llm_call` (serialised last-N input messages via `_build_step_messages`/`_summarize_content` helpers), `step_tool_call` (tool name + JSON-safe input), and `step_tool_result` (truncated result preview). The frontend accumulates these into `session.stepData` keyed by step number and renders expandable `<details>` blocks in the thought-process panel so developers can inspect the exact LLM context, tool inputs, and raw results for each step.
+
+---
+
 ## [PR #114] A.L.I.C.E. — Interactive Pentesting Chat Agent
-**Merged:** 2026-05-30 | Branch: `tester-chat → main`
+**Merged:** 2026-05-30 22:49 AEST | Branch: `tester-chat → main`
 
 Introduces A.L.I.C.E. (AI LLM-Integrated Chat Engine), an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
 

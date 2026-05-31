@@ -54,6 +54,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
     _ensure_column(engine, "test_run", "scanner_policy_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "credential", "login_url", "TEXT")
+    _ensure_column(engine, "credential", "auth_mode", "TEXT NOT NULL DEFAULT 'auto'")
+    _ensure_column(engine, "credential", "totp_seed", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")

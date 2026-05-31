@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,7 +22,7 @@ logging.basicConfig(
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PageCredentialView, PageLink, TargetIntelItem, TestRun, TestRunStatus
+from aespa.models import AuthMode, CrawledPage, PageCredentialView, PageLink, TargetIntelItem, TestRun, TestRunStatus
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
@@ -30,6 +32,16 @@ from aespa.services.settings import get_global_http_header_config, get_llm_confi
 
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
+
+# Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
+_guided_registry: dict[int, asyncio.Event] = {}
+# Ready registry: credential_id -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
+_guided_ready_registry: dict[int, asyncio.Event] = {}
+# Per-run lock: ensures guided logins happen one at a time (no simultaneous browser windows)
+_guided_locks: dict[int, asyncio.Lock] = {}
+# Captured guided-session cookies/headers keyed by (run_id, credential_id) so reconcile
+# can reuse them instead of opening a second browser window.
+_guided_session_cache: dict[tuple[int, int], dict] = {}
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -216,6 +228,9 @@ async def _do_crawl_inner(run_id: int) -> None:
              run_id, final_status, shared.pages_done)
     _update_run(run_id, status=final_status, completed_at=_utcnow(),
                 current_url=None, pages_discovered=shared.pages_done)
+    # Clean up the per-run lock (small object). The session cache is intentionally
+    # kept alive so the dynamic scan phase (same run_id) can reuse guided sessions.
+    _guided_locks.pop(run_id, None)
     events_svc.emit(run_id, {
         "type": "run_update", "status": final_status,
         "pages_discovered": shared.pages_done, "current_url": None,
@@ -329,7 +344,7 @@ async def _crawl_as_credential(
 
         if requires_auth and cred:
             log.info("Authenticating as %s at %s", cred.username, credential_login_url)
-            await _authenticate(page, credential_login_url, cred)
+            await _authenticate(page, credential_login_url, cred, run_id)
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
@@ -357,7 +372,9 @@ async def _crawl_as_credential(
                 if norm in shared.crawled_norms:
                     page_id = shared.crawled_norms[norm]
                     is_first = False
-                elif shared.pages_done >= max_pages or depth > max_depth:
+                elif local_pages >= max_pages or depth > max_depth:
+                    # Per-phase budget exhausted — this credential has visited
+                    # enough pages.  Other phases may still have budget.
                     continue
                 else:
                     page_id = _save_page_placeholder(run_id, url, depth)
@@ -386,6 +403,7 @@ async def _crawl_as_credential(
                     login_url=credential_login_url,
                     username=username,
                     auth_check_snapshot=auth_check_snapshot,
+                    run_id=run_id,
                 )
             except Exception as nav_err:
                 if is_first:
@@ -1863,7 +1881,7 @@ async def _reconcile_direct_access(
                         await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
                     except Exception:
                         pass
-                    await _authenticate(page, credential_login_url, cred)
+                    await _authenticate(page, credential_login_url, cred, run_id)
                     auth_check_snapshot = await _capture_auth_check_snapshot(
                         page, credential_login_url
                     )
@@ -1884,6 +1902,7 @@ async def _reconcile_direct_access(
                             username=cred.username,
                             auth_check_snapshot=auth_check_snapshot,
                             recover_api_auth=False,
+                            run_id=run_id,
                         )
                         if not accessible:
                             continue
@@ -1934,6 +1953,7 @@ async def _direct_load_accessible(
     username: Optional[str] = None,
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
+    run_id: int = 0,
 ) -> tuple[bool, str, str, Optional[str]]:
     try:
         resp = await _goto_with_auth_recovery(
@@ -1945,6 +1965,7 @@ async def _direct_load_accessible(
             username=username,
             auth_check_snapshot=auth_check_snapshot,
             recover_api_auth=recover_api_auth,
+            run_id=run_id,
         )
     except Exception:
         return False, "", "", None
@@ -2313,6 +2334,7 @@ async def _goto_with_auth_recovery(
     username: Optional[str],
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
+    run_id: int = 0,
 ):
     response = None
     for attempt in range(2):
@@ -2349,7 +2371,7 @@ async def _goto_with_auth_recovery(
                 )
                 return response
             log.info("Session appears to have dropped for user=%s at %s; re-authenticating and retrying", username, url)
-            await _authenticate(page, login_url, credential)
+            await _authenticate(page, login_url, credential, run_id)
             continue
         log.warning("Session still appears unauthenticated after retry for user=%s at %s", username, url)
         return response
@@ -2488,7 +2510,475 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 
 # ── Authentication ────────────────────────────────────────────────────────────
 
-async def _authenticate(page, login_url: str, credential) -> None:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+async def _detect_mfa_prompt(page) -> bool:
+    """Return True if the page shows an MFA / OTP input field."""
+    otp_selectors = [
+        "input[name*='otp' i]", "input[id*='otp' i]",
+        "input[name*='mfa' i]", "input[id*='mfa' i]",
+        "input[name*='2fa' i]", "input[id*='2fa' i]",
+        "input[name*='code' i]", "input[id*='code' i]",
+        "input[placeholder*='code' i]", "input[placeholder*='otp' i]",
+        "input[placeholder*='authenticator' i]",
+        "input[autocomplete='one-time-code']",
+    ]
+    for sel in otp_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _fill_totp_if_prompted(page, credential) -> None:
+    """If an MFA prompt is visible, generate and fill the TOTP code."""
+    if not await _detect_mfa_prompt(page):
+        return
+    if not credential.totp_seed:
+        log.warning("  _fill_totp: MFA prompt detected but no totp_seed set for %s", credential.username)
+        return
+    try:
+        import pyotp
+        code = pyotp.TOTP(credential.totp_seed).now()
+    except Exception as exc:
+        log.warning("  _fill_totp: could not generate TOTP code: %s", exc)
+        return
+
+    otp_selectors = [
+        "input[autocomplete='one-time-code']",
+        "input[name*='otp' i]", "input[id*='otp' i]",
+        "input[name*='code' i]", "input[id*='code' i]",
+        "input[name*='mfa' i]", "input[id*='mfa' i]",
+        "input[placeholder*='code' i]",
+    ]
+    filled = False
+    for sel in otp_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                await loc.fill(code)
+                filled = True
+                break
+        except Exception:
+            pass
+
+    if not filled:
+        log.warning("  _fill_totp: could not locate OTP input field for %s", credential.username)
+        return
+
+    # Submit the MFA form
+    for sel in ["button[type='submit']", "input[type='submit']",
+                "button:has-text('Verify')", "button:has-text('Submit')",
+                "button:has-text('Next')", "button:has-text('Sign in')"]:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                await loc.click()
+                break
+        except Exception:
+            pass
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=12_000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(1000)
+    log.info("  _fill_totp: TOTP code filled and submitted for %s", credential.username)
+
+
+async def _authenticate_guided(page, login_url: str, credential, run_id: int) -> None:
+    """Open a headed browser window so the user can log in interactively.
+
+    Captures cookies from the headed session and injects them into the
+    headless crawl context.  Emits a ``guided_login_required`` SSE event so
+    the web UI can show the "I'm Done" button.
+
+    When multiple credentials use guided mode, browsers open one at a time so
+    the user always knows which account to log in as.
+
+    Requires a graphical display.  On headless servers, raises RuntimeError
+    with instructions to use ``seed`` mode instead.
+    """
+    has_display = (
+        sys.platform == "darwin"
+        or bool(os.environ.get("DISPLAY"))
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+    if not has_display:
+        events_svc.emit(run_id, {
+            "type": "guided_login_failed",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "message": (
+                f"Guided login for '{credential.username}' requires a graphical display. "
+                "This scanner appears to be running on a headless host. "
+                "Guided browser login only works when the scanner is running locally with a GUI."
+            ),
+        })
+        log.warning(
+            "  _authenticate_guided: no display available for '%s' (cred_id=%s) — skipping",
+            credential.username, credential.id,
+        )
+        return
+
+    # Acquire the per-run lock so only one guided browser opens at a time
+    if run_id not in _guided_locks:
+        _guided_locks[run_id] = asyncio.Lock()
+    async with _guided_locks[run_id]:
+        ready_event = asyncio.Event()
+        done_event = asyncio.Event()
+        _guided_ready_registry[credential.id] = ready_event
+        _guided_registry[credential.id] = done_event
+
+        # Phase 1: notify the UI — browser is NOT yet open; user must click "I'm Ready" first
+        events_svc.emit(run_id, {
+            "type": "guided_login_required",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "message": (
+                f"Login required for '{credential.username}'. "
+                "Click \"I'm Ready\" in the UI when you are ready to log in."
+            ),
+        })
+
+        log.info("  _authenticate_guided: waiting for ready signal from UI for %s (cred_id=%s)",
+                 credential.username, credential.id)
+
+        # Wait for user to click "I'm Ready" (5 min timeout)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            log.warning("  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)", credential.id)
+            _guided_ready_registry.pop(credential.id, None)
+            _guided_registry.pop(credential.id, None)
+            return
+        _guided_ready_registry.pop(credential.id, None)
+
+        # Phase 2: open the browser and let the user log in
+        events_svc.emit(run_id, {
+            "type": "guided_login_browser_open",
+            "credential_id": credential.id,
+            "username": credential.username,
+        })
+
+        log.info("  _authenticate_guided: opening browser for %s (cred_id=%s)",
+                 credential.username, credential.id)
+
+        captured_cookies: list = []
+        captured_headers: dict[str, str] = {}
+
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=False)
+            try:
+                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+
+                # Capture any Authorization headers sent during navigation
+                async def _capture_auth_header(request) -> None:
+                    auth = request.headers.get("authorization")
+                    if auth and not captured_headers.get("Authorization"):
+                        captured_headers["Authorization"] = auth
+
+                ctx.on("request", _capture_auth_header)
+
+                guided_page = await ctx.new_page()
+                try:
+                    await guided_page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
+                except Exception as nav_err:
+                    log.warning("  _authenticate_guided: initial navigation error: %s", nav_err)
+
+                # Wait for user to confirm (5 min timeout)
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    log.warning("  _authenticate_guided: timed out waiting for user confirmation (cred_id=%s)", credential.id)
+
+                # Brief pause so any in-flight auth redirects / cookie-sets finish
+                # before we snapshot the context's cookies.
+                await asyncio.sleep(1.5)
+                captured_cookies = await ctx.cookies()
+                log.info(
+                    "  _authenticate_guided: captured %d cookie(s) for %s",
+                    len(captured_cookies), credential.username,
+                )
+
+                # Capture ALL localStorage and sessionStorage from every open page
+                # in the context (not just known key names) so SPAs that store tokens
+                # under arbitrary keys are handled correctly.
+                captured_local_storage: dict[str, str] = {}
+                captured_session_storage: dict[str, str] = {}
+                try:
+                    captured_local_storage = await guided_page.evaluate(
+                        "() => Object.fromEntries(Object.entries(localStorage))"
+                    ) or {}
+                except Exception:
+                    pass
+                try:
+                    captured_session_storage = await guided_page.evaluate(
+                        "() => Object.fromEntries(Object.entries(sessionStorage))"
+                    ) or {}
+                except Exception:
+                    pass
+                log.info(
+                    "  _authenticate_guided: captured %d localStorage + %d sessionStorage "
+                    "entries for %s",
+                    len(captured_local_storage), len(captured_session_storage),
+                    credential.username,
+                )
+
+                # Heuristic: pick the most likely bearer token from storage to use
+                # as an Authorization header for httpx / non-browser requests.
+                _bearer_keys = [
+                    "access_token", "accessToken", "token", "jwt", "id_token",
+                    "idToken", "auth_token", "authToken", "bearer_token",
+                ]
+                _all_storage = {**captured_session_storage, **captured_local_storage}
+                for _sk in _bearer_keys:
+                    _sv = _all_storage.get(_sk)
+                    if _sv and not captured_headers.get("Authorization"):
+                        captured_headers["Authorization"] = f"Bearer {_sv}"
+                        log.info(
+                            "  _authenticate_guided: found token in storage key '%s' for %s",
+                            _sk, credential.username,
+                        )
+                        break
+                # If no known key matched, fall back to any value that looks like a JWT
+                if not captured_headers.get("Authorization"):
+                    for _sk, _sv in _all_storage.items():
+                        if isinstance(_sv, str) and _sv.startswith("eyJ") and _sv.count(".") >= 2:
+                            captured_headers["Authorization"] = f"Bearer {_sv}"
+                            log.info(
+                                "  _authenticate_guided: JWT-shaped value found in storage key '%s' for %s",
+                                _sk, credential.username,
+                            )
+                            break
+            finally:
+                await browser.close()
+                _guided_registry.pop(credential.id, None)
+                _guided_ready_registry.pop(credential.id, None)
+
+        # Build the injectable list regardless of whether cookies were captured.
+        # We always write to the cache so subsequent _authenticate calls for this
+        # credential don't open another window (even if capture failed).
+        #
+        # Normalisation is critical: Playwright's ctx.cookies() returns fields that
+        # add_cookies rejects — leading-dot domains (".localhost"), expires=-1 for
+        # session cookies, and sameSite values outside {"Strict","Lax","None"}.
+        # Using "url" instead of "domain"+"path" is the most reliable injection form.
+        injectable = []
+        _valid_samesite = {"Strict", "Lax", "None"}
+        for c in captured_cookies:
+            if not isinstance(c, dict) or not c.get("name") or "value" not in c:
+                continue
+            entry: dict = {"name": c["name"], "value": c["value"], "url": login_url}
+            # Optional fields — only include when they are valid
+            if c.get("httpOnly"):
+                entry["httpOnly"] = True
+            if c.get("secure"):
+                entry["secure"] = True
+            ss = c.get("sameSite")
+            if ss in _valid_samesite:
+                entry["sameSite"] = ss
+            exp = c.get("expires")
+            if exp is not None and isinstance(exp, (int, float)) and exp > 0:
+                entry["expires"] = int(exp)
+            injectable.append(entry)
+        log.info(
+            "  _authenticate_guided: built %d injectable cookie(s) from %d captured for %s",
+            len(injectable), len(captured_cookies), credential.username,
+        )
+
+        if not injectable and not captured_headers.get("Authorization"):
+            log.warning(
+                "  _authenticate_guided: no injectable cookies and no bearer token for %s — "
+                "session capture may have failed. The headless crawl will proceed "
+                "unauthenticated for this credential.",
+                credential.username,
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "guided_login_warning",
+                "status": "warning",
+                "message": (
+                    f"No session cookies were captured for '{credential.username}' "
+                    "after guided login. The crawl for this credential may be "
+                    "unauthenticated. Try again or use 'guided' mode and complete the "
+                    "login fully before clicking I'm Done."
+                ),
+            })
+
+        if injectable:
+            try:
+                await page.context.add_cookies(injectable)
+                # Verify injection actually worked by reading cookies back
+                _verify = await page.context.cookies()
+                _injected_names = {ck["name"] for ck in _verify}
+                _expected_names = {e["name"] for e in injectable}
+                _missing = _expected_names - _injected_names
+                if _missing:
+                    log.warning(
+                        "  _authenticate_guided: %d cookie(s) missing after injection for %s: %s",
+                        len(_missing), credential.username, _missing,
+                    )
+                else:
+                    log.info(
+                        "  _authenticate_guided: verified %d cookie(s) in context for %s",
+                        len(_injected_names & _expected_names), credential.username,
+                    )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: add_cookies failed for %s: %s", credential.username, exc)
+
+        if captured_headers:
+            try:
+                await page.context.set_extra_http_headers(captured_headers)
+            except Exception as exc:
+                log.warning("  _authenticate_guided: could not set extra headers: %s", exc)
+
+        # Reload so the headless context picks up the injected cookies,
+        # then restore localStorage and sessionStorage from the headed session.
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=12_000)
+            await page.wait_for_load_state("networkidle", timeout=8_000)
+        except Exception:
+            pass
+        if captured_local_storage:
+            try:
+                await page.evaluate(
+                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                    "localStorage.setItem(k, v); }",
+                    captured_local_storage,
+                )
+                log.info(
+                    "  _authenticate_guided: restored %d localStorage entries for %s",
+                    len(captured_local_storage), credential.username,
+                )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: localStorage restore failed: %s", exc)
+        if captured_session_storage:
+            try:
+                await page.evaluate(
+                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                    "sessionStorage.setItem(k, v); }",
+                    captured_session_storage,
+                )
+                log.info(
+                    "  _authenticate_guided: restored %d sessionStorage entries for %s",
+                    len(captured_session_storage), credential.username,
+                )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: sessionStorage restore failed: %s", exc)
+
+        events_svc.emit(run_id, {
+            "type": "guided_login_confirmed",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "cookie_count": len(injectable),
+        })
+        # Cache the captured session so reconcile and the dynamic scan can reuse it without a second window
+        _guided_session_cache[(run_id, credential.id)] = {
+            "cookies": {c["name"]: c["value"] for c in captured_cookies if "name" in c and "value" in c},
+            "headers": captured_headers,
+            "injectable": injectable,
+            "local_storage": captured_local_storage,
+            "session_storage": captured_session_storage,
+        }
+        # Persist to session vault DB so the dynamic scan phase can load it via load_session_vault()
+        try:
+            from aespa.services import scanner_sessions as _ss
+            _ss.upsert_session(
+                run_id,
+                label=f"guided_{credential.id}",
+                kind="cookie",
+                username=credential.username,
+                credential_id=credential.id,
+                source="guided_login",
+                cookies=_guided_session_cache[(run_id, credential.id)]["cookies"],
+                extra_headers=captured_headers or None,
+            )
+        except Exception as _vs_exc:
+            log.warning("  _authenticate_guided: could not persist session to vault: %s", _vs_exc)
+
+
+async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> None:
+    """Dispatch to the correct auth strategy based on ``credential.auth_mode``.
+
+    For guided credentials that already have a cached session (from the crawl
+    phase), cookies are injected directly without opening a new browser window.
+    """
+    mode = getattr(credential, "auth_mode", None) or AuthMode.auto
+    try:
+        mode = AuthMode(mode)
+    except ValueError:
+        mode = AuthMode.auto
+
+    # If this is a guided credential with a pre-captured session, inject directly
+    if mode == AuthMode.guided and run_id:
+        cached = _guided_session_cache.get((run_id, credential.id))
+        if cached:
+            log.info(
+                "  _authenticate: reusing cached guided session for %s (cred_id=%s)",
+                credential.username, credential.id,
+            )
+            # Re-build from the flat cookies dict using url-based format (most reliable)
+            cookies_dict = cached.get("cookies") or {}
+            if cookies_dict:
+                cookie_list = [
+                    {"name": k, "value": v, "url": login_url}
+                    for k, v in cookies_dict.items()
+                ]
+                try:
+                    await page.context.add_cookies(cookie_list)
+                    log.info(
+                        "  _authenticate: injected %d cached cookie(s) for %s",
+                        len(cookie_list), credential.username,
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: could not inject cached cookies: %s", exc)
+            if cached.get("headers"):
+                try:
+                    await page.context.set_extra_http_headers(cached["headers"])
+                except Exception as exc:
+                    log.warning("  _authenticate: could not set cached headers: %s", exc)
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=12_000)
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+            except Exception:
+                pass
+            # Restore localStorage and sessionStorage
+            if cached.get("local_storage"):
+                try:
+                    await page.evaluate(
+                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                        "localStorage.setItem(k, v); }",
+                        cached["local_storage"],
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: localStorage restore failed: %s", exc)
+            if cached.get("session_storage"):
+                try:
+                    await page.evaluate(
+                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                        "sessionStorage.setItem(k, v); }",
+                        cached["session_storage"],
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: sessionStorage restore failed: %s", exc)
+            return
+
+    if mode == AuthMode.totp:
+        await _authenticate_auto(page, login_url, credential)
+        await _fill_totp_if_prompted(page, credential)
+    elif mode == AuthMode.guided:
+        await _authenticate_guided(page, login_url, credential, run_id)
+    else:
+        await _authenticate_auto(page, login_url, credential)
+
+
+async def _authenticate_auto(page, login_url: str, credential) -> None:
     """Best-effort form-based login."""
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
