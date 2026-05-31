@@ -179,7 +179,7 @@ async def _execute_alice_tool(
         }
 
         try:
-            await _persist_dynamic_finding(
+            saved = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
                 raw=finding_raw,
@@ -191,9 +191,40 @@ async def _execute_alice_tool(
                 skip_normalize=True,
             )
             log.info("A.L.I.C.E. write_finding run_id=%s title=%r", run_id, finding_raw.get("title"))
+            if saved is not None:
+                from aespa.services import validator as _validator_svc
+                asyncio.create_task(
+                    _validator_svc.validate_finding_inline(
+                        run_id,
+                        saved.id,
+                        llm_cfg=llm_cfg,
+                    )
+                )
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "idle",
+                "current_task": f"A.L.I.C.E. Wrote: {finding_raw.get('title', 'Untitled')}",
+                "outcome": (
+                    f"Saved [{finding_raw.get('severity', '?')}] {finding_raw.get('title', 'Untitled')} (ID: {saved.id})"
+                    if saved else
+                    f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                ),
+                "_persist": True,
+            })
             return f"Finding '{finding_raw.get('title')}' recorded successfully."
         except Exception as exc:
             log.warning("A.L.I.C.E. write_finding failed: %s", exc)
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "idle",
+                "current_task": "A.L.I.C.E. Write failed",
+                "outcome": f"Error: {exc}",
+                "_persist": True,
+            })
             return f"write_finding failed: {exc}"
 
     # ── forge_jwt ─────────────────────────────────────────────────────────────
@@ -429,6 +460,66 @@ async def _execute_alice_tool(
     return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
 
+def _summarize_content(content: object, max_len: int = 600) -> str:
+    """Return a JSON-serializable, truncated text representation of a message content value."""
+    if isinstance(content, str):
+        return (content[:max_len] + f"\n…[{len(content) - max_len} more chars]") if len(content) > max_len else content
+
+    if not isinstance(content, list):
+        try:
+            s = str(content)
+            return (s[:max_len] + "…") if len(s) > max_len else s
+        except Exception:
+            return "[non-serializable]"
+
+    parts: list[str] = []
+    for item in content:
+        t = item.get("type", "unknown") if isinstance(item, dict) else getattr(item, "type", "unknown")
+        if t == "text":
+            text = (item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")) or ""
+            if text:
+                parts.append(str(text)[:300])
+        elif t == "tool_use":
+            name = (item.get("name", "") if isinstance(item, dict) else getattr(item, "name", "")) or ""
+            inp = (item.get("input", {}) if isinstance(item, dict) else getattr(item, "input", {})) or {}
+            try:
+                inp_str = json.dumps(inp)[:200]
+            except Exception:
+                inp_str = str(inp)[:200]
+            parts.append(f"[tool_call: {name}] {inp_str}")
+        elif t == "tool_result":
+            tc = (item.get("content", "") if isinstance(item, dict) else getattr(item, "content", "")) or ""
+            if isinstance(tc, list):
+                tc = " ".join(
+                    (c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "")) or ""
+                    for c in tc
+                )
+            parts.append(f"[tool_result] {str(tc)[:300]}")
+        elif t == "thinking":
+            think = (item.get("thinking", "") if isinstance(item, dict) else getattr(item, "thinking", "")) or ""
+            if think:
+                parts.append(f"[thinking] {str(think)[:100]}…")
+        else:
+            try:
+                s = json.dumps(item) if isinstance(item, dict) else str(item)
+                parts.append(f"[{t}] {s[:100]}")
+            except Exception:
+                parts.append(f"[{t}]")
+
+    combined = "\n".join(parts)
+    return (combined[:max_len] + "\n…[truncated]") if len(combined) > max_len else combined
+
+
+def _build_step_messages(messages: list[dict], max_msgs: int = 4) -> list[dict]:
+    """Serialize the last N messages into a JSON-safe list for step_llm_call events."""
+    result = []
+    for m in messages[-max_msgs:]:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        result.append({"role": role, "content": _summarize_content(content)})
+    return result
+
+
 async def run_alice_turn_stream(
     run_id: int,
     user_instruction: str,
@@ -516,6 +607,10 @@ async def run_alice_turn_stream(
             step_count += 1
 
             yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\n'})}\n\n"
+            try:
+                yield f"data: {json.dumps({'type': 'step_llm_call', 'step': step_count, 'messages': _build_step_messages(messages)})}\n\n"
+            except Exception:
+                pass
 
             try:
                 content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
@@ -616,6 +711,11 @@ async def run_alice_turn_stream(
                     break
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Executing tool: {tool_name}\n'})}\n\n"
+                try:
+                    tool_input_safe = json.loads(json.dumps(tool_input, default=str))
+                    yield f"data: {json.dumps({'type': 'step_tool_call', 'step': step_count, 'tool': tool_name, 'input': tool_input_safe})}\n\n"
+                except Exception:
+                    pass
 
                 try:
                     result_str = await _execute_alice_tool(
@@ -637,6 +737,11 @@ async def run_alice_turn_stream(
                     result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
+                try:
+                    result_preview = result_str[:3000] + (f"\n…[{len(result_str) - 3000} more chars]" if len(result_str) > 3000 else "")
+                    yield f"data: {json.dumps({'type': 'step_tool_result', 'step': step_count, 'tool': tool_name, 'result': result_preview})}\n\n"
+                except Exception:
+                    pass
 
                 tool_results.append({
                     "type": "tool_result",
