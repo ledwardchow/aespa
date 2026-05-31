@@ -1526,7 +1526,11 @@ function SiteDetail({ siteId }) {
                     ${c.login_url || site.login_url || "No login URL"}
                   </div>
                 </div>`)}
-            </div>`}
+            </div>
+            ${site.credentials.some(c => c.auth_mode === "guided") && html`
+              <div style=${{marginTop:8,padding:"8px 12px",background:"var(--surface-2,#2a2a2a)",border:"1px solid var(--warn,#f59e0b)",borderRadius:5,fontSize:12,color:"var(--warn,#f59e0b)"}}>
+                ⚠️ This site is configured with interactive browser login credentials, which only works if you're running this scanner on your local machine with a GUI. It will not function if the scanner is installed on a headless host (i.e. server).
+              </div>`}`}
         </div>`}
 
       <div>
@@ -1844,20 +1848,57 @@ function useColResize(storageKey, defaults) {
 }
 
 function GuidedLoginItem({ item, runId, onConfirmed }) {
-  const [confirming, setConfirming] = useState(false);
-  const [confirmErr, setConfirmErr] = useState(null);
+  const [browserOpen, setBrowserOpen] = useState(item.browserOpen || false);
+  const [launching, setLaunching]     = useState(false);
+  const [confirming, setConfirming]   = useState(false);
+  const [err, setErr]                 = useState(null);
+  const [copied, setCopied]           = useState(false);
+
+  // Keep in sync if parent state flips (e.g. SSE fires guided_login_browser_open)
+  useEffect(() => { if (item.browserOpen) setBrowserOpen(true); }, [item.browserOpen]);
+
+  const copyUsername = async () => {
+    try {
+      await navigator.clipboard.writeText(item.username);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch(_) {
+      setErr("Clipboard unavailable \u2014 copy manually: " + item.username);
+    }
+  };
+
+  const launch = async () => {
+    setLaunching(true); setErr(null);
+    try {
+      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/ready`, {method:"POST"});
+      setBrowserOpen(true);
+    } catch(e) { setErr(e.message); }
+    setLaunching(false);
+  };
+
   const confirm = async () => {
-    setConfirming(true); setConfirmErr(null);
+    setConfirming(true); setErr(null);
     try {
       await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/confirm`, {method:"POST"});
       onConfirmed();
-    } catch(e) { setConfirmErr(e.message); setConfirming(false); }
+    } catch(e) { setErr(e.message); setConfirming(false); }
   };
+
+  if (!browserOpen) {
+    return html`
+      <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style=${{fontSize:13}}>Login required for <strong>${item.username}</strong>. Click <strong>I'm Ready</strong> to open a browser window, then log in and come back here.</span>
+        <button className="btn sm" style=${{background:"transparent",border:"1px solid var(--accent)",color:"var(--accent)"}} onClick=${copyUsername}>${copied ? "Copied!" : "Copy username"}</button>
+        ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+        <button className="btn sm" disabled=${launching} onClick=${launch}>${launching ? "Opening browser\u2026" : "I'm Ready"}</button>
+      </div>`;
+  }
+
   return html`
     <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <span style=${{fontSize:13}}>A browser window is open for <strong>${item.username}</strong>. Complete login (including any SSO, MFA, or push approval), then click Done.</span>
-      ${confirmErr && html`<span style=${{color:"var(--danger)",fontSize:12}}>${confirmErr}</span>`}
-      <button className="btn sm" disabled=${confirming} onClick=${confirm}>${confirming?"Confirming…":"I'm Done"}</button>
+      <span style=${{fontSize:13}}>Browser is open for <strong>${item.username}</strong>. Complete login (including any SSO, MFA, or push approval), then click <strong>I'm Done</strong>. Leave the browser window open, it will automatically close after credentials are captured.</span>
+      ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+      <button className="btn sm" disabled=${confirming} onClick=${confirm}>${confirming ? "Confirming\u2026" : "I'm Done"}</button>
     </div>`;
 }
 
@@ -1892,6 +1933,7 @@ function TestRunDetail({ runId, initialTab }) {
 
   // Guided login: list of {credential_id, username} waiting for "I'm Done" confirmation
   const [guidedLoginPending, setGuidedLoginPending] = useState([]);
+  const [guidedLoginErrors, setGuidedLoginErrors]   = useState([]);
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
@@ -2771,8 +2813,18 @@ function TestRunDetail({ runId, initialTab }) {
       } else if (evt.type === "guided_login_required") {
         setGuidedLoginPending(prev => {
           if (prev.some(p => p.credential_id === evt.credential_id)) return prev;
-          return [...prev, { credential_id: evt.credential_id, username: evt.username }];
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, browserOpen: false }];
         });
+      } else if (evt.type === "guided_login_browser_open") {
+        setGuidedLoginPending(prev =>
+          prev.map(p => p.credential_id === evt.credential_id ? { ...p, browserOpen: true } : p)
+        );
+      } else if (evt.type === "guided_login_failed") {
+        setGuidedLoginErrors(prev => {
+          if (prev.some(e => e.credential_id === evt.credential_id)) return prev;
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, message: evt.message }];
+        });
+        setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
       } else if (evt.type === "guided_login_confirmed") {
         setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
       }
@@ -3376,6 +3428,16 @@ function TestRunDetail({ runId, initialTab }) {
 
     <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+
+      ${guidedLoginErrors.length > 0 && html`
+        <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--danger)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:6}}>
+          <div style=${{fontWeight:600,fontSize:13,color:"var(--danger)"}}>⚠️ Guided Browser Login Failed</div>
+          ${guidedLoginErrors.map(e => html`
+            <div key=${e.credential_id} style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <span style=${{fontSize:13}}>${e.message}</span>
+              <button className="btn sm ghost" onClick=${()=>setGuidedLoginErrors(prev=>prev.filter(x=>x.credential_id!==e.credential_id))}>Dismiss</button>
+            </div>`)}
+        </div>`}
 
       ${guidedLoginPending.length > 0 && html`
         <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--warn,#f59e0b)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:8}}>
