@@ -165,34 +165,33 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
 
 
 def test_alice_chat_api_endpoint(test_client, test_data):
-    """Verify that the POST /api/test-runs/{run_id}/alice/chat endpoint operates correctly."""
+    """Verify that the POST /api/test-runs/{run_id}/alice/run endpoint operates correctly."""
     run = test_data["run"]
 
     # Test 404 for non-existent run
     r_404 = test_client.post(
-        "/api/test-runs/999999/alice/chat",
-        json={"message": "hello"}
+        "/api/test-runs/999999/alice/run",
+        json={"message": "hello", "think_msg_id": "t1", "reply_msg_id": "r1"},
     )
     assert r_404.status_code == 404
 
-    # Test valid request (which will hit run_alice_turn_stream)
-    async def mock_stream(*args, **kwargs):
-        yield "data: {\"type\": \"thinking_chunk\", \"delta\": \"thinking\"}\n\n"
-        yield "data: {\"type\": \"done\", \"thought\": \"Thought\", \"message\": \"Reply\"}\n\n"
-
-    with patch("aespa.services.alice.run_alice_turn_stream", side_effect=mock_stream) as mock_turn:
+    # Test valid request — alice/run starts a background task and returns {"ok": True}
+    with patch("aespa.services.alice_tasks.start") as mock_start:
+        mock_start.return_value = None
         r_api = test_client.post(
-            f"/api/test-runs/{run.id}/alice/chat",
-            json={"message": "Test message", "history": []}
+            f"/api/test-runs/{run.id}/alice/run",
+            json={
+                "message": "Test message",
+                "history": [],
+                "tab_id": "tab-test",
+                "think_msg_id": "think-1",
+                "reply_msg_id": "reply-1",
+            },
         )
 
         assert r_api.status_code == 200
-        assert r_api.headers["content-type"].startswith("text/event-stream")
-
-        lines = [line for line in r_api.iter_lines()]
-        assert "data: {\"type\": \"thinking_chunk\", \"delta\": \"thinking\"}" in lines
-        assert "data: {\"type\": \"done\", \"thought\": \"Thought\", \"message\": \"Reply\"}" in lines
-        mock_turn.assert_called_once_with(run.id, "Test message", [])
+        assert r_api.json() == {"ok": True}
+        mock_start.assert_called_once()
 
 
 @pytest.mark.anyio
@@ -216,7 +215,11 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     }
 
     # Mock _persist_dynamic_finding so it doesn't need full LLM
-    with patch("aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock) as mock_persist:
+    mock_finding = MagicMock()
+    mock_finding.id = 42
+    with patch("aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock) as mock_persist, \
+         patch("aespa.services.validator.validate_finding_inline", new_callable=AsyncMock) as mock_validate:
+        mock_persist.return_value = mock_finding
         result = await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=llm_cfg,
@@ -232,3 +235,4 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     call_kwargs = mock_persist.call_args.kwargs
     assert call_kwargs["raw"]["finding_source"] == "alice"
     assert call_kwargs["raw"]["title"] == "Default Admin Access Enabled"
+    mock_validate.assert_called_once()

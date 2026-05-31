@@ -330,6 +330,7 @@ function getAliceSession(runId, tabId) {
       replyMsgId: null,
       accumulatedThought: "",
       accumulatedMessage: "",
+      stepData: {},
       subscribers: new Set(),
     };
   }
@@ -370,6 +371,7 @@ async function aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, curso
   // Re-accumulate from cursor 0 on every connect so the totals are always correct.
   session.accumulatedThought = "";
   session.accumulatedMessage = "";
+  session.stepData = {};
 
   const controller = new AbortController();
   session.abortController = controller;
@@ -405,6 +407,18 @@ async function aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, curso
           else if (event.type === "done") {
             if (event.thought) session.accumulatedThought = event.thought;
             if (event.message) session.accumulatedMessage = event.message;
+          } else if (event.type === "step_llm_call") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            session.stepData[event.step].llmMessages = event.messages || [];
+          } else if (event.type === "step_tool_call") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            session.stepData[event.step].tools.push({ tool: event.tool, input: event.input, result: null });
+          } else if (event.type === "step_tool_result") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            const tools = session.stepData[event.step].tools;
+            if (tools.length > 0 && tools[tools.length - 1].result === null) {
+              tools[tools.length - 1].result = event.result;
+            }
           }
           _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId,
             session.accumulatedThought, session.accumulatedMessage);
@@ -484,6 +498,7 @@ const parseAliceThinking = (text) => {
   let currentParagraph = [];
   let inCodeBlock = false;
   let codeLang = "";
+  const toolCntByStep = {};  // track how many Executing tool lines seen per step
   let codeContent = [];
   
   let inToolCall = false;
@@ -677,13 +692,41 @@ const parseAliceThinking = (text) => {
       continue;
     }
 
-    // [Step N] Calling LLM... / [Step N] Tool result (N chars)
-    if (/^\[Step \d+\] (Calling LLM|Tool result)/.test(trimmed)) {
+    // [Step N] Calling LLM...
+    const stepLLMMatch = trimmed.match(/^\[Step (\d+)\] Calling LLM/);
+    if (stepLLMMatch) {
       if (currentParagraph.length > 0) {
         blocks.push({ type: "thought", text: currentParagraph.join("\n") });
         currentParagraph = [];
       }
-      blocks.push({ type: "status", status: "routing", text: trimmed });
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum: parseInt(stepLLMMatch[1]), stepKind: "llm_call" });
+      continue;
+    }
+
+    // [Step N] Executing tool: name  (must come before generic toolCallRegex)
+    const stepExecMatch = trimmed.match(/^\[Step (\d+)\] Executing tool:\s*(\S+)/);
+    if (stepExecMatch) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const stepNum = parseInt(stepExecMatch[1]);
+      if (!toolCntByStep[stepNum]) toolCntByStep[stepNum] = 0;
+      const toolIdx = toolCntByStep[stepNum]++;
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum, stepKind: "tool_call", toolName: stepExecMatch[2], toolIdx });
+      continue;
+    }
+
+    // [Step N] Tool result (N chars)
+    const stepResultMatch = trimmed.match(/^\[Step (\d+)\] Tool result/);
+    if (stepResultMatch) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const stepNum = parseInt(stepResultMatch[1]);
+      const toolIdx = (toolCntByStep[stepNum] || 1) - 1;
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum, stepKind: "tool_result", toolIdx });
       continue;
     }
 
@@ -705,7 +748,7 @@ const parseAliceThinking = (text) => {
       continue;
     }
 
-    // Step-level tool execution detection (e.g. "[Step 1] Executing tool: http_request")
+    // Generic tool execution detection (non-step-prefixed lines)
     const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool:?\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
     const match = trimmed.match(toolCallRegex);
     if (match) {
@@ -918,7 +961,7 @@ const renderMarkdown = (text) => {
 };
 
 
-const renderAliceBlocks = (text, isThinking) => {
+const renderAliceBlocks = (text, isThinking, stepData = {}) => {
   const blocks = parseAliceThinking(text);
   return blocks.map((block, idx) => {
     if (block.type === "status") {
@@ -930,6 +973,59 @@ const renderAliceBlocks = (text, isThinking) => {
       } else if (block.status === "routing") {
         icon = html`<span className="alice-status-icon alice-status-icon--routing">⚡</span>`;
       }
+
+      // Expandable step blocks
+      if (block.stepKind) {
+        const stepEntry = (stepData || {})[block.stepNum] || {};
+        let detailContent = null;
+
+        if (block.stepKind === "llm_call" && stepEntry.llmMessages && stepEntry.llmMessages.length > 0) {
+          detailContent = html`
+            <div className="alice-step-detail">
+              ${stepEntry.llmMessages.map((m, i) => html`
+                <div key=${i} className=${"alice-step-msg alice-step-msg--" + m.role}>
+                  <span className="alice-step-msg-role">${m.role}</span>
+                  <pre className="alice-step-msg-content">${m.content}</pre>
+                </div>
+              `)}
+            </div>
+          `;
+        } else if (block.stepKind === "tool_call") {
+          const toolEntry = stepEntry.tools && stepEntry.tools[block.toolIdx];
+          if (toolEntry && toolEntry.input !== null && toolEntry.input !== undefined) {
+            let inputStr;
+            try { inputStr = JSON.stringify(toolEntry.input, null, 2); } catch (_) { inputStr = String(toolEntry.input); }
+            detailContent = html`
+              <div className="alice-step-detail">
+                <pre className="alice-step-msg-content">${inputStr}</pre>
+              </div>
+            `;
+          }
+        } else if (block.stepKind === "tool_result") {
+          const toolEntry = stepEntry.tools && stepEntry.tools[block.toolIdx];
+          if (toolEntry && toolEntry.result !== null && toolEntry.result !== undefined) {
+            detailContent = html`
+              <div className="alice-step-detail">
+                <pre className="alice-step-msg-content">${toolEntry.result}</pre>
+              </div>
+            `;
+          }
+        }
+
+        if (detailContent) {
+          return html`
+            <details key=${idx} className=${"alice-step-details alice-step-details--" + block.stepKind} style=${isThinking ? {} : { margin: "6px 0" }}>
+              <summary className="alice-thinking-status-row alice-thinking-status-row--routing alice-step-summary">
+                ${icon}
+                <span className="alice-status-text">${block.text}</span>
+                <span className="alice-step-expand-caret">▶</span>
+              </summary>
+              ${detailContent}
+            </details>
+          `;
+        }
+      }
+
       return html`
         <div key=${idx} className=${"alice-thinking-status-row alice-thinking-status-row--" + block.status} style=${isThinking ? {} : { margin: "6px 0" }}>
           ${icon}
@@ -1223,6 +1319,8 @@ function activeJobProgress(job) {
 function ActiveJobsPage() {
   const [jobs, setJobs] = useState(null);
   const [error, setError] = useState(null);
+  const [stopping, setStopping] = useState({});  // keyed by `${job_type}-${run_id}`
+
   const load = useCallback(async () => {
     try {
       setError(null);
@@ -1237,11 +1335,37 @@ function ActiveJobsPage() {
     return () => clearInterval(id);
   }, [load]);
 
+  const stopJob = async (j) => {
+    const key = `${j.job_type}-${j.run_id}`;
+    setStopping(prev => ({ ...prev, [key]: true }));
+    try {
+      if (j.job_type === "A.L.I.C.E.") {
+        await api.stopAliceRun(j.run_id);
+      } else {
+        await api.stopRun(j.run_id);
+      }
+      await load();
+    } catch(e) {
+      setError(e.message);
+    } finally {
+      setStopping(prev => { const n = {...prev}; delete n[key]; return n; });
+    }
+  };
+
+  const stopAll = async () => {
+    if (!jobs || jobs.length === 0) return;
+    const promises = jobs.map(j => stopJob(j));
+    await Promise.allSettled(promises);
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">Active Jobs</div>
       <div className="topbar-actions">
         <button className="btn secondary" onClick=${load}>Refresh</button>
+        ${jobs && jobs.length > 0 && html`
+          <button className="btn danger" onClick=${stopAll}>Stop All</button>
+        `}
       </div>
     </div>
     <div className="content scroll-content">
@@ -1260,8 +1384,11 @@ function ActiveJobsPage() {
               <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"7%"}}/><col style=${{width:"13%"}}/><col style=${{width:"14%"}}/>
             </colgroup>
             <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
-            <tbody>${jobs.map(j=>html`
-              <tr key=${`${j.job_type}-${j.run_id}`}>
+            <tbody>${jobs.map(j=>{
+              const key = `${j.job_type}-${j.run_id}`;
+              const isStopping = !!stopping[key];
+              return html`
+              <tr key=${key}>
                 <td>
                   <a href=${`#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
@@ -1273,11 +1400,13 @@ function ActiveJobsPage() {
                 <td>${j.findings_count ?? html`<span className="subtle">—</span>`}</td>
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
-                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                  <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
-              </tr>`)}
+              </tr>`;
+            })}
             </tbody>
           </table>
         </div>`}
@@ -1721,6 +1850,8 @@ function TestRunDetail({ runId, initialTab }) {
     const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
   });
 
+  const ALICE_WELCOME_MESSAGE = "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start Pentest at the top right, or you can tell me to work on something specific!";
+
   const _aliceDefaultChats = () => [{
     id: "tab-default",
     title: "Session 1",
@@ -1728,7 +1859,7 @@ function TestRunDetail({ runId, initialTab }) {
       id: "welcome",
       sender: "alice",
       type: "message",
-      text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+      text: ALICE_WELCOME_MESSAGE,
       ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
     }]
   }];
@@ -1757,7 +1888,10 @@ function TestRunDetail({ runId, initialTab }) {
   //     tab saved after this one last wrote; accept the server state.
   useEffect(() => {
     api.getAliceSessions(runId).then(data => {
-      if (!data.chats || data.chats.length === 0) return;
+      if (!data.chats || data.chats.length === 0) {
+        _aliceServerLoaded.current = true;
+        return;
+      }
 
       const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
       const localSavedAt = parseInt(
@@ -1789,6 +1923,7 @@ function TestRunDetail({ runId, initialTab }) {
       if (serverUpdatedAt > localSavedAt) {
         // Server has newer state (another user/tab made changes).
         const merged = applyRecovery(data.chats, activeTabId);
+        _aliceServerLoaded.current = true;
         setAliceChats(merged);
         setActiveAliceTabId(activeTabId);
         try {
@@ -1796,15 +1931,20 @@ function TestRunDetail({ runId, initialTab }) {
           localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
           localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
         } catch (_) {}
+      } else {
+        // Local is fresher (page refresh mid-stream) — keep it as-is;
+        // but still mark loaded so the save effect is unblocked.
+        _aliceServerLoaded.current = true;
       }
-      // else: local is fresher (page refresh mid-stream) — keep it as-is;
-      // the recovery useEffect below will patch the latest text.
-    }).catch(() => {});
+    }).catch(() => {
+      _aliceServerLoaded.current = true; // unblock saves even if the API fails
+    });
   }, [runId]);
 
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
-  const [aliceIsThinking, setAliceIsThinking] = useState(false);
+  const [aliceThinkingTabId, setAliceThinkingTabId] = useState(null);
+  const aliceIsThinking = aliceThinkingTabId !== null;
   const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
 
@@ -1816,13 +1956,13 @@ function TestRunDetail({ runId, initialTab }) {
       if (cancelled || !st.running) return;
       const { tab_id, think_msg_id, reply_msg_id } = st;
       setAliceGlobalRunning(true);
-      setAliceIsThinking(true);
+      setAliceThinkingTabId(tab_id);
       setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(think_msg_id); return s; });
       // Pre-populate session so the subscriber can find the right messages.
       const sess = getAliceSession(runId, tab_id);
       sess.thinkMsgId = think_msg_id;
       sess.replyMsgId = reply_msg_id;
-      const done = () => { setAliceIsThinking(false); setAliceGlobalRunning(false); };
+      const done = () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); };
       aliceSessionConnect(runId, tab_id, {
         thinkMsgId: think_msg_id,
         replyMsgId: reply_msg_id,
@@ -1838,7 +1978,7 @@ function TestRunDetail({ runId, initialTab }) {
   useEffect(() => {
     const session = getAliceSession(runId, activeAliceTabId);
     if (session.active) {
-      setAliceIsThinking(true);
+      setAliceThinkingTabId(activeAliceTabId);
     }
 
     // Resolve the best available accumulated text: prefer the in-memory session
@@ -1894,13 +2034,19 @@ function TestRunDetail({ runId, initialTab }) {
             ...tab,
             messages: tab.messages.map(m => {
               if (event.type === "thinking_chunk" && m.id === thinkMsgId)
-                return { ...m, text: session.accumulatedThought };
+                return { ...m, text: session.accumulatedThought, stepData: session.stepData };
               if (event.type === "message_chunk" && m.id === replyMsgId)
                 return { ...m, text: session.accumulatedMessage };
               if (event.type === "warning" && m.id === replyMsgId)
                 return { ...m, text: event.message };
+              if (["step_llm_call", "step_tool_call", "step_tool_result"].includes(event.type) && m.id === thinkMsgId)
+                return { ...m, stepData: { ...session.stepData } };
               if (event.type === "done") {
-                if (m.id === thinkMsgId && event.thought) return { ...m, text: event.thought };
+                if (m.id === thinkMsgId) {
+                  const upd = { stepData: session.stepData };
+                  if (event.thought) upd.text = event.thought;
+                  return { ...m, ...upd };
+                }
                 if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
               }
               return m;
@@ -1908,16 +2054,20 @@ function TestRunDetail({ runId, initialTab }) {
           };
         }));
       },
-      onDone: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
-      onError: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+      onDone: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+      onError: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
     });
     return unsub;
   }, [runId, activeAliceTabId]);
 
   const _aliceSaveTimer = useRef(null);
+  const _aliceServerLoaded = useRef(false);
   useEffect(() => {
     // Keep localStorage in sync for fast initial render on next mount.
     // savedAt lets the server-load effect decide which source is fresher.
+    // Guard: skip until the initial server load has resolved so we don't
+    // stamp a fresh localSavedAt timestamp before the comparison happens.
+    if (!_aliceServerLoaded.current) return;
     const now = Date.now();
     try {
       localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
@@ -1945,7 +2095,7 @@ function TestRunDetail({ runId, initialTab }) {
           id: "welcome-" + newTabId,
           sender: "alice",
           type: "message",
-          text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+          text: ALICE_WELCOME_MESSAGE,
           ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
         }
       ]
@@ -1968,7 +2118,7 @@ function TestRunDetail({ runId, initialTab }) {
             id: "welcome-reset",
             sender: "alice",
             type: "message",
-            text: "Hello! I am A.L.I.C.E., your interactive pentesting partner. How can I assist you with this scan?",
+            text: ALICE_WELCOME_MESSAGE,
             ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
           }
         ]
@@ -2010,7 +2160,7 @@ function TestRunDetail({ runId, initialTab }) {
   const handleAliceStop = () => {
     aliceSessionAbort(runId, activeAliceTabId);
     api.stopAliceRun(runId).catch(() => {});
-    setAliceIsThinking(false);
+    setAliceThinkingTabId(null);
     setAliceGlobalRunning(false);
   };
 
@@ -2063,7 +2213,7 @@ function TestRunDetail({ runId, initialTab }) {
       }
       return tab;
     }));
-    setAliceIsThinking(true);
+    setAliceThinkingTabId(currentTabId);
     setAliceGlobalRunning(true);
 
     setAliceExpandedThinkIds(prev => {
@@ -2085,7 +2235,7 @@ function TestRunDetail({ runId, initialTab }) {
       historyPayload,
       thinkMsgId,
       replyMsgId,
-      onFinish: () => { setAliceIsThinking(false); setAliceGlobalRunning(false); },
+      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
       onFail: (err) => {
         if (err.name === "AbortError") {
           setAliceChats(prev => prev.map(tab => {
@@ -2112,7 +2262,7 @@ function TestRunDetail({ runId, initialTab }) {
             };
           }));
         }
-        setAliceIsThinking(false);
+        setAliceThinkingTabId(null);
         setAliceGlobalRunning(false);
       },
     });
@@ -4174,7 +4324,7 @@ function TestRunDetail({ runId, initialTab }) {
                                       </div>
                                       ${isThinkExpanded && html`
                                         <div className="alice-thinking-body">
-                                          ${renderAliceBlocks(msg.text, true)}
+                                          ${renderAliceBlocks(msg.text, true, msg.stepData || {})}
                                         </div>
                                       `}
                                     </div>
@@ -4186,7 +4336,7 @@ function TestRunDetail({ runId, initialTab }) {
                                 <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                                   <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
                                     <div>
-                                      ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false)}
+                                      ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false, msg.stepData || {})}
                                     </div>
                                     <div className="alice-msg-meta">
                                       <span>${msg.ts}</span>
@@ -4195,7 +4345,7 @@ function TestRunDetail({ runId, initialTab }) {
                                 </div>
                               `;
                             })}
-                            ${aliceIsThinking && html`
+                            ${(aliceThinkingTabId === activeAliceTabId) && html`
                               <div className="alice-msg-row alice-msg-row--alice">
                                 <div className="alice-typing-bubble">
                                   <div className="alice-typing-dot"></div>

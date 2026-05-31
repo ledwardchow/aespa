@@ -297,6 +297,12 @@ a:hover { color: var(--accent-hover); }
   color: var(--text-2);
 }
 .btn.secondary:hover { background: var(--panel); color: var(--text); }
+.btn.danger {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+}
+.btn.danger:hover { filter: brightness(1.15); }
 .btn.danger-outline {
   background: transparent;
   color: var(--danger);
@@ -1836,6 +1842,79 @@ legend {
   border-radius: 50%;
   background: #c084fc;
 }
+
+/* ── Expandable step details (<details>/<summary>) ────────────────────────── */
+.alice-step-details {
+  width: 100%;
+}
+.alice-step-details summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.alice-step-details summary::-webkit-details-marker { display: none; }
+.alice-step-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.alice-step-expand-caret {
+  margin-left: auto;
+  font-size: 9px;
+  opacity: 0.5;
+  transition: transform 0.15s ease;
+}
+.alice-step-details[open] > .alice-step-summary .alice-step-expand-caret {
+  transform: rotate(90deg);
+  opacity: 0.8;
+}
+.alice-step-detail {
+  margin-top: 4px;
+  border-left: 2px solid rgba(59, 130, 246, 0.3);
+  padding-left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alice-step-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.alice-step-msg-role {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+  padding: 1px 4px;
+  border-radius: 3px;
+  width: fit-content;
+}
+.alice-step-msg--user .alice-step-msg-role {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.12);
+}
+.alice-step-msg--assistant .alice-step-msg-role {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.12);
+}
+.alice-step-msg-content {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 10px;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
 
 .alice-thinking-alert {
   display: flex;
