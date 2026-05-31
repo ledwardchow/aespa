@@ -495,17 +495,16 @@ legend {
 }
 
 .cred-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: end;
   padding: 10px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 7px;
 }
-.cred-row .credential-login-field { grid-column: 1 / -1; }
-.cred-row .credential-remove-cell { padding-bottom:1px; }
+.cred-row .credential-login-field { }
+.cred-row .credential-remove-cell { align-self: flex-end; padding-bottom: 1px; }
 
 .site-credentials-list {
   margin-top:12px;

@@ -3649,13 +3649,40 @@ async def _do_thinking_scan(run_id: int) -> None:
             pass
 
         if requires_auth and creds:
-            from aespa.services.crawler import _authenticate
-
-            await _authenticate(
-                pw_page,
-                _login_url_for_credential(login_url, creds[0]),
-                creds[0],
+            # Check if the crawl phase already captured a guided session for this credential.
+            # If so, inject it directly rather than opening another browser window.
+            _primary_vault_session = (
+                session_vault.get(f"guided_{creds[0].id}")
+                or session_vault.get("configured_primary")
             )
+            if _primary_vault_session and _primary_vault_session.get("cookies"):
+                log.info(
+                    "Dynamic scan: reusing vault session '%s' for %s (skipping auth bootstrap)",
+                    _primary_vault_session.get("label", "?"), creds[0].username,
+                )
+                cookie_list = [
+                    {"name": k, "value": v, "url": base_url}
+                    for k, v in _primary_vault_session["cookies"].items()
+                ]
+                if cookie_list:
+                    await browser_ctx.add_cookies(cookie_list)
+                if _primary_vault_session.get("extra_headers"):
+                    await browser_ctx.set_extra_http_headers(
+                        _playwright_global_headers(_primary_vault_session["extra_headers"])
+                    )
+                try:
+                    await pw_page.reload(wait_until="domcontentloaded", timeout=12_000)
+                except Exception:
+                    pass
+            else:
+                from aespa.services.crawler import _authenticate
+
+                await _authenticate(
+                    pw_page,
+                    _login_url_for_credential(login_url, creds[0]),
+                    creds[0],
+                    run_id,
+                )
 
         raw_cookies = await browser_ctx.cookies()
         cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
@@ -3794,6 +3821,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     specialist_config=specialist_cfg,
                     recon_summary=recon_summary,
                     site_id=site_id,
+                    creds=creds,
+                    login_url=login_url or "",
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -4921,6 +4950,8 @@ async def _do_agentic_thinking_loop(
     specialist_config=None,
     recon_summary: dict | None = None,
     site_id: int = 0,
+    creds: list | None = None,
+    login_url: str = "",
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -4934,6 +4965,70 @@ async def _do_agentic_thinking_loop(
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+    _consecutive_auth_failures = [0]  # primary-session 401/403 streak
+    _reauth_count = [0]  # total re-auth attempts this scan
+    _REAUTH_THRESHOLD = 5
+    _REAUTH_MAX = 2
+
+    async def _try_reauth() -> bool:
+        """Re-authenticate on pw_page and refresh hx + session_vault cookies."""
+        if not creds or _reauth_count[0] >= _REAUTH_MAX:
+            return False
+        _reauth_count[0] += 1
+        _consecutive_auth_failures[0] = 0
+        log.info(
+            "Dynamic scan: session expiry detected — re-authenticating (attempt %d/%d)",
+            _reauth_count[0], _REAUTH_MAX,
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "session_reauth",
+            "status": "start",
+            "message": (
+                f"Session expired — re-authenticating with "
+                f"{creds[0].username} (attempt {_reauth_count[0]})…"
+            ),
+        })
+        try:
+            from aespa.services.crawler import _authenticate
+            _cred_login_url = _login_url_for_credential(login_url, creds[0])
+            await _authenticate(pw_page, _cred_login_url, creds[0], run_id)
+            raw_cookies = await browser_ctx.cookies()
+            new_cookies = {c["name"]: c["value"] for c in raw_cookies}
+            # Refresh the httpx client's cookie jar in-place
+            for name, value in new_cookies.items():
+                hx.cookies.set(name, value)
+            # Refresh session vault
+            if new_cookies:
+                prev = session_vault.get("configured_primary") or {}
+                session_vault["configured_primary"] = {
+                    **prev,
+                    "cookies": new_cookies,
+                }
+                _record_session(
+                    run_id,
+                    label="configured_primary",
+                    session_data=session_vault["configured_primary"],
+                    source="dynamic_scan_reauth",
+                    credential_id=creds[0].id,
+                    metadata={"login_url": _cred_login_url},
+                )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "session_reauth",
+                "status": "complete",
+                "message": "Re-authentication succeeded — continuing scan.",
+            })
+            return bool(new_cookies)
+        except Exception as _reauth_exc:
+            log.warning("Dynamic scan re-auth failed: %s", _reauth_exc)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "session_reauth",
+                "status": "error",
+                "message": f"Re-authentication failed: {_reauth_exc}",
+            })
+            return False
 
     # ── Restore state from checkpoint (resume path) ───────────────────────────
     resume_messages: list[dict] | None = None
@@ -5311,6 +5406,22 @@ async def _do_agentic_thinking_loop(
             })
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
+            # Evict expired/invalid named sessions from the vault on 401/403
+            _br_session_evicted = False
+            if resp_status in (401, 403) and use_session_label and use_session_label in session_vault:
+                del session_vault[use_session_label]
+                _br_session_evicted = True
+                log.info(
+                    "Agentic scan: evicted expired session '%s' (401/403 on BROWSER %s)",
+                    use_session_label, final_url,
+                )
+            # Track primary-session 401/403 streak for re-auth trigger
+            if resp_status in (401, 403) and not use_session_label:
+                _consecutive_auth_failures[0] += 1
+                if _consecutive_auth_failures[0] >= _REAUTH_THRESHOLD:
+                    await _try_reauth()
+            elif not use_session_label:
+                _consecutive_auth_failures[0] = 0
             task_graph_svc.complete_task_after_result(
                 run_id, active_task_id,
                 step=step, method="BROWSER", url=final_url, status=resp_status,
@@ -5325,8 +5436,14 @@ async def _do_agentic_thinking_loop(
             })
             await sleep_between_probes(scanner_policy)
             action_log_text = "\n".join(action_log) if action_log else "(none)"
+            _br_eviction_note = (
+                f"[SESSION EVICTED] Session label '{use_session_label}' returned "
+                f"{resp_status} and has been removed from the session vault. "
+                "Do not use this label again.\n\n"
+            ) if _br_session_evicted else ""
             return (
-                f"Browser: {final_url}\nStatus: {resp_status}\n"
+                _br_eviction_note
+                + f"Browser: {final_url}\nStatus: {resp_status}\n"
                 f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
             )
 
@@ -5975,6 +6092,22 @@ async def _do_agentic_thinking_loop(
         })
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status)
+        # Evict expired/invalid named sessions from the vault on 401/403
+        _hr_session_evicted = False
+        if hr_resp_status in (401, 403) and hr_use_session and hr_use_session in session_vault:
+            del session_vault[hr_use_session]
+            _hr_session_evicted = True
+            log.info(
+                "Agentic scan: evicted expired session '%s' (401/403 on %s %s)",
+                hr_use_session, hr_method, hr_url,
+            )
+        # Track primary-session 401/403 streak for re-auth trigger
+        if hr_resp_status in (401, 403) and not hr_use_session:
+            _consecutive_auth_failures[0] += 1
+            if _consecutive_auth_failures[0] >= _REAUTH_THRESHOLD:
+                await _try_reauth()
+        elif not hr_use_session:
+            _consecutive_auth_failures[0] = 0
         task_graph_svc.complete_task_after_result(
             run_id, active_task_id,
             step=step, method=hr_method, url=hr_url, status=hr_resp_status,
@@ -6003,8 +6136,14 @@ async def _do_agentic_thinking_loop(
             f"{_SSRF_CANARY_URL} — the server fetched and reflected the canary URL. "
             "This is confirmed reflected SSRF. Write a finding immediately.\n\n"
         ) if _canary_fp and _canary_fp in hr_resp_body else ""
+        _eviction_note = (
+            f"[SESSION EVICTED] Session label '{hr_use_session}' returned "
+            f"{hr_resp_status} and has been removed from the session vault. "
+            "Do not use this label again.\n\n"
+        ) if _hr_session_evicted else ""
         return (
             _canary_alert
+            + _eviction_note
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
