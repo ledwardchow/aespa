@@ -297,6 +297,12 @@ a:hover { color: var(--accent-hover); }
   color: var(--text-2);
 }
 .btn.secondary:hover { background: var(--panel); color: var(--text); }
+.btn.danger {
+  background: var(--danger);
+  color: #fff;
+  border: none;
+}
+.btn.danger:hover { filter: brightness(1.15); }
 .btn.danger-outline {
   background: transparent;
   color: var(--danger);

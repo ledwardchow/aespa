@@ -1319,6 +1319,8 @@ function activeJobProgress(job) {
 function ActiveJobsPage() {
   const [jobs, setJobs] = useState(null);
   const [error, setError] = useState(null);
+  const [stopping, setStopping] = useState({});  // keyed by `${job_type}-${run_id}`
+
   const load = useCallback(async () => {
     try {
       setError(null);
@@ -1333,11 +1335,37 @@ function ActiveJobsPage() {
     return () => clearInterval(id);
   }, [load]);
 
+  const stopJob = async (j) => {
+    const key = `${j.job_type}-${j.run_id}`;
+    setStopping(prev => ({ ...prev, [key]: true }));
+    try {
+      if (j.job_type === "A.L.I.C.E.") {
+        await api.stopAliceRun(j.run_id);
+      } else {
+        await api.stopRun(j.run_id);
+      }
+      await load();
+    } catch(e) {
+      setError(e.message);
+    } finally {
+      setStopping(prev => { const n = {...prev}; delete n[key]; return n; });
+    }
+  };
+
+  const stopAll = async () => {
+    if (!jobs || jobs.length === 0) return;
+    const promises = jobs.map(j => stopJob(j));
+    await Promise.allSettled(promises);
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">Active Jobs</div>
       <div className="topbar-actions">
         <button className="btn secondary" onClick=${load}>Refresh</button>
+        ${jobs && jobs.length > 0 && html`
+          <button className="btn danger" onClick=${stopAll}>Stop All</button>
+        `}
       </div>
     </div>
     <div className="content scroll-content">
@@ -1356,8 +1384,11 @@ function ActiveJobsPage() {
               <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"7%"}}/><col style=${{width:"13%"}}/><col style=${{width:"14%"}}/>
             </colgroup>
             <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
-            <tbody>${jobs.map(j=>html`
-              <tr key=${`${j.job_type}-${j.run_id}`}>
+            <tbody>${jobs.map(j=>{
+              const key = `${j.job_type}-${j.run_id}`;
+              const isStopping = !!stopping[key];
+              return html`
+              <tr key=${key}>
                 <td>
                   <a href=${`#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
@@ -1369,11 +1400,13 @@ function ActiveJobsPage() {
                 <td>${j.findings_count ?? html`<span className="subtle">—</span>`}</td>
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
-                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                  <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
-              </tr>`)}
+              </tr>`;
+            })}
             </tbody>
           </table>
         </div>`}
