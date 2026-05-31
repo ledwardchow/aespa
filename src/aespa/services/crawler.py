@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import sys
 from collections import deque
 from datetime import datetime, timezone
@@ -2511,103 +2510,6 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def parse_curl_command(curl_text: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Parse a raw cURL command string into (cookies, headers).
-
-    Supports ``-H 'Name: value'`` and ``-b 'name=val; name2=val2'`` /
-    ``--cookie '...'`` flags.  Returns two plain dicts suitable for injecting
-    into a Playwright context.
-    """
-    cookies: dict[str, str] = {}
-    headers: dict[str, str] = {}
-    try:
-        tokens = shlex.split(curl_text.strip())
-    except ValueError:
-        return cookies, headers
-
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in ("-H", "--header") and i + 1 < len(tokens):
-            i += 1
-            raw = tokens[i]
-            if ":" in raw:
-                name, _, value = raw.partition(":")
-                name = name.strip()
-                value = value.strip()
-                if name.lower() == "cookie":
-                    for pair in value.split(";"):
-                        pair = pair.strip()
-                        if "=" in pair:
-                            k, _, v = pair.partition("=")
-                            cookies[k.strip()] = v.strip()
-                else:
-                    headers[name] = value
-        elif tok in ("-b", "--cookie") and i + 1 < len(tokens):
-            i += 1
-            for pair in tokens[i].split(";"):
-                pair = pair.strip()
-                if "=" in pair:
-                    k, _, v = pair.partition("=")
-                    cookies[k.strip()] = v.strip()
-        i += 1
-    return cookies, headers
-
-
-async def _authenticate_seed(page, credential) -> None:
-    """Inject pre-supplied cookies/headers into the browser context.
-
-    Skips navigating to the login URL entirely.  The crawl continues using
-    the injected session material.
-    """
-    try:
-        raw_cookies: list = json.loads(credential.seed_cookies_json or "[]")
-        if not isinstance(raw_cookies, list):
-            raw_cookies = []
-    except Exception:
-        raw_cookies = []
-
-    try:
-        extra_headers: dict = json.loads(credential.seed_headers_json or "{}")
-        if not isinstance(extra_headers, dict):
-            extra_headers = {}
-    except Exception:
-        extra_headers = {}
-
-    if raw_cookies:
-        # Ensure each cookie has at least a domain derived from the current page URL
-        origin = urlparse(page.url)
-        default_domain = origin.netloc or ""
-        injectable = []
-        for c in raw_cookies:
-            if not isinstance(c, dict) or "name" not in c or "value" not in c:
-                continue
-            entry = {k: v for k, v in c.items()
-                     if k in ("name", "value", "domain", "path", "expires",
-                               "httpOnly", "secure", "sameSite")}
-            if "domain" not in entry and default_domain:
-                entry["domain"] = default_domain
-            injectable.append(entry)
-        try:
-            await page.context.add_cookies(injectable)
-            log.info("  _authenticate_seed: injected %d cookie(s) for %s", len(injectable), credential.username)
-        except Exception as exc:
-            log.warning("  _authenticate_seed: could not inject cookies: %s", exc)
-
-    if extra_headers:
-        try:
-            await page.context.set_extra_http_headers(extra_headers)
-            log.info("  _authenticate_seed: injected %d header(s) for %s", len(extra_headers), credential.username)
-        except Exception as exc:
-            log.warning("  _authenticate_seed: could not set extra headers: %s", exc)
-
-    # Reload current page so the injected session takes effect
-    try:
-        await page.reload(wait_until="domcontentloaded", timeout=12_000)
-        await page.wait_for_load_state("networkidle", timeout=8_000)
-    except Exception:
-        pass
-
 
 async def _detect_mfa_prompt(page) -> bool:
     """Return True if the page shows an MFA / OTP input field."""
@@ -2707,8 +2609,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
     if not has_display:
         raise RuntimeError(
             f"Guided login for '{credential.username}' requires a graphical display. "
-            "Running headless: use 'seed' auth mode instead — export cookies from "
-            "your browser's DevTools and paste them into the credential."
+            "Running headless: use 'guided' auth mode with a display, or contact your admin."
         )
 
     # Acquire the per-run lock so only one guided browser opens at a time
@@ -2868,8 +2769,8 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 "message": (
                     f"No session cookies were captured for '{credential.username}' "
                     "after guided login. The crawl for this credential may be "
-                    "unauthenticated. Try again or switch to 'seed' mode and paste "
-                    "cookies from your browser's DevTools."
+                    "unauthenticated. Try again or use 'guided' mode and complete the "
+                    "login fully before clicking I'm Done."
                 ),
             })
 
@@ -3031,9 +2932,7 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
                     log.warning("  _authenticate: sessionStorage restore failed: %s", exc)
             return
 
-    if mode == AuthMode.seed:
-        await _authenticate_seed(page, credential)
-    elif mode == AuthMode.totp:
+    if mode == AuthMode.totp:
         await _authenticate_auto(page, login_url, credential)
         await _fill_totp_if_prompted(page, credential)
     elif mode == AuthMode.guided:
