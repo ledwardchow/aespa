@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from aespa.db import get_session
 from aespa.models import (
@@ -251,6 +251,26 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                     job_type="Dynamic Scan",
                     status=thinking.get("status", "running"),
                     findings_count=thinking.get("findings_count"),
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        from aespa.services import alice_tasks
+        alice_task = alice_tasks.get(run.id)
+        if alice_task is not None and not alice_task.done:
+            findings_count = session.exec(
+                select(func.count()).select_from(ScanFinding).where(ScanFinding.test_run_id == run.id)
+            ).one()
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="A.L.I.C.E.",
+                    status="running",
+                    findings_count=findings_count,
                     started_at=run.started_at,
                     created_at=run.created_at,
                 )
