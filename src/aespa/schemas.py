@@ -21,6 +21,11 @@ class CredentialIn(BaseModel):
     password: str = Field(min_length=1)
     label: str | None = None
     login_url: HttpUrl | None = None
+    # Advanced auth
+    auth_mode: str = "auto"
+    totp_seed: str | None = None          # base32 TOTP secret; stored write-only
+    seed_cookies_json: str | None = None  # JSON list of cookie dicts
+    seed_headers_json: str | None = None  # JSON dict of extra request headers
 
 
 class CredentialOut(BaseModel):
@@ -31,6 +36,10 @@ class CredentialOut(BaseModel):
     password: str
     label: str | None = None
     login_url: str | None = None
+    auth_mode: str = "auto"
+    # totp_seed is intentionally excluded (write-only)
+    seed_cookies_json: str | None = None
+    seed_headers_json: str | None = None
 
 
 class SiteBase(BaseModel):
