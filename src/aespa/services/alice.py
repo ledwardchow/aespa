@@ -548,6 +548,9 @@ async def run_alice_turn_stream(
         site_id = site.id
         base_url = str(site.base_url or "").strip()
 
+    # Register run context so LLM calls attribute token usage to this run.
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -763,6 +766,7 @@ async def run_alice_turn_stream(
 
     # 5. Emit done event
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
+    llm_svc.clear_run_context()
 
 
 async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]) -> dict[str, Any]:
