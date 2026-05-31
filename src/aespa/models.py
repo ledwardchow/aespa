@@ -13,6 +13,12 @@ def _utcnow() -> datetime:
 
 # ── Site / Credential ─────────────────────────────────────────────────────────
 
+class AuthMode(str, Enum):
+    auto = "auto"      # existing single-page Playwright form fill
+    totp = "totp"      # auto + TOTP 2FA code from stored seed
+    guided = "guided"  # open headed browser, user logs in manually
+
+
 class Site(SQLModel, table=True):
     __tablename__ = "site"
 
@@ -41,6 +47,9 @@ class Credential(SQLModel, table=True):
     password: str  # plaintext — local pentesting tool
     label: Optional[str] = Field(default=None)
     login_url: Optional[str] = Field(default=None)
+    # ── Advanced auth fields ──────────────────────────────────────────────────
+    auth_mode: str = Field(default=AuthMode.auto)
+    totp_seed: Optional[str] = Field(default=None)        # base32 TOTP secret (write-only; not returned by API)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
