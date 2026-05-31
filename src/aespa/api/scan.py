@@ -539,3 +539,64 @@ def export_thinking_log(
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Guided login endpoints ────────────────────────────────────────────────────
+
+@router.get("/api/test-runs/{run_id}/guided-login/status")
+def guided_login_status(run_id: int) -> dict:
+    """Return which credential IDs are currently waiting for guided-login confirmation."""
+    from aespa.services.crawler import _guided_registry, _guided_ready_registry
+    return {
+        "pending_credential_ids": list(_guided_registry.keys()),
+        "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),
+    }
+
+
+@router.post("/api/test-runs/{run_id}/guided-login/{credential_id}/ready")
+async def ready_guided_login(run_id: int, credential_id: int) -> dict:
+    """Signal that the user is ready to log in \u2014 this triggers the browser window to open.
+
+    Must be async for the same reason as confirm_guided_login.
+    """
+    from aespa.services.crawler import _guided_ready_registry
+    event = _guided_ready_registry.get(credential_id)
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No guided login awaiting a ready signal for credential {credential_id}. "
+                "Either the crawl is not running, the credential is not in 'guided' mode, "
+                "or the ready window already timed out."
+            ),
+        )
+    event.set()
+    return {"status": "ready", "credential_id": credential_id}
+
+
+@router.post("/api/test-runs/{run_id}/guided-login/{credential_id}/confirm")
+async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
+    """Signal that the user has completed the guided login for *credential_id*.
+
+    The crawler task that is blocking on the guided-login event will be
+    unblocked, cookies will be extracted from the headed browser, and the
+    crawl will resume.
+
+    Must be async so that event.set() is called from within the event loop —
+    asyncio.Event is not thread-safe and calling .set() from a threadpool
+    (sync endpoint) can silently fail to wake the waiting coroutine.
+    """
+    from aespa.services.crawler import _guided_registry
+    event = _guided_registry.get(credential_id)
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No guided login in progress for credential {credential_id}. "
+                "Either the crawl is not running, the credential is not in 'guided' mode, "
+                "or the login already timed out."
+            ),
+        )
+    event.set()
+    return {"status": "confirmed", "credential_id": credential_id}
+
