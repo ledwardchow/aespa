@@ -16,7 +16,6 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"      # existing single-page Playwright form fill
     totp = "totp"      # auto + TOTP 2FA code from stored seed
-    seed = "seed"      # inject pre-supplied cookies/headers, skip browser login
     guided = "guided"  # open headed browser, user logs in manually
 
 
@@ -51,8 +50,6 @@ class Credential(SQLModel, table=True):
     # ── Advanced auth fields ──────────────────────────────────────────────────
     auth_mode: str = Field(default=AuthMode.auto)
     totp_seed: Optional[str] = Field(default=None)        # base32 TOTP secret (write-only; not returned by API)
-    seed_cookies_json: Optional[str] = Field(default=None)  # JSON list of Playwright cookie dicts
-    seed_headers_json: Optional[str] = Field(default=None)  # JSON dict of {Header-Name: value}
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
