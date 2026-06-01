@@ -27,6 +27,7 @@ from aespa.services.prompts.reporting import (
 from aespa.services.prompts.test_lead import (
     _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
+    _CREDENTIAL_PATH_FRAGMENTS,
     _FOLLOWUP_PROMPT,
     _PLAN_PROMPT,
     _SITE_PLAN_PROMPT,
@@ -2089,6 +2090,7 @@ def select_wstg_skills(
     *,
     requires_auth: bool = False,
     base_url: str = "",
+    login_url: str = "",
 ) -> set[str]:
     """Evaluate crawl intelligence and return the set of WSTG skill keys to inject.
 
@@ -2103,6 +2105,10 @@ def select_wstg_skills(
         Whether the site requires authentication.
     base_url:
         Target base URL (used for path-pattern matching when page list is sparse).
+    login_url:
+        The site's configured login URL, if any. A configured login URL is itself a
+        credential endpoint, so it triggers the auth-robustness checks even when the
+        login form sits at a non-standard path the URL-fragment match would miss.
     """
     selected: set[str] = {"headers"}  # security headers: always relevant
 
@@ -2137,6 +2143,22 @@ def select_wstg_skills(
         if has_inputs:
             selected.add("csrf")
 
+    # ── Credential endpoints → auth robustness ─────────────────────────────────
+    # Weak password policy, rate-limiting, and lockout are only testable where
+    # credentials are actually submitted (a login / registration / password form),
+    # so gate this on credential-endpoint URLs — NOT the broad has_auth_pages,
+    # which is true for any authenticated area (dashboards, /account, /admin).
+    has_credential_endpoint = (
+        bool(login_url.strip())  # a configured login URL is itself a credential endpoint
+        or any(
+            frag in url
+            for frag in _CREDENTIAL_PATH_FRAGMENTS
+            for url in page_urls_lower
+        )
+    )
+    if has_credential_endpoint:
+        selected.add("auth_robustness")
+
     # ── Object references / IDOR ───────────────────────────────────────────────
     has_object_refs = (
         any(p.get("has_object_ref") for p in pages)
@@ -2152,12 +2174,24 @@ def select_wstg_skills(
     if has_object_refs:
         selected.add("idor")
 
-    # ── SSRF — URL-type input parameters ──────────────────────────────────────
+    # ── SSRF — URL-type input parameters or fetch-a-URL features ──────────────
+    # SSRF often has no obvious url= parameter, so also look for feature fragments
+    # (avatar/logo by URL, import/preview, webhook config, PDF/report export) in
+    # parameter names and URLs — not just the canonical SSRF param-name list.
+    _SSRF_FEATURE_FRAGMENTS = (
+        "webhook", "callback", "redirect", "proxy", "import", "fetch",
+        "preview", "unfurl", "avatar", "logo", "thumbnail", "screenshot",
+        "/pdf", "/report", "/export", "/render", "remote",
+    )
     has_ssrf_params = (
         any(key in _SSRF_PARAM_NAMES for key in intel_keys_lower)
         or any(val.startswith("http") for val in intel_values_lower)
         or any(
-            any(name in url for name in ("webhook", "callback", "redirect", "proxy"))
+            any(frag in key for frag in _SSRF_FEATURE_FRAGMENTS)
+            for key in intel_keys_lower
+        )
+        or any(
+            any(frag in url for frag in _SSRF_FEATURE_FRAGMENTS)
             for url in page_urls_lower + list(intel_urls_lower)
         )
     )
@@ -2185,6 +2219,23 @@ def select_wstg_skills(
     )
     if has_business_logic:
         selected.add("workflow")
+
+    # ── File upload surfaces ───────────────────────────────────────────────────
+    has_file_upload = (
+        "upload" in intel_kinds
+        or any(
+            frag in url
+            for frag in ("/upload", "/file", "/attachment", "/import", "/media")
+            for url in page_urls_lower
+        )
+        or any("upload" in key for key in intel_keys_lower)
+        or any(
+            val in ("file", "upload", "attachment", "multipart")
+            for val in intel_values_lower
+        )
+    )
+    if has_file_upload:
+        selected.add("file_upload")
 
     return selected
 

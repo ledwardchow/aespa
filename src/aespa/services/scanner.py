@@ -2391,6 +2391,7 @@ _SPECIALIST_DISPATCH_CLASSES: dict[str, str] = {
     "cors":             "dispatch_cors",
     "crypto":           "dispatch_crypto",
     "config":           "dispatch_config",
+    "file_upload":      "dispatch_file_upload",
 }
 
 # Per-run concurrency tracker: run_id → count of currently-running specialists.
@@ -3575,12 +3576,24 @@ async def _do_thinking_scan(run_id: int) -> None:
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
 
+    # Resolve a login URL for the selector: prefer the site-level one, else fall back
+    # to the first credential that carries its own login_url. A configured login URL is
+    # itself a credential endpoint, so this catches login forms at non-standard paths.
+    _login_url_for_selector = (login_url or "").strip()
+    if not _login_url_for_selector:
+        for _c in creds:
+            _cu = (getattr(_c, "login_url", None) or "").strip()
+            if _cu:
+                _login_url_for_selector = _cu
+                break
+
     # Select and inject WSTG skill reference blocks based on observed attack surface.
     _selected_skills = llm_svc.select_wstg_skills(
         pages_snapshot,
         intel_items_for_selector,
         requires_auth=requires_auth,
         base_url=base_url,
+        login_url=_login_url_for_selector,
     )
     _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
     if _skill_context:
