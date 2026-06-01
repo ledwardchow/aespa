@@ -60,6 +60,8 @@ Crawls work well on any model, including local models, so you can save a bit of 
 
 If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 
+This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page. 
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust as needed:
