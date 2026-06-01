@@ -15,20 +15,59 @@ def test_auth_robustness_skill_is_defined_and_ordered():
     assert "6" in block  # the explicit bounded login-attempt count
 
 
-def test_auth_pages_select_auth_robustness():
-    selected = select_wstg_skills(
-        pages=[{"url": "https://t/login", "req_auth": False}],
-        intel_items=[],
-    )
-    assert "auth_robustness" in selected
+def test_credential_endpoint_selects_auth_robustness():
+    for path in ("/login", "/register", "/account/password", "/forgot-password"):
+        selected = select_wstg_skills(
+            pages=[{"url": f"https://t{path}", "req_auth": False}],
+            intel_items=[],
+        )
+        assert "auth_robustness" in selected, path
     # And it renders into the assembled context.
-    ctx = build_wstg_skill_context(selected)
+    ctx = build_wstg_skill_context(
+        select_wstg_skills(pages=[{"url": "https://t/login"}], intel_items=[])
+    )
     assert "AUTHENTICATION ROBUSTNESS" in ctx
 
 
-def test_requires_auth_flag_selects_auth_robustness():
+def test_authenticated_area_without_credential_form_omits_auth_robustness():
+    # A merely-authenticated dashboard / account / admin page is NOT a login form,
+    # so auth_robustness must not be selected (it would have no surface to test).
+    for path in ("/account", "/profile", "/admin", "/dashboard"):
+        selected = select_wstg_skills(
+            pages=[{"url": f"https://t{path}", "req_auth": True}],
+            intel_items=[],
+        )
+        assert "auth_robustness" not in selected, path
+        # auth_bypass / sessions still apply to the broad authenticated surface.
+        assert "auth_bypass" in selected, path
+
+
+def test_requires_auth_flag_alone_omits_auth_robustness():
+    # Site-wide requires_auth with no credential endpoint crawled → no robustness checks.
     selected = select_wstg_skills(pages=[], intel_items=[], requires_auth=True)
+    assert "auth_robustness" not in selected
+    assert "auth_bypass" in selected
+
+
+def test_configured_login_url_selects_auth_robustness_on_nonstandard_path():
+    # A login form at a non-standard path (no recognizable URL fragment) is still a
+    # credential endpoint when the site configures it as login_url.
+    selected = select_wstg_skills(
+        pages=[{"url": "https://t/portal/entry", "req_auth": False}],
+        intel_items=[],
+        requires_auth=True,
+        login_url="https://t/portal/entry",
+    )
     assert "auth_robustness" in selected
+
+
+def test_blank_login_url_does_not_select_auth_robustness():
+    selected = select_wstg_skills(
+        pages=[{"url": "https://t/portal/entry"}],
+        intel_items=[],
+        login_url="   ",
+    )
+    assert "auth_robustness" not in selected
 
 
 def test_no_auth_surface_omits_auth_robustness():
