@@ -153,7 +153,10 @@ async def _execute_alice_tool(
 
     # ── context_tool ─────────────────────────────────────────────────────────
     if tool_name == "context_tool":
-        from aespa.services.scanner import _run_thinking_context_tool
+        from aespa.services.scanner import (
+            _load_findings_snapshot,
+            _run_thinking_context_tool,
+        )
 
         ctx_tool = str(tool_input.get("tool") or "")
         ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
@@ -165,7 +168,7 @@ async def _execute_alice_tool(
             output = _run_thinking_context_tool(
                 ctx_tool, ctx_args,
                 pages_snapshot=pages_snapshot,
-                findings_snapshot=[],
+                findings_snapshot=_load_findings_snapshot(run_id),
                 history=[],
                 run_id=run_id,
                 base_url=base_url,

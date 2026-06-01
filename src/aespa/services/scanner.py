@@ -799,6 +799,81 @@ def _thinking_tool_result_record(
     }
 
 
+# Vulnerability-class vocabulary for the ``finding_list`` context tool. Agents
+# think in the same attack-class slugs used elsewhere (attack_class, WSTG_SKILLS,
+# specialist dispatch), not raw OWASP codes — so let them filter by class. Each
+# slug maps to its OWASP code plus title/description keywords; a finding matches
+# the category if EITHER its owasp code matches OR a keyword appears (findings
+# are sometimes mis-categorised, so keyword matching is the safety net).
+_FINDING_CATEGORY_FILTERS: dict[str, tuple[str, frozenset[str]]] = {
+    "sqli":            ("a03", frozenset({"sql injection", "sqli", "sql error", "blind sql"})),
+    "xss":             ("a03", frozenset({"xss", "cross-site scripting", "cross site scripting"})),
+    "cmdi":            ("a03", frozenset({"command injection", "os command", "rce", "remote code execution", "code injection"})),
+    "idor":            ("a01", frozenset({"idor", "insecure direct object", "broken access", "access control", "authorization bypass"})),
+    "auth_bypass":     ("a07", frozenset({"authentication bypass", "auth bypass", "login bypass"})),
+    "auth_robustness": ("a07", frozenset({"password", "brute force", "rate limit", "lockout", "credential"})),
+    "sessions":        ("a07", frozenset({"session", "cookie", "session fixation"})),
+    "ssrf":            ("a10", frozenset({"ssrf", "server-side request forgery", "server side request forgery"})),
+    "csrf":            ("a01", frozenset({"csrf", "cross-site request forgery", "cross site request forgery"})),
+    "cors":            ("a05", frozenset({"cors", "cross-origin", "cross origin"})),
+    "headers":         ("a05", frozenset({"security header", "header missing", "missing header", "csp", "hsts", "x-frame-options", "content-security-policy"})),
+    "workflow":        ("a04", frozenset({"workflow", "business logic", "race condition"})),
+    "file_upload":     ("a05", frozenset({"file upload", "unrestricted file upload", "upload"})),
+}
+
+# OWASP codes shared by several classes (A03 = sqli/xss/cmdi, etc.) can't tell
+# sibling classes apart, so the code only counts as a match when it maps to a
+# single class; otherwise the keyword is the sole discriminator.
+_FINDING_CATEGORY_UNIQUE_OWASP: frozenset[str] = frozenset(
+    code
+    for code, _ in _FINDING_CATEGORY_FILTERS.values()
+    if sum(1 for c, _ in _FINDING_CATEGORY_FILTERS.values() if c == code) == 1
+)
+
+# Synonyms / abbreviations an agent might reach for → canonical slug above.
+_FINDING_CATEGORY_ALIASES: dict[str, str] = {
+    "sql": "sqli",
+    "sql_injection": "sqli",
+    "injection": "sqli",
+    "cross_site_scripting": "xss",
+    "command_injection": "cmdi",
+    "rce": "cmdi",
+    "os_command_injection": "cmdi",
+    "access_control": "idor",
+    "broken_access_control": "idor",
+    "authz": "idor",
+    "authentication": "auth_bypass",
+    "auth": "auth_bypass",
+    "session": "sessions",
+    "security_headers": "headers",
+    "header": "headers",
+    "business_logic": "workflow",
+    "upload": "file_upload",
+}
+
+
+def _load_findings_snapshot(run_id: int) -> list[dict[str, Any]]:
+    """Load existing findings for a run as context-tool snapshots.
+
+    Shared by the thinking scan, specialists and ALICE so the ``finding_list``
+    context tool reflects what has actually been recorded in the DB.
+    """
+    with Session(get_engine()) as s:
+        existing = s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all()
+    return [
+        {
+            "title":        f.title,
+            "severity":     f.severity,
+            "owasp":        f.owasp_category,
+            "affected_url": f.affected_url,
+            "description":  (f.description or "")[:200],
+        }
+        for f in existing
+    ]
+
+
 def _run_thinking_context_tool(
     tool_name: str,
     args: dict[str, Any],
@@ -909,6 +984,15 @@ def _run_thinking_context_tool(
     if tool_name == "finding_list":
         severity = str(args.get("severity") or "").lower()
         owasp = str(args.get("owasp_category") or "").lower()
+        # Vuln-class filter: agents pass slugs like "sqli"/"xss". Resolve aliases,
+        # then match by owasp code OR title/description keyword. An unknown slug
+        # degrades gracefully into an extra free-text search token.
+        category = str(args.get("category") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        category = _FINDING_CATEGORY_ALIASES.get(category, category)
+        cat_filter = _FINDING_CATEGORY_FILTERS.get(category)
+        extra_tokens = list(search_tokens)
+        if category and cat_filter is None:
+            extra_tokens.extend(tok for tok in category.split("_") if tok)
         matches = []
         for finding in findings_snapshot:
             haystack = json.dumps(finding, default=str).lower()
@@ -916,7 +1000,16 @@ def _run_thinking_context_tool(
                 continue
             if owasp and str(finding.get("owasp") or "").lower() != owasp:
                 continue
-            if search_tokens and not all(token in haystack for token in search_tokens):
+            if cat_filter is not None:
+                cat_owasp, cat_keywords = cat_filter
+                keyword_hit = any(kw in haystack for kw in cat_keywords)
+                owasp_hit = (
+                    cat_owasp in _FINDING_CATEGORY_UNIQUE_OWASP
+                    and str(finding.get("owasp") or "").lower() == cat_owasp
+                )
+                if not (keyword_hit or owasp_hit):
+                    continue
+            if extra_tokens and not all(token in haystack for token in extra_tokens):
                 continue
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
@@ -2690,7 +2783,7 @@ async def _run_specialist_agent(
                 output = _run_thinking_context_tool(
                     ctx_tool, ctx_args,
                     pages_snapshot=[],
-                    findings_snapshot=[],
+                    findings_snapshot=_load_findings_snapshot(run_id),
                     history=[],
                     run_id=run_id,
                     base_url=base_url,

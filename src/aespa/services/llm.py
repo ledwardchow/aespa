@@ -337,7 +337,7 @@ _THINKING_CONTEXT_TOOL_ARG_KEYS = {
     "site_map": ("filter", "search", "type", "flags", "limit"),
     "page_detail": ("page_id", "url", "include"),
     "history_search": ("query", "search", "limit"),
-    "finding_list": ("severity", "owasp_category", "search", "limit"),
+    "finding_list": ("severity", "owasp_category", "category", "search", "limit"),
 }
 _THINKING_CONTEXT_TOOLS = frozenset(_THINKING_CONTEXT_TOOL_ARG_KEYS)
 
