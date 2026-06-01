@@ -57,7 +57,12 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     if global_header := _scanner_global_header_var.get():
         existing = kwargs.get("headers", {})
         kwargs["headers"] = {**global_header, **existing}
-    return httpx.AsyncClient(**kwargs)
+    
+    run_id = kwargs.pop("run_id", None)
+    username = kwargs.pop("username", None)
+    
+    from aespa.services.traffic import LoggingAsyncClient
+    return LoggingAsyncClient(run_id=run_id, username=username, **kwargs)
 
 
 def _playwright_proxy() -> dict:
@@ -2746,6 +2751,8 @@ async def _run_specialist_agent(
             req_cookies = (selected_session or {}).get("cookies") or cookies
             req_headers = {"User-Agent": _UA, **extra_headers, **((selected_session or {}).get("extra_headers") or {}), **headers}
             async with _make_scanner_client(
+                run_id=run_id,
+                username="specialist",
                 cookies=req_cookies,
                 headers=req_headers,
                 timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -3651,7 +3658,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
-        async with _make_scanner_client(verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
+        async with _make_scanner_client(run_id=run_id, username="js_sink", verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
@@ -3904,6 +3911,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             )
 
         async with _make_scanner_client(
+            run_id=run_id,
+            username=creds[0].username if creds else None,
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -6355,6 +6364,7 @@ async def _run_auth_matrix_module(
             continue
 
         anon_result = await _fetch_matrix_url(
+            run_id,
             url,
             method=method,
             timeout=timeout,
@@ -6369,8 +6379,8 @@ async def _run_auth_matrix_module(
                 result=anon_result,
                 title="Unauthenticated access to protected endpoint",
                 description=(
-                    "The deterministic auth matrix requested a protected or sensitive-looking "
-                    "endpoint without cookies or Authorization and received a successful response."
+                     "The deterministic auth matrix requested a protected or sensitive-looking "
+                     "endpoint without cookies or Authorization and received a successful response."
                 ),
                 actor="anonymous",
                 cvss_score=6.5,
@@ -6384,6 +6394,7 @@ async def _run_auth_matrix_module(
             if cred_id in set(target.get("accessible_by") or []):
                 continue
             result = await _fetch_matrix_url(
+                run_id,
                 url,
                 method=method,
                 session=session,
@@ -6445,6 +6456,7 @@ async def _run_idor_matrix_module(
             continue
         for cred_id, session in unauthorized[:3]:
             result = await _fetch_matrix_url(
+                run_id,
                 page.url,
                 method="GET",
                 session=session,
@@ -6521,6 +6533,7 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
 
 
 async def _fetch_matrix_url(
+    run_id: int,
     url: str,
     *,
     method: str = "GET",
@@ -6537,6 +6550,8 @@ async def _fetch_matrix_url(
         actor = session.get("username") or "credential"
     try:
         async with _make_scanner_client(
+            run_id=run_id,
+            username=actor,
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,
