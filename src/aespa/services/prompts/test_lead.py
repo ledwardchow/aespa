@@ -293,6 +293,10 @@ Recommended assessment strategy, distilled from effective manual pentest workflo
      - If a response exposes a JWT signing secret, use the jwt action to create a
          controlled HS256 token for a small number of candidate customer IDs, then verify
          access with read-only endpoints such as /api/profile and /api/accounts.
+     - Test the password policy directly: at the registration or change-password endpoint,
+         submit a trivially weak/short password (for example "a", "123", or "password"). If
+         the server accepts it, that is a confirmed weak-password-policy finding — record it.
+         This is a bounded check (a few requests), not brute-force; do it, do not skip it.
 
 5. Object ownership and IDOR testing
      - Enumerate IDs from list endpoints, detail endpoints, admin views, account numbers,
@@ -325,8 +329,13 @@ Recommended assessment strategy, distilled from effective manual pentest workflo
 8. Error disclosure, rate limiting, and configuration checks
      - Send malformed-but-valid-shape requests to endpoints with typed parameters to look for
          stack traces, SQL errors, absolute file paths, class names, and debug traces.
-     - Check login error differences for user enumeration, and use only a small bounded set
-         of failed login attempts to detect missing throttling/lockout.
+     - Check login error differences for user enumeration.
+     - Actively test for missing rate-limiting: pick one known-valid username and send exactly
+         6 consecutive failed-login requests, then check whether any lockout, captcha, delay,
+         or 429 / "too many attempts" response appears. If all 6 return the same plain error
+         with no throttling, missing rate-limiting is a confirmed finding — this bounded probe
+         is authorized and expected; do not skip it as "brute-force". Apply the same bounded
+         check to other guessable endpoints (forgot-password, OTP/2FA verify, voucher redeem).
      - Re-check CSP, HSTS, X-Frame-Options, content sniffing, and referrer-policy headers on
          representative HTML and API responses.
 
@@ -404,13 +413,26 @@ Parameter tampering: flip hidden `isAdmin=false` → true, `role=user` → admin
 
     "ssrf": r"""─── SSRF (WSTG-INPV-19) ──────────────────────────────────────────────────────────
 Candidate parameter names: url, uri, link, href, src, dest, redirect, target, path,
-  file, page, next, callback, feed, fetch, load, resource, proxy, imageurl, webhook.
+  file, page, next, callback, feed, fetch, load, resource, proxy, imageurl, webhook,
+  avatar(url), logo, import(url), source(url), document(url), pdf, report, preview, thumbnail.
+Feature-based leads (SSRF often has NO obvious url= param — hunt the feature, not the name):
+  "import/fetch from URL", avatar/profile-image set by URL, link/URL preview or unfurl,
+  webhook/callback configuration, PDF/report/screenshot export (server renders a URL),
+  RSS/feed reader, document/image proxy or thumbnailer, "test connection" buttons.
+  Any of these is an SSRF candidate even when the parameter is named "image" or "html".
 Internal targets:
   http://127.0.0.1/  |  http://localhost/  |  http://[::1]/
   http://169.254.169.254/latest/meta-data/              (AWS IMDSv1)
   http://metadata.google.internal/computeMetadata/v1/   (GCP — add Metadata-Flavor: Google header)
   http://169.254.169.254/metadata/instance?api-version=2021-02-01 (Azure — add Metadata: true)
 Evidence: "ami-id", "instance-id", "computeMetadata", "vmId", "Welcome to nginx".
+Reflected SSRF: inject a public canary URL (e.g. https://example.com) — if its content
+  ("Example Domain") appears in the response, the server fetched it. Confirmed.
+Blind SSRF (no content reflected — the common case): use a differential, not a single probe.
+  Baseline: fetch a definitely-dead host (http://127.0.0.1:1/ or an unrouteable IP) and record
+  status + latency. Then fetch a live internal target (http://127.0.0.1:80/, 169.254.169.254).
+  A clear difference — connection-refused vs timeout vs 200, or a multi-second latency gap —
+  means the server is making the request. Repeat once to rule out jitter before writing the finding.
 Filter bypass: hex IP `http://0x7f000001/`, octal `http://0177.0.0.1/`, decimal `http://2130706433/`,
   short form `http://127.1/`, `http://evil.com@127.0.0.1/`, redirect chain via external 302.
 Constraint: if cloud credentials are found, report CRITICAL but do NOT use them.""",
@@ -484,6 +506,33 @@ Step 5 — canary webshell payloads:
 Step 6 — fetch stored URL; if aespa_rce_ appears in response body → CRITICAL RCE finding.
 Step 7 — if file stored but not executed: try path traversal in filename: ../../webroot/shell.php
 Severity: CRITICAL if RCE confirmed; HIGH if dangerous extension stored but not executed.""",
+
+    "auth_robustness": r"""─── AUTHENTICATION ROBUSTNESS (WSTG-ATHN-03/07, WSTG-IDNT-05) ─────────────────────
+These checks are explicitly authorized and strictly bounded — do them, do not skip them as
+"brute-force". Each test below uses only a few requests; that is the intended, safe scope.
+
+Weak password policy (WSTG-ATHN-07) — at the registration or change-password endpoint:
+  Submit a NEW account/password with each of these in turn: "a", "1", "123", "password", "aaa".
+  Also probe the length boundary: try a 1-char and a 5-char password.
+  If the server accepts (200/201, account created or password changed) any trivially weak or
+  too-short password, that is a confirmed finding. Quote the request password + success response.
+  Severity: typically LOW-MEDIUM (no enforced minimum length / no complexity / common passwords allowed).
+
+Missing rate-limiting / account lockout (WSTG-ATHN-03) — at the login endpoint:
+  Pick ONE known-valid username. Send EXACTLY 6 consecutive login requests with a wrong password.
+  This fixed, bounded sequence is authorized — it is the minimum needed to prove the control's absence.
+  After the 6th attempt, observe: is there a lockout, a captcha, an added delay, or a
+  "too many attempts" / 429 response? If all 6 return the same plain "invalid credentials" with no
+  throttling, lockout, or delay, missing rate-limiting is confirmed. Quote attempt #1 and #6 responses.
+  Also check whether the SAME control gates other sensitive endpoints (forgot-password, OTP/2FA verify,
+  coupon/voucher redeem) — note any that accept unlimited attempts.
+  Severity: typically MEDIUM (enables credential stuffing / brute-force / OTP guessing).
+
+User enumeration (WSTG-IDNT-05):
+  Compare the login response for a VALID username + wrong password vs an INVALID username.
+  Compare the forgot-password response for a known vs unknown email.
+  Different error text, different status, or a measurable timing gap = enumeration finding (LOW).
+Constraint: never exceed 6 login attempts per user; use disposable/test accounts for registration probes.""",
 }
 
 # SSRF-indicative parameter names used by the WSTG skill selector.
@@ -491,7 +540,11 @@ _SSRF_PARAM_NAMES: frozenset[str] = frozenset({
     "url", "uri", "link", "href", "src", "dest", "destination", "redirect",
     "redirecturl", "target", "path", "file", "page", "next", "return",
     "returnurl", "callback", "feed", "fetch", "load", "resource", "proxy",
-    "imageurl", "image_url", "webhook", "endpoint", "host", "site",
+    "imageurl", "image_url", "webhook", "webhookurl", "endpoint", "host", "site",
+    "avatar", "avatarurl", "avatar_url", "logo", "logourl", "icon", "iconurl",
+    "import", "importurl", "import_url", "source", "sourceurl", "document",
+    "documenturl", "pdf", "pdfurl", "report", "reporturl", "preview",
+    "previewurl", "thumbnail", "thumbnailurl", "remote", "remoteurl",
 })
 
 # URL path fragments that imply auth-related pages.
@@ -503,7 +556,7 @@ _AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
 
 _SKILL_ORDER = (
     "sqli", "xss", "cmdi", "ssrf", "idor", "auth_bypass",
-    "csrf", "sessions", "cors", "headers", "workflow", "file_upload",
+    "csrf", "sessions", "auth_robustness", "cors", "headers", "workflow", "file_upload",
 )
 
 
