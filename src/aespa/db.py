@@ -374,6 +374,12 @@ def _migrate(engine: Engine) -> None:
         "trigger_specialist_on_burp",
         "INTEGER NOT NULL DEFAULT 0",
     )
+    _ensure_column(
+        engine,
+        "specialist_agent_config",
+        "dispatch_file_upload",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS alice_chat_session (
