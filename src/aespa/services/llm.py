@@ -2186,6 +2186,23 @@ def select_wstg_skills(
     if has_business_logic:
         selected.add("workflow")
 
+    # ── File upload surfaces ───────────────────────────────────────────────────
+    has_file_upload = (
+        "upload" in intel_kinds
+        or any(
+            frag in url
+            for frag in ("/upload", "/file", "/attachment", "/import", "/media")
+            for url in page_urls_lower
+        )
+        or any("upload" in key for key in intel_keys_lower)
+        or any(
+            val in ("file", "upload", "attachment", "multipart")
+            for val in intel_values_lower
+        )
+    )
+    if has_file_upload:
+        selected.add("file_upload")
+
     return selected
 
 

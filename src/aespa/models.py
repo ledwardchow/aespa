@@ -186,6 +186,7 @@ class SpecialistAgentConfig(SQLModel, table=True):
     dispatch_cors: bool = Field(default=False)
     dispatch_crypto: bool = Field(default=True)
     dispatch_config: bool = Field(default=False)
+    dispatch_file_upload: bool = Field(default=True)
     trigger_specialist_on_burp: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
