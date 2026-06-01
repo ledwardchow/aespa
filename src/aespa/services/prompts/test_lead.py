@@ -547,11 +547,20 @@ _SSRF_PARAM_NAMES: frozenset[str] = frozenset({
     "previewurl", "thumbnail", "thumbnailurl", "remote", "remoteurl",
 })
 
-# URL path fragments that imply auth-related pages.
+# URL path fragments that imply auth-related pages (broad: any authenticated surface).
 _AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
     "/login", "/signin", "/sign-in", "/auth", "/authenticate",
     "/register", "/signup", "/sign-up", "/logout", "/password",
     "/account", "/profile", "/admin",
+})
+
+# Narrow subset: URL fragments that imply an actual credential-submission endpoint
+# (a login / registration / password form). Used to gate auth-robustness checks
+# — weak password policy, rate-limiting, and lockout are only testable where
+# credentials are submitted, NOT on merely-authenticated areas like /account.
+_CREDENTIAL_PATH_FRAGMENTS: frozenset[str] = frozenset({
+    "/login", "/signin", "/sign-in", "/register", "/signup", "/sign-up",
+    "/password", "/forgot", "/reset", "/auth", "/authenticate",
 })
 
 _SKILL_ORDER = (
