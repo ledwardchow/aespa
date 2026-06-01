@@ -27,6 +27,7 @@ from aespa.services.prompts.reporting import (
 from aespa.services.prompts.test_lead import (
     _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
+    _CREDENTIAL_PATH_FRAGMENTS,
     _FOLLOWUP_PROMPT,
     _PLAN_PROMPT,
     _SITE_PLAN_PROMPT,
@@ -2089,6 +2090,7 @@ def select_wstg_skills(
     *,
     requires_auth: bool = False,
     base_url: str = "",
+    login_url: str = "",
 ) -> set[str]:
     """Evaluate crawl intelligence and return the set of WSTG skill keys to inject.
 
@@ -2103,6 +2105,10 @@ def select_wstg_skills(
         Whether the site requires authentication.
     base_url:
         Target base URL (used for path-pattern matching when page list is sparse).
+    login_url:
+        The site's configured login URL, if any. A configured login URL is itself a
+        credential endpoint, so it triggers the auth-robustness checks even when the
+        login form sits at a non-standard path the URL-fragment match would miss.
     """
     selected: set[str] = {"headers"}  # security headers: always relevant
 
@@ -2133,9 +2139,25 @@ def select_wstg_skills(
         or "token_hint" in intel_kinds
     )
     if has_auth_pages:
-        selected.update({"auth_bypass", "sessions", "auth_robustness"})
+        selected.update({"auth_bypass", "sessions"})
         if has_inputs:
             selected.add("csrf")
+
+    # ── Credential endpoints → auth robustness ─────────────────────────────────
+    # Weak password policy, rate-limiting, and lockout are only testable where
+    # credentials are actually submitted (a login / registration / password form),
+    # so gate this on credential-endpoint URLs — NOT the broad has_auth_pages,
+    # which is true for any authenticated area (dashboards, /account, /admin).
+    has_credential_endpoint = (
+        bool(login_url.strip())  # a configured login URL is itself a credential endpoint
+        or any(
+            frag in url
+            for frag in _CREDENTIAL_PATH_FRAGMENTS
+            for url in page_urls_lower
+        )
+    )
+    if has_credential_endpoint:
+        selected.add("auth_robustness")
 
     # ── Object references / IDOR ───────────────────────────────────────────────
     has_object_refs = (
