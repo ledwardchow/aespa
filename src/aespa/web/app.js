@@ -103,6 +103,7 @@ const api = {
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
   getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
+  clearTraffic:         (id)       => req(`/api/test-runs/${id}/traffic`,               { method:"DELETE" }),
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
@@ -2937,6 +2938,9 @@ function TestRunDetail({ runId, initialTab }) {
   }, [activeTab, runId, thinkingStatus?.status]);
 
   useEffect(() => {
+    setTraffic([]);
+    lastTrafficIdRef.current = 0;
+    setSelectedTraffic(null);
     api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
   }, [runId]);
 

@@ -326,11 +326,11 @@ async def _run_adversarial_validator_loop(
         step_counter[0] = step
         if tool_name == "http_request":
             return await _validator_http_request(
-                tool_input, primary_session, user_sessions_by_name, scanner_policy
+                tool_input, primary_session, user_sessions_by_name, scanner_policy, run_id=run_id
             )
         if tool_name == "compare_responses":
             return await _validator_compare_responses(
-                tool_input, primary_session, user_sessions_by_name, scanner_policy
+                tool_input, primary_session, user_sessions_by_name, scanner_policy, run_id=run_id
             )
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
@@ -379,6 +379,7 @@ async def _validator_http_request(
     primary_session: dict | None,
     user_sessions: dict[str, dict],
     scanner_policy,
+    run_id: Optional[int] = None,
 ) -> dict:
     method = (tool_input.get("method") or "GET").upper()
     url = tool_input.get("url", "")
@@ -398,8 +399,11 @@ async def _validator_http_request(
         else:
             content = str(body).encode()
 
+    from aespa.services.traffic import LoggingAsyncClient
     try:
-        async with httpx.AsyncClient(
+        async with LoggingAsyncClient(
+            run_id=run_id,
+            username=use_session or "validator",
             cookies=cookies,
             headers=hdrs,
             timeout=REQUEST_TIMEOUT,
@@ -426,11 +430,12 @@ async def _validator_compare_responses(
     primary_session: dict | None,
     user_sessions: dict[str, dict],
     scanner_policy,
+    run_id: Optional[int] = None,
 ) -> dict:
     """Execute baseline and test requests then return a comparison."""
 
     async def _fetch(spec: dict) -> dict:
-        return await _validator_http_request(spec, primary_session, user_sessions, scanner_policy)
+        return await _validator_http_request(spec, primary_session, user_sessions, scanner_policy, run_id=run_id)
 
     baseline_spec = tool_input.get("baseline", {})
     test_spec = tool_input.get("test", {})
@@ -591,6 +596,7 @@ async def _validate_one(
             session = user_sessions.get(as_user_name) if as_user_name else None
             result = await _run_validation_probe(
                 probe, primary_session, session,
+                run_id=run_id,
                 page_url=finding.affected_url,
                 scanner_policy=scanner_policy,
             )
@@ -838,7 +844,10 @@ async def _deterministic_validate_finding(
     for cred_id, session in unauthorized.items():
         username = session.get("username") or f"credential {cred_id}"
         try:
-            async with httpx.AsyncClient(
+            from aespa.services.traffic import LoggingAsyncClient
+            async with LoggingAsyncClient(
+                run_id=finding.test_run_id,
+                username=username,
                 cookies=session.get("cookies", {}),
                 headers={"User-Agent": _UA, **session.get("extra_headers", {})},
                 timeout=scanner_policy.request_timeout_s,
@@ -927,6 +936,7 @@ async def _run_validation_probe(
     override_session: dict | None,
     page_url: str,
     scanner_policy,
+    run_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Execute a single HTTP probe using the appropriate session."""
     method     = probe.get("method", "GET").upper()
@@ -950,7 +960,10 @@ async def _run_validation_probe(
     hdrs = {"User-Agent": _UA, **(session.get("extra_headers", {}) if session else {})}
 
     try:
-        async with httpx.AsyncClient(
+        from aespa.services.traffic import LoggingAsyncClient
+        async with LoggingAsyncClient(
+            run_id=run_id,
+            username=as_user or "validator",
             cookies=cookies,
             headers=hdrs,
             timeout=scanner_policy.request_timeout_s,

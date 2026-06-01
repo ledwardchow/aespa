@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from sqlmodel import Session, func, select
 
 from aespa.db import get_engine
@@ -109,7 +110,79 @@ def count_traffic(run_id: int) -> int:
         ).one()
 
 
-# ── httpx event hooks ─────────────────────────────────────────────────────────
+# ── Custom client for automatic logging ───────────────────────────────────────
+
+class LoggingAsyncClient(httpx.AsyncClient):
+    def __init__(self, *args, run_id: Optional[int] = None, username: Optional[str] = None, **kwargs):
+        self.run_id = run_id
+        self.username = username
+        kwargs.pop("event_hooks", None)
+        super().__init__(*args, **kwargs)
+
+    async def send(self, request: httpx.Request, *args, **kwargs) -> httpx.Response:
+        if self.run_id is None:
+            return await super().send(request, *args, **kwargs)
+
+        t0 = time.monotonic()
+        try:
+            response = await super().send(request, *args, **kwargs)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+
+            try:
+                await response.aread()
+                ct = response.headers.get("content-type", "")
+                if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
+                    resp_body: Optional[str] = response.text[:BODY_LIMIT]
+                else:
+                    resp_body = f"[binary, {len(response.content)} bytes]"
+            except Exception as e:
+                resp_body = f"[Error reading response body: {e}]"
+
+            raw_body = request.content
+            req_body: Optional[str] = (
+                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            )
+
+            await asyncio.to_thread(
+                _write,
+                self.run_id,
+                "httpx",
+                request.method,
+                str(request.url),
+                dict(request.headers),
+                req_body,
+                response.status_code,
+                dict(response.headers),
+                resp_body,
+                duration_ms,
+                self.username,
+            )
+            return response
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            raw_body = request.content
+            req_body: Optional[str] = (
+                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            )
+
+            await asyncio.to_thread(
+                _write,
+                self.run_id,
+                "httpx",
+                request.method,
+                str(request.url),
+                dict(request.headers),
+                req_body,
+                None,
+                {},
+                f"[Request Failed: {type(exc).__name__} - {exc}]",
+                duration_ms,
+                self.username,
+            )
+            raise exc
+
+
+# ── httpx event hooks (Legacy fallback) ───────────────────────────────────────
 
 def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
     """Return an httpx event_hooks dict that logs every request/response."""
@@ -250,5 +323,51 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             username,
         )
 
+    async def on_request_failed(request) -> None:
+        if request.resource_type in SKIP_RESOURCE_TYPES:
+            return
+
+        rid = id(request)
+        start = _pending.pop(rid, None)
+        req_data = _req_data.pop(rid, {})
+        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+
+        try:
+            req_headers = await request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(request.headers)
+            except Exception:
+                req_headers = {}
+
+        post_data = req_data.get("post_data")
+        if post_data is None:
+            try:
+                post_data = request.post_data
+                if post_data is None:
+                    pd_json = request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        error_text = request.failure or "Request failed"
+
+        await asyncio.to_thread(
+            _write,
+            run_id,
+            "playwright",
+            req_data.get("method", request.method),
+            request.url,
+            req_headers,
+            post_data,
+            None,
+            {},
+            f"[Browser Request Failed: {error_text}]",
+            duration_ms,
+            username,
+        )
+
     ctx.on("request", on_request)
     ctx.on("response", on_response)
+    ctx.on("requestfailed", on_request_failed)
