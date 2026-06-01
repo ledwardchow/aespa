@@ -956,7 +956,10 @@ Context tools:
 - history_search: args may include query and limit. Uses EXACT substring matching — use short
   code patterns ("fetch(", "/api/", "axios.post", a URL fragment, or a field name), NOT English
   descriptions. The query must appear verbatim in the stored request/response text.
-- finding_list: args may include severity, owasp_category, search, and limit.
+- finding_list: args may include severity, owasp_category, category, search, and limit. Use
+  `category` to filter by vulnerability class with the usual slugs (sqli, xss, cmdi, idor,
+  auth_bypass, auth_robustness, sessions, ssrf, csrf, cors, headers, workflow, file_upload);
+  `owasp_category` filters by exact OWASP code (e.g. A03); `search` is free-text substring.
 - target_inventory: args may include kind, source, search/filter, and limit; returns normalized
   endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
 - search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
