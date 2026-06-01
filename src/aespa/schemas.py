@@ -458,6 +458,7 @@ class SpecialistAgentConfigBase(BaseModel):
     dispatch_cors: bool = False
     dispatch_crypto: bool = True
     dispatch_config: bool = False
+    dispatch_file_upload: bool = True
     trigger_specialist_on_burp: bool = False
 
 

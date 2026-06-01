@@ -236,3 +236,125 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     assert call_kwargs["raw"]["finding_source"] == "alice"
     assert call_kwargs["raw"]["title"] == "Default Admin Access Enabled"
     mock_validate.assert_called_once()
+
+
+def _capturing_scanner_client(captured: dict):
+    """Return a fake _make_scanner_client that records the cookies/headers it is
+    built with and yields a client whose .request returns a canned response."""
+    def _factory(*args, **kwargs):
+        captured["cookies"] = kwargs.get("cookies")
+        captured["headers"] = kwargs.get("headers")
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = "ok"
+        resp.headers = {}
+        resp.cookies = {}
+
+        client = MagicMock()
+        client.request = AsyncMock(return_value=resp)
+        client.get = AsyncMock(return_value=resp)
+
+        ctx = AsyncMock()
+        ctx.__aenter__.return_value = client
+        ctx.__aexit__.return_value = False
+        return ctx
+
+    return _factory
+
+
+@pytest.mark.anyio
+async def test_alice_http_request_uses_stored_primary_session(db_session, test_data):
+    """http_request carries the run's stored authenticated session by default."""
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services import scanner_sessions as session_svc
+
+    run = test_data["run"]
+    session_svc.upsert_session(
+        run.id,
+        label="configured_primary",
+        kind="cookie",
+        cookies={"SESSION": "abc123"},
+        extra_headers={"Authorization": "Bearer tok-xyz"},
+    )
+    vault = session_svc.load_session_vault(run.id)
+
+    captured: dict = {}
+    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="http_request",
+            tool_input={"url": "http://target.local/account", "method": "GET"},
+            step=1,
+            session_vault=vault,
+        )
+
+    assert captured["cookies"] == {"SESSION": "abc123"}
+    assert captured["headers"]["Authorization"] == "Bearer tok-xyz"
+
+
+@pytest.mark.anyio
+async def test_alice_http_request_use_session_selects_and_anonymous_opts_out(db_session, test_data):
+    """use_session selects a specific stored session; "anonymous" sends no creds."""
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services import scanner_sessions as session_svc
+
+    run = test_data["run"]
+    session_svc.upsert_session(
+        run.id, label="configured_primary", kind="cookie",
+        cookies={"SESSION": "admin"}, extra_headers={},
+    )
+    session_svc.upsert_session(
+        run.id, label="alice_user_b", kind="cookie",
+        cookies={"SESSION": "userb"}, extra_headers={},
+    )
+    session_svc.ensure_anonymous_session(run.id)
+    vault = session_svc.load_session_vault(run.id)
+
+    site_id = test_data["site"].id
+    llm_cfg = test_data["llm_cfg"]
+
+    async def _probe(tool_input):
+        captured: dict = {}
+        with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+            await _execute_alice_tool(
+                run_id=run.id, llm_cfg=llm_cfg, base_url="http://target.local",
+                site_id=site_id, tool_name="http_request", tool_input=tool_input,
+                step=1, session_vault=vault,
+            )
+        return captured
+
+    # Explicit label selects the second identity.
+    selected = await _probe({"url": "http://target.local/u/2", "use_session": "alice_user_b"})
+    assert selected["cookies"] == {"SESSION": "userb"}
+
+    # "anonymous" opts out of stored credentials entirely.
+    anon = await _probe({"url": "http://target.local/u/2", "use_session": "anonymous"})
+    assert anon["cookies"] == {}
+    assert "Authorization" not in anon["headers"]
+
+
+@pytest.mark.anyio
+async def test_alice_http_request_anonymous_when_vault_empty(db_session, test_data):
+    """With no stored sessions, requests fall back to anonymous (no cookies)."""
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    captured: dict = {}
+    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="http_request",
+            tool_input={"url": "http://target.local/", "method": "GET"},
+            step=1,
+            session_vault={},
+        )
+
+    assert captured["cookies"] == {}
+    assert "Authorization" not in captured["headers"]
