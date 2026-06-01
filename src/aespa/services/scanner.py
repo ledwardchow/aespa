@@ -2391,6 +2391,7 @@ _SPECIALIST_DISPATCH_CLASSES: dict[str, str] = {
     "cors":             "dispatch_cors",
     "crypto":           "dispatch_crypto",
     "config":           "dispatch_config",
+    "file_upload":      "dispatch_file_upload",
 }
 
 # Per-run concurrency tracker: run_id → count of currently-running specialists.
