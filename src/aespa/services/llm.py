@@ -2133,7 +2133,7 @@ def select_wstg_skills(
         or "token_hint" in intel_kinds
     )
     if has_auth_pages:
-        selected.update({"auth_bypass", "sessions"})
+        selected.update({"auth_bypass", "sessions", "auth_robustness"})
         if has_inputs:
             selected.add("csrf")
 
@@ -2152,12 +2152,24 @@ def select_wstg_skills(
     if has_object_refs:
         selected.add("idor")
 
-    # ── SSRF — URL-type input parameters ──────────────────────────────────────
+    # ── SSRF — URL-type input parameters or fetch-a-URL features ──────────────
+    # SSRF often has no obvious url= parameter, so also look for feature fragments
+    # (avatar/logo by URL, import/preview, webhook config, PDF/report export) in
+    # parameter names and URLs — not just the canonical SSRF param-name list.
+    _SSRF_FEATURE_FRAGMENTS = (
+        "webhook", "callback", "redirect", "proxy", "import", "fetch",
+        "preview", "unfurl", "avatar", "logo", "thumbnail", "screenshot",
+        "/pdf", "/report", "/export", "/render", "remote",
+    )
     has_ssrf_params = (
         any(key in _SSRF_PARAM_NAMES for key in intel_keys_lower)
         or any(val.startswith("http") for val in intel_values_lower)
         or any(
-            any(name in url for name in ("webhook", "callback", "redirect", "proxy"))
+            any(frag in key for frag in _SSRF_FEATURE_FRAGMENTS)
+            for key in intel_keys_lower
+        )
+        or any(
+            any(frag in url for frag in _SSRF_FEATURE_FRAGMENTS)
             for url in page_urls_lower + list(intel_urls_lower)
         )
     )
