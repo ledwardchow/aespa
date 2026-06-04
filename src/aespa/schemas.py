@@ -21,6 +21,9 @@ class CredentialIn(BaseModel):
     password: str = Field(min_length=1)
     label: str | None = None
     login_url: HttpUrl | None = None
+    # Advanced auth
+    auth_mode: str = "auto"
+    totp_seed: str | None = None          # base32 TOTP secret; stored write-only
 
 
 class CredentialOut(BaseModel):
@@ -31,6 +34,8 @@ class CredentialOut(BaseModel):
     password: str
     label: str | None = None
     login_url: str | None = None
+    auth_mode: str = "auto"
+    # totp_seed is intentionally excluded (write-only)
 
 
 class SiteBase(BaseModel):
@@ -453,6 +458,7 @@ class SpecialistAgentConfigBase(BaseModel):
     dispatch_cors: bool = False
     dispatch_crypto: bool = True
     dispatch_config: bool = False
+    dispatch_file_upload: bool = True
     trigger_specialist_on_burp: bool = False
 
 

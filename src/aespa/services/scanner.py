@@ -57,7 +57,12 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     if global_header := _scanner_global_header_var.get():
         existing = kwargs.get("headers", {})
         kwargs["headers"] = {**global_header, **existing}
-    return httpx.AsyncClient(**kwargs)
+    
+    run_id = kwargs.pop("run_id", None)
+    username = kwargs.pop("username", None)
+    
+    from aespa.services.traffic import LoggingAsyncClient
+    return LoggingAsyncClient(run_id=run_id, username=username, **kwargs)
 
 
 def _playwright_proxy() -> dict:
@@ -799,6 +804,81 @@ def _thinking_tool_result_record(
     }
 
 
+# Vulnerability-class vocabulary for the ``finding_list`` context tool. Agents
+# think in the same attack-class slugs used elsewhere (attack_class, WSTG_SKILLS,
+# specialist dispatch), not raw OWASP codes — so let them filter by class. Each
+# slug maps to its OWASP code plus title/description keywords; a finding matches
+# the category if EITHER its owasp code matches OR a keyword appears (findings
+# are sometimes mis-categorised, so keyword matching is the safety net).
+_FINDING_CATEGORY_FILTERS: dict[str, tuple[str, frozenset[str]]] = {
+    "sqli":            ("a03", frozenset({"sql injection", "sqli", "sql error", "blind sql"})),
+    "xss":             ("a03", frozenset({"xss", "cross-site scripting", "cross site scripting"})),
+    "cmdi":            ("a03", frozenset({"command injection", "os command", "rce", "remote code execution", "code injection"})),
+    "idor":            ("a01", frozenset({"idor", "insecure direct object", "broken access", "access control", "authorization bypass"})),
+    "auth_bypass":     ("a07", frozenset({"authentication bypass", "auth bypass", "login bypass"})),
+    "auth_robustness": ("a07", frozenset({"password", "brute force", "rate limit", "lockout", "credential"})),
+    "sessions":        ("a07", frozenset({"session", "cookie", "session fixation"})),
+    "ssrf":            ("a10", frozenset({"ssrf", "server-side request forgery", "server side request forgery"})),
+    "csrf":            ("a01", frozenset({"csrf", "cross-site request forgery", "cross site request forgery"})),
+    "cors":            ("a05", frozenset({"cors", "cross-origin", "cross origin"})),
+    "headers":         ("a05", frozenset({"security header", "header missing", "missing header", "csp", "hsts", "x-frame-options", "content-security-policy"})),
+    "workflow":        ("a04", frozenset({"workflow", "business logic", "race condition"})),
+    "file_upload":     ("a05", frozenset({"file upload", "unrestricted file upload", "upload"})),
+}
+
+# OWASP codes shared by several classes (A03 = sqli/xss/cmdi, etc.) can't tell
+# sibling classes apart, so the code only counts as a match when it maps to a
+# single class; otherwise the keyword is the sole discriminator.
+_FINDING_CATEGORY_UNIQUE_OWASP: frozenset[str] = frozenset(
+    code
+    for code, _ in _FINDING_CATEGORY_FILTERS.values()
+    if sum(1 for c, _ in _FINDING_CATEGORY_FILTERS.values() if c == code) == 1
+)
+
+# Synonyms / abbreviations an agent might reach for → canonical slug above.
+_FINDING_CATEGORY_ALIASES: dict[str, str] = {
+    "sql": "sqli",
+    "sql_injection": "sqli",
+    "injection": "sqli",
+    "cross_site_scripting": "xss",
+    "command_injection": "cmdi",
+    "rce": "cmdi",
+    "os_command_injection": "cmdi",
+    "access_control": "idor",
+    "broken_access_control": "idor",
+    "authz": "idor",
+    "authentication": "auth_bypass",
+    "auth": "auth_bypass",
+    "session": "sessions",
+    "security_headers": "headers",
+    "header": "headers",
+    "business_logic": "workflow",
+    "upload": "file_upload",
+}
+
+
+def _load_findings_snapshot(run_id: int) -> list[dict[str, Any]]:
+    """Load existing findings for a run as context-tool snapshots.
+
+    Shared by the thinking scan, specialists and ALICE so the ``finding_list``
+    context tool reflects what has actually been recorded in the DB.
+    """
+    with Session(get_engine()) as s:
+        existing = s.exec(
+            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+        ).all()
+    return [
+        {
+            "title":        f.title,
+            "severity":     f.severity,
+            "owasp":        f.owasp_category,
+            "affected_url": f.affected_url,
+            "description":  (f.description or "")[:200],
+        }
+        for f in existing
+    ]
+
+
 def _run_thinking_context_tool(
     tool_name: str,
     args: dict[str, Any],
@@ -909,6 +989,15 @@ def _run_thinking_context_tool(
     if tool_name == "finding_list":
         severity = str(args.get("severity") or "").lower()
         owasp = str(args.get("owasp_category") or "").lower()
+        # Vuln-class filter: agents pass slugs like "sqli"/"xss". Resolve aliases,
+        # then match by owasp code OR title/description keyword. An unknown slug
+        # degrades gracefully into an extra free-text search token.
+        category = str(args.get("category") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        category = _FINDING_CATEGORY_ALIASES.get(category, category)
+        cat_filter = _FINDING_CATEGORY_FILTERS.get(category)
+        extra_tokens = list(search_tokens)
+        if category and cat_filter is None:
+            extra_tokens.extend(tok for tok in category.split("_") if tok)
         matches = []
         for finding in findings_snapshot:
             haystack = json.dumps(finding, default=str).lower()
@@ -916,7 +1005,16 @@ def _run_thinking_context_tool(
                 continue
             if owasp and str(finding.get("owasp") or "").lower() != owasp:
                 continue
-            if search_tokens and not all(token in haystack for token in search_tokens):
+            if cat_filter is not None:
+                cat_owasp, cat_keywords = cat_filter
+                keyword_hit = any(kw in haystack for kw in cat_keywords)
+                owasp_hit = (
+                    cat_owasp in _FINDING_CATEGORY_UNIQUE_OWASP
+                    and str(finding.get("owasp") or "").lower() == cat_owasp
+                )
+                if not (keyword_hit or owasp_hit):
+                    continue
+            if extra_tokens and not all(token in haystack for token in extra_tokens):
                 continue
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
@@ -2391,6 +2489,7 @@ _SPECIALIST_DISPATCH_CLASSES: dict[str, str] = {
     "cors":             "dispatch_cors",
     "crypto":           "dispatch_crypto",
     "config":           "dispatch_config",
+    "file_upload":      "dispatch_file_upload",
 }
 
 # Per-run concurrency tracker: run_id → count of currently-running specialists.
@@ -2652,6 +2751,8 @@ async def _run_specialist_agent(
             req_cookies = (selected_session or {}).get("cookies") or cookies
             req_headers = {"User-Agent": _UA, **extra_headers, **((selected_session or {}).get("extra_headers") or {}), **headers}
             async with _make_scanner_client(
+                run_id=run_id,
+                username="specialist",
                 cookies=req_cookies,
                 headers=req_headers,
                 timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -2689,7 +2790,7 @@ async def _run_specialist_agent(
                 output = _run_thinking_context_tool(
                     ctx_tool, ctx_args,
                     pages_snapshot=[],
-                    findings_snapshot=[],
+                    findings_snapshot=_load_findings_snapshot(run_id),
                     history=[],
                     run_id=run_id,
                     base_url=base_url,
@@ -3557,7 +3658,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
-        async with _make_scanner_client(verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
+        async with _make_scanner_client(run_id=run_id, username="js_sink", verify=False, timeout=REQUEST_TIMEOUT) as _hx_sink:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
     # Keep the standing prompt compact. Detailed crawl transcripts and prior findings
@@ -3575,12 +3676,24 @@ async def _do_thinking_scan(run_id: int) -> None:
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
 
+    # Resolve a login URL for the selector: prefer the site-level one, else fall back
+    # to the first credential that carries its own login_url. A configured login URL is
+    # itself a credential endpoint, so this catches login forms at non-standard paths.
+    _login_url_for_selector = (login_url or "").strip()
+    if not _login_url_for_selector:
+        for _c in creds:
+            _cu = (getattr(_c, "login_url", None) or "").strip()
+            if _cu:
+                _login_url_for_selector = _cu
+                break
+
     # Select and inject WSTG skill reference blocks based on observed attack surface.
     _selected_skills = llm_svc.select_wstg_skills(
         pages_snapshot,
         intel_items_for_selector,
         requires_auth=requires_auth,
         base_url=base_url,
+        login_url=_login_url_for_selector,
     )
     _skill_context = llm_svc.build_wstg_skill_context(_selected_skills)
     if _skill_context:
@@ -3649,13 +3762,40 @@ async def _do_thinking_scan(run_id: int) -> None:
             pass
 
         if requires_auth and creds:
-            from aespa.services.crawler import _authenticate
-
-            await _authenticate(
-                pw_page,
-                _login_url_for_credential(login_url, creds[0]),
-                creds[0],
+            # Check if the crawl phase already captured a guided session for this credential.
+            # If so, inject it directly rather than opening another browser window.
+            _primary_vault_session = (
+                session_vault.get(f"guided_{creds[0].id}")
+                or session_vault.get("configured_primary")
             )
+            if _primary_vault_session and _primary_vault_session.get("cookies"):
+                log.info(
+                    "Dynamic scan: reusing vault session '%s' for %s (skipping auth bootstrap)",
+                    _primary_vault_session.get("label", "?"), creds[0].username,
+                )
+                cookie_list = [
+                    {"name": k, "value": v, "url": base_url}
+                    for k, v in _primary_vault_session["cookies"].items()
+                ]
+                if cookie_list:
+                    await browser_ctx.add_cookies(cookie_list)
+                if _primary_vault_session.get("extra_headers"):
+                    await browser_ctx.set_extra_http_headers(
+                        _playwright_global_headers(_primary_vault_session["extra_headers"])
+                    )
+                try:
+                    await pw_page.reload(wait_until="domcontentloaded", timeout=12_000)
+                except Exception:
+                    pass
+            else:
+                from aespa.services.crawler import _authenticate
+
+                await _authenticate(
+                    pw_page,
+                    _login_url_for_credential(login_url, creds[0]),
+                    creds[0],
+                    run_id,
+                )
 
         raw_cookies = await browser_ctx.cookies()
         cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
@@ -3771,6 +3911,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             )
 
         async with _make_scanner_client(
+            run_id=run_id,
+            username=creds[0].username if creds else None,
             cookies=cookie_jar,
             headers={"User-Agent": _UA, **extra_headers},
             timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
@@ -3794,6 +3936,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     specialist_config=specialist_cfg,
                     recon_summary=recon_summary,
                     site_id=site_id,
+                    creds=creds,
+                    login_url=login_url or "",
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -4921,6 +5065,8 @@ async def _do_agentic_thinking_loop(
     specialist_config=None,
     recon_summary: dict | None = None,
     site_id: int = 0,
+    creds: list | None = None,
+    login_url: str = "",
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -4934,6 +5080,70 @@ async def _do_agentic_thinking_loop(
     """
     progressive_findings_count = 0
     _consecutive_ctx_tools = [0]  # mutable via list so the closure can write it
+    _consecutive_auth_failures = [0]  # primary-session 401/403 streak
+    _reauth_count = [0]  # total re-auth attempts this scan
+    _REAUTH_THRESHOLD = 5
+    _REAUTH_MAX = 2
+
+    async def _try_reauth() -> bool:
+        """Re-authenticate on pw_page and refresh hx + session_vault cookies."""
+        if not creds or _reauth_count[0] >= _REAUTH_MAX:
+            return False
+        _reauth_count[0] += 1
+        _consecutive_auth_failures[0] = 0
+        log.info(
+            "Dynamic scan: session expiry detected — re-authenticating (attempt %d/%d)",
+            _reauth_count[0], _REAUTH_MAX,
+        )
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "session_reauth",
+            "status": "start",
+            "message": (
+                f"Session expired — re-authenticating with "
+                f"{creds[0].username} (attempt {_reauth_count[0]})…"
+            ),
+        })
+        try:
+            from aespa.services.crawler import _authenticate
+            _cred_login_url = _login_url_for_credential(login_url, creds[0])
+            await _authenticate(pw_page, _cred_login_url, creds[0], run_id)
+            raw_cookies = await browser_ctx.cookies()
+            new_cookies = {c["name"]: c["value"] for c in raw_cookies}
+            # Refresh the httpx client's cookie jar in-place
+            for name, value in new_cookies.items():
+                hx.cookies.set(name, value)
+            # Refresh session vault
+            if new_cookies:
+                prev = session_vault.get("configured_primary") or {}
+                session_vault["configured_primary"] = {
+                    **prev,
+                    "cookies": new_cookies,
+                }
+                _record_session(
+                    run_id,
+                    label="configured_primary",
+                    session_data=session_vault["configured_primary"],
+                    source="dynamic_scan_reauth",
+                    credential_id=creds[0].id,
+                    metadata={"login_url": _cred_login_url},
+                )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "session_reauth",
+                "status": "complete",
+                "message": "Re-authentication succeeded — continuing scan.",
+            })
+            return bool(new_cookies)
+        except Exception as _reauth_exc:
+            log.warning("Dynamic scan re-auth failed: %s", _reauth_exc)
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "session_reauth",
+                "status": "error",
+                "message": f"Re-authentication failed: {_reauth_exc}",
+            })
+            return False
 
     # ── Restore state from checkpoint (resume path) ───────────────────────────
     resume_messages: list[dict] | None = None
@@ -5311,6 +5521,22 @@ async def _do_agentic_thinking_loop(
             })
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
+            # Evict expired/invalid named sessions from the vault on 401/403
+            _br_session_evicted = False
+            if resp_status in (401, 403) and use_session_label and use_session_label in session_vault:
+                del session_vault[use_session_label]
+                _br_session_evicted = True
+                log.info(
+                    "Agentic scan: evicted expired session '%s' (401/403 on BROWSER %s)",
+                    use_session_label, final_url,
+                )
+            # Track primary-session 401/403 streak for re-auth trigger
+            if resp_status in (401, 403) and not use_session_label:
+                _consecutive_auth_failures[0] += 1
+                if _consecutive_auth_failures[0] >= _REAUTH_THRESHOLD:
+                    await _try_reauth()
+            elif not use_session_label:
+                _consecutive_auth_failures[0] = 0
             task_graph_svc.complete_task_after_result(
                 run_id, active_task_id,
                 step=step, method="BROWSER", url=final_url, status=resp_status,
@@ -5325,8 +5551,14 @@ async def _do_agentic_thinking_loop(
             })
             await sleep_between_probes(scanner_policy)
             action_log_text = "\n".join(action_log) if action_log else "(none)"
+            _br_eviction_note = (
+                f"[SESSION EVICTED] Session label '{use_session_label}' returned "
+                f"{resp_status} and has been removed from the session vault. "
+                "Do not use this label again.\n\n"
+            ) if _br_session_evicted else ""
             return (
-                f"Browser: {final_url}\nStatus: {resp_status}\n"
+                _br_eviction_note
+                + f"Browser: {final_url}\nStatus: {resp_status}\n"
                 f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
             )
 
@@ -5975,6 +6207,22 @@ async def _do_agentic_thinking_loop(
         })
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status)
+        # Evict expired/invalid named sessions from the vault on 401/403
+        _hr_session_evicted = False
+        if hr_resp_status in (401, 403) and hr_use_session and hr_use_session in session_vault:
+            del session_vault[hr_use_session]
+            _hr_session_evicted = True
+            log.info(
+                "Agentic scan: evicted expired session '%s' (401/403 on %s %s)",
+                hr_use_session, hr_method, hr_url,
+            )
+        # Track primary-session 401/403 streak for re-auth trigger
+        if hr_resp_status in (401, 403) and not hr_use_session:
+            _consecutive_auth_failures[0] += 1
+            if _consecutive_auth_failures[0] >= _REAUTH_THRESHOLD:
+                await _try_reauth()
+        elif not hr_use_session:
+            _consecutive_auth_failures[0] = 0
         task_graph_svc.complete_task_after_result(
             run_id, active_task_id,
             step=step, method=hr_method, url=hr_url, status=hr_resp_status,
@@ -6003,8 +6251,14 @@ async def _do_agentic_thinking_loop(
             f"{_SSRF_CANARY_URL} — the server fetched and reflected the canary URL. "
             "This is confirmed reflected SSRF. Write a finding immediately.\n\n"
         ) if _canary_fp and _canary_fp in hr_resp_body else ""
+        _eviction_note = (
+            f"[SESSION EVICTED] Session label '{hr_use_session}' returned "
+            f"{hr_resp_status} and has been removed from the session vault. "
+            "Do not use this label again.\n\n"
+        ) if _hr_session_evicted else ""
         return (
             _canary_alert
+            + _eviction_note
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
@@ -6110,6 +6364,7 @@ async def _run_auth_matrix_module(
             continue
 
         anon_result = await _fetch_matrix_url(
+            run_id,
             url,
             method=method,
             timeout=timeout,
@@ -6124,8 +6379,8 @@ async def _run_auth_matrix_module(
                 result=anon_result,
                 title="Unauthenticated access to protected endpoint",
                 description=(
-                    "The deterministic auth matrix requested a protected or sensitive-looking "
-                    "endpoint without cookies or Authorization and received a successful response."
+                     "The deterministic auth matrix requested a protected or sensitive-looking "
+                     "endpoint without cookies or Authorization and received a successful response."
                 ),
                 actor="anonymous",
                 cvss_score=6.5,
@@ -6139,6 +6394,7 @@ async def _run_auth_matrix_module(
             if cred_id in set(target.get("accessible_by") or []):
                 continue
             result = await _fetch_matrix_url(
+                run_id,
                 url,
                 method=method,
                 session=session,
@@ -6200,6 +6456,7 @@ async def _run_idor_matrix_module(
             continue
         for cred_id, session in unauthorized[:3]:
             result = await _fetch_matrix_url(
+                run_id,
                 page.url,
                 method="GET",
                 session=session,
@@ -6276,6 +6533,7 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
 
 
 async def _fetch_matrix_url(
+    run_id: int,
     url: str,
     *,
     method: str = "GET",
@@ -6292,6 +6550,8 @@ async def _fetch_matrix_url(
         actor = session.get("username") or "credential"
     try:
         async with _make_scanner_client(
+            run_id=run_id,
+            username=actor,
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,

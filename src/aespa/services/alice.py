@@ -59,6 +59,28 @@ def _get_alice_tools() -> list[dict]:
     return [t for t in THINKING_AGENT_TOOLS if t["name"] in _ALICE_TOOL_NAMES]
 
 
+def _select_session(
+    session_vault: dict[str, dict],
+    use_session_label: str | None,
+) -> dict | None:
+    """Resolve the session to authenticate a request with.
+
+    Honors an explicit ``use_session`` label (including ``"anonymous"`` to opt
+    out of stored credentials); otherwise falls back to the run's primary
+    session — ``configured_primary`` if present, else the first non-anonymous
+    entry in the vault.
+    """
+    if use_session_label:
+        return session_vault.get(use_session_label)
+    primary = session_vault.get("configured_primary")
+    if primary is not None:
+        return primary
+    for session in session_vault.values():
+        if session.get("kind") != "anonymous":
+            return session
+    return None
+
+
 async def _execute_alice_tool(
     run_id: int,
     llm_cfg: LLMConfig,
@@ -67,8 +89,10 @@ async def _execute_alice_tool(
     tool_name: str,
     tool_input: dict,
     step: int,
+    session_vault: dict[str, dict] | None = None,
 ) -> str:
     """Execute a single ALICE tool call and return the result string."""
+    session_vault = session_vault or {}
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
@@ -87,11 +111,22 @@ async def _execute_alice_tool(
         headers = dict(tool_input.get("headers") or {})
         body = tool_input.get("body")
 
+        # Carry the run's stored authenticated session by default; an explicit
+        # use_session label (e.g. "anonymous") overrides the selection.
+        use_session_label = tool_input.get("use_session") if isinstance(tool_input.get("use_session"), str) else None
+        selected = _select_session(session_vault, use_session_label)
+        req_cookies = (selected or {}).get("cookies") or {}
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)",
+            **((selected or {}).get("extra_headers") or {}),
+            **headers,
+        }
+
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
-            cookies={},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
+            cookies=req_cookies,
+            headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
             verify=False,
@@ -118,7 +153,10 @@ async def _execute_alice_tool(
 
     # ── context_tool ─────────────────────────────────────────────────────────
     if tool_name == "context_tool":
-        from aespa.services.scanner import _run_thinking_context_tool
+        from aespa.services.scanner import (
+            _load_findings_snapshot,
+            _run_thinking_context_tool,
+        )
 
         ctx_tool = str(tool_input.get("tool") or "")
         ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
@@ -130,7 +168,7 @@ async def _execute_alice_tool(
             output = _run_thinking_context_tool(
                 ctx_tool, ctx_args,
                 pages_snapshot=pages_snapshot,
-                findings_snapshot=[],
+                findings_snapshot=_load_findings_snapshot(run_id),
                 history=[],
                 run_id=run_id,
                 base_url=base_url,
@@ -255,6 +293,13 @@ async def _execute_alice_tool(
                 metadata={"claims": jwt_claims, "header": jwt_header or {"typ": "JWT", "alg": "HS256"}},
             )
             _mark_session_pending(label)
+            # Surface the new session to later steps in this same turn.
+            session_vault[label] = {
+                "label": label,
+                "kind": "bearer",
+                "cookies": {},
+                "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
+            }
             return json.dumps({"store_as": label, "claims": jwt_claims, "token": jwt_token[:80] + "..."})
         except Exception as exc:
             return f"JWT signing failed: {exc}"
@@ -390,6 +435,13 @@ async def _execute_alice_tool(
                 if success:
                     _record_session(run_id, label=store_as, session_data=session_data, source="alice_register")
                     _mark_session_pending(store_as)
+                    # Surface the new session to later steps in this same turn.
+                    session_vault[store_as] = {
+                        "label": store_as,
+                        "kind": "cookie",
+                        "cookies": dict(resp.cookies),
+                        "extra_headers": {},
+                    }
                 return json.dumps({
                     "success": success,
                     "status": resp.status_code,
@@ -433,12 +485,17 @@ async def _execute_alice_tool(
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
+        use_session_label = tool_input.get("use_session") if isinstance(tool_input.get("use_session"), str) else None
+        selected = _select_session(session_vault, use_session_label)
+        req_cookies = (selected or {}).get("cookies") or {}
+
         timeout = _get_alice_timeout(run_id)
         async with _make_scanner_client(
-            cookies={},
+            cookies=req_cookies,
             headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                **((selected or {}).get("extra_headers") or {}),
             },
             timeout=timeout,
             follow_redirects=True,
@@ -547,6 +604,16 @@ async def run_alice_turn_stream(
 
         site_id = site.id
         base_url = str(site.base_url or "").strip()
+
+    # Load the per-run session vault so ALICE carries stored authenticated
+    # sessions (configured credentials, registered/forged tokens) instead of
+    # probing anonymously. Keyed by label for use_session selection.
+    from aespa.services import scanner_sessions as session_svc
+    try:
+        session_vault = session_svc.load_session_vault(run_id)
+    except Exception:
+        log.warning("ALICE: failed to load session vault for run_id=%s", run_id, exc_info=True)
+        session_vault = {}
 
     # Register run context so LLM calls attribute token usage to this run.
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
@@ -729,6 +796,7 @@ async def run_alice_turn_stream(
                         tool_name=tool_name,
                         tool_input=tool_input,
                         step=step_count,
+                        session_vault=session_vault,
                     )
                 except Exception as exc:
                     log.warning("ALICE tool %r step %d failed: %s", tool_name, step_count, exc)
