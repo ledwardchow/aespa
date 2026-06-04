@@ -12,14 +12,6 @@ Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparis
 
 And a [comparison](docs/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
 
-Quick comparsion summary of a single vs multi-agent scan on the Bank of Ed below. There are 23 vulnerabilities deliberately injected into the app, of which I'd consider 18 of them "findable" by a scanner:
-
-| Model | Finding Count | Price |
-|---|---|---|
-| Sonnet 4.6 | 14 | $7.50 |
-| Deepseek v4 Flash | 10 | $1.50 |
-| Qwen3.6 35b-A3b | 2 | "Free" (run locally) |
-
 ## How does it work?
 
 See [Architecture](docs/architecture.md).
@@ -60,7 +52,7 @@ Crawls work well on any model, including local models, so you can save a bit of 
 
 If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 
-This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page. 
+This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
 
 ## Configuration
 
@@ -96,11 +88,14 @@ Site test runs:
 Site setup:
 ![Screenshot](docs/images/sitesetup.png)
 
-Crawler:
-![Screenshot](docs/images/crawler.png)
+Site Map:
+![Screenshot](docs/images/sitemap.png)
 
 Intelligence Log (populated by crawler and scanners):
 ![Screenshot](docs/images/intelligence.png)
+
+A.L.I.C.E chat:
+![Screenshot](docs/images/alice.png)
 
 Dynamic scan in progress:
 ![Screenshot](docs/images/agentstatus.png)
@@ -115,7 +110,7 @@ Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
 
 Findings
-![Screenshot](docs/images/finding.png)
+![Screenshot](docs/images/findings.png)
 
 ## Recommended models
 * Claude Sonnet 4.6 - set output token cap to 60000
