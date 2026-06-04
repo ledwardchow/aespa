@@ -90,6 +90,8 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
                 password=cred.password,
                 label=cred.label,
                 login_url=str(cred.login_url) if cred.login_url else None,
+                auth_mode=cred.auth_mode,
+                totp_seed=cred.totp_seed,
             )
         )
 
@@ -121,6 +123,8 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
                 password=cred.password,
                 label=cred.label,
                 login_url=str(cred.login_url) if cred.login_url else None,
+                auth_mode=cred.auth_mode,
+                totp_seed=cred.totp_seed,
             )
         )
 
@@ -166,6 +170,8 @@ def add_credential(session: Session, site_id: int, payload: CredentialIn) -> Cre
         password=payload.password,
         label=payload.label,
         login_url=str(payload.login_url) if payload.login_url else None,
+        auth_mode=payload.auth_mode,
+        totp_seed=payload.totp_seed,
     )
     site.updated_at = _utcnow()
     session.add(cred)

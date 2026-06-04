@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.4.20260531.3"
+version = "0.4.20260601.3"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn[standard]>=0.46.0",
     "cryptography>=42.0.0",
     "pyjwt>=2.8.0",
+    "pyotp>=2.9.0",
 ]
 
 [project.scripts]

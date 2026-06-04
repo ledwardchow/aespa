@@ -29,6 +29,104 @@ def test_compact_thinking_context_includes_all_existing_findings():
     assert "Finding 11 @ https://target.local/finding/11" in context
 
 
+def test_load_findings_snapshot_returns_existing_findings(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+
+        with Session(engine) as session:
+            session.add(
+                ScanFinding(
+                    test_run_id=7,
+                    owasp_category="A03",
+                    severity="high",
+                    title="SQL injection in /search",
+                    affected_url="https://target.local/search",
+                    description="param is concatenated into the query",
+                )
+            )
+            # A finding for a different run must not leak in.
+            session.add(
+                ScanFinding(
+                    test_run_id=99,
+                    owasp_category="A01",
+                    severity="low",
+                    title="Other run finding",
+                    affected_url="https://other.local",
+                    description="unrelated",
+                )
+            )
+            session.commit()
+
+        snapshot = scanner._load_findings_snapshot(7)
+
+        assert len(snapshot) == 1
+        assert snapshot[0]["title"] == "SQL injection in /search"
+        assert snapshot[0]["owasp"] == "A03"
+
+        # finding_list over the loaded snapshot must surface the finding rather
+        # than the empty-list regression that returned count 0 (issue #124).
+        result = scanner._run_thinking_context_tool(
+            "finding_list",
+            {"category": "sqli"},
+            pages_snapshot=[],
+            findings_snapshot=snapshot,
+            history=[],
+            run_id=7,
+        )
+        assert result["count"] == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def _finding_list(args, snapshot):
+    return scanner._run_thinking_context_tool(
+        "finding_list", args,
+        pages_snapshot=[], findings_snapshot=snapshot, history=[], run_id=1,
+    )
+
+
+def test_finding_list_category_filter():
+    snapshot = [
+        {"title": "SQL injection in /search", "severity": "high", "owasp": "A03",
+         "affected_url": "https://t/search", "description": "blind sql"},
+        {"title": "Reflected XSS in name param", "severity": "medium", "owasp": "A03",
+         "affected_url": "https://t/profile", "description": "cross-site scripting"},
+        {"title": "SSRF via webhook url", "severity": "high", "owasp": "A10",
+         "affected_url": "https://t/webhook", "description": "server-side request forgery"},
+    ]
+
+    # Vuln-class slug matches only its class, not other A03 findings.
+    sqli = _finding_list({"category": "sqli"}, snapshot)
+    assert sqli["count"] == 1
+    assert sqli["findings"][0]["title"].startswith("SQL injection")
+
+    # Alias resolves to canonical slug.
+    assert _finding_list({"category": "RCE"}, snapshot)["count"] == 0
+    assert _finding_list({"category": "cross-site scripting"}, snapshot)["count"] == 1
+
+    # Keyword match catches a finding even if its owasp code differs from the map.
+    assert _finding_list({"category": "ssrf"}, snapshot)["count"] == 1
+
+    # owasp_category still filters by exact code (both injection findings).
+    assert _finding_list({"owasp_category": "A03"}, snapshot)["count"] == 2
+
+    # Unknown slug degrades into a free-text search token.
+    assert _finding_list({"category": "webhook"}, snapshot)["count"] == 1
+    assert _finding_list({"category": "nonexistentclass"}, snapshot)["count"] == 0
+
+    # No filter returns everything.
+    assert _finding_list({}, snapshot)["count"] == 3
+
+
 def test_burp_scan_body_uses_default_configuration_when_name_blank():
     body = burp_rest._build_scan_body(
         "https://target.local/api/customers?search=test",
