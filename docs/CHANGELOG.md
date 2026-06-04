@@ -4,6 +4,49 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #130] 4th June Release
+**Merged:** 2026-06-04 20:47 AEST | Branch: `develop → main`
+
+Bundles scanner improvements, ALICE session fixes, and a new file upload attack specialist across 42 files (12,841 insertions, 103 deletions).
+
+### Browser-Interactive Login Flow
+
+- **Browser-based login** (`services/crawler.py`): Replaced the `seed` curl login method with a fully functional browser-interactive login flow. The crawler now uses a headless browser to complete login forms, resolving issues with JavaScript-heavy authentication pages.
+- **Headless host detection**: Displays an informational error when interactive logins are attempted on headless hosts where no display is available, preventing silent failures.
+
+### ALICE Fixes
+
+- **Session token vault** (`services/alice.py`, `#120`): ALICE's tool executor now loads the per-run session vault at the start of each turn. `http_request` and `browser` tool calls carry the primary authenticated session by default, honour `use_session` to switch identities, and accept `"anonymous"` to opt out. `forge_jwt` and `register_account` surface newly created sessions into the in-memory vault so later steps in the same turn can reference them immediately. Previously all ALICE probes were sent anonymously even when stored credentials existed.
+- **`finding_list` returns live DB findings + vuln-class filter** (`services/alice.py`, `services/scanner.py`, `#124`): ALICE and specialist context-tool handlers were passing `findings_snapshot=[]` into `_run_thinking_context_tool`, so `finding_list` always returned count 0. A shared `_load_findings_snapshot` helper now reads from the database. A `category` filter is also added so agents can search by vuln-class slug (`sqli`, `xss`, `ssrf`, etc.) matching the `attack_class` vocabulary; unknown slugs degrade to a free-text search token. Documented in the Test Lead and ALICE prompts.
+
+### Scanner Improvements
+
+- **SQLi chaining depth** (`services/prompts/test_lead.py`, `#97`): After confirming a SQL injection, the agent now executes a structured post-confirmation escalation sequence: DB user identity, table enumeration (names only), MSSQL `xp_cmdshell` RCE probe, MySQL `LOAD_FILE` read probe, and PostgreSQL `COPY TO PROGRAM` OS exec probe. Hard constraint remains read-only — no `DROP`/`INSERT`/`UPDATE`/`DELETE` and no bulk PII dump.
+- **`auth_robustness` skill scoping** (`services/prompts/specialist.py`, `#98`): The `auth_robustness` WSTG skill is now gated on an actual credential-submission endpoint rather than the broad `has_auth_pages` signal (which was true for any authenticated page, including dashboards). A `_CREDENTIAL_PATH_FRAGMENTS` set and a dedicated `has_credential_endpoint` check now gate this skill; the site's configured `login_url` is fed into the selector so non-standard login paths still trigger correctly. `auth_bypass` and `sessions` remain on the broader authenticated surface.
+- **Password compliance finding and SSRF improvements** (`#98`): Improved accuracy of password policy compliance findings and SSRF detection logic.
+- **Traffic logging fixes** (`services/traffic.py`, `#128`): Fixed issues with traffic request logging — requests are now fully and correctly captured.
+
+### File Upload Specialist (New)
+
+- **`file_upload` attack class** (`services/prompts/specialist.py`, `services/prompts/test_lead.py`, `services/scanner.py`): New specialist agent dispatched as soon as an upload endpoint is confirmed. Tests extension filtering (`.php`, `.php3`, `.phtml`, `.phar`, `.jsp`, `.aspx`, etc.), extension bypass tricks (mixed case, double extension, trailing dot, null-byte, alternate extensions), content-type spoofing, and path traversal in filename parameters. Uploads a canary webshell (`aespa_rce_` marker) and fetches the stored URL to confirm execution. Severity: CRITICAL if RCE is confirmed, HIGH if a dangerous extension is stored but not executed.
+- **Specialist dispatch registered**: `dispatch_file_upload` added to `_SPECIALIST_DISPATCH_CLASSES` in `scanner.py` and `file_upload` appended to `_SKILL_ORDER`.
+- **Thinking agent system prompt updated**: Now dispatches a `file_upload` specialist on upload endpoint discovery without waiting for manual extension probing.
+
+### New API & Scan Endpoint
+
+- **`/api/scan.py` additions** (61 lines): New scan-related API endpoints added.
+- **Database and schema extensions** (`db.py`, `models.py`, `schemas.py`): Model and schema additions to support new features.
+
+### Documentation & Test Coverage
+
+- `docs/advanced-auth-implementation.md` added (109 lines) — documents the browser-interactive authentication flow.
+- `docs/aespa-boe-2026-06-01.md` added (10,769 lines) — scan results document.
+- `docs/results-comparison.md` updated with new comparison data.
+- `README.md` refreshed; all UI screenshots updated.
+- New test suites: `test_alice_service.py` (122 lines), `test_scanner_service.py` (98 lines), `test_traffic_service.py` (131 lines), `test_wstg_skill_selector.py` (112 lines).
+
+---
+
 ## [PR #119] ALICE Bug Fixes
 **Opened:** 2026-05-31 | Branch: `develop → main`
 
