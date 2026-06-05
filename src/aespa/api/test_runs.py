@@ -3,26 +3,50 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from aespa.db import get_session
-from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, TestRunStatus
+from aespa.models import (
+    AgentLog,
+    CrawledPage,
+    PageCredentialView,
+    PageLink,
+    PentestHypothesis,
+    PentestTask,
+    ScanCheckpoint,
+    ScanFinding,
+    ScanLog,
+    ScannerSession,
+    TargetIntelItem,
+    TestRun,
+    TestRunStatus,
+    TrafficEntry,
+)
 from aespa.schemas import (
-    CredentialSummary,
+    ActiveJobSummary,
     CrawledPageDetail,
     CrawledPageOut,
+    CredentialSummary,
     GraphData,
     GraphLink,
     GraphNode,
     PageCredentialViewOut,
+    PentestTaskGraphOut,
     ScopeUpdate,
+    ScannerSessionOut,
+    ScannerSessionSummary,
+    ScannerSessionUpdate,
+    TargetIntelItemOut,
+    TargetIntelSummary,
     TestRunCreate,
     TestRunSummary,
     TestRunUpdate,
 )
 from aespa.services import crawler as crawler_svc
+from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
-from aespa.services.settings import get_llm_config
+from aespa.services import task_graph as task_graph_svc
+from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
 
@@ -43,23 +67,13 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
     creds = [CredentialSummary.model_validate(c) for c in (site.credentials if site else [])]
     s = TestRunSummary.model_validate(run)
     s.credentials = creds
-    s.scanner_policy = settings_service.get_run_scanner_policy(session, run).model_dump(mode="json")
-    scan_pages = session.exec(
-        select(CrawledPage)
-        .where(CrawledPage.test_run_id == run.id)
-        .where(CrawledPage.in_scope != False)  # noqa: E712
-    ).all()
-    s.scan_total_pages = len(scan_pages)
-    s.scan_pages_done = sum(1 for p in scan_pages if p.scan_status == "complete")
-    em = run.error_message or ""
-    if scanner_svc.is_running(run.id):
-        s.scan_status = "running"
-    elif em.startswith("scan:"):
-        parts = em.split(":", 2)
-        s.scan_status = parts[1] if len(parts) > 1 else "idle"
-        s.error_message = f"Scan failed: {parts[2]}" if s.scan_status == "failed" and len(parts) > 2 else None
-    elif s.scan_total_pages > 0 and s.scan_pages_done == s.scan_total_pages:
-        s.scan_status = "complete"
+    policy = settings_service.get_run_scanner_policy(session, run)
+    s.scanner_policy = policy.model_dump(mode="json")
+    s.scan_mode = policy.scan_mode
+    import json as _json
+    s.scope_hosts = _json.loads(site.scope_hosts or "[]") if site else []
+    thinking = scanner_svc.get_thinking_scan_status(run.id)
+    s.thinking_status = thinking.get("status", "idle")
     return s
 
 
@@ -71,11 +85,84 @@ def _get_site_or_404(session: Session, site_id: int):
     return site
 
 
+def _json_dict(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _redacted_metadata(value: dict) -> dict:
+    sensitive_terms = ("password", "secret", "token", "cookie", "authorization")
+    redacted: dict = {}
+    for key, raw in value.items():
+        if any(term in str(key).lower() for term in sensitive_terms):
+            redacted[key] = "[REDACTED]"
+        elif isinstance(raw, dict):
+            redacted[key] = _redacted_metadata(raw)
+        else:
+            redacted[key] = raw
+    return redacted
+
+
+def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
+    cookies = _json_dict(record.cookies_json)
+    headers = _json_dict(record.extra_headers_json)
+    metadata = _redacted_metadata(_json_dict(record.session_metadata))
+    return ScannerSessionOut(
+        id=record.id,
+        test_run_id=record.test_run_id,
+        label=record.label,
+        kind=record.kind,
+        username=record.username,
+        credential_id=record.credential_id,
+        source=record.source,
+        cookie_names=sorted(str(k) for k in cookies.keys()),
+        header_names=sorted(str(k) for k in headers.keys()),
+        token_hint=record.token_hint,
+        session_metadata=metadata,
+        is_active=record.is_active,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
 def _auto_name(session: Session, site_id: int) -> str:
     existing = session.exec(
         select(TestRun).where(TestRun.site_id == site_id)
     ).all()
     return f"Run #{len(existing) + 1}"
+
+
+def _clear_crawl_state(session: Session, run: TestRun) -> None:
+    run_id = run.id
+    if run_id is None:
+        return
+
+    for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
+        if finding.page_id is not None:
+            finding.page_id = None
+            session.add(finding)
+    for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
+        session.delete(lnk)
+    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
+        session.delete(view)
+    for item in session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all():
+        session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
+    for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
+        session.delete(pg)
+
+    run.status = TestRunStatus.pending
+    run.pages_discovered = 0
+    run.started_at = None
+    run.completed_at = None
+    run.error_message = None
+    run.current_url = None
+    run.per_user_progress = None
+    session.add(run)
 
 
 # ── Per-site: create / list ───────────────────────────────────────────────────
@@ -91,8 +178,12 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
+    if payload.llm_config_id is not None:
+        from aespa.models import LLMConfig
+        if session.get(LLMConfig, payload.llm_config_id) is None:
+            raise HTTPException(status_code=404, detail="LLM profile not found")
     name = payload.name or _auto_name(session, site_id)
-    policy = settings_service.get_scanner_policy(session).model_copy(update={"scan_mode": payload.scan_mode})
+    policy = settings_service.get_scanner_policy(session)
     run = TestRun(
         site_id=site_id,
         name=name,
@@ -100,7 +191,7 @@ def create_test_run(
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
         scan_mode=policy.scan_mode,
-        scanner_policy_json=settings_service.scanner_policy_snapshot(policy),
+        scanner_policy_json="{}",
         llm_config_id=payload.llm_config_id,
     )
     session.add(run)
@@ -119,6 +210,73 @@ def list_test_runs(
         select(TestRun).where(TestRun.site_id == site_id).order_by(TestRun.created_at.desc())
     ).all()
     return [_run_summary(r, session) for r in runs]
+
+
+@router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])
+def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
+    from aespa.models import Site
+    from aespa.services import scanner as scanner_svc
+
+    runs = session.exec(select(TestRun).order_by(TestRun.created_at.desc())).all()
+    jobs: list[ActiveJobSummary] = []
+    for run in runs:
+        site = session.get(Site, run.site_id)
+        site_name = site.name if site else f"Site #{run.site_id}"
+
+        if run.status == TestRunStatus.running:
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Crawl",
+                    status="running",
+                    pages_done=run.pages_discovered,
+                    total_pages=run.max_pages,
+                    current_url=run.current_url,
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        if scanner_svc.is_thinking_running(run.id):
+            thinking = scanner_svc.get_thinking_scan_status(run.id)
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Dynamic Scan",
+                    status=thinking.get("status", "running"),
+                    findings_count=thinking.get("findings_count"),
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        from aespa.services import alice_tasks
+        alice_task = alice_tasks.get(run.id)
+        if alice_task is not None and not alice_task.done:
+            findings_count = session.exec(
+                select(func.count()).select_from(ScanFinding).where(ScanFinding.test_run_id == run.id)
+            ).one()
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="A.L.I.C.E.",
+                    status="running",
+                    findings_count=findings_count,
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+    return jobs
 
 
 # ── Single run ────────────────────────────────────────────────────────────────
@@ -142,9 +300,28 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
     views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all()
     for v in views:
         session.delete(v)
+    intel = session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all()
+    for item in intel:
+        session.delete(item)
+    for entry in session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all():
+        session.delete(entry)
     pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
     for p in pages:
         session.delete(p)
+    for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
+        session.delete(finding)
+    for log_entry in session.exec(select(ScanLog).where(ScanLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
+    for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
+        session.delete(ckpt)
+    for ss in session.exec(select(ScannerSession).where(ScannerSession.test_run_id == run_id)).all():
+        session.delete(ss)
+    for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
+        session.delete(hyp)
+    for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
+        session.delete(task)
+    for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+        session.delete(log_entry)
     session.delete(run)
     session.commit()
 
@@ -194,7 +371,7 @@ async def start_test_run(
             status_code=409,
             detail=f"Cannot start a run with status '{run.status}'",
         )
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
@@ -217,32 +394,32 @@ async def restart_test_run(
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Stop the run before restarting.")
-    if get_llm_config(session) is None:
+    if get_llm_config_for_run(session, run) is None:
         raise HTTPException(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
-    # Wipe existing results
-    for lnk in session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all():
-        session.delete(lnk)
-    for view in session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all():
-        session.delete(view)
-    for pg in session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all():
-        session.delete(pg)
-    # Reset run state
-    run.status = TestRunStatus.pending
-    run.pages_discovered = 0
-    run.started_at = None
-    run.completed_at = None
-    run.error_message = None
-    run.current_url = None
-    run.per_user_progress = None
-    session.add(run)
+    _clear_crawl_state(session, run)
     session.commit()
     session.refresh(run)
     summary = _run_summary(run, session)
     await crawler_svc.start_crawl(run_id)
     return summary
+
+
+@router.post("/api/test-runs/{run_id}/crawl/clear", response_model=TestRunSummary)
+def clear_test_run_crawl(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> TestRunSummary:
+    """Wipe crawled pages/links for this run without starting a new crawl."""
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Stop the run before clearing crawl data.")
+    _clear_crawl_state(session, run)
+    session.commit()
+    session.refresh(run)
+    return _run_summary(run, session)
 
 
 @router.post("/api/test-runs/{run_id}/stop", response_model=TestRunSummary)
@@ -328,6 +505,164 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
         and l.target_page_id in page_ids
     ]
     return GraphData(nodes=nodes, links=edges)
+
+
+@router.delete("/api/test-runs/{run_id}/target-intelligence", status_code=204)
+def clear_target_intelligence(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all target intelligence items discovered for this run."""
+    _get_run_or_404(session, run_id)
+    for item in session.exec(
+        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    ).all():
+        session.delete(item)
+    session.commit()
+
+
+@router.get("/api/test-runs/{run_id}/target-intelligence", response_model=TargetIntelSummary)
+def get_target_intelligence(
+    run_id: int,
+    kind: str | None = None,
+    limit: int = 500,
+    session: Session = Depends(get_session),
+) -> TargetIntelSummary:
+    _get_run_or_404(session, run_id)
+    limit = max(1, min(limit, 2000))
+    all_items = session.exec(
+        select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    ).all()
+    counts: dict[str, int] = {}
+    for item in all_items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+
+    query = select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+    if kind:
+        query = query.where(TargetIntelItem.kind == kind)
+    items = session.exec(
+        query.order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc()).limit(limit)
+    ).all()
+    return TargetIntelSummary(
+        counts=counts,
+        items=[TargetIntelItemOut.model_validate(item) for item in items],
+    )
+
+
+@router.get("/api/test-runs/{run_id}/scanner-sessions", response_model=ScannerSessionSummary)
+def get_scanner_sessions(
+    run_id: int,
+    include_inactive: bool = False,
+    session: Session = Depends(get_session),
+) -> ScannerSessionSummary:
+    _get_run_or_404(session, run_id)
+    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    if not include_inactive:
+        query = query.where(ScannerSession.is_active == True)  # noqa: E712
+    records = session.exec(query.order_by(ScannerSession.label)).all()
+    counts: dict[str, int] = {"total": len(records)}
+    for record in records:
+        counts[record.kind] = counts.get(record.kind, 0) + 1
+        if record.is_active:
+            counts["active"] = counts.get("active", 0) + 1
+        else:
+            counts["inactive"] = counts.get("inactive", 0) + 1
+    return ScannerSessionSummary(
+        counts=counts,
+        sessions=[_scanner_session_out(record) for record in records],
+    )
+
+
+@router.patch("/api/test-runs/{run_id}/scanner-sessions/{session_id}", response_model=ScannerSessionOut)
+def update_scanner_session(
+    run_id: int,
+    session_id: int,
+    payload: ScannerSessionUpdate,
+    session: Session = Depends(get_session),
+) -> ScannerSessionOut:
+    _get_run_or_404(session, run_id)
+    record = session.get(ScannerSession, session_id)
+    if record is None or record.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
+
+    if payload.label is not None:
+        normalized = scanner_session_svc.stable_label(payload.label)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="Session label cannot be blank")
+        duplicate = session.exec(
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.label == normalized)
+            .where(ScannerSession.id != session_id)
+        ).first()
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail=f"Session label '{normalized}' already exists")
+        record.label = normalized
+    if payload.is_active is not None:
+        record.is_active = payload.is_active
+    from aespa.models import _utcnow
+    record.updated_at = _utcnow()
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return _scanner_session_out(record)
+
+
+@router.delete("/api/test-runs/{run_id}/task-graph", status_code=204)
+def clear_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all hypotheses and tasks for this run."""
+    _get_run_or_404(session, run_id)
+    for task in session.exec(
+        select(PentestTask).where(PentestTask.test_run_id == run_id)
+    ).all():
+        session.delete(task)
+    for hyp in session.exec(
+        select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)
+    ).all():
+        session.delete(hyp)
+    session.commit()
+
+
+@router.get("/api/test-runs/{run_id}/task-graph", response_model=PentestTaskGraphOut)
+def get_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> PentestTaskGraphOut:
+    _get_run_or_404(session, run_id)
+    return task_graph_svc.get_task_graph(run_id, session=session)
+
+
+@router.post("/api/test-runs/{run_id}/task-graph/seed", response_model=PentestTaskGraphOut)
+def seed_task_graph(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> PentestTaskGraphOut:
+    _get_run_or_404(session, run_id)
+    result = task_graph_svc.seed_task_graph(run_id, session=session)
+    if result.get("hypotheses_created") or result.get("tasks_created"):
+        from aespa.services import events as events_svc
+        events_svc.emit(run_id, {
+            "type": "task_graph_update",
+            "reason": "seeded",
+            "data": result,
+        })
+    return task_graph_svc.get_task_graph(run_id, session=session)
+
+
+@router.get("/api/test-runs/{run_id}/recon-summary")
+def get_recon_summary(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return the stored attack-surface summary for this run, or 404 if not yet built."""
+    run = _get_run_or_404(session, run_id)
+    if not run.recon_summary:
+        raise HTTPException(status_code=404, detail="Recon summary not yet available for this run.")
+    import json as _json
+    return _json.loads(run.recon_summary)
 
 
 # ── Scope management ──────────────────────────────────────────────────────────
