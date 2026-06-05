@@ -1,18 +1,345 @@
 """Abstract LLM client wrappers for configured provider APIs."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import json
 import logging
+import os
 import re
-from typing import Any, Optional
+import time
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from typing import Any, Optional, AsyncGenerator
 from urllib.parse import quote
 
+import httpx
+
 from aespa.models import LLMConfig
+from aespa.services.prompts.reporting import (
+    _ANALYSE_PROMPT,
+    _DEDUPLICATE_FINDINGS_PROMPT,
+    _FINGERPRINT_PROMPT,
+    _NORMALIZE_TITLES_PROMPT,
+    _WRITEUP_REPLAY_PROMPT,
+)
+from aespa.services.prompts.test_lead import (
+    _ANALYSIS_PROMPT,
+    _AUTH_PATH_FRAGMENTS,
+    _CREDENTIAL_PATH_FRAGMENTS,
+    _FOLLOWUP_PROMPT,
+    _PLAN_PROMPT,
+    _SITE_PLAN_PROMPT,
+    _SKILL_ORDER,
+    _SSRF_PARAM_NAMES,
+    _THINKING_CORRECTION_PROMPT,
+    _THINKING_NEXT_ACTION_PROMPT,
+    _THINKING_PENTEST_PLAYBOOK,
+    THINKING_AGENT_TOOLS,
+    WSTG_SKILLS,
+)
+from aespa.services.prompts.specialist import (
+    SPECIALIST_AGENT_TOOLS,
+)
+from aespa.services.prompts.validator import (
+    _ADVERSARIAL_VALIDATOR_SYSTEM,
+    _DISPROOF_HINTS,
+    _VALIDATION_PLAN_PROMPT,
+    _VALIDATION_VERDICT_PROMPT,
+    VALIDATOR_AGENT_TOOLS,
+)
 
 log = logging.getLogger("aespa.llm")
 
+REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
+
+_llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
+_run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
+_emit_fn_var: ContextVar[Any | None] = ContextVar('_emit_fn', default=None)
+_last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar('last_call_tokens', default=None)
+
+# Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
+_run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
+
+# Tracks which run_ids have already been seeded from DB this process lifetime.
+_run_token_seeded: set[int] = set()
+
+
+# ── Rate Limiting Core ────────────────────────────────────────────────────────
+
+class AsyncTokenBucketLimiter:
+    def __init__(self, tpm: int, rpm: Optional[int] = None):
+        self.tpm = tpm
+        self.rpm = rpm
+        
+        self.max_tokens = float(tpm)
+        self.tokens_per_second = tpm / 60.0
+        self.available_tokens = float(tpm)
+        self.last_token_update = time.monotonic()
+        
+        self.max_requests = float(rpm) if rpm else 0.0
+        self.requests_per_second = (rpm / 60.0) if rpm else 0.0
+        self.available_requests = float(rpm) if rpm else 0.0
+        self.last_request_update = time.monotonic()
+        
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, estimated_tokens: int) -> bool:
+        slept = False
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                
+                # Refill tokens
+                elapsed_tokens = now - self.last_token_update
+                self.available_tokens = min(
+                    self.max_tokens,
+                    self.available_tokens + (elapsed_tokens * self.tokens_per_second)
+                )
+                self.last_token_update = now
+                
+                # Refill request slots
+                if self.rpm:
+                    elapsed_requests = now - self.last_request_update
+                    self.available_requests = min(
+                        self.max_requests,
+                        self.available_requests + (elapsed_requests * self.requests_per_second)
+                    )
+                    self.last_request_update = now
+
+                # Check availability
+                tokens_ready = self.available_tokens >= estimated_tokens
+                requests_ready = not self.rpm or self.available_requests >= 1.0
+                
+                if tokens_ready and requests_ready:
+                    self.available_tokens -= estimated_tokens
+                    if self.rpm:
+                        self.available_requests -= 1.0
+                    return slept
+                
+                wait_time_tokens = 0.0
+                if not tokens_ready:
+                    needed_tokens = estimated_tokens - self.available_tokens
+                    wait_time_tokens = needed_tokens / self.tokens_per_second
+                
+                wait_time_requests = 0.0
+                if self.rpm and not requests_ready:
+                    needed_requests = 1.0 - self.available_requests
+                    wait_time_requests = needed_requests / self.requests_per_second
+                
+                wait_time = max(wait_time_tokens, wait_time_requests)
+                slept = True
+                
+            await asyncio.sleep(wait_time)
+
+
+    async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
+        async with self._lock:
+            difference = estimated_tokens - actual_tokens
+            self.available_tokens = min(
+                self.max_tokens,
+                max(0.0, self.available_tokens + difference)
+            )
+
+
+def estimate_tokens(prompt: str, screenshot_b64: Optional[str] = None, provider: str = "openai") -> int:
+    text_tokens = int((len(prompt) / 4.0) * 1.1)
+    vision_tokens = 0
+    if screenshot_b64:
+        if provider == "anthropic":
+            vision_tokens = 1600
+        elif provider in ("openai", "azure_openai", "openrouter"):
+            vision_tokens = 765
+        else:
+            vision_tokens = 258
+    return text_tokens + vision_tokens
+
+
+_limiters: dict[str, AsyncTokenBucketLimiter] = {}
+
+def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimiter]:
+    if config.provider_id is None:
+        return None
+    
+    key = f"{config.provider}:{config.model}"
+    try:
+        from sqlmodel import Session
+
+        from aespa.db import get_engine
+        from aespa.models import LLMProviderConfig
+        
+        with Session(get_engine()) as session:
+            provider = session.get(LLMProviderConfig, config.provider_id)
+            if not provider or (not provider.max_tpm and not provider.max_rpm):
+                _limiters.pop(key, None)
+                return None
+            
+            tpm = provider.max_tpm or 10_000_000
+            rpm = provider.max_rpm
+            
+            limiter = _limiters.get(key)
+            if not limiter or limiter.tpm != tpm or limiter.rpm != rpm:
+                _limiters[key] = AsyncTokenBucketLimiter(tpm=tpm, rpm=rpm)
+    except Exception as e:
+        log.warning(f"Failed to lookup rate limit for provider: {e}")
+        
+    return _limiters.get(key)
+
+
+
+def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
+    """Load persisted token usage for a run from the DB (best-effort)."""
+    try:
+        from sqlmodel import Session as _Session
+
+        from aespa.db import get_engine
+        from aespa.models import TestRun
+        with _Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run and run.token_usage_json:
+                return json.loads(run.token_usage_json)
+    except Exception:
+        pass
+    return {}
+
+
+def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
+    """Write the current in-memory bucket for a run back to the DB (best-effort)."""
+    try:
+        from sqlmodel import Session as _Session
+
+        from aespa.db import get_engine
+        from aespa.models import TestRun
+        with _Session(get_engine()) as s:
+            run = s.get(TestRun, run_id)
+            if run:
+                run.token_usage_json = json.dumps(bucket)
+                s.add(run)
+                s.commit()
+    except Exception:
+        pass
+
+
+def set_run_context(run_id: int, emit_fn: Any) -> None:
+    """Set the current run context so LLM calls track token usage automatically.
+
+    Seeds the in-memory bucket from DB on first call for this run_id so that
+    token counts accumulate correctly across server restarts.
+    """
+    _run_id_var.set(run_id)
+    _emit_fn_var.set(emit_fn)
+    if run_id not in _run_token_seeded:
+        existing = _load_bucket_from_db(run_id)
+        if existing:
+            # Merge DB data into the (possibly already-populated) in-memory bucket.
+            bucket = _run_token_usage.setdefault(run_id, {})
+            for model, counts in existing.items():
+                if model not in bucket:
+                    bucket[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+                for k in ("input", "output", "cache_read", "cache_write"):
+                    bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
+        _run_token_seeded.add(run_id)
+
+
+def clear_run_context() -> None:
+    _run_id_var.set(None)
+    _emit_fn_var.set(None)
+
+
+def _record_usage(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> None:
+    """Accumulate token counts for the active run and fire a SSE event."""
+    _last_call_tokens_var.set({
+        "input": input_tokens + cache_read_tokens,
+        "output": output_tokens
+    })
+    run_id = _run_id_var.get()
+    if run_id is None:
+        return
+    bucket = _run_token_usage.setdefault(run_id, {})
+    entry = bucket.setdefault(model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    entry["input"] += input_tokens
+    entry["output"] += output_tokens
+    entry["cache_read"] += cache_read_tokens
+    entry["cache_write"] += cache_write_tokens
+    _persist_bucket_to_db(run_id, bucket)
+    emit_fn = _emit_fn_var.get()
+    if emit_fn:
+        try:
+            total_in = sum(v["input"] for v in bucket.values())
+            total_out = sum(v["output"] for v in bucket.values())
+            total_cache_read = sum(v.get("cache_read", 0) for v in bucket.values())
+            total_cache_write = sum(v.get("cache_write", 0) for v in bucket.values())
+            emit_fn({
+                "type": "token_usage_update",
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "totals": {
+                    "total_input": total_in,
+                    "total_output": total_out,
+                    "total_cache_read": total_cache_read,
+                    "total_cache_write": total_cache_write,
+                    "by_model": {m: dict(v) for m, v in bucket.items()},
+                },
+            })
+        except Exception:
+            pass
+
+
+def get_run_token_usage(run_id: int) -> dict:
+    """Return accumulated token usage for a run.
+
+    If the run isn't in the in-memory dict (e.g. after a server restart), falls
+    back to the persisted DB value so the REST endpoint always returns data.
+    """
+    bucket = _run_token_usage.get(run_id)
+    if bucket is None:
+        bucket = _load_bucket_from_db(run_id)
+    return {
+        "total_input": sum(v["input"] for v in bucket.values()),
+        "total_output": sum(v["output"] for v in bucket.values()),
+        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
+        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
+        "by_model": {m: dict(v) for m, v in bucket.items()},
+    }
+
+
+def set_llm_proxy(url: str | None) -> None:
+    _llm_proxy_var.set(url)
+
+
+def _llm_client_kwargs() -> dict:
+    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
+    proxy = _llm_proxy_var.get()
+    return {"http_client": httpx.AsyncClient(verify=False, **{"proxy": proxy} if proxy else {})}
+
+
+def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
+    """Creates an httpx client for direct LLM calls, always with verify=False."""
+    kwargs.setdefault("verify", False)
+    if proxy := _llm_proxy_var.get():
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+ANALYSE_RESULTS_TEXT_BUDGET = 80_000
+ANALYSE_RESULTS_PER_BATCH = 20
+_THINKING_CONTEXT_TOOL_ARG_KEYS = {
+    "site_map": ("filter", "search", "type", "flags", "limit"),
+    "page_detail": ("page_id", "url", "include"),
+    "history_search": ("query", "search", "limit"),
+    "finding_list": ("severity", "owasp_category", "category", "search", "limit"),
+}
+_THINKING_CONTEXT_TOOLS = frozenset(_THINKING_CONTEXT_TOOL_ARG_KEYS)
 
 
 def _strip_thinking_blocks(raw: str) -> str:
@@ -94,42 +421,36 @@ def _extract_json(raw: str, expect: type = list) -> Any:
 
     raise ValueError("could not extract balanced JSON from LLM response")
 
-_ANALYSIS_PROMPT = """\
-You are a web application security analyst performing reconnaissance on a target web application.
 
-Analyse the following web page and return a JSON response.
+def _extract_action_json(raw: str) -> dict:
+    action = _extract_json(raw, expect=dict)
+    if not isinstance(action, dict):
+        raise ValueError("action response was not a JSON object")
+    return action
 
-URL: {url}
-Title: {title}
 
-Page content:
-{text}
+def _normalize_thinking_action(action: Any) -> Any:
+    if not isinstance(action, dict):
+        return action
 
-Return ONLY valid JSON in this exact format (no markdown fences):
-{{
-  "context": "2-4 sentence description of the page's purpose and the functionality it offers to users",
-  "suggested_links": ["absolute_url_1", "absolute_url_2"],
-  "categories": {{
-    "req_auth": true,
-    "takes_input": false,
-    "has_object_ref": false,
-    "has_business_logic": false
-  }}
-}}
+    action_name = str(action.get("action") or "").strip()
+    if action_name not in _THINKING_CONTEXT_TOOLS:
+        return action
 
-For suggested_links: include up to 10 absolute URLs that appear as actual links on this page \
-(same domain) and reveal the most important or interesting application functionality. Do not \
-construct, guess, rewrite, or substitute URLs from IDs/account numbers visible in page text. \
-Prefer links to forms, features, user actions, admin areas, API endpoints, etc. over navigation \
-links already visible on every page.
+    arg_keys = _THINKING_CONTEXT_TOOL_ARG_KEYS[action_name]
+    args = {}
+    nested_args = action.get("args")
+    if isinstance(nested_args, dict):
+        args.update(nested_args)
+    for key in arg_keys:
+        if key in action and key not in args:
+            args[key] = action[key]
 
-For categories — answer true/false to each:
-- req_auth: Does accessing or using this page require the user to be authenticated/logged in?
-- takes_input: Does this page contain forms, input fields, search boxes, or otherwise accept data from the user?
-- has_object_ref: Does the URL or page content reference a specific object by ID \
-(e.g. id=1 in a query param, /accounts/42/ in the path, or a resource identifier in a POST body)?
-- has_business_logic: Can this page trigger transactions, modify account data, transfer funds, \
-create/update/delete records, or perform other business-significant operations?"""
+    normalized = {key: value for key, value in action.items() if key not in arg_keys}
+    normalized["action"] = "tool"
+    normalized["tool"] = action_name
+    normalized["args"] = args
+    return normalized
 
 
 PageCategories = dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
@@ -241,19 +562,271 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 
 
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    limiter = get_limiter_for_config(config)
+    if limiter is None:
+        if config.provider == "anthropic":
+            return await _anthropic(config, prompt, screenshot_b64)
+        if config.provider == "google":
+            return await _google(config, prompt, screenshot_b64)
+        if config.provider == "azure_openai":
+            return await _azure_openai(config, prompt, screenshot_b64)
+        if config.provider in ("azure_foundry", "azure_foundry_openai"):
+            return await _azure_foundry_openai(config, prompt, screenshot_b64)
+        if config.provider == "azure_foundry_anthropic":
+            return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+        if config.provider == "openrouter":
+            return await _openrouter(config, prompt, screenshot_b64)
+        if config.provider == "bedrock":
+            return await _bedrock(config, prompt, screenshot_b64)
+        return await _openai_compat(config, prompt, screenshot_b64)
+
+    estimated_input = estimate_tokens(prompt, screenshot_b64, config.provider)
+    estimated_output = config.max_tokens or 4096
+    total_estimated = estimated_input + estimated_output
+
+    _last_call_tokens_var.set(None)
+    slept = await limiter.acquire(total_estimated)
+
+    run_id = _run_id_var.get()
+    if slept and run_id is not None:
+        try:
+            from aespa.services import events
+            events.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "rate_limit",
+                "status": "active",
+                "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
+            })
+        except Exception:
+            pass
+
+    try:
+        if config.provider == "anthropic":
+            resp = await _anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "google":
+            resp = await _google(config, prompt, screenshot_b64)
+        elif config.provider == "azure_openai":
+            resp = await _azure_openai(config, prompt, screenshot_b64)
+        elif config.provider in ("azure_foundry", "azure_foundry_openai"):
+            resp = await _azure_foundry_openai(config, prompt, screenshot_b64)
+        elif config.provider == "azure_foundry_anthropic":
+            resp = await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+        elif config.provider == "openrouter":
+            resp = await _openrouter(config, prompt, screenshot_b64)
+        elif config.provider == "bedrock":
+            resp = await _bedrock(config, prompt, screenshot_b64)
+        else:
+            resp = await _openai_compat(config, prompt, screenshot_b64)
+
+        usage = _last_call_tokens_var.get()
+        if usage:
+            actual_total = usage["input"] + usage["output"]
+            await limiter.reconcile(total_estimated, actual_total)
+        else:
+            actual_total = total_estimated
+            await limiter.reconcile(total_estimated, total_estimated)
+
+        if slept and run_id is not None:
+            try:
+                from aespa.services import events
+                events.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "rate_limit",
+                    "status": "complete",
+                    "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
+                })
+            except Exception:
+                pass
+
+        return resp
+    except Exception:
+        await limiter.reconcile(total_estimated, 0)
+        raise
+
+
+
+
+async def plain_completion(config: LLMConfig, prompt: str) -> str:
+    """Send a plain text prompt and return the raw response text."""
+    return await _call(config, prompt, None)
+
+
+async def stream_chat_completion(
+    config: LLMConfig,
+    system_message: str,
+    messages: list[dict],
+) -> AsyncGenerator[str, None]:
+    """Stream a chat completion from the configured LLM provider in real-time."""
     if config.provider == "anthropic":
-        return await _anthropic(config, prompt, screenshot_b64)
-    if config.provider == "google":
-        return await _google(config, prompt, screenshot_b64)
-    if config.provider == "azure_openai":
-        return await _azure_openai(config, prompt, screenshot_b64)
-    if config.provider == "azure_foundry":
-        return await _azure_foundry(config, prompt, screenshot_b64)
-    if config.provider == "openrouter":
-        return await _openrouter(config, prompt, screenshot_b64)
-    if config.provider == "bedrock":
-        return await _bedrock(config, prompt, screenshot_b64)
-    return await _openai_compat(config, prompt, screenshot_b64)
+        import anthropic as _ant
+
+        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        formatted_messages = []
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                formatted_messages.append({"role": m["role"], "content": m["content"]})
+
+        async with client.messages.stream(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            system=[{"type": "text", "text": system_message}],
+            messages=formatted_messages,
+        ) as stream:
+            async for event in stream:
+                if event.type == "text":
+                    yield event.text
+
+    elif config.provider == "bedrock":
+        import threading
+
+        converse_messages = []
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                converse_messages.append({
+                    "role": m["role"],
+                    "content": [{"text": m["content"]}]
+                })
+        system_list = [{"text": system_message}]
+
+        if config.api_key:
+            model_id = quote(config.model, safe="")
+            url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse-stream"
+            payload = {
+                "messages": converse_messages,
+                "system": system_list,
+                "inferenceConfig": {
+                    "maxTokens": config.max_tokens,
+                    "temperature": config.temperature,
+                },
+            }
+            headers = {
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            try:
+                async with _make_llm_http_client(timeout=120) as client:
+                    async with client.stream("POST", url, headers=headers, json=payload) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            try:
+                                chunk = json.loads(line)
+                                if "contentBlockDelta" in chunk:
+                                    delta = chunk["contentBlockDelta"]["delta"]
+                                    if "text" in delta:
+                                        yield delta["text"]
+                            except Exception:
+                                pass
+            except Exception as e:
+                log.exception("Error in Bedrock API key stream completion")
+                raise RuntimeError(f"Bedrock API key stream failed: {e}") from e
+        else:
+            _proxy_url = _llm_proxy_var.get()
+            _model = config.model
+            _messages = converse_messages
+            _system = system_list
+            _infer = {
+                "maxTokens": config.max_tokens,
+                "temperature": config.temperature,
+            }
+            _endpoint = config.base_url or None
+
+            def _run_converse_stream():
+                import boto3
+                from botocore.config import Config as _BotocoreConfig
+
+                region = (
+                    os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or _bedrock_region_from_url(config.base_url or "")
+                )
+                profile = os.getenv("AWS_PROFILE")
+                session_kwargs = {"profile_name": profile} if profile else {}
+                session = boto3.Session(**session_kwargs)
+                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+                client = session.client(
+                    "bedrock-runtime",
+                    region_name=region,
+                    endpoint_url=_endpoint,
+                    verify=not _proxy_url,
+                    **{"config": _boto_cfg} if _boto_cfg else {},
+                )
+                return client.converse_stream(
+                    modelId=_model,
+                    system=_system,
+                    messages=_messages,
+                    inferenceConfig=_infer,
+                )
+
+            q = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _producer():
+                try:
+                    res = _run_converse_stream()
+                    stream = res.get("stream")
+                    if stream:
+                        for chunk in stream:
+                            if "contentBlockDelta" in chunk:
+                                delta = chunk["contentBlockDelta"]["delta"]
+                                if "text" in delta:
+                                    loop.call_soon_threadsafe(q.put_nowait, ("text", delta["text"]))
+                    loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+                except Exception as e:
+                    loop.call_soon_threadsafe(q.put_nowait, ("error", e))
+
+            thread = threading.Thread(target=_producer, daemon=True)
+            thread.start()
+
+            while True:
+                item_type, val = await q.get()
+                if item_type == "text":
+                    yield val
+                elif item_type == "done":
+                    break
+                elif item_type == "error":
+                    raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
+
+    else:
+        from openai import AsyncOpenAI
+
+        kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            kwargs["base_url"] = base
+        kwargs.update(_llm_client_kwargs())
+        client = AsyncOpenAI(**kwargs)
+
+        formatted_messages = [{"role": "system", "content": system_message}]
+        for m in messages:
+            if m.get("role") in ("user", "assistant"):
+                formatted_messages.append({"role": m["role"], "content": m["content"]})
+
+        call_kwargs = {
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "messages": formatted_messages,
+            "stream": True,
+        }
+        
+        try:
+            response = await client.chat.completions.create(**call_kwargs)
+            async for chunk in response:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            log.exception("Error in OpenAI-compatible stream completion")
+            raise RuntimeError(f"OpenAI-compatible stream failed: {e}") from e
+
 
 
 def _content_part_text(part: Any) -> str:
@@ -348,12 +921,22 @@ def _chat_completion_kwargs(
         "messages": messages,
     }
     token_limit = config.max_tokens
-    if provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model):
+    openai_reasoning_providers = (
+        "openai",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+    )
+    uses_reasoning_params = (
+        provider in openai_reasoning_providers
+        and _model_needs_reasoning_params(config.model)
+    )
+    if uses_reasoning_params:
         kwargs["max_completion_tokens"] = token_limit
     else:
         kwargs["max_tokens"] = token_limit
 
-    if not (provider in ("openai", "azure_openai") and _model_needs_reasoning_params(config.model)):
+    if not uses_reasoning_params:
         kwargs["temperature"] = config.temperature
     return kwargs
 
@@ -372,6 +955,9 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
         if "temperature" in retry_kwargs and "temperature" in message:
             retry_kwargs.pop("temperature", None)
             changed = True
+        if "tool_choice" in retry_kwargs and any(term in message for term in ("tool_choice", "tool choice", "thinking mode", "thinking_mode")):
+            retry_kwargs.pop("tool_choice", None)
+            changed = True
 
         if not changed:
             raise
@@ -388,7 +974,7 @@ def _extract_first_choice_text(resp: Any) -> str:
 async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     import anthropic as _ant
 
-    client = _ant.AsyncAnthropic(api_key=config.api_key)
+    client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
     content: list = []
     if screenshot_b64:
         content.append({
@@ -402,6 +988,11 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
         temperature=config.temperature,
         messages=[{"role": "user", "content": content}],
     )
+    _record_usage(config.model,
+                  getattr(resp.usage, "input_tokens", 0),
+                  getattr(resp.usage, "output_tokens", 0),
+                  cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+                  cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
@@ -409,7 +1000,14 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=config.api_key)
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+    )
+    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
     if screenshot_b64:
         parts.append(types.Part.from_bytes(
@@ -426,6 +1024,10 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
             temperature=config.temperature,
         ),
     )
+    _um = getattr(resp, "usage_metadata", None)
+    _record_usage(config.model,
+                  getattr(_um, "prompt_token_count", 0) if _um else 0,
+                  getattr(_um, "candidates_token_count", 0) if _um else 0)
     return resp.text or ""
 
 
@@ -440,6 +1042,7 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         if not base.endswith("/v1"):
             base += "/v1"
         kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
     client = AsyncOpenAI(**kwargs)
 
     if screenshot_b64:
@@ -458,13 +1061,20 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
 async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(api_key=config.api_key, base_url=OPENROUTER_BASE_URL)
+    _or_kwargs: dict = {"api_key": config.api_key, "base_url": OPENROUTER_BASE_URL, **_llm_client_kwargs()}
+    client = AsyncOpenAI(**_or_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -482,17 +1092,25 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
 async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     from openai import AsyncAzureOpenAI
 
-    client = AsyncAzureOpenAI(
-        api_key=config.api_key,
-        azure_endpoint=config.base_url,
-        api_version="2024-12-01-preview",
-    )
+    _az_kwargs: dict = {
+        "api_key": config.api_key,
+        "azure_endpoint": config.base_url,
+        "api_version": "2024-12-01-preview",
+        **_llm_client_kwargs(),
+    }
+    client = AsyncAzureOpenAI(**_az_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -510,18 +1128,38 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
 
 
-async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    """Azure AI Foundry serverless endpoints are OpenAI-compatible."""
+def _azure_foundry_openai_base_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith(("/openai/v1", "/v1")):
+        return base
+    if ".openai.azure.com" in base or ".services.ai.azure.com" in base:
+        return f"{base}/openai/v1"
+    return f"{base}/v1"
+
+
+async def _azure_foundry_openai(
+    config: LLMConfig,
+    prompt: str,
+    screenshot_b64: Optional[str],
+) -> str:
+    """Azure AI Foundry deployments that expose the OpenAI v1 chat completions API."""
     from openai import AsyncOpenAI
 
-    base = (config.base_url or "").rstrip("/")
-    if not base.endswith("/v1"):
-        base += "/v1"
-
-    client = AsyncOpenAI(api_key=config.api_key, base_url=base)
+    _afo_kwargs: dict = {
+        "api_key": config.api_key,
+        "base_url": _azure_foundry_openai_base_url(config.base_url or ""),
+        **_llm_client_kwargs(),
+    }
+    client = AsyncOpenAI(**_afo_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -539,7 +1177,72 @@ async def _azure_foundry(config: LLMConfig, prompt: str, screenshot_b64: Optiona
             messages=[{"role": "user", "content": msg_content}],
         ),
     )
+    _u = getattr(resp, "usage", None)
+    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
+    _record_usage(config.model,
+                  getattr(_u, "prompt_tokens", 0) if _u else 0,
+                  getattr(_u, "completion_tokens", 0) if _u else 0,
+                  cache_read_tokens=_u_cached)
     return _extract_first_choice_text(resp)
+
+
+def _azure_foundry_anthropic_messages_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/messages"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    if base.endswith("/anthropic"):
+        return f"{base}/v1/messages"
+    if ".openai.azure.com" in base or ".services.ai.azure.com" in base:
+        return f"{base}/anthropic/v1/messages"
+    return f"{base}/v1/messages"
+
+
+async def _azure_foundry_anthropic(
+    config: LLMConfig,
+    prompt: str,
+    screenshot_b64: Optional[str],
+) -> str:
+    """Azure AI Foundry Claude deployments that expose Anthropic Messages semantics."""
+    content: list[dict[str, Any]] = []
+    if screenshot_b64:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": screenshot_b64,
+            },
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+        "messages": [{"role": "user", "content": content}],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-api-key": config.api_key or "",
+        "anthropic-version": "2023-06-01",
+    }
+
+    async with _make_llm_http_client(timeout=120) as client:
+        resp = await client.post(
+            _azure_foundry_anthropic_messages_url(config.base_url or ""),
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    _af_u = data.get("usage", {})
+    _record_usage(config.model, _af_u.get("input_tokens", 0), _af_u.get("output_tokens", 0),
+                  cache_read_tokens=_af_u.get("cache_read_input_tokens", 0),
+                  cache_write_tokens=_af_u.get("cache_creation_input_tokens", 0))
+    return "".join(_content_part_text(block) for block in (data.get("content") or [])).strip()
 
 
 def _extract_bedrock_text(data: dict[str, Any]) -> str:
@@ -549,13 +1252,14 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
     return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
 
 
-async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    import httpx
+def _bedrock_region_from_url(base_url: str) -> str:
+    match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
+    return match.group(1) if match else "us-east-1"
 
-    if not config.api_key:
-        raise ValueError("Amazon Bedrock API key is required")
-    if not config.base_url:
-        raise ValueError("Amazon Bedrock Runtime endpoint is required")
+
+async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+    if config.api_key and not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required when using an API key")
 
     content: list[dict[str, Any]] = []
     if screenshot_b64:
@@ -574,6 +1278,51 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
             "temperature": config.temperature,
         },
     }
+    if not config.api_key:
+        import asyncio as _aio
+
+        import boto3
+        from botocore.config import Config as _BotocoreConfig
+
+        region = (
+            os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or _bedrock_region_from_url(config.base_url or "")
+        )
+        profile = os.getenv("AWS_PROFILE")
+        _proxy_url = _llm_proxy_var.get()
+        _model = config.model
+        _messages = payload["messages"]
+        _infer = payload["inferenceConfig"]
+        _endpoint = config.base_url or None
+
+        def _run_sync() -> dict:
+            _session_kwargs = {"profile_name": profile} if profile else {}
+            _session = boto3.Session(**_session_kwargs)
+            _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+            _client = _session.client(
+                "bedrock-runtime",
+                region_name=region,
+                endpoint_url=_endpoint,
+                verify=not _proxy_url,
+                **{"config": _boto_cfg} if _boto_cfg else {},
+            )
+            return _client.converse(
+                modelId=_model,
+                messages=_messages,
+                inferenceConfig=_infer,
+            )
+
+        loop = _aio.get_event_loop()
+        data = await loop.run_in_executor(None, _run_sync)
+        _bd_u = data.get("usage", {})
+        _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0),
+                      cache_read_tokens=_bd_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bd_u.get("cacheWriteInputTokens", 0))
+        return _extract_bedrock_text(data)
+
+    if not config.base_url:
+        raise ValueError("Amazon Bedrock Runtime endpoint is required")
     model_id = quote(config.model, safe="")
     url = f"{config.base_url.rstrip('/')}/model/{model_id}/converse"
     headers = {
@@ -582,98 +1331,18 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         "Accept": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with _make_llm_http_client(timeout=120) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
-        return _extract_bedrock_text(resp.json())
+        _resp_data = resp.json()
+    _bd_u2 = _resp_data.get("usage", {})
+    _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0),
+                  cache_read_tokens=_bd_u2.get("cacheReadInputTokens", 0),
+                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokens", 0))
+    return _extract_bedrock_text(_resp_data)
 
 
 # ── Scanner LLM functions ─────────────────────────────────────────────────────
-
-_PLAN_PROMPT = """\
-You are a web application penetration tester. Given the page details below, generate a list \
-of HTTP probes to test for OWASP Top 10 vulnerabilities.
-
-URL: {url}
-Title: {title}
-LLM Context: {context}
-{site_context_section}
-Page categories:
-- Authentication Required: {req_auth}
-- Takes User Input: {takes_input}
-- Contains Object Reference: {has_object_ref}
-- Contains Business Logic: {has_business_logic}
-
-Applicable OWASP checks: {applicable}
-
-{users_section}
-{category_guidance}
-{xss_canary_section}
-Return ONLY valid JSON — an array of probe objects (no markdown fences):
-[
-  {{
-    "type": "http",
-    "method": "GET",
-    "url": "https://...",
-    "params": {{}},
-    "headers": {{}},
-    "body": null,
-    "as_user": null,
-    "desc": "Brief description of what this probe tests"
-  }},
-  {{
-    "type": "form",
-    "url": "https://...",
-    "selector": "input[name='search']",
-    "payload": "<script>alert(1)</script>",
-    "submit_selector": "button[type=submit]",
-    "as_user": null,
-    "desc": "XSS in search field"
-  }},
-  {{
-    "type": "idor",
-    "url": "https://app.com/users/42",
-    "as_user": "bob",
-    "desc": "IDOR on user ID tested as low-privilege user"
-  }}
-]
-
-General rules:
-- Maximum 60 probes total. Prefer more targeted input-validation probes over repeating the same
-    authorization/IDOR pattern. If you cannot include everything, preserve coverage in this order:
-    SQL injection, XSS, object-reference tampering, authentication/authorization bypass, then other checks.
-- "http" probes: sent directly via HTTP client (auth bypass, header checks, URL/query param injection, JSON/form body tampering, SSRF).
-- "form" probes: require browser interaction (form input injection where CSRF tokens are needed).
-- "idor" probes: mark a URL that contains an object ID for IDOR testing. Use ONE per URL — the \
-scanner automatically finds peer IDs from the crawl and tests a ±500 range. \
-Do NOT generate individual http probes for each sequential ID.
-- Object references are not limited to REST-style path IDs. When testing authorization or IDOR, inspect and mutate IDs in:
-    - path segments such as /accounts/42 or /api/users/7;
-    - GET query parameters such as ?id=42, ?accountId=42, ?user_id=7;
-    - request bodies for POST/PUT/PATCH/DELETE, including JSON objects, nested JSON objects/arrays, and form-like fields.
-- For query-string IDs, put mutated values in the "params" object or in the URL query string.
-- For JSON body IDs, put a JSON object/array in "body" and include "Content-Type": "application/json" in "headers" when appropriate.
-- "as_user": set to a username from the available test users list to send the probe authenticated \
-as that specific user. Set to null to use the primary session. Use this for authorization bypass \
-testing — e.g. send a request as a low-privilege user to an endpoint that should be admin-only.
-- For auth bypass probes: include a version with empty Cookie and Authorization headers.
-- For injection probes, generate multiple payload variants per discovered input. Do not stop after one
-    generic payload. Cover reflected, stored-like, encoded, quote-breaking, numeric, boolean, and timing cases
-    where relevant. Keep payloads safe and non-destructive.
-    - SQLi boolean/string: ' OR '1'='1'--  /  " OR "1"="1"--  /  admin'--
-    - SQLi numeric: 1 OR 1=1--  /  0 OR 1=1  /  -1 OR 1=1
-    - SQLi error/union/order: ' UNION SELECT NULL--  /  1' ORDER BY 999--  /  ' AND extractvalue(1,concat(0x7e,version()))--
-    - SQLi timing: 1 AND SLEEP(1)--  /  '; WAITFOR DELAY '0:0:1'--  /  1); SELECT pg_sleep(1)--
-    - XSS HTML/script: <script>alert(1)</script>  /  "><script>alert(1)</script>
-    - XSS attribute breakouts: "><img src=x onerror=alert(1)>  /  ' autofocus onfocus=alert(1) x='
-    - XSS SVG/event: <svg onload=alert(1)>  /  <details open ontoggle=alert(1)>
-    - XSS encoded/url contexts: javascript:alert(1)  /  %3Cscript%3Ealert(1)%3C/script%3E
-  - SSTI: {{7*7}}  /  ${{7*7}}
-  - Path traversal: ../../../etc/passwd  /  ..%2F..%2Fetc%2Fpasswd
-  - SSRF: http://169.254.169.254/latest/meta-data/
-  - CMDi: ; echo aespa_probe  /  $(echo aespa_probe)
-- Do NOT generate probes for checks not in the applicable list.
-- Only generate probes relevant to this specific page."""
 
 
 def _build_users_section(users: list[dict] | None) -> str:
@@ -776,57 +1445,6 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
 
     return "\n\n".join(sections) if sections else ""
 
-_ANALYSE_PROMPT = """\
-You are a web application penetration tester reviewing probe results for OWASP vulnerabilities.
-
-Page URL: {url}
-
-Probe results:
-{results}
-
-For each result, determine whether it indicates a real vulnerability. Consider:
-- Unexpected data disclosure (other users' data, admin data)
-- Injection indicators (SQL errors, reflected payloads, template evaluation)
-- Auth bypass (200 on a protected resource without credentials)
-- Misconfiguration (missing security headers, verbose errors, version disclosure)
-- SSRF responses (cloud metadata, internal IP responses)
-
-Return ONLY valid JSON — an array of findings (empty array [] if none found, no markdown fences):
-[
-  {{
-    "owasp_category": "A03",
-    "title": "Reflected XSS in search parameter",
-    "description": "The search parameter reflects user input without encoding.",
-    "impact": "An attacker could execute JavaScript in a victim's browser and act as that user.",
-    "likelihood": "Likely when attacker-controlled links can be delivered to authenticated users.",
-    "recommendation": "Encode output by context, validate input, and add regression tests for this parameter.",
-    "cvss_score": 6.1,
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
-    "severity": "medium",
-    "affected_url": "https://example.com/search?q=<script>alert(1)</script>",
-    "evidence": "Short summary of the exact request and response evidence that proves the finding."
-  }}
-]
-
-The "affected_url" must be the exact URL from the probe result that triggered this finding (copy it verbatim from the probe results above).
-Write each finding using the report headings represented by these JSON fields:
-- description: what is vulnerable and where.
-- impact: what an attacker could achieve.
-- likelihood: practical exploitability in this observed context.
-- recommendation: specific remediation steps.
-
-Score every finding using CVSS v3.1. Provide both cvss_score and cvss_vector.
-Set severity from cvss_score: critical 9.0-10.0, high 7.0-8.9,
-medium 4.0-6.9, low 0.1-3.9, info 0.0.
-
-Severity levels: critical, high, medium, low, info
-OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
-A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
-A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
-A09 (Logging/Monitoring), A10 (SSRF)
-
-Be conservative — only report confirmed or highly likely issues, not theoretical ones."""
-
 
 async def plan_probes(
     config: LLMConfig,
@@ -900,83 +1518,291 @@ async def analyse_probes(
     config: LLMConfig,
     url: str,
     results: list[dict],
+    on_batch_complete=None,
 ) -> list[dict]:
-    """Ask the LLM to analyse probe results and return a list of findings."""
+    """Ask the LLM to analyse probe results and return a list of findings.
+
+    on_batch_complete: optional async callable(turn_num, batch_size, batch_findings)
+        called after each LLM batch completes.
+    """
     if not results:
         return []
-    results_text = "\n\n".join(
-        f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
-        f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
-        f"URL: {r.get('url')}\n"
-        f"Status: {r.get('status')}\n"
-        f"Request evidence:\n{str(r.get('request_evidence') or '')[:2000]}\n\n"
-        f"Response evidence:\n{str(r.get('response_evidence') or '')[:3000]}\n\n"
-        f"Response headers: {json.dumps(r.get('headers', {}))}\n"
-        f"Response body excerpt: {str(r.get('body', ''))[:1000]}"
-        for r in results
+
+    findings: list[dict] = []
+    batches = _chunk_probe_results(results)
+    for turn_num, batch in enumerate(batches, start=1):
+        batch_findings = await _analyse_probe_batch(config, url, batch)
+        findings.extend(batch_findings)
+        if on_batch_complete is not None:
+            await on_batch_complete(turn_num, len(batch), batch_findings)
+    return findings
+
+
+def _format_probe_result(result: dict) -> str:
+    return (
+        f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
+        f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"URL: {result.get('url')}\n"
+        f"Status: {result.get('status')}\n"
+        f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
+        f"Response evidence:\n{str(result.get('response_evidence') or '')[:3000]}\n\n"
+        f"Response headers: {json.dumps(result.get('headers', {}))}\n"
+        f"Response body excerpt: {str(result.get('body', ''))[:1000]}"
     )
-    prompt = _ANALYSE_PROMPT.format(url=url, results=results_text)
+
+
+def _chunk_probe_results(results: list[dict]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_size = 0
+
+    for result in results:
+        formatted = _format_probe_result(result)
+        separator_size = 2 if current_batch else 0
+        next_size = current_size + separator_size + len(formatted)
+        if current_batch and (
+            len(current_batch) >= ANALYSE_RESULTS_PER_BATCH
+            or next_size > ANALYSE_RESULTS_TEXT_BUDGET
+        ):
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+            separator_size = 0
+        current_batch.append(formatted)
+        current_size += separator_size + len(formatted)
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
+async def _analyse_probe_batch(
+    config: LLMConfig,
+    url: str,
+    result_texts: list[str],
+) -> list[dict]:
+    prompt = build_reporting_analyse_prompt(url, result_texts)
     raw = await _call(config, prompt, None)
     try:
-        findings = _extract_json(raw or "", expect=list)
-        if not isinstance(findings, list):
-            return []
-        required = {
-            "owasp_category",
-            "severity",
-            "title",
-            "description",
-            "impact",
-            "likelihood",
-            "recommendation",
-            "cvss_score",
-            "affected_url",
-            "evidence",
-        }
-        return [f for f in findings if isinstance(f, dict) and required.issubset(f)]
-    except Exception:
+        findings = parse_reporting_findings(raw or "")
+        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", findings)
+        return findings
+    except Exception as exc:
+        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", [], parse_error=str(exc))
+        log.warning(
+            "analyse_probes: failed to extract findings from LLM response (%s). "
+            "Raw response (first 500 chars): %r",
+            exc,
+            (raw or "")[:500],
+        )
         return []
+
+
+def build_reporting_analyse_prompt(
+    url: str,
+    result_texts: list[str],
+    *,
+    prompt_template: str | None = None,
+) -> str:
+    """Build the reporting/finding analysis prompt from replayable probe result text."""
+    template = prompt_template or _ANALYSE_PROMPT
+    return template.format(
+        url=url,
+        results="\n\n".join(result_texts),
+    )
+
+
+def parse_reporting_findings(raw: str) -> list[dict]:
+    """Parse the reporting LLM response into the structured findings shape."""
+    findings = _extract_json(raw or "", expect=list)
+    if not isinstance(findings, list):
+        return []
+    required = {
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "affected_url",
+        "evidence",
+    }
+    return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+
+
+def parse_reporting_finding(raw: str) -> dict:
+    """Parse one report finding object from an LLM response."""
+    finding = _extract_json(raw or "", expect=dict)
+    if not isinstance(finding, dict):
+        return {}
+    required = {
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "affected_url",
+        "evidence",
+    }
+    return finding if required.issubset(finding) else {}
+
+
+def build_reporting_writeup_prompt(
+    *,
+    source: str,
+    base_url: str,
+    finding: dict[str, Any],
+    evidence: dict[str, Any],
+    prompt_template: str | None = None,
+) -> str:
+    template = prompt_template or _WRITEUP_REPLAY_PROMPT
+    return template.format(
+        source=source,
+        base_url=base_url,
+        finding_json=json.dumps(finding, indent=2, ensure_ascii=False, default=str),
+        evidence_json=json.dumps(evidence, indent=2, ensure_ascii=False, default=str),
+    )
+
+
+async def rewrite_finding_writeup(
+    config: LLMConfig,
+    *,
+    source: str,
+    base_url: str,
+    finding_dict: dict[str, Any],
+    evidence_dict: dict[str, Any],
+) -> dict:
+    """Rewrite a persisted finding's prose through the writeup prompt.
+
+    Calls the LLM once with _WRITEUP_REPLAY_PROMPT and returns the parsed
+    finding dict on success, or an empty dict if the response cannot be parsed.
+    Does not invent evidence or create new findings — only improves wording.
+    """
+    prompt = build_reporting_writeup_prompt(
+        source=source,
+        base_url=base_url,
+        finding=finding_dict,
+        evidence=evidence_dict,
+    )
+    raw = await _call(config, prompt, None)
+    return parse_reporting_finding(raw or "")
+
+
+async def replay_reporting_writeup_capture(
+    config: LLMConfig,
+    capture: dict[str, Any],
+    *,
+    prompt_template: str | None = None,
+) -> dict[str, Any]:
+    """Replay one captured during-scan finding writeup through the reporting prompt."""
+    if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
+        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+    finding = capture.get("finding")
+    if not isinstance(finding, dict):
+        raise ValueError("writeup capture must contain finding")
+    evidence = capture.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    prompt = build_reporting_writeup_prompt(
+        source=str(capture.get("source") or "unknown"),
+        base_url=str(capture.get("base_url") or ""),
+        finding=finding,
+        evidence=evidence,
+        prompt_template=prompt_template,
+    )
+    raw = await _call(config, prompt, None)
+    parsed = parse_reporting_finding(raw or "")
+    findings = [parsed] if parsed else []
+    return {
+        "schema": "aespa.reporting.replay.result.v1",
+        "source_capture_schema": capture.get("schema"),
+        "source_capture_id": capture.get("capture_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "url": str(capture.get("url") or finding.get("affected_url") or ""),
+        "prompt": prompt,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "raw_response": raw or "",
+        "findings": findings,
+    }
+
+
+async def replay_reporting_capture(
+    config: LLMConfig,
+    capture: dict[str, Any],
+    *,
+    prompt_template: str | None = None,
+    use_saved_prompt: bool = False,
+) -> dict[str, Any]:
+    """Replay one captured reporting prompt payload through the configured LLM."""
+    if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
+        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+    url = str(capture.get("url") or "")
+    result_texts = capture.get("result_texts")
+    if not url or not isinstance(result_texts, list) or not all(isinstance(x, str) for x in result_texts):
+        raise ValueError("capture must contain url and result_texts")
+    if use_saved_prompt and prompt_template is None:
+        prompt = str(capture.get("prompt") or "")
+        if not prompt:
+            raise ValueError("capture does not contain a saved prompt")
+    else:
+        prompt = build_reporting_analyse_prompt(url, result_texts, prompt_template=prompt_template)
+    raw = await _call(config, prompt, None)
+    findings = parse_reporting_findings(raw or "")
+    return {
+        "schema": "aespa.reporting.replay.result.v1",
+        "source_capture_schema": capture.get("schema"),
+        "source_capture_id": capture.get("capture_id"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "url": url,
+        "prompt": prompt,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "raw_response": raw or "",
+        "findings": findings,
+    }
+
+
+def _capture_reporting_replay(
+    config: LLMConfig,
+    url: str,
+    result_texts: list[str],
+    prompt: str,
+    raw_response: str,
+    findings: list[dict],
+    *,
+    parse_error: str | None = None,
+) -> None:
+    try:
+        from aespa.services import reporting_debug as reporting_debug_svc
+
+        if not reporting_debug_svc.is_capture_enabled():
+            return
+        reporting_debug_svc.capture_reporting_batch(
+            run_id=_run_id_var.get(),
+            url=url,
+            result_texts=result_texts,
+            prompt=prompt,
+            prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            llm={
+                "provider": config.provider,
+                "base_url": config.base_url,
+                "model": config.model,
+                "max_tokens": config.max_tokens,
+                "temperature": config.temperature,
+            },
+            raw_response=raw_response,
+            findings=findings,
+            parse_error=parse_error,
+        )
+    except Exception as exc:
+        log.warning("failed to write reporting replay capture: %s", exc)
 
 
 # ── Site-level test plan ──────────────────────────────────────────────────────
-
-_SITE_PLAN_PROMPT = """\
-You are a senior web application penetration tester preparing a security assessment.
-
-Below is a summary of all pages discovered during crawling of the target web application.
-Analyse the attack surface, reason through the application's architecture, and produce a
-structured test plan with specific, actionable vulnerability hypotheses.
-
-Target base URL: {base_url}
-
-Discovered pages ({page_count} total):
-{pages_summary}
-
-Consider:
-- What kind of application is this? (auth model, user roles, key data objects)
-- What are the highest-value attack targets? (admin panels, financial operations, \
-ID-bearing endpoints, privileged actions)
-- What systemic vulnerabilities are likely based on the observed structure and page categories?
-- What cross-endpoint attack chains deserve testing? For example: auth bypass by calling a \
-final step directly without going through a gated check step; IDOR across resource types; \
-privilege escalation by sending a lower-privilege token to an admin endpoint.
-
-Return ONLY valid JSON in this exact format:
-{{
-  "app_summary": "2-3 sentence description of the application, its key roles, and security-relevant features",
-  "attack_hypotheses": [
-    {{
-      "hypothesis": "Short label for this attack scenario",
-      "description": "What to test, why it may be vulnerable, and which endpoints are involved",
-      "target_pages": ["partial URL or pattern"],
-      "owasp": "A01"
-    }}
-  ],
-  "critical_areas": ["URL pattern or page type that deserves the most thorough testing"],
-  "test_notes": "Specific techniques, IDs, credentials, header patterns, or sequences the scanner should use"
-}}
-
-Limit to the 8 most valuable attack hypotheses. Be specific and actionable."""
 
 
 async def generate_site_test_plan(
@@ -1014,55 +1840,6 @@ async def generate_site_test_plan(
 
 
 # ── Follow-up probe planning ──────────────────────────────────────────────────
-
-_FOLLOWUP_PROMPT = """\
-You are a senior web application penetration tester reviewing mid-scan probe results.
-
-You have just run an initial set of probes against the page below and received the results.
-Your task is to reason through what you observe, identify any promising leads, and generate
-targeted follow-up probes that would confirm, deepen, or chain from the potential issues.
-
-Page URL: {url}
-Page context: {context}
-
-Site-level test plan context:
-{site_context}
-
-Initial probe results:
-{initial_results}
-
-Think through:
-- Which results look anomalous or potentially vulnerable? (unexpected 200s on restricted pages, \
-error messages that disclose stack traces or internals, reflected or stored payloads, \
-differing responses for different input values, auth bypass indicators)
-- For each interesting result, what follow-up probe would confirm or rule out the issue?
-- Are there attack chains implied by multiple results together? In particular:
-  • If a check/validate/verify endpoint responded saying something is required (e.g. TOTP, pin,
-    2FA code, elevated privilege), probe the corresponding action endpoint DIRECTLY without
-    providing that requirement, to test whether enforcement is server-side or only client-side.
-  • If a response revealed a new endpoint URL, resource ID, token, or parameter — probe it.
-  • If a check returned requires_X: true but the action endpoint is not yet probed — add a probe
-    calling the action endpoint with the required field absent or empty.
-- Did any response reveal new endpoints, IDs, tokens, or parameters worth testing?
-
-Generate targeted follow-up probes. Prefer quality over quantity — a focused probe testing a
-specific hypothesis is more valuable than re-running broad coverage.
-
-Return ONLY valid JSON — an array of follow-up probe objects (max 20, return [] if no leads):
-[
-  {{
-    "type": "http",
-    "method": "GET",
-    "url": "https://...",
-    "params": {{}},
-    "headers": {{}},
-    "body": null,
-    "as_user": null,
-    "desc": "Follow-up: what this tests and why"
-  }}
-]
-
-Return [] if no results look promising enough to warrant follow-up investigation."""
 
 
 async def plan_followup_probes(
@@ -1106,27 +1883,6 @@ async def plan_followup_probes(
 
 # ── Finding title normalisation ───────────────────────────────────────────────
 
-_NORMALIZE_TITLES_PROMPT = """\
-You are deduplicating security findings from a web application penetration test report.
-
-EXISTING confirmed findings for this test run:
-{existing_list}
-
-NEW candidate findings just discovered (normalize these):
-{new_list}
-
-Rules:
-- If a new finding is the same vulnerability class as an existing one (same OWASP category \
-and root cause, possibly on a different URL), set its title to EXACTLY the existing title.
-- If two new findings in this batch are the same class, give them the SAME title (pick the \
-clearest one).
-- If a new finding is genuinely different, keep its title as-is.
-- Do NOT merge or drop findings — return one entry per new finding.
-
-Return ONLY a JSON array, one object per new finding in the same order:
-[{{"index": 0, "title": "..."}}, ...]
-"""
-
 
 async def normalize_finding_titles(
     config: "LLMConfig",
@@ -1145,8 +1901,8 @@ async def normalize_finding_titles(
         for i, f in enumerate(existing_findings[:60])
     )
     new_list = "\n".join(
-        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] "
-        f"{f.get('title', '?')} — {(f.get('description') or '')[:120]}"
+        f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
+        + (f"\n     desc: {(f.get('description') or '')[:120]}" if f.get('description') else "")
         for i, f in enumerate(new_findings)
     )
 
@@ -1173,64 +1929,1157 @@ async def normalize_finding_titles(
         return new_findings
 
 
+def _format_findings_as_text(findings: list[dict]) -> str:
+    """Format findings as structured text sorted by severity for LLM input.
+
+    Works with both full _finding_summary dicts and compact _compact_finding_summary
+    dicts, so it can be used in both the per-bucket and global deduplication prompts.
+    """
+    _sev = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    ordered = sorted(
+        findings,
+        key=lambda f: (_sev.get(str(f.get("severity") or "").lower(), 5), f.get("id") or 0),
+    )
+    parts = []
+    for f in ordered:
+        header = (
+            f"### [{(f.get('severity') or 'unknown').upper()}] "
+            f"Finding {f.get('id')} \u2014 {f.get('title') or '(untitled)'}"
+        )
+        lines = [
+            header,
+            f"OWASP: {f.get('owasp_category') or f.get('owasp') or 'unknown'}",
+            f"URL: {f.get('affected_url') or f.get('url') or 'unknown'}",
+        ]
+        for key in ("description", "desc"):
+            if v := str(f.get(key) or "").strip():
+                lines.append(f"Description: {v}")
+                break
+        for key, label in (
+            ("impact", "Impact"),
+            ("likelihood", "Likelihood"),
+            ("recommendation", "Recommendation"),
+            ("evidence", "Evidence"),
+        ):
+            if v := str(f.get(key) or "").strip():
+                lines.append(f"{label}: {v}")
+        parts.append("\n".join(lines))
+    return "\n\n---\n\n".join(parts)
+
+
+async def deduplicate_finding_groups(
+    config: "LLMConfig",
+    *,
+    target: str,
+    findings: list[dict],
+) -> list[list[int]]:
+    """Return LLM-identified duplicate finding id groups for one target bucket."""
+    if len(findings) < 2:
+        return []
+
+    truncated = []
+    for finding in findings[:40]:
+        truncated.append({
+            "id": finding.get("id"),
+            "owasp_category": finding.get("owasp_category"),
+            "severity": finding.get("severity"),
+            "affected_url": finding.get("affected_url"),
+            "title": finding.get("title"),
+            "description": str(finding.get("description") or "")[:1200],
+            "impact": str(finding.get("impact") or "")[:600],
+            "likelihood": str(finding.get("likelihood") or "")[:400],
+            "recommendation": str(finding.get("recommendation") or "")[:600],
+            "evidence": str(finding.get("evidence") or "")[:800],
+        })
+
+    prompt = _DEDUPLICATE_FINDINGS_PROMPT.format(
+        target=target or "(unknown target)",
+        findings_text=_format_findings_as_text(truncated),
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        data = _extract_json(raw or "", expect=dict)
+        groups = data.get("duplicate_groups") if isinstance(data, dict) else None
+        if not isinstance(groups, list):
+            return []
+        allowed_ids = {
+            int(finding["id"])
+            for finding in findings
+            if isinstance(finding.get("id"), int)
+        }
+        result: list[list[int]] = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("ids"), list):
+                continue
+            ids = []
+            for raw_id in group["ids"]:
+                if isinstance(raw_id, int) and raw_id in allowed_ids and raw_id not in ids:
+                    ids.append(raw_id)
+            if len(ids) >= 2:
+                result.append(ids)
+        return result
+    except Exception as exc:
+        log.warning("deduplicate_finding_groups failed: %s", exc)
+        return []
+
+
+async def global_deduplicate_findings(
+    config: "LLMConfig",
+    *,
+    findings: list[dict],
+) -> list[list[int]]:
+    """Two-phase global cross-target consolidation pass.
+
+    Phase 1 — the LLM assigns a canonical vulnerability fingerprint to every finding.
+    Phase 2 — findings that share an identical fingerprint are grouped deterministically
+               without a second LLM call.
+    """
+    if len(findings) < 2:
+        return []
+
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: (
+            sev_order.get(str(f.get("severity") or "").lower(), 5),
+            f.get("id") or 0,
+        ),
+    )
+    batch = sorted_findings[:120]
+
+    prompt = _FINGERPRINT_PROMPT.format(
+        findings_text=_format_findings_as_text(batch),
+    )
+    try:
+        raw = await _call(config, prompt, None)
+        data = _extract_json(raw or "", expect=dict)
+        fp_list = data.get("fingerprints") if isinstance(data, dict) else None
+        if not isinstance(fp_list, list):
+            return []
+        allowed_ids = {
+            int(f["id"])
+            for f in findings
+            if isinstance(f.get("id"), int)
+        }
+        # Phase 2: group by fingerprint.
+        # Cross-URL groups are safe here — the merge step in deduplicate_findings
+        # will consolidate different-URL instances into merged_instances rather than
+        # deleting them, so all instance data is preserved.
+        by_fp: dict[str, list[int]] = {}
+        for entry in fp_list:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            fp = str(entry.get("fingerprint") or "").strip().lower()
+            if not fp or not isinstance(raw_id, int) or raw_id not in allowed_ids:
+                continue
+            by_fp.setdefault(fp, []).append(raw_id)
+        return [ids for ids in by_fp.values() if len(ids) >= 2]
+    except Exception as exc:
+        log.warning("global_deduplicate_findings failed: %s", exc)
+        return []
+
+
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
 
-_THINKING_NEXT_ACTION_PROMPT = """\
-You are an expert web application penetration tester conducting a hands-on security assessment.
-You are working iteratively: each turn you review everything learned so far and decide on ONE
-specific HTTP request to send next, exactly like a human tester driving curl.
 
-Target base URL: {target_url}
 
-Application context discovered during crawling:
-{crawl_context}
+def select_wstg_skills(
+    pages: list[dict],
+    intel_items: list[dict],
+    *,
+    requires_auth: bool = False,
+    base_url: str = "",
+    login_url: str = "",
+) -> set[str]:
+    """Evaluate crawl intelligence and return the set of WSTG skill keys to inject.
 
-{credentials_section}
-Step {current_step} of {max_steps}.
+    Parameters
+    ----------
+    pages:
+        List of page dicts from pages_snapshot (keys: url, req_auth,
+        takes_input, has_object_ref, has_business_logic).
+    intel_items:
+        List of TargetIntelItem dicts (keys: kind, key, value, url).
+    requires_auth:
+        Whether the site requires authentication.
+    base_url:
+        Target base URL (used for path-pattern matching when page list is sparse).
+    login_url:
+        The site's configured login URL, if any. A configured login URL is itself a
+        credential endpoint, so it triggers the auth-robustness checks even when the
+        login form sits at a non-standard path the URL-fragment match would miss.
+    """
+    selected: set[str] = {"headers"}  # security headers: always relevant
 
-History of previous actions and responses:
-{history_text}
+    page_urls_lower = [str(p.get("url") or "").lower() for p in pages]
+    intel_kinds = {str(i.get("kind") or "") for i in intel_items}
+    intel_keys_lower = {str(i.get("key") or "").lower() for i in intel_items}
+    intel_values_lower = {str(i.get("value") or "").lower() for i in intel_items}
+    intel_urls_lower = {str(i.get("url") or "").lower() for i in intel_items}
 
-────────────────────────────────────────────────────────────────────────────────
-TASK: What is the single most valuable HTTP request to send RIGHT NOW?
+    # ── Injection surface ──────────────────────────────────────────────────────
+    has_inputs = (
+        any(p.get("takes_input") for p in pages)
+        or "form" in intel_kinds
+        or "input" in intel_kinds
+    )
+    if has_inputs:
+        selected.update({"sqli", "xss", "cmdi"})
 
-Think like a human tester:
-- Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
-  API endpoints, error messages, and any other signals.
-- Use discovered tokens in Authorization headers for subsequent requests.
-- Test for IDOR by swapping IDs you found from one response into requests for another resource.
-- Look for auth bypasses, privilege escalation, injection, business-logic flaws, info disclosure.
-- When you find something interesting, follow it up immediately — don't move on too quickly.
-- If step count is getting high, prefer confirming likely findings over exploring new areas.
-- Be explicit about what made the next request worthwhile. Do not use vague phrases like
-    "found something interesting" unless you also name the specific signal and hypothesis.
+    # ── Authentication surface ─────────────────────────────────────────────────
+    has_auth_pages = (
+        requires_auth
+        or any(p.get("req_auth") for p in pages)
+        or any(
+            frag in url
+            for frag in _AUTH_PATH_FRAGMENTS
+            for url in page_urls_lower
+        )
+        or "token_hint" in intel_kinds
+    )
+    if has_auth_pages:
+        selected.update({"auth_bypass", "sessions"})
+        if has_inputs:
+            selected.add("csrf")
 
-Return ONLY valid JSON (no markdown, no prose):
+    # ── Credential endpoints → auth robustness ─────────────────────────────────
+    # Weak password policy, rate-limiting, and lockout are only testable where
+    # credentials are actually submitted (a login / registration / password form),
+    # so gate this on credential-endpoint URLs — NOT the broad has_auth_pages,
+    # which is true for any authenticated area (dashboards, /account, /admin).
+    has_credential_endpoint = (
+        bool(login_url.strip())  # a configured login URL is itself a credential endpoint
+        or any(
+            frag in url
+            for frag in _CREDENTIAL_PATH_FRAGMENTS
+            for url in page_urls_lower
+        )
+    )
+    if has_credential_endpoint:
+        selected.add("auth_robustness")
 
-To make one HTTP request:
-{{
-  "action": "http",
-  "method": "GET",
-  "url": "https://...",
-  "headers": {{}},
-  "body": null,
-    "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
-    "hypothesis": "Specific issue or behavior this request is investigating",
-    "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
-    "note": "One sentence combining the observation, hypothesis, and why this request is valuable"
-}}
+    # ── Object references / IDOR ───────────────────────────────────────────────
+    has_object_refs = (
+        any(p.get("has_object_ref") for p in pages)
+        or "id" in intel_kinds
+        or any("/api/" in url for url in page_urls_lower)
+        or any(
+            part.isdigit()
+            for url in page_urls_lower
+            for part in url.split("/")
+            if part
+        )
+    )
+    if has_object_refs:
+        selected.add("idor")
 
-Body rules:
-- Omit or set null when there is no body.
-- Use a JSON object for JSON API payloads (Content-Type will be set automatically).
-- Use a plain string for form-encoded or raw bodies.
+    # ── SSRF — URL-type input parameters or fetch-a-URL features ──────────────
+    # SSRF often has no obvious url= parameter, so also look for feature fragments
+    # (avatar/logo by URL, import/preview, webhook config, PDF/report export) in
+    # parameter names and URLs — not just the canonical SSRF param-name list.
+    _SSRF_FEATURE_FRAGMENTS = (
+        "webhook", "callback", "redirect", "proxy", "import", "fetch",
+        "preview", "unfurl", "avatar", "logo", "thumbnail", "screenshot",
+        "/pdf", "/report", "/export", "/render", "remote",
+    )
+    has_ssrf_params = (
+        any(key in _SSRF_PARAM_NAMES for key in intel_keys_lower)
+        or any(val.startswith("http") for val in intel_values_lower)
+        or any(
+            any(frag in key for frag in _SSRF_FEATURE_FRAGMENTS)
+            for key in intel_keys_lower
+        )
+        or any(
+            any(frag in url for frag in _SSRF_FEATURE_FRAGMENTS)
+            for url in page_urls_lower + list(intel_urls_lower)
+        )
+    )
+    if has_ssrf_params:
+        selected.add("ssrf")
 
-To finish the assessment (all key areas covered, or steps nearly exhausted):
-{{
-  "action": "done",
-  "summary": "2-3 sentence summary of notable findings and tested areas"
-}}
-"""
+    # ── API endpoints → CORS ───────────────────────────────────────────────────
+    has_api = (
+        any("/api/" in url or "/graphql" in url for url in page_urls_lower)
+        or "endpoint" in intel_kinds
+        or any("/api/" in url for url in intel_urls_lower)
+    )
+    if has_api:
+        selected.add("cors")
+
+    # ── Business logic / multi-step flows ─────────────────────────────────────
+    has_business_logic = (
+        any(p.get("has_business_logic") for p in pages)
+        or any(
+            frag in url
+            for frag in ("/checkout", "/payment", "/order", "/cart",
+                         "/transfer", "/confirm", "/submit", "/approve")
+            for url in page_urls_lower
+        )
+    )
+    if has_business_logic:
+        selected.add("workflow")
+
+    # ── File upload surfaces ───────────────────────────────────────────────────
+    has_file_upload = (
+        "upload" in intel_kinds
+        or any(
+            frag in url
+            for frag in ("/upload", "/file", "/attachment", "/import", "/media")
+            for url in page_urls_lower
+        )
+        or any("upload" in key for key in intel_keys_lower)
+        or any(
+            val in ("file", "upload", "attachment", "multipart")
+            for val in intel_values_lower
+        )
+    )
+    if has_file_upload:
+        selected.add("file_upload")
+
+    return selected
+
+
+def build_wstg_skill_context(selected: set[str]) -> str:
+    """Assemble selected WSTG skill blocks into a single context string."""
+    blocks = [
+        WSTG_SKILLS[key]
+        for key in _SKILL_ORDER
+        if key in selected and key in WSTG_SKILLS
+    ]
+    if not blocks:
+        return ""
+    return (
+        "WSTG technique reference — selected for this target's attack surface:\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+# ── Continuous agentic session (Anthropic native tool use) ────────────────────
+
+TOOL_RESULT_CHAR_LIMIT = 8_000
+# All providers that support native tool use and therefore run the continuous
+# agentic session.  Non-Anthropic providers use the OpenAI function-calling
+# wire format or the Bedrock Converse toolConfig format.
+AGENTIC_LOOP_PROVIDERS = frozenset({
+    "anthropic",
+    "azure_foundry_anthropic",
+    "bedrock",
+    "openai",
+    "openai_compatible",
+    "openrouter",
+    "azure_openai",
+    "azure_foundry",
+    "azure_foundry_openai",
+    "google",
+})
+
+
+
+def _with_anthropic_cache(
+    messages: list[dict],
+    tools: list[dict] | None,
+) -> tuple[list[dict], list[dict] | None]:
+    """Helper to copy messages and tools, and attach ephemeral cache points
+    to the last item of each, avoiding in-place mutation of the caller's lists.
+    """
+    cached_messages = [dict(m) for m in messages]
+    if cached_messages:
+        last_msg = dict(cached_messages[-1])
+        content = last_msg.get("content")
+        if isinstance(content, str):
+            content_list = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            content_list = [dict(block) for block in content]
+        else:
+            content_list = []
+
+        if content_list:
+            # Attach cache_control to the last block in the content array
+            content_list[-1] = {**content_list[-1], "cache_control": {"type": "ephemeral"}}
+            last_msg["content"] = content_list
+            cached_messages[-1] = last_msg
+
+    cached_tools = None
+    if tools is not None:
+        cached_tools = [dict(t) for t in tools]
+        if cached_tools:
+            # Attach cache_control to the last tool definition
+            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+    return cached_messages, cached_tools
+
+
+async def _call_with_tools(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    """Call an LLM with tool definitions.
+
+    The *messages* list is always in Anthropic format (the canonical internal
+    representation used by thinking_agentic_loop).  Each provider branch
+    translates that list into the wire format it needs, calls the API, and
+    returns results normalised back to Anthropic-style content blocks so the
+    loop never has to know which provider it is talking to.
+
+    Returns (content_blocks, stop_reason, raw_content_for_history) where
+    content_blocks is a normalised list of dicts with {type, id, name, input, text}
+    and raw_content_for_history is appended as the assistant message (always in
+    Anthropic-format so the growing messages list stays consistent).
+    """
+    _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    # ── Anthropic (direct) ────────────────────────────────────────────────────
+    if config.provider == "anthropic":
+        import anthropic as _ant
+
+        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
+        resp = await client.messages.create(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            system=[{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            tools=cached_tools,
+            messages=cached_messages,
+        )
+        blocks = [
+            {
+                "type": b.type,
+                "id": getattr(b, "id", None),
+                "name": getattr(b, "name", None),
+                "input": getattr(b, "input", None),
+                "text": getattr(b, "text", None),
+            }
+            for b in (resp.content or [])
+        ]
+        _record_usage(config.model,
+                      getattr(resp.usage, "input_tokens", 0),
+                      getattr(resp.usage, "output_tokens", 0),
+                      cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+                      cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
+        return blocks, resp.stop_reason or "end_turn", resp.content
+
+    # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
+    if config.provider == "azure_foundry_anthropic":
+        cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
+        payload = {
+            "model": config.model,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "system": [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            "tools": cached_tools,
+            "messages": cached_messages,
+        }
+        hdrs = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": config.api_key or "",
+            "anthropic-version": "2023-06-01",
+        }
+        async with _make_llm_http_client(timeout=120) as client:
+            resp = await client.post(
+                _azure_foundry_anthropic_messages_url(config.base_url or ""),
+                headers=hdrs,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        content = data.get("content") or []
+        blocks = [
+            {
+                "type": b.get("type"),
+                "id": b.get("id"),
+                "name": b.get("name"),
+                "input": b.get("input"),
+                "text": b.get("text"),
+            }
+            for b in content
+        ]
+        _cwt_u = data.get("usage", {})
+        _record_usage(config.model, _cwt_u.get("input_tokens", 0), _cwt_u.get("output_tokens", 0),
+                      cache_read_tokens=_cwt_u.get("cache_read_input_tokens", 0),
+                      cache_write_tokens=_cwt_u.get("cache_creation_input_tokens", 0))
+        return blocks, data.get("stop_reason") or "end_turn", content
+
+    # ── AWS Bedrock (Converse API with toolConfig) ────────────────────────────
+    if config.provider == "bedrock":
+        import asyncio as _asyncio
+
+        tool_config = {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "inputSchema": {"json": t.get("input_schema", {"type": "object"})},
+                    }
+                }
+                for t in _active_tools
+            ]
+        }
+
+        def _ant_msg_to_converse(msg: dict) -> dict:
+            role = msg["role"]
+            content = msg["content"]
+            if isinstance(content, str):
+                return {"role": role, "content": [{"text": content}]}
+            cvt: list[dict] = []
+            for blk in content:
+                btype = blk.get("type")
+                if btype == "text":
+                    cvt.append({"text": blk.get("text") or ""})
+                elif btype == "tool_use":
+                    cvt.append({
+                        "toolUse": {
+                            "toolUseId": blk.get("id") or "",
+                            "name": blk.get("name") or "",
+                            "input": blk.get("input") or {},
+                        }
+                    })
+                elif btype == "tool_result":
+                    result_content = blk.get("content") or ""
+                    cvt.append({
+                        "toolResult": {
+                            "toolUseId": blk.get("tool_use_id") or "",
+                            "content": [{"text": result_content}]
+                            if isinstance(result_content, str)
+                            else result_content,
+                        }
+                    })
+            return {"role": role, "content": cvt}
+
+        converse_messages = [_ant_msg_to_converse(m) for m in messages]
+        system_list = [
+            {"text": system_message},
+            {"cachePoint": {"type": "default"}},
+        ]
+
+        # Cache the static initial user message (crawl context + WSTG blocks).
+        # It is messages[0] and never changes during the scan, so it qualifies
+        # as a stable prefix.  The cachePoint is re-sent on every turn, which
+        # is correct — Bedrock resets the TTL on each cache hit.
+        if converse_messages and converse_messages[0].get("role") == "user":
+            first_content = list(converse_messages[0].get("content") or [])
+            if not any("cachePoint" in blk for blk in first_content):
+                first_content = first_content + [{"cachePoint": {"type": "default"}}]
+            converse_messages = [
+                {**converse_messages[0], "content": first_content},
+                *converse_messages[1:],
+            ]
+
+        # Cache the latest turn of the conversation history to enable prefix extension caching.
+        if len(converse_messages) > 1:
+            last_msg = converse_messages[-1]
+            last_content = list(last_msg.get("content") or [])
+            if not any("cachePoint" in blk for blk in last_content):
+                last_content = last_content + [{"cachePoint": {"type": "default"}}]
+            converse_messages[-1] = {**last_msg, "content": last_content}
+
+        if config.api_key:
+            # Bearer-token path (SAML / federated credentials stored as api_key).
+            # Uses the same HTTP endpoint as _bedrock() so SAML token users work.
+            model_id = quote(config.model, safe="")
+            url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse"
+            payload: dict = {
+                "messages": converse_messages,
+                "system": system_list,
+                "toolConfig": tool_config,
+                "inferenceConfig": {
+                    "maxTokens": config.max_tokens,
+                    "temperature": config.temperature,
+                },
+            }
+            headers = {
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            async with _make_llm_http_client(timeout=120) as _hx:
+                _resp = await _hx.post(url, headers=headers, json=payload)
+                _resp.raise_for_status()
+                data = _resp.json()
+        else:
+            # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
+            # Capture proxy URL now — ContextVar values are not inherited by threads.
+            _proxy_url = _llm_proxy_var.get()
+
+            def _run_converse():
+                import boto3
+                from botocore.config import Config as _BotocoreConfig
+
+                region = (
+                    os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or _bedrock_region_from_url(config.base_url or "")
+                )
+                profile = os.getenv("AWS_PROFILE")
+                session_kwargs = {"profile_name": profile} if profile else {}
+                session = boto3.Session(**session_kwargs)
+                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+                client = session.client(
+                    "bedrock-runtime",
+                    region_name=region,
+                    endpoint_url=config.base_url or None,
+                    verify=not _proxy_url,
+                    **{"config": _boto_cfg} if _boto_cfg else {},
+                )
+                return client.converse(
+                    modelId=config.model,
+                    system=system_list,
+                    messages=converse_messages,
+                    toolConfig=tool_config,
+                    inferenceConfig={
+                        "maxTokens": config.max_tokens,
+                        "temperature": config.temperature,
+                    },
+                )
+
+            loop = _asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _run_converse)
+        stop_reason_raw = data.get("stopReason") or "end_turn"
+        stop_reason = "tool_use" if stop_reason_raw == "tool_use" else "end_turn"
+        out_content = (
+            ((data.get("output") or {}).get("message") or {}).get("content") or []
+        )
+        blocks: list[dict] = []
+        for blk in out_content:
+            if "text" in blk:
+                blocks.append({"type": "text", "id": None, "name": None,
+                                "input": None, "text": blk["text"]})
+            elif "toolUse" in blk:
+                tu = blk["toolUse"]
+                blocks.append({"type": "tool_use", "id": tu.get("toolUseId"),
+                                "name": tu.get("name"), "input": tu.get("input") or {},
+                                "text": None})
+        # Store as Anthropic-format so the messages list stays consistent
+        raw_content_ant = [
+            {"type": b["type"], **{
+                k: v for k, v in b.items() if k != "type"
+            }}
+            for b in blocks
+        ]
+        _bdt_u = data.get("usage", {})
+        _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0),
+                      cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
+                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0))
+        return blocks, stop_reason, raw_content_ant
+
+    # ── OpenAI-style providers ─────────────────────────────────────────────────
+    # Covers: openai, openai_compatible, openrouter, azure_openai,
+    #         azure_foundry, azure_foundry_openai
+    def _ant_tools_to_openai() -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object"}),
+                },
+            }
+            for t in _active_tools
+        ]
+
+    def _ant_messages_to_openai(msgs: list[dict]) -> list[dict]:
+        """Translate Anthropic-format messages list to OpenAI chat format."""
+        result: list[dict] = [{"role": "system", "content": system_message}]
+        for msg in msgs:
+            role = msg["role"]
+            content = msg["content"]
+            if isinstance(content, str):
+                result.append({"role": role, "content": content})
+                continue
+            if role == "user":
+                tool_results = [b for b in content if b.get("type") == "tool_result"]
+                text_blocks  = [b for b in content if b.get("type") == "text"]
+                if tool_results:
+                    for tr in tool_results:
+                        rc = tr.get("content") or ""
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": tr.get("tool_use_id") or "",
+                            "content": rc if isinstance(rc, str) else json.dumps(rc),
+                        })
+                elif text_blocks:
+                    result.append({
+                        "role": "user",
+                        "content": " ".join(b.get("text", "") for b in text_blocks),
+                    })
+            elif role == "assistant":
+                text_parts    = [b.get("text", "") for b in content if b.get("type") == "text"]
+                tool_use_blks = [b for b in content if b.get("type") == "tool_use"]
+                oai_msg: dict = {
+                    "role": "assistant",
+                    "content": " ".join(filter(None, text_parts)) or None,
+                }
+                if tool_use_blks:
+                    oai_msg["tool_calls"] = [
+                        {
+                            "id": b.get("id") or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": b.get("name") or "",
+                                "arguments": json.dumps(b.get("input") or {}),
+                            },
+                        }
+                        for i, b in enumerate(tool_use_blks)
+                    ]
+                result.append(oai_msg)
+        return result
+
+    if config.provider in (
+        "openai", "openai_compatible", "openrouter",
+        "azure_openai", "azure_foundry", "azure_foundry_openai",
+    ):
+        from openai import AsyncOpenAI
+
+        client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.provider == "openrouter":
+            client_kwargs["base_url"] = OPENROUTER_BASE_URL
+        elif config.provider in ("azure_openai", "azure_foundry", "azure_foundry_openai"):
+            base = (config.base_url or "").rstrip("/")
+            client_kwargs["base_url"] = (
+                _azure_foundry_openai_base_url(base)
+                if config.provider in ("azure_foundry", "azure_foundry_openai")
+                else base
+            )
+        elif config.provider in ("openai", "openai_compatible") and config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            client_kwargs["base_url"] = base
+        client_kwargs.update(_llm_client_kwargs())
+        oai_client = AsyncOpenAI(**client_kwargs)
+        oai_tools = _ant_tools_to_openai()
+        oai_messages = _ant_messages_to_openai(messages)
+        call_kwargs = _chat_completion_kwargs(
+            config=config,
+            provider=config.provider,
+            messages=oai_messages,
+        )
+        call_kwargs["tools"] = oai_tools
+        model_lower = (config.model or "").lower()
+        # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
+        if not getattr(config, "force_tool_choice", True):
+            pass
+        elif "r1" in model_lower or "reasoner" in model_lower or "thinking" in model_lower:
+            # Reasoning/thinking models do not support forced tool choice
+            pass
+        else:
+            call_kwargs["tool_choice"] = "required"
+        resp = await _create_chat_completion(oai_client, call_kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        finish = getattr(choice, "finish_reason", None) or "stop"
+        blocks = []
+        if msg.content:
+            blocks.append({"type": "text", "id": None, "name": None,
+                            "input": None, "text": msg.content})
+        for tc in (getattr(msg, "tool_calls", None) or []):
+            try:
+                inp = json.loads(tc.function.arguments)
+            except Exception:
+                inp = {}
+            blocks.append({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": inp,
+                "text": None,
+            })
+        stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
+        _oai_u = getattr(resp, "usage", None)
+        _oai_cached = getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0) if _oai_u else 0
+        _record_usage(config.model,
+                      getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+                      cache_read_tokens=_oai_cached)
+        return blocks, stop_reason, blocks  # store Anthropic-format in history
+
+    # ── Google Gemini (function calling) ──────────────────────────────────────
+    if config.provider == "google":
+        from google import genai
+        from google.genai import types as _gtypes
+
+        def _ant_tools_to_gemini() -> list:
+            fn_decls = []
+            for t in _active_tools:
+                schema = t.get("input_schema") or {}
+                fn_decls.append(
+                    _gtypes.FunctionDeclaration(
+                        name=t["name"],
+                        description=t.get("description", ""),
+                        parameters=schema if schema else None,
+                    )
+                )
+            return [_gtypes.Tool(function_declarations=fn_decls)]
+
+        def _ant_contents_to_gemini(msgs: list[dict]) -> list:
+            result = []
+            for msg in msgs:
+                role = "user" if msg["role"] == "user" else "model"
+                content = msg["content"]
+                parts: list = []
+                if isinstance(content, str):
+                    parts.append(_gtypes.Part(text=content))
+                elif isinstance(content, list):
+                    for blk in content:
+                        btype = blk.get("type")
+                        if btype == "text":
+                            parts.append(_gtypes.Part(text=blk.get("text") or ""))
+                        elif btype == "tool_use":
+                            _ts = blk.get("thought_signature")
+                            parts.append(_gtypes.Part(
+                                function_call=_gtypes.FunctionCall(
+                                    name=blk.get("name") or "",
+                                    args=blk.get("input") or {},
+                                ),
+                                **({'thought_signature': _ts} if _ts is not None else {}),
+                            ))
+                        elif btype == "tool_result":
+                            rc = blk.get("content") or ""
+                            parts.append(_gtypes.Part(
+                                function_response=_gtypes.FunctionResponse(
+                                    name=blk.get("tool_use_id") or "",
+                                    response={"result": rc},
+                                )
+                            ))
+                if parts:
+                    result.append(_gtypes.Content(role=role, parts=parts))
+            return result
+
+        _g_proxy = _llm_proxy_var.get()
+        _g_http_opts: dict = {}
+        if config.base_url:
+            _g_http_opts["base_url"] = config.base_url
+        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+            verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+        )
+        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+        g_tools = _ant_tools_to_gemini()
+        g_contents = _ant_contents_to_gemini(messages)
+        g_resp = await g_client.aio.models.generate_content(
+            model=config.model,
+            contents=g_contents,
+            config=_gtypes.GenerateContentConfig(
+                system_instruction=system_message,
+                tools=g_tools,
+                max_output_tokens=config.max_tokens,
+                temperature=config.temperature,
+            ),
+        )
+        blocks = []
+        for part in (g_resp.candidates[0].content.parts if g_resp.candidates else []):
+            if getattr(part, "text", None):
+                blocks.append({"type": "text", "id": None, "name": None,
+                                "input": None, "text": part.text})
+            elif getattr(part, "function_call", None):
+                fc = part.function_call
+                blocks.append({
+                    "type": "tool_use",
+                    "id": fc.name,   # Gemini doesn't issue call IDs; use name
+                    "name": fc.name,
+                    "input": dict(fc.args) if fc.args else {},
+                    "text": None,
+                    "thought_signature": getattr(part, "thought_signature", None),
+                })
+        stop_reason = (
+            "tool_use"
+            if any(b["type"] == "tool_use" for b in blocks)
+            else "end_turn"
+        )
+        _g_um = getattr(g_resp, "usage_metadata", None)
+        _record_usage(config.model,
+                      getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
+                      getattr(_g_um, "candidates_token_count", 0) if _g_um else 0)
+        return blocks, stop_reason, blocks
+
+    raise ValueError(f"Provider {config.provider!r} does not support native tool use")
+
+
+async def thinking_agentic_loop(
+    config: "LLMConfig",
+    *,
+    system_message: str,
+    initial_user_message: str,
+    tool_executor,
+    emit_fn=None,
+    stop_check=None,
+    done_check=None,
+    resume_messages: list[dict] | None = None,
+    on_checkpoint=None,
+    tools: list[dict] | None = None,
+) -> str:
+    """Run a continuous Anthropic tool-use session.
+
+    Maintains a growing messages list so the model reads its own prior reasoning
+    verbatim instead of from a lossy reconstructed summary.
+
+    tool_executor: async (tool_name: str, tool_input: dict, step: int) -> str
+
+    resume_messages: if provided, the loop restores this conversation history
+        instead of building a fresh one from initial_user_message.  Used when
+        resuming an interrupted scan.
+
+    on_checkpoint: optional async callable ``(messages: list[dict]) -> None``
+        invoked after every completed LLM turn so the caller can persist the
+        current conversation state to durable storage.
+
+    Returns the summary string from the final ``done`` call (empty string otherwise).
+    """
+    if resume_messages is not None:
+        messages: list[dict] = resume_messages
+    else:
+        messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    tool_call_count = 0
+    final_summary = ""
+    consecutive_text_only_turns = 0
+
+    try:
+      while True:
+        if stop_check and stop_check():
+            break
+
+        if emit_fn:
+            try:
+                emit_fn({
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "deciding",
+                    "message": (
+                        f"Step {tool_call_count + 1}: "
+                        "LLM deciding next action\u2026"
+                    ),
+                    "data": {
+                        "step": tool_call_count + 1,
+                        "mode": "agentic",
+                    },
+                })
+            except Exception:
+                pass
+
+        try:
+            if emit_fn:
+                try:
+                    emit_fn({
+                        "type": "scanner_phase",
+                        "phase": "llm_request",
+                        "status": "pending",
+                        "message": (
+                            f"Step {tool_call_count + 1}: sending to LLM "
+                            f"({len(messages)} messages in context)\u2026"
+                        ),
+                        "data": {
+                            "step": tool_call_count + 1,
+                            "message_count": len(messages),
+                        },
+                    })
+                except Exception:
+                    pass
+            _step_no = tool_call_count + 1
+            _t_llm = time.monotonic()
+            _llm_fut = asyncio.ensure_future(
+                _call_with_tools(config, system_message, messages, tools=tools)
+            )
+            while True:
+                _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
+                if _done:
+                    break
+                _elapsed = int(time.monotonic() - _t_llm)
+                if emit_fn:
+                    try:
+                        emit_fn({
+                            "type": "scanner_phase",
+                            "phase": "llm_heartbeat",
+                            "status": "pending",
+                            "message": (
+                                f"Step {_step_no}: waiting for LLM response "
+                                f"({_elapsed}s elapsed)\u2026"
+                            ),
+                        })
+                    except Exception:
+                        pass
+            content_blocks, stop_reason, raw_content = _llm_fut.result()
+        except Exception as exc:
+            log.error(
+                "thinking_agentic_loop: API error at step %d: %s",
+                tool_call_count + 1, exc,
+            )
+            _exc_resp = getattr(exc, "response", None)
+            _exc_code = (_exc_resp.get("Error", {}).get("Code", "") if isinstance(_exc_resp, dict) else type(exc).__name__)
+            _is_expired = "ExpiredToken" in _exc_code or "ExpiredToken" in type(exc).__name__ or "expired" in str(exc).lower()
+            if emit_fn:
+                try:
+                    if _is_expired:
+                        _msg = (
+                            f"Step {tool_call_count + 1}: AWS credentials have expired. "
+                            "Please refresh your AWS credentials and resume the pentest."
+                        )
+                    else:
+                        _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                    emit_fn({
+                        "type": "scanner_phase",
+                        "phase": "llm_response",
+                        "status": "error",
+                        "message": _msg,
+                        "data": {"step": tool_call_count + 1, "error": str(exc)},
+                    })
+                except Exception:
+                    pass
+            break
+
+        tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+        text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
+
+        if emit_fn:
+            action_label = (
+                ", ".join(b["name"] for b in tool_use_blocks)
+                if tool_use_blocks else "end_turn"
+            )
+            try:
+                emit_fn({
+                    "type": "scanner_phase",
+                    "phase": "llm_response",
+                    "status": "complete",
+                    "message": f"Step {tool_call_count + 1}: LLM \u2192 {action_label}",
+                    "data": {
+                        "step": tool_call_count + 1,
+                        "raw_response": "\n".join(
+                            b.get("text", "") for b in text_blocks
+                        )[:4000],
+                    },
+                })
+            except Exception:
+                pass
+
+        # Append the assistant turn to the growing conversation
+        messages.append({"role": "assistant", "content": raw_content})
+
+        if not tool_use_blocks:
+            # OpenAI-style reasoning models occasionally narrate the next step instead
+            # of emitting the required tool call. Treat that as a recoverable protocol
+            # slip; only the explicit `done` tool is allowed to finish the scan.
+            if text_blocks:
+                final_summary = (text_blocks[-1].get("text") or "")[:500]
+            consecutive_text_only_turns += 1
+            if consecutive_text_only_turns >= 3:
+                log.warning(
+                    "thinking_agentic_loop: model returned %d consecutive text-only "
+                    "turns; ending assessment.",
+                    consecutive_text_only_turns,
+                )
+                break
+            messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Your previous response did not call a tool, so no scan action "
+                        "was executed. Continue by calling exactly one tool now. Use "
+                        "http_request, browser, context_tool, write_finding, forge_jwt, "
+                        "decode_jwt, credential_check, or register_account for the next "
+                        "assessment step. Call done only if the assessment is genuinely "
+                        "complete and key attack areas have been covered."
+                    ),
+                }],
+            })
+            continue
+        consecutive_text_only_turns = 0
+
+        # Execute each tool call and collect results for the next user message
+        tool_results = []
+        session_done = False
+
+        for block in tool_use_blocks:
+            tool_call_count += 1
+            tool_name = block.get("name") or ""
+            tool_input = block.get("input") or {}
+            tool_use_id = block.get("id") or ""
+
+            if stop_check and stop_check():
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Scan stopped by user.",
+                })
+                session_done = True
+                break
+
+            if tool_name == "done":
+                final_summary = str(tool_input.get("summary") or "")
+                if done_check:
+                    try:
+                        done_ok, done_feedback = done_check(tool_input, tool_call_count)
+                    except Exception as exc:
+                        log.warning("thinking_agentic_loop: done_check failed: %s", exc)
+                        done_ok, done_feedback = True, ""
+                    if not done_ok:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": (
+                                done_feedback
+                                or "Assessment is not complete. Continue with one concrete tool call."
+                            ),
+                        })
+                        session_done = False
+                        break
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "Assessment complete.",
+                })
+                session_done = True
+                break
+
+            try:
+                result_str = await tool_executor(tool_name, tool_input, tool_call_count)
+            except Exception as exc:
+                log.warning(
+                    "thinking_agentic_loop: tool %r step %d error: %s",
+                    tool_name, tool_call_count, exc,
+                )
+                result_str = f"Tool execution error: {exc}"
+
+            if len(result_str) > TOOL_RESULT_CHAR_LIMIT:
+                omitted = len(result_str) - TOOL_RESULT_CHAR_LIMIT
+                result_str = (
+                    result_str[:TOOL_RESULT_CHAR_LIMIT]
+                    + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
+                )
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_str,
+            })
+
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+
+        if on_checkpoint:
+            try:
+                await on_checkpoint(messages)
+            except Exception:
+                pass  # checkpoint write failures must never abort the scan
+
+        if session_done:
+            break
+
+    finally:
+        # Save a final checkpoint on any exit — including CancelledError raised
+        # by task.cancel() — so the conversation state is always recoverable.
+        if on_checkpoint and len(messages) > 1:
+            try:
+                await on_checkpoint(messages)
+            except Exception:
+                pass
+
+    return final_summary
+
+
 
 
 async def thinking_next_action(
@@ -1241,43 +3090,75 @@ async def thinking_next_action(
     max_steps: int,
     current_step: int,
     credentials: list[dict] | None = None,
+    sessions: list[dict] | None = None,
     emit_fn=None,
 ) -> dict:
     """Ask the LLM for the next action in an agentic (thinking) scan.
 
     Returns a dict with either:
+      {"action": "tool", "tool": ..., "args": {...}, "note": ...}
       {"action": "http", "method": ..., "url": ..., "headers": ..., "body": ..., "note": ...}
+      {"action": "browser", "url": ..., "steps": [...], "note": ...}
+      {"action": "jwt", "secret": ..., "claims": {...}, "header": {...}, "note": ...}
+      {"action": "credential_check", "url": ..., "candidates": [...], "note": ...}
+    {"action": "register_account", "url": ..., "store_as": ..., "note": ...}
+      {"action": "finding_write", ...}
     or:
       {"action": "done", "summary": ...}
     """
-    # Format history — give full detail for recent steps, compress older ones.
-    RECENT = 8
+    # Format history compactly. Full crawl/page details remain available via context tools.
+    RECENT = 5
+    MAX_HISTORY_CHARS = 18_000
     if not history:
         history_text = "(none — this is the first step)"
     else:
         lines: list[str] = []
-        for i, h in enumerate(history):
-            is_recent = i >= len(history) - RECENT
-            body_limit = 3000 if is_recent else 400
+        older_count = max(0, len(history) - RECENT)
+        if older_count:
+            older = history[:older_count]
+            lines.append(
+                f"Earlier history: {older_count} step(s) summarized. "
+                f"Use history_search to retrieve details. "
+                f"Recent earlier URLs: "
+                + ", ".join(str(h.get("url") or "") for h in older[-8:] if h.get("url"))[:1000]
+            )
+        for h in history[-RECENT:]:
+            method = str(h.get("method") or "")
+            is_tool = method == "TOOL"
+            _is_js_step = str(h.get("url") or "").split("?")[0].lower().endswith(".js")
+            body_limit = 2200 if is_tool else (6000 if _is_js_step else 1400)
             resp_excerpt = str(h.get("response_body") or "")[:body_limit]
             req_body = h.get("request_body")
             req_body_str = (
-                json.dumps(req_body)[:400] if isinstance(req_body, dict)
-                else str(req_body or "")[:400]
+                json.dumps(req_body, separators=(",", ":"), default=str)[:300]
+                if isinstance(req_body, dict)
+                else str(req_body or "")[:300]
+            )
+            response_headers = h.get("response_headers") or {}
+            response_headers_str = (
+                json.dumps(response_headers, separators=(",", ":"), default=str)[:350]
+                if response_headers else "{}"
             )
             lines.append(
-                f"Step {h['step']}: {h['method']} {h['url']}\n"
+                f"Step {h.get('step')}: {method} {h.get('url')}\n"
                 f"  Note: {h.get('note', '')}\n"
                 f"  Request body: {req_body_str or '(none)'}\n"
-                f"  Response status: {h['response_status']}\n"
+                f"  Response status: {h.get('response_status')}\n"
+                f"  Response headers: {response_headers_str}\n"
                 f"  Response body: {resp_excerpt}"
             )
         history_text = "\n\n".join(lines)
+        if len(history_text) > MAX_HISTORY_CHARS:
+            history_text = (
+                history_text[:MAX_HISTORY_CHARS]
+                + "\n\n[history truncated; use history_search for older or larger response details]"
+            )
 
     credentials_section = ""
     if credentials:
         cred_lines = [
             f"  - username={c['username']}  password={c['password']}"
+            + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
             for c in credentials
         ]
         credentials_section = (
@@ -1285,12 +3166,28 @@ async def thinking_next_action(
             + "\n".join(cred_lines)
         )
 
+    sessions_section = ""
+    if sessions:
+        session_lines = [
+            f"  - label={s.get('label')}  kind={s.get('kind', 'bearer')}"
+            + (f"  username={s.get('username')}" if s.get("username") else "")
+            + (f"  source={s.get('source')}" if s.get("source") else "")
+            for s in sessions
+        ]
+        sessions_section = (
+            "Reusable authenticated sessions (includes sessions from prior scans) — "
+            "use these labels instead of re-authenticating or re-forging tokens:\n"
+            + "\n".join(session_lines)
+        )
+
     prompt = _THINKING_NEXT_ACTION_PROMPT.format(
         target_url=target_url,
         crawl_context=crawl_context,
         credentials_section=credentials_section,
+        sessions_section=sessions_section,
         current_step=current_step,
         max_steps=max_steps,
+        pentest_playbook=_THINKING_PENTEST_PLAYBOOK,
         history_text=history_text,
     )
     if emit_fn:
@@ -1307,12 +3204,28 @@ async def thinking_next_action(
     raw = await _call(config, prompt, None)
     action: dict
     try:
-        action = _extract_json(raw or "", expect=dict)
-        if not isinstance(action, dict) or action.get("action") not in ("http", "done"):
-            raise ValueError("unexpected action")
+        action = _normalize_thinking_action(_extract_action_json(raw or ""))
     except Exception as exc:
-        log.warning("thinking_next_action: failed to parse LLM response (%s). Raw: %r", exc, (raw or "")[:300])
-        action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+        log.warning(
+            "thinking_next_action: initial parse failed (%s), retrying with correction prompt. "
+            "Raw (first 300 chars): %r",
+            exc,
+            (raw or "")[:300],
+        )
+        try:
+            # Re-send the original prompt with the correction appended so the model
+            # has full context and doesn't return a generic "no task provided" done.
+            correction_with_context = (
+                prompt
+                + "\n\n---\n"
+                + _THINKING_CORRECTION_PROMPT
+            )
+            raw2 = await _call(config, correction_with_context, None)
+            action = _normalize_thinking_action(_extract_action_json(raw2 or ""))
+            log.info("thinking_next_action: correction retry succeeded — action=%r", action.get("action"))
+        except Exception as exc2:
+            log.warning("thinking_next_action: retry also failed (%s). Ending assessment.", exc2)
+            action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
     if emit_fn:
         try:
             emit_fn({
@@ -1321,7 +3234,12 @@ async def thinking_next_action(
                 "status": "complete",
                 "message": (
                     f"Step {current_step}: LLM → {action.get('action')}"
+                    + (f" {action.get('tool','')}" if action.get('action') == 'tool' else '')
                     + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'browser' else '')
+                    + (f" {action.get('store_as','')}" if action.get('action') == 'jwt' else '')
+                    + (f" {action.get('url','')}" if action.get('action') == 'credential_check' else '')
+                    + (f" {action.get('title','')}" if action.get('action') == 'finding_write' else '')
                     + (
                         f": {action.get('hypothesis') or action.get('note','')}"
                         if action.get('hypothesis') or action.get('note')
@@ -1335,64 +3253,23 @@ async def thinking_next_action(
     return action
 
 
-# ── Validation LLM functions ──────────────────────────────────────────────────
-
-_VALIDATION_PLAN_PROMPT = """\
-You are a web application penetration tester. A security scanner flagged a potential vulnerability.
-Generate targeted HTTP probes to CONFIRM or REFUTE this specific finding.
-
-Finding:
-- Title: {title}
-- OWASP Category: {owasp_category}
-- Severity: {severity}
-- Affected URL: {affected_url}
-- Description: {description}
-
-Original evidence:
-{evidence}
-
-{users_section}
-
-Strategy:
-- Reproduce the exact condition that triggered the finding.
-- For auth/access control issues: test with both privileged and unprivileged users (set as_user).
-- For injection findings: repeat the exact payload and look for the evaluation marker.
-- For missing header / config issues: re-request the URL and inspect the response.
-- For IDOR: re-request the affected URL with a different user's session (set as_user).
-
-Return ONLY valid JSON — an array of up to 10 probe objects (no markdown fences).
-Use the same probe format as scanning (type, method, url, params, headers, body, as_user, desc).
-Return [] if no targeted probes can be generated."""
+def _disproof_hints_for_finding(owasp_category: str) -> str:
+    """Return category-specific disproof strategies or an empty string."""
+    cat = (owasp_category or "").upper()
+    for key, hints in _DISPROOF_HINTS.items():
+        if cat.startswith(key):
+            return hints
+    return ""
 
 
-_VALIDATION_VERDICT_PROMPT = """\
-You are a web application penetration tester reviewing validation probe results.
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
-Original finding:
-- Title: {title}
-- Description: {description}
 
-Original evidence:
-{evidence}
-
-Validation probe results:
-{results}
-
-Based on the probe results, determine whether this finding is CONFIRMED or a FALSE POSITIVE.
-
-Consider:
-- Does any probe reproduce the vulnerability? (injection marker present, access granted, etc.)
-- Does the server behaviour match what the original finding described?
-- Could the original evidence have been a false positive (coincidental keyword, expected redirect)?
-
-Return ONLY valid JSON (no markdown fences):
-{{
-  "verdict": "confirmed",
-  "reasoning": "The validation probe reproduced the issue: the payload was reflected verbatim."
-}}
-
-"verdict" must be exactly "confirmed" or "false_positive".
-"reasoning" should be 1–3 sentences explaining the decision."""
+def severity_meets_threshold(severity: str, min_severity: str) -> bool:
+    """Return True when *severity* is at or above *min_severity*."""
+    rank = _SEVERITY_RANK.get((severity or "low").lower(), 3)
+    threshold = _SEVERITY_RANK.get((min_severity or "low").lower(), 3)
+    return rank <= threshold
 
 
 async def plan_validation_probes(

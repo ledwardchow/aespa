@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from collections.abc import Iterator
 
 from sqlalchemy.engine import Engine
@@ -41,13 +43,19 @@ def init_db() -> None:
 
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
+    _ensure_column(engine, "site", "scope_hosts", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
     _ensure_column(engine, "test_run", "scanner_policy_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(engine, "credential", "login_url", "TEXT")
+    _ensure_column(engine, "credential", "auth_mode", "TEXT NOT NULL DEFAULT 'auto'")
+    _ensure_column(engine, "credential", "totp_seed", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "crawled_page", "scan_status", "TEXT NOT NULL DEFAULT 'pending'")
@@ -63,12 +71,90 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "cvss_vector", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "request_evidence", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "response_evidence", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "evidence_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "scan_finding", "screenshot_b64", "TEXT")
+    _ensure_column(engine, "scan_finding", "finding_source", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
+    _ensure_column(engine, "scan_finding", "merged_instances", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
+    _ensure_column(engine, "test_run", "recon_summary", "TEXT")
+    _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
+    _ensure_llm_provider_config_migration(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
+    _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
+    _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS reporting_debug_config (
+                id INTEGER PRIMARY KEY,
+                capture_enabled INTEGER NOT NULL DEFAULT 0,
+                panel_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS upstream_proxy_config (
+                id INTEGER PRIMARY KEY,
+                proxy_url TEXT,
+                proxy_scanner INTEGER NOT NULL DEFAULT 0,
+                proxy_llm INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS burp_mcp_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                server_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:9876/sse',
+                transport TEXT NOT NULL DEFAULT 'sse',
+                send_http1_tool TEXT NOT NULL DEFAULT 'send_http1_request',
+                scanner_issues_tool TEXT NOT NULL DEFAULT 'get_scanner_issues',
+                active_scan_tool TEXT,
+                seed_limit INTEGER NOT NULL DEFAULT 200,
+                issue_poll_retries INTEGER NOT NULL DEFAULT 6,
+                issue_poll_interval_s REAL NOT NULL DEFAULT 5.0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS burp_rest_api_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                api_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:1337',
+                api_key TEXT,
+                scan_configuration_name TEXT DEFAULT 'Audit checks - all except time-based detection methods',
+                scan_sqli INTEGER NOT NULL DEFAULT 1,
+                scan_xss INTEGER NOT NULL DEFAULT 1,
+                scan_command_injection INTEGER NOT NULL DEFAULT 1,
+                scan_path_traversal INTEGER NOT NULL DEFAULT 1,
+                scan_ssrf INTEGER NOT NULL DEFAULT 1,
+                scan_xxe INTEGER NOT NULL DEFAULT 1,
+                scan_ssti INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    _ensure_column(
+        engine,
+        "burp_rest_api_config",
+        "scan_configuration_name",
+        "TEXT DEFAULT 'Audit checks - all except time-based detection methods'",
+    )
+    _ensure_column(engine, "burp_rest_api_config", "scan_command_injection", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_path_traversal", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_ssrf", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_xxe", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "burp_rest_api_config", "scan_ssti", "INTEGER NOT NULL DEFAULT 1")
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
@@ -112,6 +198,336 @@ def _migrate(engine: Engine) -> None:
             )
         """))
         conn.commit()
+    # target_intel_item — normalized crawl/recon inventory used by the UI and scanners.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS target_intel_item (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                kind TEXT NOT NULL,
+                key TEXT NOT NULL DEFAULT '',
+                value TEXT NOT NULL DEFAULT '',
+                url TEXT,
+                method TEXT,
+                source TEXT NOT NULL DEFAULT 'crawler',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                evidence TEXT NOT NULL DEFAULT '',
+                item_metadata TEXT NOT NULL DEFAULT '{}',
+                discovered_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_test_run_id "
+            "ON target_intel_item (test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_kind "
+            "ON target_intel_item (kind)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_key "
+            "ON target_intel_item (key)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_target_intel_item_url "
+            "ON target_intel_item (url)"
+        ))
+        conn.commit()
+    # pentest_hypothesis / pentest_task — durable dynamic-scan plan.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS pentest_hypothesis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                attack_area TEXT NOT NULL DEFAULT '',
+                owasp_category TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                priority INTEGER NOT NULL DEFAULT 50,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                rationale TEXT NOT NULL DEFAULT '',
+                created_from TEXT NOT NULL DEFAULT '',
+                related_intel_ids TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS pentest_task (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                hypothesis_id INTEGER REFERENCES pentest_hypothesis(id),
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                target_url TEXT NOT NULL DEFAULT '',
+                method TEXT NOT NULL DEFAULT 'GET',
+                task_type TEXT NOT NULL DEFAULT 'recon',
+                status TEXT NOT NULL DEFAULT 'queued',
+                priority INTEGER NOT NULL DEFAULT 50,
+                evidence TEXT NOT NULL DEFAULT '',
+                result_summary TEXT NOT NULL DEFAULT '',
+                last_action_step INTEGER,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for table in ("pentest_hypothesis", "pentest_task"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_test_run_id ON {table} (test_run_id)"
+            ))
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_status ON {table} (status)"
+            ))
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_priority ON {table} (priority)"
+            ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_title "
+            "ON pentest_hypothesis (title)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_attack_area "
+            "ON pentest_hypothesis (attack_area)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_hypothesis_id "
+            "ON pentest_task (hypothesis_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_title ON pentest_task (title)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_target_url ON pentest_task (target_url)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_pentest_task_task_type ON pentest_task (task_type)"
+        ))
+        conn.commit()
+    # scanner_session — durable scanner auth/session material with stable labels.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scanner_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                label TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'cookie',
+                username TEXT,
+                credential_id INTEGER REFERENCES credential(id),
+                source TEXT NOT NULL DEFAULT 'scanner',
+                cookies_json TEXT NOT NULL DEFAULT '{}',
+                extra_headers_json TEXT NOT NULL DEFAULT '{}',
+                session_metadata TEXT NOT NULL DEFAULT '{}',
+                token_hint TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        for column in ("test_run_id", "label", "kind", "username", "credential_id", "is_active"):
+            conn.execute(__import__("sqlalchemy").text(
+                f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
+                f"ON scanner_session ({column})"
+            ))
+        conn.commit()
+    # specialist_agent_config — singleton settings for specialist agent dispatch.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS specialist_agent_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                max_concurrent INTEGER NOT NULL DEFAULT 5,
+                max_steps INTEGER NOT NULL DEFAULT 30,
+                min_priority INTEGER NOT NULL DEFAULT 7,
+                dispatch_idor INTEGER NOT NULL DEFAULT 1,
+                dispatch_auth_bypass INTEGER NOT NULL DEFAULT 1,
+                dispatch_sqli INTEGER NOT NULL DEFAULT 1,
+                dispatch_xss INTEGER NOT NULL DEFAULT 1,
+                dispatch_business_logic INTEGER NOT NULL DEFAULT 1,
+                dispatch_ssrf INTEGER NOT NULL DEFAULT 1,
+                dispatch_path_traversal INTEGER NOT NULL DEFAULT 1,
+                dispatch_cors INTEGER NOT NULL DEFAULT 0,
+                dispatch_crypto INTEGER NOT NULL DEFAULT 1,
+                dispatch_config INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+    # adversarial_validator_config — singleton settings for the adversarial validator.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS adversarial_validator_config (
+                id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                max_steps INTEGER NOT NULL DEFAULT 20,
+                min_severity TEXT NOT NULL DEFAULT 'low',
+                auto_validate_inline INTEGER NOT NULL DEFAULT 1,
+                require_concrete_disproof INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+    _ensure_column(
+        engine,
+        "specialist_agent_config",
+        "trigger_specialist_on_burp",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        engine,
+        "specialist_agent_config",
+        "dispatch_file_upload",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS alice_chat_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                session_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'Session 1',
+                position INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_alice_chat_session_test_run_id "
+            "ON alice_chat_session (test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS alice_chat_message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES alice_chat_session(id),
+                message_key TEXT NOT NULL,
+                sender TEXT NOT NULL DEFAULT 'alice',
+                type TEXT NOT NULL DEFAULT 'message',
+                text TEXT NOT NULL DEFAULT '',
+                ts TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_alice_chat_message_session_id "
+            "ON alice_chat_message (session_id)"
+        ))
+        conn.commit()
+
+
+def _ensure_llm_provider_config_migration(engine: Engine) -> None:
+    sql = __import__("sqlalchemy").text
+    with engine.connect() as conn:
+        conn.execute(sql("""
+            CREATE TABLE IF NOT EXISTS llm_provider_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                api_format TEXT NOT NULL DEFAULT 'anthropic',
+                api_key TEXT,
+                base_url TEXT,
+                models_json TEXT NOT NULL DEFAULT '[]',
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(sql("""
+            CREATE TABLE IF NOT EXISTS aespa_migration_state (
+                key TEXT PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+        applied = conn.execute(
+            sql("SELECT 1 FROM aespa_migration_state WHERE key = 'llm_provider_split_v1'")
+        ).first()
+        if applied is not None:
+            return
+
+        profiles = conn.execute(sql("""
+            SELECT id, name, provider, api_key, base_url, model, updated_at
+            FROM llm_config
+            WHERE provider_id IS NULL
+            ORDER BY id ASC
+        """)).mappings().all()
+        provider_by_key: dict[tuple[str, str | None, str | None], int] = {}
+        legacy_provider_formats = {
+            "anthropic",
+            "openai",
+            "openai_compatible",
+            "openrouter",
+            "google",
+            "bedrock",
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+            "azure_foundry_anthropic",
+        }
+        for profile in profiles:
+            api_format = (
+                profile["provider"]
+                if profile["provider"] in legacy_provider_formats
+                else "openai"
+            )
+            base_url = profile["base_url"]
+            api_key = profile["api_key"]
+            key = (api_format, base_url, api_key)
+            provider_id = provider_by_key.get(key)
+            if provider_id is None:
+                label = {
+                    "anthropic": "Anthropic",
+                    "openai": "OpenAI",
+                    "openai_compatible": "OpenAI-compatible",
+                    "openrouter": "OpenRouter",
+                    "google": "Google",
+                    "bedrock": "Bedrock",
+                    "azure_openai": "Azure OpenAI",
+                    "azure_foundry": "Azure Foundry",
+                    "azure_foundry_openai": "Azure Foundry OpenAI",
+                    "azure_foundry_anthropic": "Azure Foundry Anthropic",
+                }.get(api_format, "OpenAI")
+                provider_name = f"{profile['name']} {label} Provider".strip()
+                result = conn.execute(sql("""
+                    INSERT INTO llm_provider_config (name, api_format, api_key, base_url, models_json, updated_at)
+                    VALUES (:name, :api_format, :api_key, :base_url, :models_json, COALESCE(:updated_at, datetime('now')))
+                """), {
+                    "name": provider_name,
+                    "api_format": api_format,
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "models_json": json.dumps([profile["model"]]),
+                    "updated_at": profile["updated_at"],
+                })
+                provider_id = int(result.lastrowid)
+                provider_by_key[key] = provider_id
+            else:
+                row = conn.execute(
+                    sql("SELECT models_json FROM llm_provider_config WHERE id = :id"),
+                    {"id": provider_id},
+                ).first()
+                models = json.loads(row[0] or "[]") if row is not None else []
+                if profile["model"] not in models:
+                    models.append(profile["model"])
+                    conn.execute(
+                        sql("UPDATE llm_provider_config SET models_json = :models_json WHERE id = :id"),
+                        {"id": provider_id, "models_json": json.dumps(models)},
+                    )
+
+            conn.execute(sql("""
+                UPDATE llm_config
+                SET provider_id = :provider_id,
+                    provider = :api_format,
+                    api_key = NULL,
+                    base_url = NULL
+                WHERE id = :profile_id
+            """), {"provider_id": provider_id, "api_format": api_format, "profile_id": profile["id"]})
+
+        # Existing historical runs that selected a profile should now fall back
+        # to the system default profile, as requested for this schema change.
+        conn.execute(sql("UPDATE test_run SET llm_config_id = NULL WHERE llm_config_id IS NOT NULL"))
+        conn.execute(sql("INSERT INTO aespa_migration_state (key) VALUES ('llm_provider_split_v1')"))
+        conn.commit()
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:
@@ -128,6 +544,96 @@ def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> Non
                 )
             )
             conn.commit()
+
+
+def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
+    """Allow findings to be saved when no specific crawled page applies."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    columns = [
+        "id",
+        "test_run_id",
+        "page_id",
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "cvss_vector",
+        "affected_url",
+        "evidence",
+        "request_evidence",
+        "response_evidence",
+        "evidence_json",
+        "merged_instances",
+        "screenshot_b64",
+        "finding_source",
+        "validation_status",
+        "validation_note",
+        "created_at",
+    ]
+    column_list = ", ".join(columns)
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(scan_finding)")))
+        page_id_row = next((row for row in rows if row[1] == "page_id"), None)
+        if page_id_row is None or int(page_id_row[3] or 0) == 0:
+            return
+
+        conn.execute(sql("DROP TABLE IF EXISTS scan_finding_nullable_migration"))
+        conn.execute(sql("""
+            CREATE TABLE scan_finding_nullable_migration (
+                id INTEGER PRIMARY KEY,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                page_id INTEGER REFERENCES crawled_page(id),
+                owasp_category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                impact TEXT NOT NULL DEFAULT '',
+                likelihood TEXT NOT NULL DEFAULT '',
+                recommendation TEXT NOT NULL DEFAULT '',
+                cvss_score REAL NOT NULL DEFAULT 0.0,
+                cvss_vector TEXT NOT NULL DEFAULT '',
+                affected_url TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL,
+                request_evidence TEXT NOT NULL DEFAULT '',
+                response_evidence TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                merged_instances TEXT NOT NULL DEFAULT '[]',
+                screenshot_b64 TEXT,
+                finding_source TEXT NOT NULL DEFAULT 'unknown',
+                validation_status TEXT NOT NULL DEFAULT 'unvalidated',
+                validation_note TEXT,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(sql(f"""
+            INSERT INTO scan_finding_nullable_migration ({column_list})
+            SELECT {column_list}
+            FROM scan_finding
+        """))
+        conn.execute(sql("DROP TABLE scan_finding"))
+        conn.execute(sql(
+            "ALTER TABLE scan_finding_nullable_migration RENAME TO scan_finding"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_test_run_id "
+            "ON scan_finding (test_run_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_page_id "
+            "ON scan_finding (page_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_scan_finding_owasp_category "
+            "ON scan_finding (owasp_category)"
+        ))
+        conn.commit()
 
 
 def get_session() -> Iterator[Session]:
