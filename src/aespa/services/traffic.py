@@ -11,7 +11,8 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlmodel import Session, select
+import httpx
+from sqlmodel import Session, func, select
 
 from aespa.db import get_engine
 
@@ -100,7 +101,88 @@ def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
         ]
 
 
-# ── httpx event hooks ─────────────────────────────────────────────────────────
+def count_traffic(run_id: int) -> int:
+    from aespa.models import TrafficEntry
+    with Session(get_engine()) as s:
+        return s.exec(
+            select(func.count(TrafficEntry.id))
+            .where(TrafficEntry.test_run_id == run_id)
+        ).one()
+
+
+# ── Custom client for automatic logging ───────────────────────────────────────
+
+class LoggingAsyncClient(httpx.AsyncClient):
+    def __init__(self, *args, run_id: Optional[int] = None, username: Optional[str] = None, **kwargs):
+        self.run_id = run_id
+        self.username = username
+        kwargs.pop("event_hooks", None)
+        super().__init__(*args, **kwargs)
+
+    async def send(self, request: httpx.Request, *args, **kwargs) -> httpx.Response:
+        if self.run_id is None:
+            return await super().send(request, *args, **kwargs)
+
+        t0 = time.monotonic()
+        try:
+            response = await super().send(request, *args, **kwargs)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+
+            try:
+                await response.aread()
+                ct = response.headers.get("content-type", "")
+                if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
+                    resp_body: Optional[str] = response.text[:BODY_LIMIT]
+                else:
+                    resp_body = f"[binary, {len(response.content)} bytes]"
+            except Exception as e:
+                resp_body = f"[Error reading response body: {e}]"
+
+            raw_body = request.content
+            req_body: Optional[str] = (
+                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            )
+
+            await asyncio.to_thread(
+                _write,
+                self.run_id,
+                "httpx",
+                request.method,
+                str(request.url),
+                dict(request.headers),
+                req_body,
+                response.status_code,
+                dict(response.headers),
+                resp_body,
+                duration_ms,
+                self.username,
+            )
+            return response
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            raw_body = request.content
+            req_body: Optional[str] = (
+                raw_body.decode(errors="replace")[:BODY_LIMIT] if raw_body else None
+            )
+
+            await asyncio.to_thread(
+                _write,
+                self.run_id,
+                "httpx",
+                request.method,
+                str(request.url),
+                dict(request.headers),
+                req_body,
+                None,
+                {},
+                f"[Request Failed: {type(exc).__name__} - {exc}]",
+                duration_ms,
+                self.username,
+            )
+            raise exc
+
+
+# ── httpx event hooks (Legacy fallback) ───────────────────────────────────────
 
 def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
     """Return an httpx event_hooks dict that logs every request/response."""
@@ -154,16 +236,24 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
     _req_data: dict[int, dict] = {}
 
     async def on_request(request) -> None:
+        # Only store timing and body here.  Full headers are read in on_response
+        # via response.request.all_headers(), which is the only point where the
+        # browser has finalised cookies, Authorization, and other internally-added
+        # headers.  Reading them in on_request captures only what the caller
+        # explicitly set, which is why callers were seeing just the host header.
         rid = id(request)
         _pending[rid] = time.monotonic()
-        try:
-            hdrs = await request.all_headers()
-        except Exception:
-            hdrs = dict(request.headers)
+        post_data = request.post_data
+        if post_data is None:
+            try:
+                pd_json = request.post_data_json
+                if pd_json is not None:
+                    post_data = json.dumps(pd_json)
+            except Exception:
+                pass
         _req_data[rid] = {
             "method": request.method,
-            "headers": hdrs,
-            "post_data": request.post_data,
+            "post_data": post_data,
         }
 
     async def on_response(response) -> None:
@@ -175,14 +265,43 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
         req_data = _req_data.pop(rid, {})
         duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
 
+        # Read request headers here — the full set (cookies, Authorization, etc.)
+        # is only available after the request has been sent.
         try:
+            req_headers = await response.request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(response.request.headers)
+            except Exception:
+                req_headers = {}
+
+        # Prefer the body captured at request time; fall back to response.request.
+        post_data = req_data.get("post_data")
+        if post_data is None:
+            try:
+                post_data = response.request.post_data
+                if post_data is None:
+                    pd_json = response.request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        # Use response.body() (raw bytes) — more reliable than response.text().
+        # text() can fail if encoding detection breaks or the body is already consumed;
+        # body() reads the raw CDP buffer directly.
+        try:
+            body_bytes = await response.body()
             ct = response.headers.get("content-type", "")
             if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
-                resp_body: Optional[str] = (await response.text())[:BODY_LIMIT]
+                resp_body: Optional[str] = body_bytes.decode(errors="replace")[:BODY_LIMIT]
             else:
-                resp_body = "[binary]"
+                resp_body = f"[binary, {len(body_bytes)} bytes]"
         except Exception:
-            resp_body = None
+            try:
+                resp_body = (await response.text())[:BODY_LIMIT]
+            except Exception:
+                resp_body = None
 
         try:
             all_resp_hdrs = await response.all_headers()
@@ -195,8 +314,8 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             "playwright",
             req_data.get("method", response.request.method),
             response.url,
-            req_data.get("headers", {}),
-            req_data.get("post_data"),
+            req_headers,
+            post_data,
             response.status,
             all_resp_hdrs,
             resp_body,
@@ -204,5 +323,51 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             username,
         )
 
+    async def on_request_failed(request) -> None:
+        if request.resource_type in SKIP_RESOURCE_TYPES:
+            return
+
+        rid = id(request)
+        start = _pending.pop(rid, None)
+        req_data = _req_data.pop(rid, {})
+        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+
+        try:
+            req_headers = await request.all_headers()
+        except Exception:
+            try:
+                req_headers = dict(request.headers)
+            except Exception:
+                req_headers = {}
+
+        post_data = req_data.get("post_data")
+        if post_data is None:
+            try:
+                post_data = request.post_data
+                if post_data is None:
+                    pd_json = request.post_data_json
+                    if pd_json is not None:
+                        post_data = json.dumps(pd_json)
+            except Exception:
+                pass
+
+        error_text = request.failure or "Request failed"
+
+        await asyncio.to_thread(
+            _write,
+            run_id,
+            "playwright",
+            req_data.get("method", request.method),
+            request.url,
+            req_headers,
+            post_data,
+            None,
+            {},
+            f"[Browser Request Failed: {error_text}]",
+            duration_ms,
+            username,
+        )
+
     ctx.on("request", on_request)
     ctx.on("response", on_response)
+    ctx.on("requestfailed", on_request_failed)

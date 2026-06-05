@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from aespa.services.scanner import _do_thinking_scan; from aespa.services.llm import thinking_next_action; print\\('imports ok'\\)\")",
+      "Bash(.venv/bin/python -m pytest tests/ -x -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_llm_service.py::test_thinking_next_action_history_includes_response_headers -x -q)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\ledwardchow\\\\GitHub\\\\aespa\" -Recurse -Force)",
+      "Bash(Select-Object -First 100)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/aespa/services/scanner.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(uv run *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python3 -c ' *)",
+      "Bash(pyenv local *)",
+      "Bash(python -m py_compile src/aespa/models.py src/aespa/schemas.py src/aespa/db.py src/aespa/services/settings.py src/aespa/api/settings.py)",
+      "Bash(python -m py_compile src/aespa/services/llm.py src/aespa/services/scanner.py)",
+      "Bash(python3 -c \"import httpx; import inspect; sig = inspect.signature\\(httpx.AsyncClient.__init__\\); print\\([p for p in sig.parameters if 'proxy' in p.lower\\(\\)]\\)\")",
+      "Bash(gh pr *)",
+      "Bash(python3 -c \"import json,sys; prs=json.load\\(sys.stdin\\); [print\\(f'PR#{p[\\\\\"number\\\\\"]} [{p[\\\\\"mergedAt\\\\\"]}] {p[\\\\\"headRefName\\\\\"]}: {p[\\\\\"title\\\\\"]}'\\) for p in prs]\")",
+      "Bash(python -m py_compile src/aespa/services/scanner.py)",
+      "Bash(python -m py_compile src/aespa/services/llm.py)",
+      "Bash(awk -F: '{print $1, $2}')",
+      "Bash(awk '$1 > 5841 {print; exit}')",
+      "Bash(awk '$1 > 6566 {print; exit}')",
+      "Bash(python3)",
+      "Bash(python -m pytest tests/ -x -q --tb=short)",
+      "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")",
+      "Bash(python3 -c \"import sys, urllib.parse, json; data = sys.stdin.read\\(\\).strip\\(\\); decoded = urllib.parse.unquote\\(data\\); findings = json.loads\\(decoded\\); [print\\(f['owasp_category'], '|', f['title'], '|', f.get\\('validation_status',''\\)\\) for f in findings]\")",
+      "Bash(find /Users/ledwardchow -name \"vuln-scanner-comparison.md\" 2>/dev/null)"
+    ]
+  }
+}

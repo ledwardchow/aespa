@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel as _BaseModel
 from sqlmodel import Session
 
 from aespa.db import get_session
@@ -30,6 +34,7 @@ def _to_summary(site: Site) -> SiteSummary:
         created_at=site.created_at,
         updated_at=site.updated_at,
         credential_count=len(site.credentials),
+        scope_hosts=json.loads(site.scope_hosts or "[]"),
     )
 
 
@@ -44,6 +49,7 @@ def _to_detail(site: Site) -> SiteDetail:
         created_at=site.created_at,
         updated_at=site.updated_at,
         credentials=[CredentialOut.model_validate(c) for c in site.credentials],
+        scope_hosts=json.loads(site.scope_hosts or "[]"),
     )
 
 
@@ -93,6 +99,25 @@ def delete_site(site_id: int, session: Session = Depends(get_session)) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+class _ScopeHostsPayload(_BaseModel):
+    scope_hosts: list[str]
+
+
+@router.put("/{site_id}/scope-hosts")
+def update_scope_hosts(
+    site_id: int,
+    payload: _ScopeHostsPayload,
+    session: Session = Depends(get_session),
+) -> dict:
+    site = session.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+    site.scope_hosts = json.dumps(payload.scope_hosts)
+    session.add(site)
+    session.commit()
+    return {"scope_hosts": payload.scope_hosts}
+
+
 @router.post(
     "/{site_id}/credentials",
     response_model=CredentialOut,
@@ -127,3 +152,36 @@ def delete_credential(
         sites_service.delete_credential(session, site_id, credential_id)
     except sites_service.CredentialNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# ── Export / Import ──────────────────────────────────────────────────────────
+
+@router.get("/{site_id}/export")
+def export_site(site_id: int, session: Session = Depends(get_session)) -> JSONResponse:
+    """Download a portable JSON bundle for the site and all its data."""
+    try:
+        bundle = sites_service.export_site(session, site_id)
+    except sites_service.SiteNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    site_name = bundle["site"]["name"]
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in site_name)
+    headers = {"Content-Disposition": f'attachment; filename="{safe_name}.aespa-site.json"'}
+    return JSONResponse(content=bundle, headers=headers)
+
+
+@router.post("/import", response_model=SiteDetail, status_code=status.HTTP_201_CREATED)
+async def import_site(request: Request, session: Session = Depends(get_session)) -> SiteDetail:
+    """Create a site from a bundle previously produced by the export endpoint."""
+    try:
+        body = await request.body()
+        bundle = json.loads(body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON body: {exc}",
+        ) from exc
+    try:
+        site = sites_service.import_site(session, bundle)
+    except sites_service.SiteServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return _to_detail(site)

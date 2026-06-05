@@ -4,11 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 log = logging.getLogger("aespa.crawler")
 logging.basicConfig(
@@ -20,16 +22,26 @@ logging.basicConfig(
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PageCredentialView, PageLink, TestRun, TestRunStatus
+from aespa.models import AuthMode, CrawledPage, PageCredentialView, PageLink, TargetIntelItem, TestRun, TestRunStatus
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_llm_config, get_llm_config_for_run
+from aespa.services.settings import get_global_http_header_config, get_llm_config, get_llm_config_for_run, get_upstream_proxy_config
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 _stop_requested: set[int] = set()
 _active_tasks: dict[int, asyncio.Task] = {}
+
+# Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
+_guided_registry: dict[int, asyncio.Event] = {}
+# Ready registry: credential_id -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
+_guided_ready_registry: dict[int, asyncio.Event] = {}
+# Per-run lock: ensures guided logins happen one at a time (no simultaneous browser windows)
+_guided_locks: dict[int, asyncio.Lock] = {}
+# Captured guided-session cookies/headers keyed by (run_id, credential_id) so reconcile
+# can reuse them instead of opening a second browser window.
+_guided_session_cache: dict[tuple[int, int], dict] = {}
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,6 +63,10 @@ def is_running(run_id: int) -> bool:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _login_url_for_credential(default_login_url: str, cred) -> str:
+    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -104,6 +120,14 @@ class _CrawlShared:
 # ── Core orchestrator ─────────────────────────────────────────────────────────
 
 async def _do_crawl(run_id: int) -> None:
+    llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
+    try:
+        await _do_crawl_inner(run_id)
+    finally:
+        llm_svc.clear_run_context()
+
+
+async def _do_crawl_inner(run_id: int) -> None:
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
         if run is None:
@@ -114,10 +138,17 @@ async def _do_crawl(run_id: int) -> None:
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
         creds = list(site.credentials)
+        upstream_proxy = get_upstream_proxy_config(s)
+        crawl_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        global_header_cfg = get_global_http_header_config(s)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
-    base_url      = site.base_url.rstrip("/")
+    _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
+    _global_http_header: dict[str, str] = {}
+    if global_header_cfg.header_name and global_header_cfg.header_value:
+        _global_http_header = {global_header_cfg.header_name: global_header_cfg.header_value}
+    base_url      = _site_base_url(site.base_url)
     login_url     = site.login_url or ""
     requires_auth = site.requires_auth
     max_depth     = run.max_depth
@@ -144,8 +175,17 @@ async def _do_crawl(run_id: int) -> None:
                 completed_at=None, error_message=None,
                 pages_discovered=shared.pages_done, current_url=base_url,
                 per_user_progress=None)
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Crawler",
+        "status": "active",
+        "current_task": "Crawling application…",
+        "outcome": None,
+        "_persist": True,
+    })
 
-    phases = creds if (requires_auth and creds) else [None]
+    phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
     tasks = [
         asyncio.create_task(
@@ -156,6 +196,8 @@ async def _do_crawl(run_id: int) -> None:
                 max_pages=max_pages, llm_cfg=llm_cfg,
                 base_netloc=base_netloc, base_path=base_path,
                 phase_idx=idx, total_phases=len(phases),
+                pw_proxy=_pw_proxy,
+                global_http_header=_global_http_header,
             ),
             name=f"crawl-{run_id}-cred{idx}",
         )
@@ -174,6 +216,8 @@ async def _do_crawl(run_id: int) -> None:
         login_url=login_url,
         requires_auth=requires_auth,
         llm_cfg=llm_cfg,
+        pw_proxy=_pw_proxy,
+        global_http_header=_global_http_header,
     )
 
     # OR-merge page categories from all credential views into each CrawledPage.
@@ -184,9 +228,21 @@ async def _do_crawl(run_id: int) -> None:
              run_id, final_status, shared.pages_done)
     _update_run(run_id, status=final_status, completed_at=_utcnow(),
                 current_url=None, pages_discovered=shared.pages_done)
+    # Clean up the per-run lock (small object). The session cache is intentionally
+    # kept alive so the dynamic scan phase (same run_id) can reuse guided sessions.
+    _guided_locks.pop(run_id, None)
     events_svc.emit(run_id, {
         "type": "run_update", "status": final_status,
         "pages_discovered": shared.pages_done, "current_url": None,
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "crawler",
+        "role": "Crawler",
+        "status": "complete",
+        "current_task": "Crawl complete",
+        "outcome": f"{shared.pages_done} page(s) discovered",
+        "_persist": True,
     })
 
 
@@ -207,11 +263,14 @@ async def _crawl_as_credential(
     base_path: str,
     phase_idx: int,
     total_phases: int,
+    pw_proxy: dict,
+    global_http_header: dict[str, str],
 ) -> None:
     from playwright.async_api import async_playwright
 
-    username      = cred.username if cred else None
+    username      = cred.username if cred else "unauthenticated"
     credential_id = cred.id if cred else None
+    credential_login_url = _login_url_for_credential(login_url, cred)
 
     log.info("=== Phase %d/%d: user=%s ===", phase_idx + 1, total_phases, username or "anonymous")
     events_svc.emit(run_id, {
@@ -228,7 +287,10 @@ async def _crawl_as_credential(
         ctx = await browser.new_context(
             user_agent=_UA,
             ignore_https_errors=True,
+            **pw_proxy,
         )
+        if global_http_header:
+            await ctx.set_extra_http_headers(global_http_header)
         traffic_svc.setup_playwright_logging(ctx, run_id, username=username)
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
@@ -271,15 +333,21 @@ async def _crawl_as_credential(
 
         page.on("response", _record_api_response)
 
-        try:
-            await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
-        except Exception as e:
-            log.warning("Pre-load failed for user=%s: %s", username, e)
+        await _best_effort_preload(page, base_url, username)
+        if phase_idx == 0:
+            await _mine_public_assets(
+                run_id=run_id,
+                page=page,
+                base_url=base_url,
+                base_netloc=base_netloc,
+            )
 
         if requires_auth and cred:
-            log.info("Authenticating as %s", cred.username)
-            await _authenticate(page, login_url, cred)
-            auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+            log.info("Authenticating as %s at %s", cred.username, credential_login_url)
+            await _authenticate(page, credential_login_url, cred, run_id)
+            auth_check_snapshot = await _capture_auth_check_snapshot(
+                page, credential_login_url
+            )
 
         observed_api_calls.clear()
 
@@ -304,7 +372,9 @@ async def _crawl_as_credential(
                 if norm in shared.crawled_norms:
                     page_id = shared.crawled_norms[norm]
                     is_first = False
-                elif shared.pages_done >= max_pages or depth > max_depth:
+                elif local_pages >= max_pages or depth > max_depth:
+                    # Per-phase budget exhausted — this credential has visited
+                    # enough pages.  Other phases may still have budget.
                     continue
                 else:
                     page_id = _save_page_placeholder(run_id, url, depth)
@@ -330,9 +400,10 @@ async def _crawl_as_credential(
                     page, url,
                     requires_auth=requires_auth,
                     credential=cred,
-                    login_url=login_url,
+                    login_url=credential_login_url,
                     username=username,
                     auth_check_snapshot=auth_check_snapshot,
+                    run_id=run_id,
                 )
             except Exception as nav_err:
                 if is_first:
@@ -368,7 +439,7 @@ async def _crawl_as_credential(
                         shared.crawled_norms[norm_final] = page_id
 
             # ── DOM-based accessibility check (login form = not accessible) ───
-            on_login = await _page_requires_login(page, login_url)
+            on_login = await _page_requires_login(page, credential_login_url)
 
             if on_login:
                 if is_first:
@@ -406,6 +477,15 @@ async def _crawl_as_credential(
                 for r in raw_links
                 if _same_domain(r["href"], base_netloc)
             ]
+            await _record_page_intelligence(
+                run_id=run_id,
+                page=page,
+                page_url=final_url,
+                text=text,
+                raw_links=raw_links,
+                base_netloc=base_netloc,
+                username=username,
+            )
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
@@ -515,6 +595,7 @@ async def _crawl_as_credential(
 
         await browser.close()
 
+    _update_credential_progress(run_id, username, None, local_pages, done=True)
     events_svc.emit(run_id, {
         "type": "crawl_progress",
         "username": username,
@@ -528,6 +609,7 @@ async def _crawl_as_credential(
 
 def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     """Atomically create a stub CrawledPage and return its ID."""
+    from aespa.services.scope import register_scope_host_for_run
     with Session(get_engine()) as s:
         cp = CrawledPage(
             test_run_id=run_id, url=url, depth=depth,
@@ -537,7 +619,12 @@ def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
         s.commit()
         s.refresh(cp)
         s.expunge(cp)
-        return cp.id
+    # Fire-and-forget: doesn't matter if this fails
+    try:
+        register_scope_host_for_run(run_id, url)
+    except Exception:
+        pass
+    return cp.id
 
 
 def _update_page(page_id: int, **kwargs) -> None:
@@ -595,6 +682,894 @@ def _save_credential_view(
         )
         s.add(view)
         s.commit()
+
+
+# ── Target intelligence collection ───────────────────────────────────────────
+
+_ENDPOINT_RE = re.compile(
+    r"""(?P<quote>['"`])(?P<path>(?:https?://[^'"`\s<>]+|/(?:api|admin|auth|graphql|v\d+|[\w.-]+/)[^'"`\s<>]*))(?P=quote)"""
+)
+_FETCH_CALL_RE = re.compile(
+    r"\b(?:fetch|axios(?:\.(?P<axios_method>get|post|put|patch|delete|head|options))?)\s*\(\s*(?P<quote>['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)(?P=quote)(?P<args>[\s\S]{0,500}?)\)",
+    re.IGNORECASE,
+)
+_AXIOS_OBJECT_RE = re.compile(
+    r"\baxios\s*\(\s*\{(?P<object>[\s\S]{0,900}?)\}\s*\)",
+    re.IGNORECASE,
+)
+_ROUTE_LITERAL_RE = re.compile(
+    r"(?:path|route|url|href|to)\s*[:=]\s*(['\"`])(?P<path>/[^'\"`\s<>]+)\1",
+    re.IGNORECASE,
+)
+_STORAGE_ACCESS_RE = re.compile(
+    r"\b(?:localStorage|sessionStorage)\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*(['\"`])(?P<key>[^'\"`]{1,120})\1",
+    re.IGNORECASE,
+)
+_FEATURE_FLAG_RE = re.compile(
+    r"(['\"`])(?P<key>(?:feature|flag|enable|disable|beta|experimental|admin)[A-Za-z0-9_.:-]{2,100})\1\s*[:=]\s*(?P<value>true|false|['\"`][^'\"`]{0,120}['\"`]|\d+)",
+    re.IGNORECASE,
+)
+_JWT_STORAGE_KEY_RE = re.compile(
+    r"\b(?:access[_-]?token|auth[_-]?token|id[_-]?token|jwt|bearer|session[_-]?token)\b",
+    re.IGNORECASE,
+)
+_INTERESTING_FIELD_RE = re.compile(
+    r"\b(?:password_hash|passwd|totp_secret|jwt_secret|secret|api_key|debug|stack|trace|role|is_admin)\b",
+    re.IGNORECASE,
+)
+_SOURCE_MAPPING_RE = re.compile(r"sourceMappingURL=([^\s*]+)")
+_PUBLIC_ASSET_PATHS = (
+    "/robots.txt",
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    "/manifest.json",
+    "/asset-manifest.json",
+    "/.well-known/security.txt",
+    "/openapi.json",
+    "/swagger.json",
+    "/api/openapi.json",
+    "/api/swagger.json",
+    "/config.json",
+    "/api/config",
+    "/api/health",
+    "/health",
+    "/status",
+    "/api/status",
+)
+_ADMIN_PATH_RE = re.compile(r"/(?:admin|manage|management|moderator|staff|backoffice|internal|superuser)(?:[/?.#-]|$)", re.IGNORECASE)
+_VALIDATION_PATH_RE = re.compile(r"/(?:validate|verify|verification|check|preflight|csrf|captcha|otp|mfa|2fa)(?:[/?.#-]|$)", re.IGNORECASE)
+_AUTH_PATH_RE = re.compile(r"/(?:login|logout|signup|register|auth|token|session|password|reset)(?:[/?.#-]|$)", re.IGNORECASE)
+
+
+def _save_intel_item(
+    *,
+    run_id: int,
+    kind: str,
+    key: str,
+    value: str = "",
+    url: str | None = None,
+    method: str | None = None,
+    source: str = "crawler",
+    confidence: float = 1.0,
+    evidence: str = "",
+    metadata: dict | None = None,
+) -> None:
+    key = str(key or "")[:500]
+    value = str(value or "")[:2000]
+    evidence = str(evidence or "")[:2000]
+    method = method.upper() if method else None
+    metadata_text = json.dumps(metadata or {}, separators=(",", ":"), default=str)[:4000]
+    with Session(get_engine()) as s:
+        existing = s.exec(
+            select(TargetIntelItem)
+            .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind == kind)
+            .where(TargetIntelItem.key == key)
+            .where(TargetIntelItem.value == value)
+            .where(TargetIntelItem.url == url)
+            .where(TargetIntelItem.method == method)
+            .where(TargetIntelItem.source == source)
+        ).first()
+        if existing:
+            return
+        s.add(TargetIntelItem(
+            test_run_id=run_id,
+            kind=kind,
+            key=key,
+            value=value,
+            url=url,
+            method=method,
+            source=source,
+            confidence=max(0.0, min(1.0, float(confidence))),
+            evidence=evidence,
+            item_metadata=metadata_text,
+        ))
+        s.commit()
+
+
+async def _record_page_intelligence(
+    *,
+    run_id: int,
+    page,
+    page_url: str,
+    text: str,
+    raw_links: list[dict],
+    base_netloc: str,
+    username: Optional[str],
+) -> None:
+    """Extract durable target inventory facts from a rendered page."""
+    for item in _extract_ids_from_text(text):
+        _save_intel_item(
+            run_id=run_id,
+            kind="id",
+            key=item["key"],
+            value=item["value"],
+            url=page_url,
+            source="page_text",
+            evidence=item["evidence"],
+            metadata={"username": username},
+        )
+
+    for link in raw_links[:300]:
+        href = str(link.get("href") or "")
+        if not href or not _same_domain(href, base_netloc):
+            continue
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(href),
+            value=href,
+            url=page_url,
+            method="GET",
+            source="dom_link",
+            evidence=str(link.get("text") or "")[:200],
+            metadata={"username": username},
+        )
+
+    dom = await _extract_dom_intelligence(page)
+    for script_url in dom["scripts"]:
+        if not _same_domain(script_url, base_netloc):
+            continue
+        _save_intel_item(
+            run_id=run_id,
+            kind="script",
+            key=_path_key(script_url),
+            value=script_url,
+            url=page_url,
+            method="GET",
+            source="dom_script",
+            metadata={"username": username},
+        )
+
+    for asset_url in dom["assets"]:
+        if not _same_domain(asset_url, base_netloc):
+            continue
+        _save_intel_item(
+            run_id=run_id,
+            kind="asset",
+            key=_path_key(asset_url),
+            value=asset_url,
+            url=page_url,
+            method="GET",
+            source="dom_asset",
+            metadata={"username": username},
+        )
+
+    for form in dom["forms"]:
+        form_url = form.get("action") or page_url
+        method = str(form.get("method") or "GET").upper()
+        fields = form.get("fields") or []
+        _save_intel_item(
+            run_id=run_id,
+            kind="form",
+            key=_path_key(form_url),
+            value=str(form.get("selector") or ""),
+            url=form_url,
+            method=method,
+            source="dom_form",
+            evidence=", ".join(f.get("name") or f.get("id") or f.get("type") or "field" for f in fields[:12]),
+            metadata={"page_url": page_url, "fields": fields, "username": username},
+        )
+        for field in fields:
+            field_key = str(field.get("name") or field.get("id") or field.get("selector") or "")
+            if not field_key:
+                continue
+            _save_intel_item(
+                run_id=run_id,
+                kind="input",
+                key=field_key,
+                value=str(field.get("type") or ""),
+                url=form_url,
+                method=method,
+                source="dom_form",
+                metadata={"page_url": page_url, "form_selector": form.get("selector"), "username": username},
+            )
+
+    for key in dom["storage_keys"]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="storage_key",
+            key=key,
+            value=key,
+            url=page_url,
+            source="browser_storage",
+            confidence=0.9 if _JWT_STORAGE_KEY_RE.search(key) else 0.7,
+            metadata={"username": username},
+        )
+
+    await _mine_script_intelligence(
+        run_id=run_id,
+        page=page,
+        page_url=page_url,
+        script_urls=dom["scripts"],
+        base_netloc=base_netloc,
+    )
+
+
+async def _extract_dom_intelligence(page) -> dict:
+    try:
+        return await page.evaluate(
+            """() => {
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                const id = el.id ? "#" + CSS.escape(el.id) : "";
+                const name = el.getAttribute("name") ? `[name="${el.getAttribute("name").replace(/"/g, '\\"')}"]` : "";
+                return el.tagName.toLowerCase() + id + name;
+              };
+              const fieldsFor = (form) => Array.from(form.querySelectorAll("input, textarea, select, button"))
+                .slice(0, 80).map((el) => ({
+                  selector: cssPath(el),
+                  name: el.getAttribute("name") || "",
+                  id: el.id || "",
+                  type: el.getAttribute("type") || el.tagName.toLowerCase(),
+                  autocomplete: el.getAttribute("autocomplete") || "",
+                  placeholder: el.getAttribute("placeholder") || "",
+                }));
+              return {
+                scripts: Array.from(document.querySelectorAll("script[src]")).map(s => s.src),
+                assets: Array.from(document.querySelectorAll("link[href]"))
+                  .filter(l => /manifest|modulepreload|preload|prefetch|stylesheet|icon/i.test(l.rel || ""))
+                  .map(l => l.href),
+                forms: Array.from(document.querySelectorAll("form")).slice(0, 50).map((form, idx) => ({
+                  selector: form.id ? `form#${CSS.escape(form.id)}` : `form:nth-of-type(${idx + 1})`,
+                  action: form.action || location.href,
+                  method: (form.method || "GET").toUpperCase(),
+                  fields: fieldsFor(form),
+                })),
+                storage_keys: [
+                  ...Array.from({length: localStorage.length}, (_, i) => localStorage.key(i)),
+                  ...Array.from({length: sessionStorage.length}, (_, i) => sessionStorage.key(i)),
+                ].filter(Boolean),
+              };
+            }"""
+        )
+    except Exception as exc:
+        log.debug("DOM intelligence extraction failed: %s", exc)
+        return {"scripts": [], "assets": [], "forms": [], "storage_keys": []}
+
+
+async def _mine_script_intelligence(
+    *,
+    run_id: int,
+    page,
+    page_url: str,
+    script_urls: list[str],
+    base_netloc: str,
+) -> None:
+    seen: set[str] = set()
+    for script_url in script_urls[:20]:
+        if not script_url or script_url in seen or not _same_domain(script_url, base_netloc):
+            continue
+        seen.add(script_url)
+        try:
+            resp = await page.request.get(script_url, timeout=10_000)
+            if not resp.ok:
+                continue
+            body = (await resp.text())[:500_000]
+        except Exception as exc:
+            log.debug("Script mining failed for %s: %s", script_url, exc)
+            continue
+        _mine_asset_text(
+            run_id=run_id,
+            asset_url=script_url,
+            body=body,
+            source="js_asset",
+            page_url=page_url,
+        )
+        for sourcemap_url in _extract_sourcemap_urls(script_url, body)[:3]:
+            if not _same_domain(sourcemap_url, base_netloc):
+                continue
+            try:
+                sm_resp = await page.request.get(sourcemap_url, timeout=10_000)
+                if not sm_resp.ok:
+                    continue
+                sm_body = (await sm_resp.text())[:500_000]
+            except Exception as exc:
+                log.debug("Sourcemap mining failed for %s: %s", sourcemap_url, exc)
+                continue
+            _save_intel_item(
+                run_id=run_id,
+                kind="asset",
+                key=_path_key(sourcemap_url),
+                value=sourcemap_url,
+                url=script_url,
+                method="GET",
+                source="sourcemap",
+                confidence=0.8,
+                metadata={"page_url": page_url},
+            )
+            _mine_asset_text(
+                run_id=run_id,
+                asset_url=sourcemap_url,
+                body=sm_body,
+                source="sourcemap",
+                page_url=page_url,
+            )
+
+
+async def _mine_public_assets(
+    *,
+    run_id: int,
+    page,
+    base_url: str,
+    base_netloc: str,
+) -> None:
+    for asset_url in _public_asset_candidates(base_url):
+        if not _same_domain(asset_url, base_netloc):
+            continue
+        try:
+            resp = await page.request.get(asset_url, timeout=8_000)
+            status = getattr(resp, "status", None)
+            if status is None or status >= 400:
+                continue
+            content_type = str((getattr(resp, "headers", {}) or {}).get("content-type", ""))
+            body = (await resp.text())[:500_000]
+        except Exception as exc:
+            log.debug("Public asset mining failed for %s: %s", asset_url, exc)
+            continue
+        _save_intel_item(
+            run_id=run_id,
+            kind="asset",
+            key=_path_key(asset_url),
+            value=asset_url,
+            url=asset_url,
+            method="GET",
+            source="public_asset",
+            confidence=0.9,
+            evidence=f"HTTP {status}; {content_type}"[:200],
+        )
+        _mine_asset_text(
+            run_id=run_id,
+            asset_url=asset_url,
+            body=body,
+            source="public_asset",
+            page_url=base_url,
+        )
+
+
+def _mine_asset_text(
+    *,
+    run_id: int,
+    asset_url: str,
+    body: str,
+    source: str,
+    page_url: str,
+) -> None:
+    for endpoint in _extract_endpoint_strings(body)[:150]:
+        resolved = _resolve_asset_reference(asset_url, endpoint)
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            source=source,
+            confidence=0.8,
+            evidence=endpoint,
+            metadata={"page_url": page_url},
+        )
+    for call in _extract_js_api_calls(body)[:150]:
+        resolved = _resolve_asset_reference(asset_url, call["url"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method=call.get("method") or "GET",
+            source=source,
+            confidence=0.92,
+            evidence=call.get("evidence") or call["url"],
+            metadata={"page_url": page_url, "discovery": "js_api_call", **call.get("metadata", {})},
+        )
+        for field in call.get("body_fields", [])[:30]:
+            _save_intel_item(
+                run_id=run_id,
+                kind="input",
+                key=field,
+                value="js_request_body",
+                url=resolved,
+                method=call.get("method") or "GET",
+                source=source,
+                confidence=0.8,
+                metadata={"page_url": page_url, "asset_url": asset_url, "discovery": "js_api_call"},
+            )
+    for route in _extract_js_route_paths(body)[:150]:
+        resolved = _resolve_asset_reference(asset_url, route["path"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method="GET",
+            source=source,
+            confidence=route.get("confidence", 0.75),
+            evidence=route.get("evidence") or route["path"],
+            metadata={"page_url": page_url, "discovery": route.get("discovery", "js_route"), "category": route.get("category")},
+        )
+    for lead in _extract_js_path_leads(body)[:120]:
+        resolved = _resolve_asset_reference(asset_url, lead["path"])
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(resolved),
+            value=resolved,
+            url=asset_url,
+            method=lead.get("method") or "GET",
+            source=source,
+            confidence=lead.get("confidence", 0.82),
+            evidence=lead.get("evidence") or lead["path"],
+            metadata={"page_url": page_url, "discovery": "js_path_lead", "category": lead.get("category")},
+        )
+    for endpoint in _extract_sitemap_locations(body)[:200]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(endpoint),
+            value=endpoint,
+            url=asset_url,
+            method="GET",
+            source=source,
+            confidence=0.9,
+            evidence="sitemap location",
+            metadata={"page_url": page_url},
+        )
+    for endpoint in _extract_robots_paths(asset_url, body)[:100]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="endpoint",
+            key=_path_key(endpoint),
+            value=endpoint,
+            url=asset_url,
+            method="GET",
+            source=source,
+            confidence=0.7,
+            evidence="robots directive",
+            metadata={"page_url": page_url},
+        )
+    for key in sorted(set(m.group(0) for m in _JWT_STORAGE_KEY_RE.finditer(body)))[:50]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="storage_key",
+            key=key,
+            value=key,
+            url=asset_url,
+            source=source,
+            confidence=0.8,
+            metadata={"page_url": page_url},
+        )
+    for key in _extract_storage_keys_from_js(body)[:100]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="storage_key",
+            key=key,
+            value=key,
+            url=asset_url,
+            source=source,
+            confidence=0.9 if _JWT_STORAGE_KEY_RE.search(key) else 0.75,
+            evidence="JavaScript storage access",
+            metadata={"page_url": page_url, "discovery": "storage_api"},
+        )
+    for flag in _extract_feature_flags(body)[:100]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="feature_flag",
+            key=flag["key"],
+            value=flag["value"],
+            url=asset_url,
+            source=source,
+            confidence=0.75,
+            evidence=flag["evidence"],
+            metadata={"page_url": page_url},
+        )
+    for field in _extract_interesting_response_fields(body):
+        _save_intel_item(
+            run_id=run_id,
+            kind="response_field",
+            key=field["key"],
+            value=field["value"],
+            url=asset_url,
+            source=source,
+            confidence=0.8,
+            evidence=field["evidence"],
+            metadata={"page_url": page_url},
+        )
+
+
+def _record_api_intelligence(
+    *,
+    run_id: int,
+    call: dict,
+    source_page_id: int,
+    username: Optional[str],
+) -> None:
+    url = str(call.get("url") or "")
+    method = str(call.get("method") or "GET").upper()
+    if not url:
+        return
+    _save_intel_item(
+        run_id=run_id,
+        kind="endpoint",
+        key=_path_key(url),
+        value=url,
+        url=url,
+        method=method,
+        source="api_observation",
+        confidence=1.0,
+        evidence=f"Observed {method} during crawl; status={call.get('status')}",
+        metadata={"source_page_id": source_page_id, "username": username},
+    )
+
+    request_body = str(call.get("request_body") or "")
+    for field in _extract_jsonish_keys(request_body)[:80]:
+        _save_intel_item(
+            run_id=run_id,
+            kind="input",
+            key=field,
+            value="request_body",
+            url=url,
+            method=method,
+            source="api_request",
+            metadata={"source_page_id": source_page_id, "username": username},
+        )
+
+    body = str(call.get("body") or "")[:50_000]
+    for item in _extract_ids_from_text(body):
+        _save_intel_item(
+            run_id=run_id,
+            kind="id",
+            key=item["key"],
+            value=item["value"],
+            url=url,
+            method=method,
+            source="api_response",
+            evidence=item["evidence"],
+            metadata={"source_page_id": source_page_id, "username": username},
+        )
+    for field in _extract_interesting_response_fields(body):
+        _save_intel_item(
+            run_id=run_id,
+            kind="response_field",
+            key=field["key"],
+            value=field["value"],
+            url=url,
+            method=method,
+            source="api_response",
+            confidence=0.9,
+            evidence=field["evidence"],
+            metadata={"source_page_id": source_page_id, "username": username},
+        )
+
+
+def _extract_endpoint_strings(text: str) -> list[str]:
+    out: list[str] = []
+    for match in _ENDPOINT_RE.finditer(text or ""):
+        path = match.group("path").strip()
+        if path and path not in out:
+            out.append(path)
+    return out
+
+
+def _extract_js_api_calls(text: str) -> list[dict]:
+    calls: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    body = text or ""
+    for match in _FETCH_CALL_RE.finditer(body[:500_000]):
+        url = match.group("url").strip()
+        args = match.group("args") or ""
+        method = (match.group("axios_method") or _extract_method_from_js_options(args) or "GET").upper()
+        key = (method, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append({
+            "url": url,
+            "method": method,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
+            "body_fields": _dedupe_strings([*_extract_jsonish_keys(args), *_extract_js_shorthand_object_keys(args)]),
+            "metadata": {"call": "fetch_or_axios"},
+        })
+        if len(calls) >= 200:
+            return calls
+
+    for match in _AXIOS_OBJECT_RE.finditer(body[:500_000]):
+        obj = match.group("object") or ""
+        url_match = re.search(r"\burl\s*:\s*(['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)\1", obj)
+        if not url_match:
+            continue
+        method_match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>[A-Za-z]+)\1", obj)
+        url = url_match.group("url").strip()
+        method = (method_match.group("method") if method_match else "GET").upper()
+        key = (method, url)
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append({
+            "url": url,
+            "method": method,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
+            "body_fields": _dedupe_strings([*_extract_jsonish_keys(obj), *_extract_js_shorthand_object_keys(obj)]),
+            "metadata": {"call": "axios_object"},
+        })
+        if len(calls) >= 200:
+            break
+    return calls
+
+
+def _extract_method_from_js_options(text: str) -> str | None:
+    match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\1", text or "", re.IGNORECASE)
+    return match.group("method") if match else None
+
+
+def _extract_js_shorthand_object_keys(text: str) -> list[str]:
+    keys: list[str] = []
+    for match in re.finditer(r"\{(?P<body>[^{}]{1,500})\}", text or ""):
+        for token in re.split(r"\s*,\s*", match.group("body")):
+            token = token.strip()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{1,80}", token) and token not in keys:
+                keys.append(token)
+    return keys
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _extract_js_route_paths(text: str) -> list[dict]:
+    routes: list[dict] = []
+    seen: set[str] = set()
+    body = text or ""
+    for match in _ROUTE_LITERAL_RE.finditer(body[:500_000]):
+        path = match.group("path").strip()
+        if not _looks_like_route_path(path) or path in seen:
+            continue
+        seen.add(path)
+        routes.append({
+            "path": path,
+            "category": _path_category(path),
+            "confidence": 0.86 if _path_category(path) else 0.72,
+            "discovery": "route_literal",
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
+        })
+        if len(routes) >= 200:
+            break
+    return routes
+
+
+def _extract_js_path_leads(text: str) -> list[dict]:
+    leads: list[dict] = []
+    seen: set[str] = set()
+    for path in _extract_endpoint_strings(text):
+        category = _path_category(path)
+        if not category or path in seen:
+            continue
+        seen.add(path)
+        leads.append({
+            "path": path,
+            "category": category,
+            "method": "POST" if category in {"auth", "validation"} and re.search(r"/(?:login|register|signup|verify|validate|check|preflight)", path, re.IGNORECASE) else "GET",
+            "confidence": 0.9 if category in {"admin", "validation", "auth"} else 0.82,
+            "evidence": path,
+        })
+    return leads
+
+
+def _extract_storage_keys_from_js(text: str) -> list[str]:
+    keys: list[str] = []
+    for match in _STORAGE_ACCESS_RE.finditer(text or ""):
+        key = match.group("key").strip()
+        if key and key not in keys:
+            keys.append(key)
+        if len(keys) >= 120:
+            break
+    return keys
+
+
+def _extract_feature_flags(text: str) -> list[dict[str, str]]:
+    flags: list[dict[str, str]] = []
+    seen: set[str] = set()
+    body = text or ""
+    for match in _FEATURE_FLAG_RE.finditer(body[:500_000]):
+        key = match.group("key").strip()
+        value = match.group("value").strip().strip("'\"`")[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        flags.append({
+            "key": key,
+            "value": value,
+            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
+        })
+        if len(flags) >= 120:
+            break
+    return flags
+
+
+def _looks_like_route_path(path: str) -> bool:
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return False
+    if len(path) > 240 or any(ch in path for ch in " \t\r\n<>{}"):
+        return False
+    return True
+
+
+def _path_category(path: str) -> str | None:
+    if _ADMIN_PATH_RE.search(path):
+        return "admin"
+    if _VALIDATION_PATH_RE.search(path):
+        return "validation"
+    if _AUTH_PATH_RE.search(path):
+        return "auth"
+    if re.search(r"/(?:feature|flag|beta|experiment|config)(?:[/?.#-]|$)", path, re.IGNORECASE):
+        return "feature"
+    return None
+
+
+def _public_asset_candidates(base_url: str) -> list[str]:
+    parsed = urlparse(base_url)
+    origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+    prefixes = {origin}
+    app_path = parsed.path
+    if app_path and app_path != "/":
+        app_prefix = app_path if app_path.endswith("/") else app_path.rsplit("/", 1)[0] + "/"
+        prefixes.add(urljoin(origin + "/", app_prefix.lstrip("/")))
+
+    candidates: list[str] = []
+    for prefix in sorted(prefixes):
+        for path in _PUBLIC_ASSET_PATHS:
+            candidate = urljoin(prefix.rstrip("/") + "/", path.lstrip("/"))
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _resolve_asset_reference(asset_url: str, reference: str) -> str:
+    if reference.startswith(("http://", "https://")):
+        return reference
+    return urljoin(asset_url, reference)
+
+
+def _extract_sitemap_locations(text: str) -> list[str]:
+    locations: list[str] = []
+    for match in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", text or "", flags=re.IGNORECASE):
+        url = match.group(1).strip()
+        if url and url not in locations:
+            locations.append(url)
+    return locations
+
+
+def _extract_robots_paths(asset_url: str, text: str) -> list[str]:
+    paths: list[str] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        directive, value = line.split(":", 1)
+        if directive.strip().lower() not in {"allow", "disallow", "sitemap"}:
+            continue
+        value = value.strip()
+        if not value or value == "/":
+            continue
+        resolved = _resolve_asset_reference(asset_url, value)
+        if resolved not in paths:
+            paths.append(resolved)
+    return paths
+
+
+def _extract_sourcemap_urls(script_url: str, text: str) -> list[str]:
+    urls: list[str] = []
+    for match in _SOURCE_MAPPING_RE.finditer(text or ""):
+        value = match.group(1).strip()
+        if not value or value.startswith("data:"):
+            continue
+        resolved = _resolve_asset_reference(script_url, value)
+        if resolved not in urls:
+            urls.append(resolved)
+    return urls
+
+
+def _extract_jsonish_keys(text: str) -> list[str]:
+    keys: list[str] = []
+    if not text:
+        return keys
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if data is not None:
+        def _walk(value):
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if isinstance(k, str) and k not in keys:
+                        keys.append(k)
+                    _walk(v)
+            elif isinstance(value, list):
+                for child in value:
+                    _walk(child)
+        _walk(data)
+        return keys
+    for key in re.findall(r'"([A-Za-z_][A-Za-z0-9_-]{1,80})"\s*:', text):
+        if key not in keys:
+            keys.append(key)
+    for key in re.findall(r"\b([A-Za-z_][A-Za-z0-9_-]{1,80})\s*:", text):
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _extract_ids_from_text(text: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if not text:
+        return items
+    patterns = [
+        r'"(?P<key>[A-Za-z_][A-Za-z0-9_-]*(?:id|ID|Id))"\s*:\s*"?(?P<value>[A-Za-z0-9_-]{1,80})"?',
+        r'\b(?P<key>[A-Za-z_][A-Za-z0-9_-]*(?:id|ID|Id))\s*[=:]\s*"?(?P<value>[A-Za-z0-9_-]{1,80})"?',
+    ]
+    seen: set[tuple[str, str]] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text[:50_000]):
+            key = match.group("key")
+            value = match.group("value")
+            if not value or (key, value) in seen:
+                continue
+            seen.add((key, value))
+            start = max(0, match.start() - 80)
+            end = min(len(text), match.end() + 80)
+            items.append({"key": key, "value": value, "evidence": text[start:end]})
+            if len(items) >= 100:
+                return items
+    return items
+
+
+def _extract_interesting_response_fields(text: str) -> list[dict[str, str]]:
+    fields: list[dict[str, str]] = []
+    for key in _extract_jsonish_keys(text):
+        if not _INTERESTING_FIELD_RE.search(key):
+            continue
+        value = ""
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*(".*?"|[^,\n\r}}]+)', text[:50_000])
+        if match:
+            value = match.group(1).strip().strip('"')[:200]
+            evidence = match.group(0)[:500]
+        else:
+            evidence = key
+        fields.append({"key": key, "value": value, "evidence": evidence})
+    return fields[:50]
+
+
+def _path_key(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return parsed.path or "/"
+    except Exception:
+        pass
+    return str(url or "")[:500]
 
 
 async def _promote_api_calls(
@@ -667,6 +1642,13 @@ async def _promote_api_calls(
                 "page_id": page_id,
                 "username": username,
             })
+
+        _record_api_intelligence(
+            run_id=run_id,
+            call=call,
+            source_page_id=source_page_id,
+            username=username,
+        )
 
 
 def _dedupe_api_calls(calls: list[dict]) -> list[dict]:
@@ -853,6 +1835,8 @@ async def _reconcile_direct_access(
     login_url: str,
     requires_auth: bool,
     llm_cfg,
+    pw_proxy: dict,
+    global_http_header: dict[str, str],
 ) -> None:
     """Mark pages as accessible when a credential can load a known URL directly.
 
@@ -886,7 +1870,10 @@ async def _reconcile_direct_access(
             for cred in creds:
                 if run_id in _stop_requested:
                     break
-                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+                credential_login_url = _login_url_for_credential(login_url, cred)
+                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **pw_proxy)
+                if global_http_header:
+                    await ctx.set_extra_http_headers(global_http_header)
                 traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
                 page = await ctx.new_page()
                 try:
@@ -894,8 +1881,10 @@ async def _reconcile_direct_access(
                         await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
                     except Exception:
                         pass
-                    await _authenticate(page, login_url, cred)
-                    auth_check_snapshot = await _capture_auth_check_snapshot(page, login_url)
+                    await _authenticate(page, credential_login_url, cred, run_id)
+                    auth_check_snapshot = await _capture_auth_check_snapshot(
+                        page, credential_login_url
+                    )
 
                     for page_id, page_url, page_title, page_text, accessible_by in page_rows:
                         if run_id in _stop_requested:
@@ -909,10 +1898,11 @@ async def _reconcile_direct_access(
                             page_url,
                             requires_auth=requires_auth,
                             credential=cred,
-                            login_url=login_url,
+                            login_url=credential_login_url,
                             username=cred.username,
                             auth_check_snapshot=auth_check_snapshot,
                             recover_api_auth=False,
+                            run_id=run_id,
                         )
                         if not accessible:
                             continue
@@ -963,6 +1953,7 @@ async def _direct_load_accessible(
     username: Optional[str] = None,
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
+    run_id: int = 0,
 ) -> tuple[bool, str, str, Optional[str]]:
     try:
         resp = await _goto_with_auth_recovery(
@@ -974,6 +1965,7 @@ async def _direct_load_accessible(
             username=username,
             auth_check_snapshot=auth_check_snapshot,
             recover_api_auth=recover_api_auth,
+            run_id=run_id,
         )
     except Exception:
         return False, "", "", None
@@ -1161,7 +2153,12 @@ def _update_run(run_id: int, **kwargs) -> None:
 
 
 def _update_credential_progress(
-    run_id: int, username: Optional[str], current_url: str, pages_visited: int
+    run_id: int,
+    username: Optional[str],
+    current_url: str | None,
+    pages_visited: int,
+    *,
+    done: bool = False,
 ) -> None:
     """Persist per-credential crawl progress so the UI can read it on load/refresh."""
     if not username:
@@ -1171,7 +2168,12 @@ def _update_credential_progress(
         if run is None:
             return
         progress = json.loads(run.per_user_progress or "{}")
-        progress[username] = {"current_url": current_url, "pages_visited": pages_visited}
+        progress[username] = {
+            "current_url": current_url,
+            "pages_visited": pages_visited,
+            "done": done,
+            "updated_at": _utcnow().isoformat(),
+        }
         run.per_user_progress = json.dumps(progress)
         s.add(run)
         s.commit()
@@ -1332,10 +2334,11 @@ async def _goto_with_auth_recovery(
     username: Optional[str],
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
+    run_id: int = 0,
 ):
     response = None
     for attempt in range(2):
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        response = await _goto_lenient(page, url, timeout=20_000)
         try:
             await page.wait_for_load_state("networkidle", timeout=8_000)
         except Exception:
@@ -1368,11 +2371,45 @@ async def _goto_with_auth_recovery(
                 )
                 return response
             log.info("Session appears to have dropped for user=%s at %s; re-authenticating and retrying", username, url)
-            await _authenticate(page, login_url, credential)
+            await _authenticate(page, login_url, credential, run_id)
             continue
         log.warning("Session still appears unauthenticated after retry for user=%s at %s", username, url)
         return response
     return response
+
+
+def _site_base_url(value: str) -> str:
+    """Preserve the configured path, including a trailing slash for mounted apps."""
+    return str(value or "").strip()
+
+
+async def _best_effort_preload(page, url: str, username: Optional[str]) -> None:
+    try:
+        await _goto_lenient(page, url, timeout=20_000)
+    except Exception as exc:
+        log.warning("Pre-load failed for user=%s: %s", username, exc)
+
+
+async def _goto_lenient(page, url: str, timeout: int = 20_000):
+    try:
+        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    except Exception as exc:
+        if _navigation_reached_target(page, url, exc):
+            log.info(
+                "Navigation to %s timed out waiting for domcontentloaded, but the browser reached the target URL; continuing.",
+                url,
+            )
+            return None
+        raise
+
+
+def _navigation_reached_target(page, url: str, exc: Exception) -> bool:
+    if "timeout" not in str(exc).lower():
+        return False
+    current_url = str(getattr(page, "url", "") or "")
+    if not current_url:
+        return False
+    return _same_url_without_fragment(current_url, url)
 
 
 def _api_response_should_not_reauth(url: str, response) -> bool:
@@ -1473,7 +2510,475 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 
 # ── Authentication ────────────────────────────────────────────────────────────
 
-async def _authenticate(page, login_url: str, credential) -> None:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+async def _detect_mfa_prompt(page) -> bool:
+    """Return True if the page shows an MFA / OTP input field."""
+    otp_selectors = [
+        "input[name*='otp' i]", "input[id*='otp' i]",
+        "input[name*='mfa' i]", "input[id*='mfa' i]",
+        "input[name*='2fa' i]", "input[id*='2fa' i]",
+        "input[name*='code' i]", "input[id*='code' i]",
+        "input[placeholder*='code' i]", "input[placeholder*='otp' i]",
+        "input[placeholder*='authenticator' i]",
+        "input[autocomplete='one-time-code']",
+    ]
+    for sel in otp_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _fill_totp_if_prompted(page, credential) -> None:
+    """If an MFA prompt is visible, generate and fill the TOTP code."""
+    if not await _detect_mfa_prompt(page):
+        return
+    if not credential.totp_seed:
+        log.warning("  _fill_totp: MFA prompt detected but no totp_seed set for %s", credential.username)
+        return
+    try:
+        import pyotp
+        code = pyotp.TOTP(credential.totp_seed).now()
+    except Exception as exc:
+        log.warning("  _fill_totp: could not generate TOTP code: %s", exc)
+        return
+
+    otp_selectors = [
+        "input[autocomplete='one-time-code']",
+        "input[name*='otp' i]", "input[id*='otp' i]",
+        "input[name*='code' i]", "input[id*='code' i]",
+        "input[name*='mfa' i]", "input[id*='mfa' i]",
+        "input[placeholder*='code' i]",
+    ]
+    filled = False
+    for sel in otp_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                await loc.fill(code)
+                filled = True
+                break
+        except Exception:
+            pass
+
+    if not filled:
+        log.warning("  _fill_totp: could not locate OTP input field for %s", credential.username)
+        return
+
+    # Submit the MFA form
+    for sel in ["button[type='submit']", "input[type='submit']",
+                "button:has-text('Verify')", "button:has-text('Submit')",
+                "button:has-text('Next')", "button:has-text('Sign in')"]:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                await loc.click()
+                break
+        except Exception:
+            pass
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=12_000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(1000)
+    log.info("  _fill_totp: TOTP code filled and submitted for %s", credential.username)
+
+
+async def _authenticate_guided(page, login_url: str, credential, run_id: int) -> None:
+    """Open a headed browser window so the user can log in interactively.
+
+    Captures cookies from the headed session and injects them into the
+    headless crawl context.  Emits a ``guided_login_required`` SSE event so
+    the web UI can show the "I'm Done" button.
+
+    When multiple credentials use guided mode, browsers open one at a time so
+    the user always knows which account to log in as.
+
+    Requires a graphical display.  On headless servers, raises RuntimeError
+    with instructions to use ``seed`` mode instead.
+    """
+    has_display = (
+        sys.platform == "darwin"
+        or bool(os.environ.get("DISPLAY"))
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+    if not has_display:
+        events_svc.emit(run_id, {
+            "type": "guided_login_failed",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "message": (
+                f"Guided login for '{credential.username}' requires a graphical display. "
+                "This scanner appears to be running on a headless host. "
+                "Guided browser login only works when the scanner is running locally with a GUI."
+            ),
+        })
+        log.warning(
+            "  _authenticate_guided: no display available for '%s' (cred_id=%s) — skipping",
+            credential.username, credential.id,
+        )
+        return
+
+    # Acquire the per-run lock so only one guided browser opens at a time
+    if run_id not in _guided_locks:
+        _guided_locks[run_id] = asyncio.Lock()
+    async with _guided_locks[run_id]:
+        ready_event = asyncio.Event()
+        done_event = asyncio.Event()
+        _guided_ready_registry[credential.id] = ready_event
+        _guided_registry[credential.id] = done_event
+
+        # Phase 1: notify the UI — browser is NOT yet open; user must click "I'm Ready" first
+        events_svc.emit(run_id, {
+            "type": "guided_login_required",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "message": (
+                f"Login required for '{credential.username}'. "
+                "Click \"I'm Ready\" in the UI when you are ready to log in."
+            ),
+        })
+
+        log.info("  _authenticate_guided: waiting for ready signal from UI for %s (cred_id=%s)",
+                 credential.username, credential.id)
+
+        # Wait for user to click "I'm Ready" (5 min timeout)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            log.warning("  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)", credential.id)
+            _guided_ready_registry.pop(credential.id, None)
+            _guided_registry.pop(credential.id, None)
+            return
+        _guided_ready_registry.pop(credential.id, None)
+
+        # Phase 2: open the browser and let the user log in
+        events_svc.emit(run_id, {
+            "type": "guided_login_browser_open",
+            "credential_id": credential.id,
+            "username": credential.username,
+        })
+
+        log.info("  _authenticate_guided: opening browser for %s (cred_id=%s)",
+                 credential.username, credential.id)
+
+        captured_cookies: list = []
+        captured_headers: dict[str, str] = {}
+
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=False)
+            try:
+                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+
+                # Capture any Authorization headers sent during navigation
+                async def _capture_auth_header(request) -> None:
+                    auth = request.headers.get("authorization")
+                    if auth and not captured_headers.get("Authorization"):
+                        captured_headers["Authorization"] = auth
+
+                ctx.on("request", _capture_auth_header)
+
+                guided_page = await ctx.new_page()
+                try:
+                    await guided_page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
+                except Exception as nav_err:
+                    log.warning("  _authenticate_guided: initial navigation error: %s", nav_err)
+
+                # Wait for user to confirm (5 min timeout)
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    log.warning("  _authenticate_guided: timed out waiting for user confirmation (cred_id=%s)", credential.id)
+
+                # Brief pause so any in-flight auth redirects / cookie-sets finish
+                # before we snapshot the context's cookies.
+                await asyncio.sleep(1.5)
+                captured_cookies = await ctx.cookies()
+                log.info(
+                    "  _authenticate_guided: captured %d cookie(s) for %s",
+                    len(captured_cookies), credential.username,
+                )
+
+                # Capture ALL localStorage and sessionStorage from every open page
+                # in the context (not just known key names) so SPAs that store tokens
+                # under arbitrary keys are handled correctly.
+                captured_local_storage: dict[str, str] = {}
+                captured_session_storage: dict[str, str] = {}
+                try:
+                    captured_local_storage = await guided_page.evaluate(
+                        "() => Object.fromEntries(Object.entries(localStorage))"
+                    ) or {}
+                except Exception:
+                    pass
+                try:
+                    captured_session_storage = await guided_page.evaluate(
+                        "() => Object.fromEntries(Object.entries(sessionStorage))"
+                    ) or {}
+                except Exception:
+                    pass
+                log.info(
+                    "  _authenticate_guided: captured %d localStorage + %d sessionStorage "
+                    "entries for %s",
+                    len(captured_local_storage), len(captured_session_storage),
+                    credential.username,
+                )
+
+                # Heuristic: pick the most likely bearer token from storage to use
+                # as an Authorization header for httpx / non-browser requests.
+                _bearer_keys = [
+                    "access_token", "accessToken", "token", "jwt", "id_token",
+                    "idToken", "auth_token", "authToken", "bearer_token",
+                ]
+                _all_storage = {**captured_session_storage, **captured_local_storage}
+                for _sk in _bearer_keys:
+                    _sv = _all_storage.get(_sk)
+                    if _sv and not captured_headers.get("Authorization"):
+                        captured_headers["Authorization"] = f"Bearer {_sv}"
+                        log.info(
+                            "  _authenticate_guided: found token in storage key '%s' for %s",
+                            _sk, credential.username,
+                        )
+                        break
+                # If no known key matched, fall back to any value that looks like a JWT
+                if not captured_headers.get("Authorization"):
+                    for _sk, _sv in _all_storage.items():
+                        if isinstance(_sv, str) and _sv.startswith("eyJ") and _sv.count(".") >= 2:
+                            captured_headers["Authorization"] = f"Bearer {_sv}"
+                            log.info(
+                                "  _authenticate_guided: JWT-shaped value found in storage key '%s' for %s",
+                                _sk, credential.username,
+                            )
+                            break
+            finally:
+                await browser.close()
+                _guided_registry.pop(credential.id, None)
+                _guided_ready_registry.pop(credential.id, None)
+
+        # Build the injectable list regardless of whether cookies were captured.
+        # We always write to the cache so subsequent _authenticate calls for this
+        # credential don't open another window (even if capture failed).
+        #
+        # Normalisation is critical: Playwright's ctx.cookies() returns fields that
+        # add_cookies rejects — leading-dot domains (".localhost"), expires=-1 for
+        # session cookies, and sameSite values outside {"Strict","Lax","None"}.
+        # Using "url" instead of "domain"+"path" is the most reliable injection form.
+        injectable = []
+        _valid_samesite = {"Strict", "Lax", "None"}
+        for c in captured_cookies:
+            if not isinstance(c, dict) or not c.get("name") or "value" not in c:
+                continue
+            entry: dict = {"name": c["name"], "value": c["value"], "url": login_url}
+            # Optional fields — only include when they are valid
+            if c.get("httpOnly"):
+                entry["httpOnly"] = True
+            if c.get("secure"):
+                entry["secure"] = True
+            ss = c.get("sameSite")
+            if ss in _valid_samesite:
+                entry["sameSite"] = ss
+            exp = c.get("expires")
+            if exp is not None and isinstance(exp, (int, float)) and exp > 0:
+                entry["expires"] = int(exp)
+            injectable.append(entry)
+        log.info(
+            "  _authenticate_guided: built %d injectable cookie(s) from %d captured for %s",
+            len(injectable), len(captured_cookies), credential.username,
+        )
+
+        if not injectable and not captured_headers.get("Authorization"):
+            log.warning(
+                "  _authenticate_guided: no injectable cookies and no bearer token for %s — "
+                "session capture may have failed. The headless crawl will proceed "
+                "unauthenticated for this credential.",
+                credential.username,
+            )
+            events_svc.emit(run_id, {
+                "type": "scanner_phase",
+                "phase": "guided_login_warning",
+                "status": "warning",
+                "message": (
+                    f"No session cookies were captured for '{credential.username}' "
+                    "after guided login. The crawl for this credential may be "
+                    "unauthenticated. Try again or use 'guided' mode and complete the "
+                    "login fully before clicking I'm Done."
+                ),
+            })
+
+        if injectable:
+            try:
+                await page.context.add_cookies(injectable)
+                # Verify injection actually worked by reading cookies back
+                _verify = await page.context.cookies()
+                _injected_names = {ck["name"] for ck in _verify}
+                _expected_names = {e["name"] for e in injectable}
+                _missing = _expected_names - _injected_names
+                if _missing:
+                    log.warning(
+                        "  _authenticate_guided: %d cookie(s) missing after injection for %s: %s",
+                        len(_missing), credential.username, _missing,
+                    )
+                else:
+                    log.info(
+                        "  _authenticate_guided: verified %d cookie(s) in context for %s",
+                        len(_injected_names & _expected_names), credential.username,
+                    )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: add_cookies failed for %s: %s", credential.username, exc)
+
+        if captured_headers:
+            try:
+                await page.context.set_extra_http_headers(captured_headers)
+            except Exception as exc:
+                log.warning("  _authenticate_guided: could not set extra headers: %s", exc)
+
+        # Reload so the headless context picks up the injected cookies,
+        # then restore localStorage and sessionStorage from the headed session.
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=12_000)
+            await page.wait_for_load_state("networkidle", timeout=8_000)
+        except Exception:
+            pass
+        if captured_local_storage:
+            try:
+                await page.evaluate(
+                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                    "localStorage.setItem(k, v); }",
+                    captured_local_storage,
+                )
+                log.info(
+                    "  _authenticate_guided: restored %d localStorage entries for %s",
+                    len(captured_local_storage), credential.username,
+                )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: localStorage restore failed: %s", exc)
+        if captured_session_storage:
+            try:
+                await page.evaluate(
+                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                    "sessionStorage.setItem(k, v); }",
+                    captured_session_storage,
+                )
+                log.info(
+                    "  _authenticate_guided: restored %d sessionStorage entries for %s",
+                    len(captured_session_storage), credential.username,
+                )
+            except Exception as exc:
+                log.warning("  _authenticate_guided: sessionStorage restore failed: %s", exc)
+
+        events_svc.emit(run_id, {
+            "type": "guided_login_confirmed",
+            "credential_id": credential.id,
+            "username": credential.username,
+            "cookie_count": len(injectable),
+        })
+        # Cache the captured session so reconcile and the dynamic scan can reuse it without a second window
+        _guided_session_cache[(run_id, credential.id)] = {
+            "cookies": {c["name"]: c["value"] for c in captured_cookies if "name" in c and "value" in c},
+            "headers": captured_headers,
+            "injectable": injectable,
+            "local_storage": captured_local_storage,
+            "session_storage": captured_session_storage,
+        }
+        # Persist to session vault DB so the dynamic scan phase can load it via load_session_vault()
+        try:
+            from aespa.services import scanner_sessions as _ss
+            _ss.upsert_session(
+                run_id,
+                label=f"guided_{credential.id}",
+                kind="cookie",
+                username=credential.username,
+                credential_id=credential.id,
+                source="guided_login",
+                cookies=_guided_session_cache[(run_id, credential.id)]["cookies"],
+                extra_headers=captured_headers or None,
+            )
+        except Exception as _vs_exc:
+            log.warning("  _authenticate_guided: could not persist session to vault: %s", _vs_exc)
+
+
+async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> None:
+    """Dispatch to the correct auth strategy based on ``credential.auth_mode``.
+
+    For guided credentials that already have a cached session (from the crawl
+    phase), cookies are injected directly without opening a new browser window.
+    """
+    mode = getattr(credential, "auth_mode", None) or AuthMode.auto
+    try:
+        mode = AuthMode(mode)
+    except ValueError:
+        mode = AuthMode.auto
+
+    # If this is a guided credential with a pre-captured session, inject directly
+    if mode == AuthMode.guided and run_id:
+        cached = _guided_session_cache.get((run_id, credential.id))
+        if cached:
+            log.info(
+                "  _authenticate: reusing cached guided session for %s (cred_id=%s)",
+                credential.username, credential.id,
+            )
+            # Re-build from the flat cookies dict using url-based format (most reliable)
+            cookies_dict = cached.get("cookies") or {}
+            if cookies_dict:
+                cookie_list = [
+                    {"name": k, "value": v, "url": login_url}
+                    for k, v in cookies_dict.items()
+                ]
+                try:
+                    await page.context.add_cookies(cookie_list)
+                    log.info(
+                        "  _authenticate: injected %d cached cookie(s) for %s",
+                        len(cookie_list), credential.username,
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: could not inject cached cookies: %s", exc)
+            if cached.get("headers"):
+                try:
+                    await page.context.set_extra_http_headers(cached["headers"])
+                except Exception as exc:
+                    log.warning("  _authenticate: could not set cached headers: %s", exc)
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=12_000)
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+            except Exception:
+                pass
+            # Restore localStorage and sessionStorage
+            if cached.get("local_storage"):
+                try:
+                    await page.evaluate(
+                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                        "localStorage.setItem(k, v); }",
+                        cached["local_storage"],
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: localStorage restore failed: %s", exc)
+            if cached.get("session_storage"):
+                try:
+                    await page.evaluate(
+                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
+                        "sessionStorage.setItem(k, v); }",
+                        cached["session_storage"],
+                    )
+                except Exception as exc:
+                    log.warning("  _authenticate: sessionStorage restore failed: %s", exc)
+            return
+
+    if mode == AuthMode.totp:
+        await _authenticate_auto(page, login_url, credential)
+        await _fill_totp_if_prompted(page, credential)
+    elif mode == AuthMode.guided:
+        await _authenticate_guided(page, login_url, credential, run_id)
+    else:
+        await _authenticate_auto(page, login_url, credential)
+
+
+async def _authenticate_auto(page, login_url: str, credential) -> None:
     """Best-effort form-based login."""
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
