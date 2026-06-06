@@ -40,6 +40,13 @@ class AliceSessionsRequest(BaseModel):
 # ── Chat session persistence helpers ──────────────────────────────────────────
 
 def _load_sessions(run_id: int, session: Session) -> dict:
+    run = session.get(TestRun, run_id)
+    # Stable per-run identity. SQLite reuses INTEGER PRIMARY KEY ids after the
+    # highest run is deleted, so a new run can inherit a deleted run's id. The
+    # client uses this token to detect that case and discard stale localStorage
+    # belonging to the deleted run (otherwise it would show another run's chat).
+    run_token = run.created_at.isoformat() if run and run.created_at else None
+
     sess_rows = session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
@@ -69,6 +76,7 @@ def _load_sessions(run_id: int, session: Session) -> dict:
         "chats": chats,
         "active_tab_id": active.session_key if active else "tab-default",
         "updated_at": latest_updated.isoformat() if latest_updated else None,
+        "run_created_at": run_token,
     }
 
 
