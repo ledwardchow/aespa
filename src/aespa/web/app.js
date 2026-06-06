@@ -1981,23 +1981,21 @@ function TestRunDetail({ runId, initialTab }) {
   });
 
   // Load sessions from the server on mount.
-  // Strategy: use whichever source is more recent.
-  //   - Local is newer  → page-refresh by the same user; keep local (it has the
-  //     latest streaming content) and apply the recovery key on top.
-  //   - Server is newer → a different user opened the scan, or another browser
-  //     tab saved after this one last wrote; accept the server state.
+  // The server (DB rows scoped by test_run_id) is the source of truth for run
+  // *identity*. localStorage is only an instant-paint cache; because SQLite
+  // reuses run ids after the highest run is deleted, a cached chat under
+  // alice_chats_<id> may actually belong to a different, deleted run. We compare
+  // the server's stable run token against the one stored with the cache and
+  // discard the cache when they disagree (or when the run has no chats yet),
+  // which prevents one run from showing another run's chat.
   useEffect(() => {
+    let cancelled = false;
     api.getAliceSessions(runId).then(data => {
-      if (!data.chats || data.chats.length === 0) {
-        _aliceServerLoaded.current = true;
-        return;
-      }
+      if (cancelled) return;
 
-      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
-      const localSavedAt = parseInt(
-        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
-      );
-      const activeTabId = data.active_tab_id || "tab-default";
+      const serverToken = data.run_created_at || "";
+      const localToken = localStorage.getItem(`alice_chats_${runId}_runToken`) || "";
+      const localIsForThisRun = !!serverToken && localToken === serverToken;
 
       // Helper: patch messages with the latest recovery-key text.
       const applyRecovery = (chats, tabId) => {
@@ -2020,8 +2018,39 @@ function TestRunDetail({ runId, initialTab }) {
         } catch (_) { return chats; }
       };
 
-      if (serverUpdatedAt > localSavedAt) {
-        // Server has newer state (another user/tab made changes).
+      if (!data.chats || data.chats.length === 0) {
+        // The run has no persisted chat. If our cache is from a *different*
+        // (reused-id) run, it would wrongly display that run's chat — reset to
+        // a fresh default and overwrite the stale cache. Only keep the cache
+        // when it provably belongs to this run (genuine not-yet-saved content).
+        if (!localIsForThisRun) {
+          const defaults = _aliceDefaultChats();
+          setAliceChats(defaults);
+          setActiveAliceTabId("tab-default");
+          try {
+            localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(defaults));
+            localStorage.setItem(`alice_active_tab_${runId}`, "tab-default");
+            localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+            localStorage.removeItem(`alice_chats_${runId}_savedAt`);
+          } catch (_) {}
+        }
+        _aliceServerLoaded.current = true;
+        return;
+      }
+
+      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localSavedAt = parseInt(
+        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
+      );
+      const activeTabId = data.active_tab_id || "tab-default";
+
+      // Prefer local only when it provably belongs to THIS run and is newer
+      // (a page refresh mid-stream that hasn't flushed to the server yet).
+      // Otherwise the server wins — this also covers the reused-id case, where
+      // the local cache belongs to a deleted run and must be discarded.
+      const preferLocal = localIsForThisRun && localSavedAt > serverUpdatedAt;
+
+      if (!preferLocal) {
         const merged = applyRecovery(data.chats, activeTabId);
         _aliceServerLoaded.current = true;
         setAliceChats(merged);
@@ -2029,16 +2058,21 @@ function TestRunDetail({ runId, initialTab }) {
         try {
           localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
           localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
           localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
         } catch (_) {}
       } else {
-        // Local is fresher (page refresh mid-stream) — keep it as-is;
-        // but still mark loaded so the save effect is unblocked.
+        // Local is fresher and belongs to this run — keep it, but record the
+        // run token so future loads recognise it.
+        try {
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+        } catch (_) {}
         _aliceServerLoaded.current = true;
       }
     }).catch(() => {
       _aliceServerLoaded.current = true; // unblock saves even if the API fails
     });
+    return () => { cancelled = true; };
   }, [runId]);
 
   const [aliceInputText, setAliceInputText] = useState("");
@@ -2180,6 +2214,11 @@ function TestRunDetail({ runId, initialTab }) {
       api.saveAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId })
         .catch(() => {});
     }, 800);
+    // Cancel a pending save when this run unmounts so a late timer can't fire
+    // after the user has navigated away.
+    return () => {
+      if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    };
   }, [aliceChats, activeAliceTabId, runId]);
 
   const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
