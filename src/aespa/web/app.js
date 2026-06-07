@@ -5615,7 +5615,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
 const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
-const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0.7, use_temperature:true, use_vision:false, force_tool_choice:true };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
   openai:"https://api.openai.com/v1",
@@ -5689,7 +5689,7 @@ function llmProfileToForm(cfg, providers=[]) {
       provider_id:providerId,
       model:cfg.model,
       max_tokens:cfg.max_tokens,
-      temperature:hasTemp ? cfg.temperature : 0.7,
+      temperature:hasTemp ? cfg.temperature : 0.2,
       use_temperature:hasTemp,
       use_vision:cfg.use_vision??false,
       force_tool_choice:cfg.force_tool_choice??true,
@@ -5835,7 +5835,7 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="64000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+          <input type="number" required min="1" max="256000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
         <div className="field">
           <label style=${{display:"flex", alignItems:"center", gap:"6px", cursor:"pointer"}}>
             <input type="checkbox" checked=${form.use_temperature} onChange=${e=>upd({use_temperature:e.target.checked})} style=${{width:"14px", height:"14px", accentColor:"var(--accent)", cursor:"pointer", margin:0}}/>
