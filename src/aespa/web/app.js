@@ -2808,10 +2808,12 @@ function TestRunDetail({ runId, initialTab }) {
           f.id === evt.finding_id
             ? {
                 ...f,
-                validation_status: evt.validation_status,
+                validation_status: evt.validation_status ?? f.validation_status,
                 validation_note: evt.validation_note ?? f.validation_note,
                 evidence_json: evt.evidence_json ?? f.evidence_json,
                 evidence_items: evt.evidence_items ?? f.evidence_items,
+                poc_command: evt.poc_command ?? f.poc_command,
+                poc_setup: evt.poc_setup ?? f.poc_setup,
               }
             : f
         ));
@@ -3895,6 +3897,20 @@ function TestRunDetail({ runId, initialTab }) {
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${f.poc_command && html`
+                          <div className="finding-poc" style=${{marginTop:12}}>
+                            <div className="row" style=${{justifyContent:"space-between",alignItems:"center"}}>
+                              <strong>Validation Command (verified)</strong>
+                              <button className="btn ghost sm" title="Copy command"
+                                onClick=${e=>{e.stopPropagation(); navigator.clipboard?.writeText(f.poc_command);}}>Copy</button>
+                            </div>
+                            <pre className="finding-evidence">${f.poc_command}</pre>
+                            ${f.poc_setup && html`
+                              <details style=${{marginTop:4}}>
+                                <summary className="finding-affected-label" style=${{cursor:"pointer"}}>Setup (capture an authenticated session)</summary>
+                                <pre className="finding-evidence" style=${{whiteSpace:"pre-wrap"}}>${f.poc_setup}</pre>
+                              </details>`}
                           </div>`}
                         ${evidenceItemsFor(f).length > 0 && html`
                           <div className="structured-evidence">
@@ -6898,6 +6914,12 @@ function findingsToMarkdown(findings, meta = {}) {
     if (f.validation_note) {
       lines.push("### Validation Note", markdownListValue(f.validation_note), "");
     }
+    if (f.poc_command) {
+      lines.push("### Validation Command", markdownCodeBlock(f.poc_command), "");
+    }
+    if (f.poc_setup) {
+      lines.push("### Validation Setup", f.poc_setup, "");
+    }
     const mergedInstances = (() => {
       try { return JSON.parse(f.merged_instances || "[]"); } catch (_) { return []; }
     })();
@@ -6934,6 +6956,8 @@ function findingImportPayload(f) {
     validation_status: f.validation_status || "unvalidated",
     validation_note: f.validation_note || null,
     merged_instances: f.merged_instances || "[]",
+    poc_command: f.poc_command || "",
+    poc_setup: f.poc_setup || "",
   };
 }
 
@@ -6972,6 +6996,8 @@ function parseFindingsMarkdownSections(markdown) {
       request_evidence: stripMarkdownFence(markdownSection(block, "Request Evidence")),
       response_evidence: stripMarkdownFence(markdownSection(block, "Response Evidence")),
       validation_note: markdownSection(block, "Validation Note") || null,
+      poc_command: stripMarkdownFence(markdownSection(block, "Validation Command")),
+      poc_setup: markdownSection(block, "Validation Setup"),
     });
   });
 }
