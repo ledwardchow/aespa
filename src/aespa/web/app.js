@@ -2226,15 +2226,6 @@ function TestRunDetail({ runId, initialTab }) {
         api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
           .catch(() => {});
       }
-    // Cancel a pending save when this run unmounts so a late timer can't fire
-    // after the user has navigated away.
-    return () => {
-      if (_aliceSaveTimer.current) {
-        clearTimeout(_aliceSaveTimer.current);
-        _aliceSaveTimer.current = null;
-        api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
-          .catch(() => {});
-      }
     };
   }, [aliceChats, activeAliceTabId, runId]);
 
