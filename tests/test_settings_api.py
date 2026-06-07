@@ -120,6 +120,21 @@ def test_create_provider_and_profile(client: TestClient):
     assert active["provider"] == "openai"
 
 
+def test_create_profile_with_optional_temperature(client: TestClient):
+    provider_r = _make_provider(client)
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+
+    profile_r = _make_profile(client, provider["id"], name="OptionalTempProfile", temperature=None)
+    assert profile_r.status_code == 200
+    profile = profile_r.json()
+    assert profile["temperature"] is None
+
+    client.post(f"/api/settings/llm/profiles/{profile['id']}/activate")
+    active = client.get("/api/settings/llm").json()
+    assert active["temperature"] is None
+
+
 def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     provider_r = _make_provider(
         client,

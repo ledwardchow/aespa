@@ -669,7 +669,7 @@ async def stream_chat_completion(
         async with client.messages.stream(
             model=config.model,
             max_tokens=config.max_tokens,
-            temperature=config.temperature,
+            **({'temperature': config.temperature} if config.temperature is not None else {}),
             system=[{"type": "text", "text": system_message}],
             messages=formatted_messages,
         ) as stream:
@@ -691,14 +691,14 @@ async def stream_chat_completion(
 
         if config.api_key:
             model_id = quote(config.model, safe="")
+            infer_cfg: dict = {"maxTokens": config.max_tokens}
+            if config.temperature is not None:
+                infer_cfg["temperature"] = config.temperature
             url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse-stream"
             payload = {
                 "messages": converse_messages,
                 "system": system_list,
-                "inferenceConfig": {
-                    "maxTokens": config.max_tokens,
-                    "temperature": config.temperature,
-                },
+                "inferenceConfig": infer_cfg,
             }
             headers = {
                 "Authorization": f"Bearer {config.api_key}",
@@ -731,10 +731,9 @@ async def stream_chat_completion(
             _model = config.model
             _messages = converse_messages
             _system = system_list
-            _infer = {
-                "maxTokens": config.max_tokens,
-                "temperature": config.temperature,
-            }
+            _infer: dict = {"maxTokens": config.max_tokens}
+            if config.temperature is not None:
+                _infer["temperature"] = config.temperature
             _endpoint = config.base_url or None
 
             def _run_converse_stream():
@@ -936,7 +935,7 @@ def _chat_completion_kwargs(
     else:
         kwargs["max_tokens"] = token_limit
 
-    if not uses_reasoning_params:
+    if not uses_reasoning_params and config.temperature is not None:
         kwargs["temperature"] = config.temperature
     return kwargs
 
@@ -985,7 +984,7 @@ async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[st
     resp = await client.messages.create(
         model=config.model,
         max_tokens=config.max_tokens,
-        temperature=config.temperature,
+        **({'temperature': config.temperature} if config.temperature is not None else {}),
         messages=[{"role": "user", "content": content}],
     )
     _record_usage(config.model,
@@ -1021,7 +1020,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         contents=parts,
         config=types.GenerateContentConfig(
             max_output_tokens=config.max_tokens,
-            temperature=config.temperature,
+            **({'temperature': config.temperature} if config.temperature is not None else {}),
         ),
     )
     _um = getattr(resp, "usage_metadata", None)
@@ -1217,12 +1216,13 @@ async def _azure_foundry_anthropic(
         })
     content.append({"type": "text", "text": prompt})
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": config.model,
         "max_tokens": config.max_tokens,
-        "temperature": config.temperature,
         "messages": [{"role": "user", "content": content}],
     }
+    if config.temperature is not None:
+        payload["temperature"] = config.temperature
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -1271,12 +1271,12 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         })
     content.append({"text": prompt})
 
+    _infer_cfg: dict[str, Any] = {"maxTokens": config.max_tokens}
+    if config.temperature is not None:
+        _infer_cfg["temperature"] = config.temperature
     payload: dict[str, Any] = {
         "messages": [{"role": "user", "content": content}],
-        "inferenceConfig": {
-            "maxTokens": config.max_tokens,
-            "temperature": config.temperature,
-        },
+        "inferenceConfig": _infer_cfg,
     }
     if not config.api_key:
         import asyncio as _aio
@@ -2339,7 +2339,7 @@ async def _call_with_tools(
         resp = await client.messages.create(
             model=config.model,
             max_tokens=config.max_tokens,
-            temperature=config.temperature,
+            **({'temperature': config.temperature} if config.temperature is not None else {}),
             system=[{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
             tools=cached_tools,
             messages=cached_messages,
@@ -2367,11 +2367,12 @@ async def _call_with_tools(
         payload = {
             "model": config.model,
             "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
             "system": [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
             "tools": cached_tools,
             "messages": cached_messages,
         }
+        if config.temperature is not None:
+            payload["temperature"] = config.temperature
         hdrs = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -2481,15 +2482,15 @@ async def _call_with_tools(
             # Bearer-token path (SAML / federated credentials stored as api_key).
             # Uses the same HTTP endpoint as _bedrock() so SAML token users work.
             model_id = quote(config.model, safe="")
+            _infer_agent: dict = {"maxTokens": config.max_tokens}
+            if config.temperature is not None:
+                _infer_agent["temperature"] = config.temperature
             url = f"{(config.base_url or '').rstrip('/')}/model/{model_id}/converse"
             payload: dict = {
                 "messages": converse_messages,
                 "system": system_list,
                 "toolConfig": tool_config,
-                "inferenceConfig": {
-                    "maxTokens": config.max_tokens,
-                    "temperature": config.temperature,
-                },
+                "inferenceConfig": _infer_agent,
             }
             headers = {
                 "Authorization": f"Bearer {config.api_key}",
@@ -2525,15 +2526,15 @@ async def _call_with_tools(
                     verify=not _proxy_url,
                     **{"config": _boto_cfg} if _boto_cfg else {},
                 )
+                _infer_converse: dict = {"maxTokens": config.max_tokens}
+                if config.temperature is not None:
+                    _infer_converse["temperature"] = config.temperature
                 return client.converse(
                     modelId=config.model,
                     system=system_list,
                     messages=converse_messages,
                     toolConfig=tool_config,
-                    inferenceConfig={
-                        "maxTokens": config.max_tokens,
-                        "temperature": config.temperature,
-                    },
+                    inferenceConfig=_infer_converse,
                 )
 
             loop = _asyncio.get_event_loop()
@@ -2767,7 +2768,7 @@ async def _call_with_tools(
                 system_instruction=system_message,
                 tools=g_tools,
                 max_output_tokens=config.max_tokens,
-                temperature=config.temperature,
+                **({'temperature': config.temperature} if config.temperature is not None else {}),
             ),
         )
         blocks = []
