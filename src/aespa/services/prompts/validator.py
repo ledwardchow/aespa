@@ -33,6 +33,26 @@ innocent explanation: "this endpoint is intentionally public", "the payload is H
 so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
 • Stay focused on the finding's core claim. Do not explore adjacent attack surface.
 • You cannot write new findings. Your only output is a verdict via done().
+
+Proof-of-concept (only when you confirm)
+────────────────────────────────────────
+When you call done(verdict="confirmed"), also supply a reproducible proof so a human can
+re-verify the finding from a terminal:
+• poc_request: the SINGLE decisive request you already ran that demonstrates the issue.
+  Strongly prefer a safe, idempotent GET/HEAD. If the only proof is a state-changing
+  request (POST/PUT/PATCH/DELETE), OMIT poc_request — a missing PoC is better than one
+  that mutates data.
+• poc_expect: the assertion that proves it (an HTTP status and/or a distinctive
+  body_contains substring such as a reflected marker or another user's data). Avoid
+  generic substrings that would also appear in a benign response.
+• If the request reproduces with NO authentication, leave use_session empty and omit
+  poc_auth. If it needs a session, set use_session and provide poc_auth describing how a
+  human captures the credential (bearer token, readable cookie, or — for HttpOnly session
+  cookies that JavaScript cannot read — copying the Cookie header from the Network tab).
+  Never put real passwords or live tokens in any field; the server injects credentials at
+  verification time and the human supplies their own at run time.
+The server independently re-runs your poc_request and only keeps the PoC if it actually
+reproduces, so make it precise.
 """
 
 
@@ -203,6 +223,84 @@ _VALIDATOR_DONE_TOOL: dict = {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
                 "description": "Your confidence in the verdict.",
+            },
+            "poc_request": {
+                "type": "object",
+                "description": (
+                    "Only for verdict=confirmed. The SINGLE decisive HTTP request that "
+                    "reproduces this finding — copy it from the request you actually ran "
+                    "and confirmed. Prefer a safe, idempotent GET/HEAD. Omit entirely for "
+                    "state-changing requests (POST/PUT/PATCH/DELETE) or when no single "
+                    "request proves the issue; a missing PoC is better than a wrong one."
+                ),
+                "properties": {
+                    "method": {"type": "string"},
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "body": {},
+                    "use_session": {
+                        "type": "string",
+                        "description": (
+                            "Username whose session this request needs, or omit/empty if "
+                            "the request reproduces with NO authentication."
+                        ),
+                    },
+                },
+                "required": ["method", "url"],
+            },
+            "poc_expect": {
+                "type": "object",
+                "description": (
+                    "Assertion that proves the vuln when poc_request is replayed. At least "
+                    "one of status / body_contains must be set."
+                ),
+                "properties": {
+                    "status": {
+                        "type": "integer",
+                        "description": "Expected HTTP status code (e.g. 200).",
+                    },
+                    "body_contains": {
+                        "type": "string",
+                        "description": (
+                            "A distinctive substring that must appear in the response and "
+                            "demonstrates the issue (e.g. a reflected payload marker, "
+                            "another user's email). Avoid generic strings."
+                        ),
+                    },
+                    "body_not_contains": {
+                        "type": "string",
+                        "description": "Optional substring that must be ABSENT (e.g. a login redirect marker).",
+                    },
+                },
+            },
+            "poc_auth": {
+                "type": "object",
+                "description": (
+                    "How a human obtains the credential the poc_request needs. Required "
+                    "when poc_request.use_session is set; omit when the PoC needs no auth."
+                ),
+                "properties": {
+                    "mechanism": {
+                        "type": "string",
+                        "enum": ["bearer", "cookie_readable", "cookie_httponly"],
+                        "description": (
+                            "bearer: token in localStorage/sessionStorage or an "
+                            "Authorization header. cookie_readable: a non-HttpOnly cookie "
+                            "readable from document.cookie. cookie_httponly: an HttpOnly "
+                            "session cookie that JavaScript CANNOT read (human must copy "
+                            "the Cookie header from the DevTools Network tab)."
+                        ),
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "Short human steps: which user to log in as and how to capture "
+                            "the credential. Do NOT include real passwords; refer to the "
+                            "role/user only."
+                        ),
+                    },
+                },
+                "required": ["mechanism"],
             },
         },
         "required": ["verdict", "reasoning"],

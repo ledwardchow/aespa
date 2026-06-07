@@ -878,6 +878,8 @@ class ScanFindingOut(BaseModel):
     validation_status: str
     validation_note: str | None
     merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
     created_at: datetime
 
 
@@ -900,6 +902,8 @@ class ScanFindingImportIn(BaseModel):
     validation_status: str = "unvalidated"
     validation_note: str | None = None
     merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
 
 
 class ScanFindingImportResult(BaseModel):
