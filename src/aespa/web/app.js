@@ -1981,23 +1981,21 @@ function TestRunDetail({ runId, initialTab }) {
   });
 
   // Load sessions from the server on mount.
-  // Strategy: use whichever source is more recent.
-  //   - Local is newer  → page-refresh by the same user; keep local (it has the
-  //     latest streaming content) and apply the recovery key on top.
-  //   - Server is newer → a different user opened the scan, or another browser
-  //     tab saved after this one last wrote; accept the server state.
+  // The server (DB rows scoped by test_run_id) is the source of truth for run
+  // *identity*. localStorage is only an instant-paint cache; because SQLite
+  // reuses run ids after the highest run is deleted, a cached chat under
+  // alice_chats_<id> may actually belong to a different, deleted run. We compare
+  // the server's stable run token against the one stored with the cache and
+  // discard the cache when they disagree (or when the run has no chats yet),
+  // which prevents one run from showing another run's chat.
   useEffect(() => {
+    let cancelled = false;
     api.getAliceSessions(runId).then(data => {
-      if (!data.chats || data.chats.length === 0) {
-        _aliceServerLoaded.current = true;
-        return;
-      }
+      if (cancelled) return;
 
-      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
-      const localSavedAt = parseInt(
-        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
-      );
-      const activeTabId = data.active_tab_id || "tab-default";
+      const serverToken = data.run_created_at || "";
+      const localToken = localStorage.getItem(`alice_chats_${runId}_runToken`) || "";
+      const localIsForThisRun = !!serverToken && localToken === serverToken;
 
       // Helper: patch messages with the latest recovery-key text.
       const applyRecovery = (chats, tabId) => {
@@ -2020,8 +2018,39 @@ function TestRunDetail({ runId, initialTab }) {
         } catch (_) { return chats; }
       };
 
-      if (serverUpdatedAt > localSavedAt) {
-        // Server has newer state (another user/tab made changes).
+      if (!data.chats || data.chats.length === 0) {
+        // The run has no persisted chat. If our cache is from a *different*
+        // (reused-id) run, it would wrongly display that run's chat — reset to
+        // a fresh default and overwrite the stale cache. Only keep the cache
+        // when it provably belongs to this run (genuine not-yet-saved content).
+        if (!localIsForThisRun) {
+          const defaults = _aliceDefaultChats();
+          setAliceChats(defaults);
+          setActiveAliceTabId("tab-default");
+          try {
+            localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(defaults));
+            localStorage.setItem(`alice_active_tab_${runId}`, "tab-default");
+            localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+            localStorage.removeItem(`alice_chats_${runId}_savedAt`);
+          } catch (_) {}
+        }
+        _aliceServerLoaded.current = true;
+        return;
+      }
+
+      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localSavedAt = parseInt(
+        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
+      );
+      const activeTabId = data.active_tab_id || "tab-default";
+
+      // Prefer local only when it provably belongs to THIS run and is newer
+      // (a page refresh mid-stream that hasn't flushed to the server yet).
+      // Otherwise the server wins — this also covers the reused-id case, where
+      // the local cache belongs to a deleted run and must be discarded.
+      const preferLocal = localIsForThisRun && localSavedAt > serverUpdatedAt;
+
+      if (!preferLocal) {
         const merged = applyRecovery(data.chats, activeTabId);
         _aliceServerLoaded.current = true;
         setAliceChats(merged);
@@ -2029,16 +2058,21 @@ function TestRunDetail({ runId, initialTab }) {
         try {
           localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
           localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
           localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
         } catch (_) {}
       } else {
-        // Local is fresher (page refresh mid-stream) — keep it as-is;
-        // but still mark loaded so the save effect is unblocked.
+        // Local is fresher and belongs to this run — keep it, but record the
+        // run token so future loads recognise it.
+        try {
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+        } catch (_) {}
         _aliceServerLoaded.current = true;
       }
     }).catch(() => {
       _aliceServerLoaded.current = true; // unblock saves even if the API fails
     });
+    return () => { cancelled = true; };
   }, [runId]);
 
   const [aliceInputText, setAliceInputText] = useState("");
@@ -2176,10 +2210,23 @@ function TestRunDetail({ runId, initialTab }) {
     } catch (_) {}
     // Debounce server save so rapid streaming chunks don't hammer the API.
     if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    const capturedRunId = runId;
+    const capturedChats = aliceChats;
+    const capturedTabId = activeAliceTabId;
     _aliceSaveTimer.current = setTimeout(() => {
-      api.saveAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId })
+      api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
         .catch(() => {});
     }, 800);
+    // Flush any pending save immediately on unmount so navigation away within the
+    // debounce window doesn't silently drop the last change.
+    return () => {
+      if (_aliceSaveTimer.current) {
+        clearTimeout(_aliceSaveTimer.current);
+        _aliceSaveTimer.current = null;
+        api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
+          .catch(() => {});
+      }
+    };
   }, [aliceChats, activeAliceTabId, runId]);
 
   const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
@@ -2769,10 +2816,12 @@ function TestRunDetail({ runId, initialTab }) {
           f.id === evt.finding_id
             ? {
                 ...f,
-                validation_status: evt.validation_status,
+                validation_status: evt.validation_status ?? f.validation_status,
                 validation_note: evt.validation_note ?? f.validation_note,
                 evidence_json: evt.evidence_json ?? f.evidence_json,
                 evidence_items: evt.evidence_items ?? f.evidence_items,
+                poc_command: evt.poc_command ?? f.poc_command,
+                poc_setup: evt.poc_setup ?? f.poc_setup,
               }
             : f
         ));
@@ -3856,6 +3905,20 @@ function TestRunDetail({ runId, initialTab }) {
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${f.poc_command && html`
+                          <div className="finding-poc" style=${{marginTop:12}}>
+                            <div className="row" style=${{justifyContent:"space-between",alignItems:"center"}}>
+                              <strong>Validation Command (verified)</strong>
+                              <button className="btn ghost sm" title="Copy command"
+                                onClick=${e=>{e.stopPropagation(); navigator.clipboard?.writeText(f.poc_command);}}>Copy</button>
+                            </div>
+                            <pre className="finding-evidence">${f.poc_command}</pre>
+                            ${f.poc_setup && html`
+                              <details style=${{marginTop:4}}>
+                                <summary className="finding-affected-label" style=${{cursor:"pointer"}}>Setup (capture an authenticated session)</summary>
+                                <pre className="finding-evidence" style=${{whiteSpace:"pre-wrap"}}>${f.poc_setup}</pre>
+                              </details>`}
                           </div>`}
                         ${evidenceItemsFor(f).length > 0 && html`
                           <div className="structured-evidence">
@@ -5552,7 +5615,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
 const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
-const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false, force_tool_choice:true };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
   openai:"https://api.openai.com/v1",
@@ -5619,15 +5682,20 @@ function providerPayload(form) {
 function llmProfileToForm(cfg, providers=[]) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
   const provider = providers.find(p=>p.id===providerId) || providers[0];
-  return cfg ? {
-    name:cfg.name??"Default",
-    provider_id:providerId,
-    model:cfg.model,
-    max_tokens:cfg.max_tokens,
-    temperature:cfg.temperature,
-    use_vision:cfg.use_vision??false,
-    force_tool_choice:cfg.force_tool_choice??true,
-  } : {
+  if (cfg) {
+    const hasTemp = cfg.temperature !== null && cfg.temperature !== undefined;
+    return {
+      name:cfg.name??"Default",
+      provider_id:providerId,
+      model:cfg.model,
+      max_tokens:cfg.max_tokens,
+      temperature:hasTemp ? cfg.temperature : 0.2,
+      use_temperature:hasTemp,
+      use_vision:cfg.use_vision??false,
+      force_tool_choice:cfg.force_tool_choice??true,
+    };
+  }
+  return {
     ...DEFAULT_LLM_FORM,
     provider_id:provider?.id || "",
     model:provider?.models?.[0] || "",
@@ -5640,7 +5708,7 @@ function llmPayload(form) {
     provider_id:Number(form.provider_id),
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
-    temperature:Number(form.temperature),
+    temperature:form.use_temperature ? Number(form.temperature) : null,
     use_vision:form.use_vision,
     force_tool_choice:form.force_tool_choice,
   };
@@ -5767,9 +5835,14 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="64000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
-        <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
-          <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
+          <input type="number" required min="1" max="256000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+        <div className="field">
+          <label style=${{display:"flex", alignItems:"center", gap:"6px", cursor:"pointer"}}>
+            <input type="checkbox" checked=${form.use_temperature} onChange=${e=>upd({use_temperature:e.target.checked})} style=${{width:"14px", height:"14px", accentColor:"var(--accent)", cursor:"pointer", margin:0}}/>
+            <span>Temperature <span className="field-hint-inline">(0-2)</span></span>
+          </label>
+          <input type="number" required=${form.use_temperature} disabled=${!form.use_temperature} min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/>
+        </div>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Vision</div>
@@ -6859,6 +6932,12 @@ function findingsToMarkdown(findings, meta = {}) {
     if (f.validation_note) {
       lines.push("### Validation Note", markdownListValue(f.validation_note), "");
     }
+    if (f.poc_command) {
+      lines.push("### Validation Command", markdownCodeBlock(f.poc_command), "");
+    }
+    if (f.poc_setup) {
+      lines.push("### Validation Setup", f.poc_setup, "");
+    }
     const mergedInstances = (() => {
       try { return JSON.parse(f.merged_instances || "[]"); } catch (_) { return []; }
     })();
@@ -6895,6 +6974,8 @@ function findingImportPayload(f) {
     validation_status: f.validation_status || "unvalidated",
     validation_note: f.validation_note || null,
     merged_instances: f.merged_instances || "[]",
+    poc_command: f.poc_command || "",
+    poc_setup: f.poc_setup || "",
   };
 }
 
@@ -6933,6 +7014,8 @@ function parseFindingsMarkdownSections(markdown) {
       request_evidence: stripMarkdownFence(markdownSection(block, "Request Evidence")),
       response_evidence: stripMarkdownFence(markdownSection(block, "Response Evidence")),
       validation_note: markdownSection(block, "Validation Note") || null,
+      poc_command: stripMarkdownFence(markdownSection(block, "Validation Command")),
+      poc_setup: markdownSection(block, "Validation Setup"),
     });
   });
 }

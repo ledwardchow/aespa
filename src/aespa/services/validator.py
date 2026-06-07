@@ -13,9 +13,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import shlex
+import subprocess
+import tempfile
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from sqlmodel import Session, select
@@ -285,11 +290,12 @@ async def _run_adversarial_validator_loop(
     llm_cfg,
     cred_sessions: dict[int, dict],
     scanner_policy,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, dict]:
     """Run the adversarial agentic validator loop for a single finding.
 
-    Returns (verdict, reasoning, confidence) where verdict is "confirmed" or
-    "false_positive".
+    Returns (verdict, reasoning, confidence, done_input) where verdict is
+    "confirmed" or "false_positive" and done_input is the raw done() tool input
+    (carrying any poc_request/poc_expect/poc_auth).
     """
     # Build the user message for the validator.
     disproof_hints = llm_svc._disproof_hints_for_finding(finding.owasp_category or "")
@@ -319,7 +325,7 @@ async def _run_adversarial_validator_loop(
     primary_session = next(iter(user_sessions_by_name.values()), None)
 
     # Mutable verdict holder — set by the done() tool call.
-    verdict_holder: list[tuple[str, str, str]] = []
+    verdict_holder: list[tuple[str, str, str, dict]] = []
     step_counter: list[int] = [0]
 
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> Any:  # noqa: ANN401
@@ -338,7 +344,7 @@ async def _run_adversarial_validator_loop(
             verdict = tool_input.get("verdict", "confirmed")
             reasoning = tool_input.get("reasoning", "")
             confidence = tool_input.get("confidence", "medium")
-            verdict_holder.append((verdict, reasoning, confidence))
+            verdict_holder.append((verdict, reasoning, confidence, dict(tool_input)))
             events_svc.emit(run_id, {
                 "type": "agent_status",
                 "agent_id": f"validator-{finding.id}",
@@ -371,6 +377,7 @@ async def _run_adversarial_validator_loop(
         "confirmed",
         "Adversarial validator exhausted the step budget without finding a disproof.",
         "low",
+        {},
     )
 
 
@@ -512,7 +519,7 @@ async def _validate_one(
 
     deterministic = await _deterministic_validate_finding(finding, cred_sessions or {}, scanner_policy)
     if deterministic:
-        verdict, reasoning = deterministic
+        verdict, reasoning, poc_spec = deterministic
         await _persist_verdict(
             run_id,
             finding.id,
@@ -521,6 +528,13 @@ async def _validate_one(
             validation_results=[],
             source="deterministic_validation",
         )
+        if verdict == "confirmed":
+            await _attach_poc_if_confirmed(
+                run_id, finding,
+                done_input=poc_spec,
+                cred_sessions=cred_sessions or {},
+                scanner_policy=scanner_policy,
+            )
         return
 
     # Skip finding if it is below the configured severity threshold.
@@ -543,8 +557,9 @@ async def _validate_one(
 
     # ── Adversarial validator (agentic loop) ─────────────────────────────────
     if validator_cfg.enabled:
+        done_input: dict = {}
         try:
-            verdict, reasoning, confidence = await _run_adversarial_validator_loop(
+            verdict, reasoning, confidence, done_input = await _run_adversarial_validator_loop(
                 run_id=run_id,
                 finding=finding,
                 validator_cfg=validator_cfg,
@@ -565,6 +580,13 @@ async def _validate_one(
             validation_results=[],
             source="adversarial_validator",
         )
+        if verdict == "confirmed":
+            await _attach_poc_if_confirmed(
+                run_id, finding,
+                done_input=done_input,
+                cred_sessions=cred_sessions or {},
+                scanner_policy=scanner_policy,
+            )
         return
 
     # ── Legacy static-probe fallback ─────────────────────────────────────────
@@ -811,11 +833,11 @@ async def _deterministic_validate_finding(
     finding: ScanFinding,
     cred_sessions: dict[int, dict],
     scanner_policy,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, dict | None] | None:
     if not _is_access_control_finding(finding):
         return None
     if not cred_sessions:
-        return ("unconfirmed", "Access-control validation could not run because no alternate user sessions were available.")
+        return ("unconfirmed", "Access-control validation could not run because no alternate user sessions were available.", None)
 
     with Session(get_engine()) as s:
         page = (
@@ -828,18 +850,18 @@ async def _deterministic_validate_finding(
         page_title = page.title or "" if page else ""
 
     if not accessible_by:
-        return ("unconfirmed", "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.")
+        return ("unconfirmed", "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.", None)
 
     unauthorized = {
         cred_id: session for cred_id, session in cred_sessions.items()
         if cred_id not in accessible_by
     }
     if not unauthorized:
-        return ("unconfirmed", "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.")
+        return ("unconfirmed", "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.", None)
 
     url = finding.affected_url or ""
     if not url:
-        return ("unconfirmed", "The finding did not include an affected URL to re-test.")
+        return ("unconfirmed", "The finding did not include an affected URL to re-test.", None)
 
     for cred_id, session in unauthorized.items():
         username = session.get("username") or f"credential {cred_id}"
@@ -856,7 +878,7 @@ async def _deterministic_validate_finding(
             ) as client:
                 resp = await client.get(url)
         except Exception as exc:
-            return ("unconfirmed", f"Validation request as {username} failed: {exc}")
+            return ("unconfirmed", f"Validation request as {username} failed: {exc}", None)
 
         if _response_denies_access(resp):
             continue
@@ -866,15 +888,29 @@ async def _deterministic_validate_finding(
         if _looks_like_spa_shell(body, content_type):
             continue
 
-        if _body_contains_page_evidence(body, page_title, page_text):
+        evidence_match = _first_page_evidence_match(body, page_title, page_text)
+        if evidence_match:
+            poc_spec = {
+                "poc_request": {"method": "GET", "url": url, "use_session": username},
+                "poc_expect": {"status": resp.status_code, "body_contains": evidence_match},
+                "poc_auth": {
+                    "mechanism": "cookie_httponly",
+                    "instructions": (
+                        f"Log in as **{username}** (a user who should NOT be able to "
+                        "access this resource) and capture that session."
+                    ),
+                },
+            }
             return (
                 "confirmed",
                 f"Re-requesting the affected URL as {username} returned HTTP {resp.status_code} with protected-looking content rather than a denial or generic app shell.",
+                poc_spec,
             )
 
     return (
         "false_positive",
         "Validation could not reproduce unauthorized access. Alternate users received an access denial, login response, generic SPA shell, or no protected content signal.",
+        None,
     )
 
 
@@ -915,7 +951,10 @@ def _looks_like_spa_shell(body: str, content_type: str) -> bool:
 
 
 def _body_contains_page_evidence(body: str, page_title: str, page_text: str) -> bool:
-    body_lower = body.lower()
+    return bool(_first_page_evidence_match(body, page_title, page_text))
+
+
+def _page_evidence_candidates(page_title: str, page_text: str) -> list[str]:
     candidates: list[str] = []
     for line in (page_text or "").splitlines():
         line = re.sub(r"\s+", " ", line).strip()
@@ -925,7 +964,314 @@ def _body_contains_page_evidence(body: str, page_title: str, page_text: str) -> 
             break
     if not candidates and page_title and len(page_title.strip()) >= 12:
         candidates.append(page_title.strip())
-    return any(candidate.lower() in body_lower for candidate in candidates)
+    return candidates
+
+
+def _first_page_evidence_match(body: str, page_title: str, page_text: str) -> str:
+    body_lower = body.lower()
+    for candidate in _page_evidence_candidates(page_title, page_text):
+        if candidate.lower() in body_lower:
+            return candidate
+    return ""
+
+
+# ── Proof-of-concept generation + verification ────────────────────────────────
+# When a finding is confirmed, build a single runnable validation command and
+# re-execute it (curl, in a temp dir) to prove it actually reproduces the issue.
+# Only verified commands are persisted — "it works, or don't have it".
+
+_POC_AUTH_FILE = "aespa-poc-auth.txt"
+_POC_SAFE_METHODS = {"GET", "HEAD"}
+_POC_BLOCKED_HEADERS = {"authorization", "cookie", "host", "content-length"}
+_POC_MAX_HEADERS = 12
+_POC_MAX_URL_LEN = 2048
+_POC_TIMEOUT_S = 20
+
+
+async def _attach_poc_if_confirmed(
+    run_id: int,
+    finding: ScanFinding,
+    *,
+    done_input: dict | None,
+    cred_sessions: dict[int, dict],
+    scanner_policy,
+) -> None:
+    """Build, verify, and persist a PoC command for a confirmed finding.
+
+    Stores nothing if no reproducible request is available or verification fails.
+    """
+    if not isinstance(done_input, dict):
+        return
+    user_sessions_by_name: dict[str, dict] = {
+        cs["username"]: cs for cs in cred_sessions.values() if cs.get("username")
+    }
+    try:
+        built = await _build_and_verify_poc(
+            finding, done_input, user_sessions_by_name, scanner_policy
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("PoC build/verify failed for finding %s: %s", finding.id, exc)
+        return
+    if not built:
+        return
+    command, setup = built
+    with Session(get_engine()) as s:
+        row = s.get(ScanFinding, finding.id)
+        if row is None:
+            return
+        row.poc_command = command
+        row.poc_setup = setup
+        s.add(row)
+        s.commit()
+    finding.poc_command = command
+    finding.poc_setup = setup
+    events_svc.emit(run_id, {
+        "type": "finding_validation_update",
+        "finding_id": finding.id,
+        "poc_command": command,
+        "poc_setup": setup,
+    })
+    log.info("Verified PoC attached to finding %s", finding.id)
+
+
+async def _build_and_verify_poc(
+    finding: ScanFinding,
+    done_input: dict,
+    user_sessions_by_name: dict[str, dict],
+    scanner_policy,
+) -> tuple[str, str] | None:
+    poc_request = done_input.get("poc_request")
+    if not isinstance(poc_request, dict):
+        return None
+
+    url = str(poc_request.get("url") or "").strip()
+    if not _poc_url_in_scope(url, finding.affected_url):
+        return None
+    if len(url) > _POC_MAX_URL_LEN:
+        return None
+
+    method = str(poc_request.get("method") or "GET").upper()
+    if method not in _POC_SAFE_METHODS:
+        # Never ship a command that could mutate state.
+        return None
+
+    headers = _sanitise_poc_headers(poc_request.get("headers"))
+
+    expect = poc_request_expect(done_input)
+    if expect is None:
+        return None
+
+    # Resolve auth, if the request needs a session.
+    use_session = str(poc_request.get("use_session") or "").strip()
+    auth: dict | None = None
+    setup = ""
+    if use_session:
+        session = user_sessions_by_name.get(use_session)
+        if not session:
+            return None
+        poc_auth = done_input.get("poc_auth") if isinstance(done_input.get("poc_auth"), dict) else {}
+        mechanism = str(poc_auth.get("mechanism") or "cookie_httponly")
+        auth = _resolve_poc_auth(session, mechanism)
+        if not auth:
+            return None
+        setup = _build_poc_setup(mechanism, use_session, str(poc_auth.get("instructions") or ""))
+
+    command = _build_curl_command(
+        method,
+        url,
+        headers,
+        insecure=True,
+        follow_redirects=bool(getattr(scanner_policy, "follow_redirects", True)),
+        auth=auth,
+    )
+
+    verified = await asyncio.to_thread(
+        _run_and_assert_curl, command, expect, auth["file_value"] if auth else None
+    )
+    if not verified:
+        return None
+    return command, setup
+
+
+def poc_request_expect(done_input: dict) -> dict | None:
+    """Return a usable assertion dict, or None if no positive assertion exists."""
+    expect = done_input.get("poc_expect")
+    if not isinstance(expect, dict):
+        return None
+    status = expect.get("status")
+    body_contains = str(expect.get("body_contains") or "").strip()
+    if not isinstance(status, int) and not body_contains:
+        # Without a status or distinctive substring we cannot prove anything.
+        return None
+    return {
+        "status": status if isinstance(status, int) else None,
+        "body_contains": body_contains,
+        "body_not_contains": str(expect.get("body_not_contains") or "").strip(),
+    }
+
+
+def _poc_url_in_scope(url: str, affected_url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    affected = urlparse(affected_url or "")
+    # Constrain the PoC to the same host as the finding to avoid SSRF/out-of-scope.
+    return bool(affected.netloc) and parsed.netloc.lower() == affected.netloc.lower()
+
+
+def _sanitise_poc_headers(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key).strip()
+        if not name or name.lower() in _POC_BLOCKED_HEADERS:
+            continue
+        headers[name] = str(value)
+        if len(headers) >= _POC_MAX_HEADERS:
+            break
+    return headers
+
+
+def _resolve_poc_auth(session: dict, mechanism: str) -> dict | None:
+    """Resolve the live credential into a file value + header template.
+
+    Returns {file_value, header_name, header_prefix} or None when the session
+    cannot supply the requested credential type.
+    """
+    if mechanism == "bearer":
+        extra = session.get("extra_headers", {}) or {}
+        auth_value = next(
+            (v for k, v in extra.items() if str(k).lower() == "authorization"),
+            "",
+        )
+        token = str(auth_value).strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if not token:
+            return None
+        return {"file_value": token, "header_name": "Authorization", "header_prefix": "Bearer "}
+
+    # cookie_readable / cookie_httponly both reproduce via the Cookie header.
+    cookies = session.get("cookies", {}) or {}
+    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if not cookie_str:
+        return None
+    return {"file_value": cookie_str, "header_name": "Cookie", "header_prefix": ""}
+
+
+def _build_curl_command(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    *,
+    insecure: bool,
+    follow_redirects: bool,
+    auth: dict | None,
+) -> str:
+    # Everything model-derived is shlex-quoted; only our own constant auth header
+    # uses a shell substitution to read the credential from the token file.
+    args = ["curl", "-s", "-S", "-i"]
+    if insecure:
+        args.append("-k")
+    if follow_redirects:
+        args.append("-L")
+    args += ["--max-time", str(_POC_TIMEOUT_S)]
+    if method != "GET":
+        args += ["-X", method]
+    for name, value in headers.items():
+        args += ["-H", f"{name}: {value}"]
+    args.append(url)
+    command = shlex.join(args)
+    if auth:
+        command += f' -H "{auth["header_name"]}: {auth["header_prefix"]}$(cat {_POC_AUTH_FILE})"'
+    return command
+
+
+def _run_and_assert_curl(command: str, expect: dict, auth_file_value: str | None) -> bool:
+    """Run the exact PoC command in a throwaway dir and check the assertion."""
+    with tempfile.TemporaryDirectory(prefix="aespa-poc-") as tmp:
+        if auth_file_value is not None:
+            with open(os.path.join(tmp, _POC_AUTH_FILE), "w", encoding="utf-8") as fh:
+                fh.write(auth_file_value)
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=_POC_TIMEOUT_S + 10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            log.debug("PoC curl execution failed: %s", exc)
+            return False
+    output = proc.stdout or ""
+    return _poc_assertion_holds(expect, output)
+
+
+def _poc_assertion_holds(expect: dict, output: str) -> bool:
+    status_matches = re.findall(r"(?im)^HTTP/\d(?:\.\d)?\s+(\d{3})", output)
+    last_status = int(status_matches[-1]) if status_matches else None
+    expected_status = expect.get("status")
+    if isinstance(expected_status, int):
+        if last_status != expected_status:
+            return False
+    body_contains = expect.get("body_contains") or ""
+    if body_contains and body_contains not in output:
+        return False
+    body_not_contains = expect.get("body_not_contains") or ""
+    if body_not_contains and body_not_contains in output:
+        return False
+    # Require at least one positive signal to have been checked.
+    return bool(isinstance(expected_status, int) or body_contains)
+
+
+def _build_poc_setup(mechanism: str, username: str, instructions: str) -> str:
+    """Markdown setup steps for capturing the session credential to a token file."""
+    lines = [
+        f"This finding requires an authenticated session (log in as **{username}** "
+        "or an equivalent user).",
+    ]
+    if instructions.strip():
+        lines.append("")
+        lines.append(instructions.strip())
+    lines.append("")
+    lines.append(
+        f"Capture the credential into a file named `{_POC_AUTH_FILE}` in the directory "
+        "you run the command from:"
+    )
+    if mechanism == "bearer":
+        lines.append("")
+        lines.append("In the browser DevTools Console (adjust the storage key for the app):")
+        lines.append("```js")
+        lines.append("const token = localStorage.getItem('token'); // or sessionStorage")
+        lines.append("const a = document.createElement('a');")
+        lines.append(
+            "a.href = URL.createObjectURL(new Blob([token], {type:'text/plain'}));"
+        )
+        lines.append(f"a.download = '{_POC_AUTH_FILE}'; a.click();")
+        lines.append("```")
+    elif mechanism == "cookie_readable":
+        lines.append("")
+        lines.append("In the browser DevTools Console:")
+        lines.append("```js")
+        lines.append("const a = document.createElement('a');")
+        lines.append(
+            "a.href = URL.createObjectURL(new Blob([document.cookie], {type:'text/plain'}));"
+        )
+        lines.append(f"a.download = '{_POC_AUTH_FILE}'; a.click();")
+        lines.append("```")
+    else:  # cookie_httponly — JavaScript cannot read the cookie.
+        lines.append("")
+        lines.append(
+            "The session cookie is HttpOnly, so JavaScript cannot read it. Instead, in "
+            "DevTools open the **Network** tab, reload the page, click the request, and "
+            f"copy the full `Cookie:` request header value into `{_POC_AUTH_FILE}`."
+        )
+    lines.append("")
+    lines.append(f"Then move `{_POC_AUTH_FILE}` next to where you run the command below.")
+    return "\n".join(lines)
 
 
 # ── Probe execution ───────────────────────────────────────────────────────────
