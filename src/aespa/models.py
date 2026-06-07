@@ -99,8 +99,8 @@ class LLMConfig(SQLModel, table=True):
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
-    max_tokens: int = Field(default=4096)
-    temperature: float = Field(default=0.0)
+    max_tokens: int = Field(default=70000)
+    temperature: Optional[float] = Field(default=None)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any
@@ -466,6 +466,11 @@ class ScanFinding(SQLModel, table=True):
     response_evidence: str = Field(default="")
     evidence_json: str = Field(default="[]")
     merged_instances: str = Field(default="[]")  # JSON list of consolidated cross-URL instances
+    # Verified proof-of-concept: a runnable one-line validation command and optional
+    # setup instructions. Populated only when the command was re-run server-side and
+    # proven to reproduce the finding; otherwise left blank.
+    poc_command: str = Field(default="")
+    poc_setup: str = Field(default="")
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     finding_source: str = Field(default="unknown", index=True)
     # Validation fields
