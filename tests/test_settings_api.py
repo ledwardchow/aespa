@@ -302,7 +302,7 @@ def test_upsert_invalid_temperature(client: TestClient):
 
 def test_upsert_invalid_max_tokens(client: TestClient):
     provider = _make_provider(client).json()
-    r = _make_profile(client, provider["id"], max_tokens=99999)
+    r = _make_profile(client, provider["id"], max_tokens=300000)
     assert r.status_code == 422
 
 
