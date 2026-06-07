@@ -5615,7 +5615,7 @@ const API_FORMAT_LABELS = {
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
 const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
-const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:4096, temperature:0, use_vision:false, force_tool_choice:true };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
   openai:"https://api.openai.com/v1",
@@ -5682,15 +5682,20 @@ function providerPayload(form) {
 function llmProfileToForm(cfg, providers=[]) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
   const provider = providers.find(p=>p.id===providerId) || providers[0];
-  return cfg ? {
-    name:cfg.name??"Default",
-    provider_id:providerId,
-    model:cfg.model,
-    max_tokens:cfg.max_tokens,
-    temperature:cfg.temperature,
-    use_vision:cfg.use_vision??false,
-    force_tool_choice:cfg.force_tool_choice??true,
-  } : {
+  if (cfg) {
+    const hasTemp = cfg.temperature !== null && cfg.temperature !== undefined;
+    return {
+      name:cfg.name??"Default",
+      provider_id:providerId,
+      model:cfg.model,
+      max_tokens:cfg.max_tokens,
+      temperature:hasTemp ? cfg.temperature : 0.2,
+      use_temperature:hasTemp,
+      use_vision:cfg.use_vision??false,
+      force_tool_choice:cfg.force_tool_choice??true,
+    };
+  }
+  return {
     ...DEFAULT_LLM_FORM,
     provider_id:provider?.id || "",
     model:provider?.models?.[0] || "",
@@ -5703,7 +5708,7 @@ function llmPayload(form) {
     provider_id:Number(form.provider_id),
     model:form.model.trim(),
     max_tokens:Number(form.max_tokens),
-    temperature:Number(form.temperature),
+    temperature:form.use_temperature ? Number(form.temperature) : null,
     use_vision:form.use_vision,
     force_tool_choice:form.force_tool_choice,
   };
@@ -5830,9 +5835,14 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="64000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
-        <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
-          <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
+          <input type="number" required min="1" max="256000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+        <div className="field">
+          <label style=${{display:"flex", alignItems:"center", gap:"6px", cursor:"pointer"}}>
+            <input type="checkbox" checked=${form.use_temperature} onChange=${e=>upd({use_temperature:e.target.checked})} style=${{width:"14px", height:"14px", accentColor:"var(--accent)", cursor:"pointer", margin:0}}/>
+            <span>Temperature <span className="field-hint-inline">(0-2)</span></span>
+          </label>
+          <input type="number" required=${form.use_temperature} disabled=${!form.use_temperature} min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/>
+        </div>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Vision</div>
