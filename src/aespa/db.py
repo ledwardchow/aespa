@@ -77,6 +77,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
     _ensure_column(engine, "scan_finding", "merged_instances", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "scan_finding", "poc_command", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "poc_setup", "TEXT NOT NULL DEFAULT ''")
     _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
@@ -571,6 +573,8 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
         "response_evidence",
         "evidence_json",
         "merged_instances",
+        "poc_command",
+        "poc_setup",
         "screenshot_b64",
         "finding_source",
         "validation_status",
@@ -605,6 +609,8 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
                 response_evidence TEXT NOT NULL DEFAULT '',
                 evidence_json TEXT NOT NULL DEFAULT '[]',
                 merged_instances TEXT NOT NULL DEFAULT '[]',
+                poc_command TEXT NOT NULL DEFAULT '',
+                poc_setup TEXT NOT NULL DEFAULT '',
                 screenshot_b64 TEXT,
                 finding_source TEXT NOT NULL DEFAULT 'unknown',
                 validation_status TEXT NOT NULL DEFAULT 'unvalidated',

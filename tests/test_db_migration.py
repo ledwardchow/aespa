@@ -139,6 +139,8 @@ def test_migrate_makes_scan_finding_page_id_nullable_and_preserves_new_columns()
             "evidence_json",
             "merged_instances",
             "finding_source",
+            "poc_command",
+            "poc_setup",
         } <= set(columns)
     finally:
         SQLModel.metadata.drop_all(engine)
