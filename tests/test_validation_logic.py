@@ -41,9 +41,10 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
     ))
 
     assert result is not None
-    verdict, reason = result
+    verdict, reason, poc_spec = result
     assert verdict == "unconfirmed"
     assert "no alternate user sessions" in reason
+    assert poc_spec is None
 
 
 def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
