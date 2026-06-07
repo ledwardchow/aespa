@@ -100,7 +100,7 @@ class LLMConfig(SQLModel, table=True):
     base_url: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=4096)
-    temperature: float = Field(default=0.0)
+    temperature: Optional[float] = Field(default=None)
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any
