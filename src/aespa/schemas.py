@@ -255,7 +255,7 @@ class LLMConfigIn(BaseModel):
     name: str = Field(default="Default", min_length=1, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=64000)
+    max_tokens: int = Field(default=70000, ge=1, le=256000)
     temperature: Optional[float] = Field(default=None)
     use_vision: bool = False
     force_tool_choice: bool = True
@@ -565,7 +565,7 @@ class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
-    max_tokens: int = 4096
+    max_tokens: int = 70000
     temperature: Optional[float] = None
     use_vision: bool = False
     force_tool_choice: bool = True
