@@ -2210,10 +2210,22 @@ function TestRunDetail({ runId, initialTab }) {
     } catch (_) {}
     // Debounce server save so rapid streaming chunks don't hammer the API.
     if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    const capturedRunId = runId;
+    const capturedChats = aliceChats;
+    const capturedTabId = activeAliceTabId;
     _aliceSaveTimer.current = setTimeout(() => {
-      api.saveAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId })
+      api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
         .catch(() => {});
     }, 800);
+    // Flush any pending save immediately on unmount so navigation away within the
+    // debounce window doesn't silently drop the last change.
+    return () => {
+      if (_aliceSaveTimer.current) {
+        clearTimeout(_aliceSaveTimer.current);
+        _aliceSaveTimer.current = null;
+        api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
+          .catch(() => {});
+      }
     // Cancel a pending save when this run unmounts so a late timer can't fire
     // after the user has navigated away.
     return () => {
