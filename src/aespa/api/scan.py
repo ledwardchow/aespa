@@ -259,6 +259,8 @@ def import_findings(
             validation_status=import_validation_status,
             validation_note=item.validation_note,
             merged_instances=item.merged_instances,
+            poc_command=item.poc_command,
+            poc_setup=item.poc_setup,
         )
         session.add(finding)
         session.flush()
