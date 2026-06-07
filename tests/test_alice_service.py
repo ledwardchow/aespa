@@ -194,6 +194,44 @@ def test_alice_chat_api_endpoint(test_client, test_data):
         mock_start.assert_called_once()
 
 
+def test_alice_sessions_roundtrip_and_run_token(test_client, test_data):
+    """GET returns a stable run_created_at token; PUT persists and reloads chats."""
+    run = test_data["run"]
+
+    # 404 for a non-existent run.
+    assert test_client.get("/api/test-runs/999999/alice/sessions").status_code == 404
+
+    # Fresh run: no chats yet, but the stable run identity token is present.
+    r_empty = test_client.get(f"/api/test-runs/{run.id}/alice/sessions")
+    assert r_empty.status_code == 200
+    empty = r_empty.json()
+    assert empty["chats"] == []
+    token = empty["run_created_at"]
+    assert token == run.created_at.isoformat()
+
+    # Save a chat session, then reload it.
+    payload = {
+        "chats": [{
+            "id": "tab-default",
+            "title": "Session 1",
+            "messages": [
+                {"id": "m1", "sender": "user", "type": "message", "text": "hi", "ts": "10:00"},
+                {"id": "m2", "sender": "alice", "type": "message", "text": "hello", "ts": "10:01"},
+            ],
+        }],
+        "active_tab_id": "tab-default",
+    }
+    r_put = test_client.put(f"/api/test-runs/{run.id}/alice/sessions", json=payload)
+    assert r_put.status_code == 200
+
+    loaded = test_client.get(f"/api/test-runs/{run.id}/alice/sessions").json()
+    assert loaded["run_created_at"] == token   # token is stable across saves
+    assert len(loaded["chats"]) == 1
+    assert loaded["chats"][0]["id"] == "tab-default"
+    assert [m["text"] for m in loaded["chats"][0]["messages"]] == ["hi", "hello"]
+    assert loaded["updated_at"] is not None
+
+
 @pytest.mark.anyio
 async def test_alice_write_finding_tool_persists(db_session, test_data):
     """Verify that calling write_finding via the agentic loop persists a finding."""

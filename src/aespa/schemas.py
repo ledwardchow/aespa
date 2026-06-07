@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -255,10 +255,17 @@ class LLMConfigIn(BaseModel):
     name: str = Field(default="Default", min_length=1, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=64000)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=70000, ge=1, le=256000)
+    temperature: Optional[float] = Field(default=None)
     use_vision: bool = False
     force_tool_choice: bool = True
+
+    @field_validator("temperature")
+    @classmethod
+    def _validate_temperature(cls, v: float | None) -> float | None:
+        if v is not None and not (0.0 <= v <= 2.0):
+            raise ValueError("temperature must be between 0.0 and 2.0")
+        return v
 
 
 class LLMConfigOut(BaseModel):
@@ -274,7 +281,7 @@ class LLMConfigOut(BaseModel):
     base_url: str | None
     model: str
     max_tokens: int
-    temperature: float
+    temperature: Optional[float] = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -558,8 +565,8 @@ class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
-    max_tokens: int = 4096
-    temperature: float = 0.0
+    max_tokens: int = 70000
+    temperature: Optional[float] = None
     use_vision: bool = False
     force_tool_choice: bool = True
     is_active: bool = False
@@ -878,6 +885,8 @@ class ScanFindingOut(BaseModel):
     validation_status: str
     validation_note: str | None
     merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
     created_at: datetime
 
 
@@ -900,6 +909,8 @@ class ScanFindingImportIn(BaseModel):
     validation_status: str = "unvalidated"
     validation_note: str | None = None
     merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
 
 
 class ScanFindingImportResult(BaseModel):

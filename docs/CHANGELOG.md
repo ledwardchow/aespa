@@ -4,6 +4,51 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #141] 7th June Update
+**Opened:** 2026-06-07 | Branch: `develop → main`
+
+Verified proof-of-concept generation for confirmed findings, optional temperature parameter for LLM profiles, and an ALICE session identity fix (27 files, ~780 insertions).
+
+### Verified Proof-of-Concept Commands (New)
+
+- **PoC generation in validator** (`services/validator.py`): When the adversarial validator confirms a finding, it now attempts to build and execute a `curl` command that re-produces the issue server-side. The command is only persisted to the finding if the re-run passes all assertions, so `poc_command` is always a proven reproducer rather than a speculative template.
+- **Safety constraints**: Only idempotent `GET`/`HEAD` requests are accepted as PoC candidates — state-changing methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected. The PoC URL must match the host of the affected finding to prevent SSRF / out-of-scope requests. A `_POC_BLOCKED_HEADERS` allowlist filters dangerous request headers, and a header count cap prevents oversized payloads.
+- **Auth credential handling** (`_resolve_poc_auth`, `_build_curl_command`): Live session credentials (cookies or bearer tokens) are never embedded in the command string. Instead, the command reads from a local token file at runtime via `$(cat <token-file>)`, with a `_build_poc_setup` helper generating human-readable instructions for capturing the session credential (JS console snippets for readable cookies/JWT, DevTools Network tab steps for HttpOnly session cookies).
+- **Deterministic validator updated**: `_deterministic_validate_finding` now returns a third element carrying the PoC spec so access-control findings confirmed by HTTP replay also receive a `poc_command`.
+- **`done()` tool schema extended** (`services/prompts/validator.py`): The validator agent's `done()` tool now accepts `poc_request`, `poc_expect`, and `poc_auth` fields. The system prompt instructs the agent to supply a single decisive GET/HEAD request and a distinctive assertion (HTTP status and/or `body_contains` substring). The server re-runs the request and discards the PoC if the assertion fails.
+
+### Optional Temperature Parameter
+
+- **`temperature` made nullable** (`models.py`, `schemas.py`, `db.py`): The `temperature` field on `LLMConfig` is now `Optional[float]` (defaults to `None`). A SQLite table-rebuild migration (`_ensure_llm_config_temperature_nullable`) makes the column nullable for existing databases. When `temperature` is `None`, the parameter is omitted entirely from all LLM API call sites (Anthropic, OpenAI, Bedrock Converse, Azure Foundry Anthropic, Google Gemini, and the `_chat_completion_kwargs` shared path).
+- **UI checkbox toggle** (`web/app.js`): The LLM profile form now shows a checkbox next to the temperature input. When unchecked, the field is disabled and `null` is sent in the save payload. The default profile form raises `max_tokens` from 4,096 to 70,000 and sets a default temperature of 0.2.
+- **Export/import schema updated**: `LLMExportProfileItem` defaults updated to `max_tokens=70000` and `temperature=None`.
+
+### ALICE Session Identity Fix
+
+- **`run_created_at` token** (`api/alice.py`): `GET /alice/sessions` now returns a `run_created_at` timestamp derived from `TestRun.created_at`. The client can use this token to detect when a new run has been assigned a previously-deleted run's integer ID (SQLite reuses primary keys) and discard stale `localStorage` chat history that belongs to the deleted run.
+
+### UI
+
+- **PoC command panel in findings** (`web/app.js`): Confirmed findings with a `poc_command` now display a "Validation Command (verified)" block with a one-click copy button and a collapsible "Setup" section showing credential-capture instructions.
+- **Markdown export**: `findingsToMarkdown` and `parseFindingsMarkdownSections` round-trip `poc_command` and `poc_setup` as `### Validation Command` and `### Validation Setup` sections.
+- **Finding import API** (`api/scan.py`): `poc_command` and `poc_setup` are now preserved when importing findings.
+
+### Database & Schema
+
+- `scan_finding` table: `poc_command TEXT NOT NULL DEFAULT ''` and `poc_setup TEXT NOT NULL DEFAULT ''` columns added via migration.
+- `llm_config` table: `temperature` column made nullable via SQLite table rebuild migration.
+
+### Test Coverage
+
+- `tests/test_poc_validation.py` (new, 173 lines): Unit tests for `_poc_url_in_scope`, `_resolve_poc_auth`, `_build_curl_command`, `_run_and_assert_curl`, `_poc_assertion_holds`, `_build_and_verify_poc`, and rejection of unsafe methods / out-of-scope URLs / missing sessions.
+- `tests/test_alice_service.py`, `tests/test_settings_api.py`, `tests/test_db_migration.py`, `tests/test_validation_logic.py`: Updated for the new fields and schema changes.
+
+### Version
+
+- `pyproject.toml`: bumped to `0.4.20260607.6`.
+
+---
+
 ## [PR #130] 4th June Release
 **Merged:** 2026-06-04 20:47 AEST | Branch: `develop → main`
 

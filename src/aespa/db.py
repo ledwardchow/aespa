@@ -77,11 +77,14 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "validation_status", "TEXT NOT NULL DEFAULT 'unvalidated'")
     _ensure_column(engine, "scan_finding", "validation_note", "TEXT")
     _ensure_column(engine, "scan_finding", "merged_instances", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "scan_finding", "poc_command", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(engine, "scan_finding", "poc_setup", "TEXT NOT NULL DEFAULT ''")
     _ensure_scan_finding_page_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
     _ensure_llm_provider_config_migration(engine)
+    _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
@@ -571,6 +574,8 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
         "response_evidence",
         "evidence_json",
         "merged_instances",
+        "poc_command",
+        "poc_setup",
         "screenshot_b64",
         "finding_source",
         "validation_status",
@@ -605,6 +610,8 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
                 response_evidence TEXT NOT NULL DEFAULT '',
                 evidence_json TEXT NOT NULL DEFAULT '[]',
                 merged_instances TEXT NOT NULL DEFAULT '[]',
+                poc_command TEXT NOT NULL DEFAULT '',
+                poc_setup TEXT NOT NULL DEFAULT '',
                 screenshot_b64 TEXT,
                 finding_source TEXT NOT NULL DEFAULT 'unknown',
                 validation_status TEXT NOT NULL DEFAULT 'unvalidated',
@@ -632,6 +639,65 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
         conn.execute(sql(
             "CREATE INDEX IF NOT EXISTS ix_scan_finding_owasp_category "
             "ON scan_finding (owasp_category)"
+        ))
+        conn.commit()
+
+
+def _ensure_llm_config_temperature_nullable(engine: Engine) -> None:
+    """Make the temperature column in llm_config nullable (SQLite table rebuild)."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(llm_config)")))
+        temp_row = next((row for row in rows if row[1] == "temperature"), None)
+        if temp_row is None or int(temp_row[3] or 0) == 0:
+            # Column is already nullable (notnull == 0) or doesn't exist
+            return
+
+        # Build a dynamic CREATE TABLE, making only temperature nullable
+        col_defs = []
+        for row in rows:
+            cid, name, col_type, notnull, dflt_value, pk = row
+            if pk:
+                col_defs.append(f"{name} {col_type} PRIMARY KEY")
+            elif name == "temperature":
+                col_defs.append(f"{name} {col_type}")  # nullable, no default
+            else:
+                parts = [f"{name} {col_type}"]
+                if notnull:
+                    parts.append("NOT NULL")
+                if dflt_value is not None:
+                    parts.append(f"DEFAULT {dflt_value}")
+                col_defs.append(" ".join(parts))
+
+        column_list = ", ".join(row[1] for row in rows)
+        create_sql = (
+            "CREATE TABLE llm_config_temp_nullable_migration (\n    "
+            + ",\n    ".join(col_defs)
+            + "\n)"
+        )
+
+        conn.execute(sql("DROP TABLE IF EXISTS llm_config_temp_nullable_migration"))
+        conn.execute(sql(create_sql))
+        conn.execute(sql(f"""
+            INSERT INTO llm_config_temp_nullable_migration ({column_list})
+            SELECT {column_list}
+            FROM llm_config
+        """))
+        conn.execute(sql("DROP TABLE llm_config"))
+        conn.execute(sql(
+            "ALTER TABLE llm_config_temp_nullable_migration RENAME TO llm_config"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_llm_config_name ON llm_config (name)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_llm_config_is_active ON llm_config (is_active)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_llm_config_provider_id ON llm_config (provider_id)"
         ))
         conn.commit()
 
