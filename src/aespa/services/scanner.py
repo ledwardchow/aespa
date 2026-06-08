@@ -197,6 +197,35 @@ def _compact_log_value(value, limit: int = 180) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
+    """Return a human-readable description for an agentic step.
+
+    Uses the explicit ``note`` field when the LLM provides it; otherwise
+    derives a short description from the tool name and its key inputs so
+    the UI never shows the unhelpful fallback 'Step N: Step N'.
+    """
+    explicit = tool_input.get("note")
+    if explicit:
+        return str(explicit)
+    if tool_name == "http_request":
+        method = (tool_input.get("method") or "HTTP").upper()
+        url = tool_input.get("url") or ""
+        return f"{method} {url}" if url else f"{method} request"
+    if tool_name == "context_tool":
+        inner = tool_input.get("tool") or "context lookup"
+        return f"Query: {inner}"
+    if tool_name == "write_finding":
+        title = tool_input.get("title") or "untitled"
+        return f"Write finding: {title}"
+    if tool_name == "done":
+        return "Completing assessment"
+    if tool_name == "browser":
+        action = tool_input.get("action") or "navigate"
+        url = tool_input.get("url") or ""
+        return f"Browser {action}: {url}" if url else f"Browser {action}"
+    return tool_name
+
+
 def _context_budget_reason(action: dict[str, Any]) -> str:
     for key in ("context_budget_reason", "budget_reason", "scan_reason"):
         value = action.get(key)
@@ -2604,7 +2633,7 @@ async def _run_specialist_agent(
 
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         step_count[0] = step
-        note = str(tool_input.get("note") or f"Step {step}")
+        note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit specialist_step as scanner_phase so it persists to scan_log
         # (Log tab) and also as specialist_step for the Agents panel thread view.
@@ -5249,7 +5278,7 @@ async def _do_agentic_thinking_loop(
     # ── Tool executor closure ─────────────────────────────────────────────────
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         nonlocal progressive_findings_count
-        note = str(tool_input.get("note") or f"Step {step}")
+        note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit live agent_status update for every agentic step (SSE only, not persisted).
         events_svc.emit(run_id, {
