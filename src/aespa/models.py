@@ -150,6 +150,35 @@ class ApiCredential(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+# ── API Test Run ───────────────────────────────────────────────────────────────
+
+class ApiTestRun(SQLModel, table=True):
+    """A security test run against an ``ApiCollection``.
+
+    Parallel to ``TestRun`` (which targets a Site) but operates against
+    ``ApiEndpoint`` units rather than ``CrawledPage`` units.  The run id is
+    used directly by the existing Alice / events / agent-log infrastructure
+    (``AliceChatSession.test_run_id``, ``AgentLog.test_run_id``, etc.) via
+    alias routes added in Slice 5.
+    """
+
+    __tablename__ = "api_test_run"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    name: str
+    status: str = Field(default="pending")   # pending|running|completed|failed|cancelled
+    llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    coverage_mode: str = Field(default="track")  # track|enforce (used in Slice 8)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    error_message: Optional[str] = Field(default=None)
+    recon_summary_json: Optional[str] = Field(default=None)
+    token_usage_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── LLM config ────────────────────────────────────────────────────────────────
 
 class LLMProviderAPI(str, Enum):

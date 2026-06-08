@@ -217,6 +217,32 @@ class ApiCredentialCreate(BaseModel):
     auth_endpoint: str | None = None  # set when scheme == "login"
 
 
+# ── API Test Run schemas ──────────────────────────────────────────────────────
+
+class ApiTestRunCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = None        # auto-generated if omitted
+    llm_config_id: int | None = None
+    coverage_mode: str = "track"   # track|enforce
+
+
+class ApiTestRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    name: str
+    status: str
+    coverage_mode: str
+    llm_config_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderAPILiteral = Literal[

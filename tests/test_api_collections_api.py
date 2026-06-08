@@ -183,7 +183,7 @@ def test_upload_and_list_documents(client, data_dir):
     assert len(created) == 2
     assert created[0]["filename"] == "spec.yaml"
     assert created[0]["doc_type"] == "openapi"
-    assert created[0]["status"] in ("parsed", "failed")  # parse runs inline on upload now
+    assert created[0]["status"] == "uploaded"  # parse no longer runs inline on upload
     assert created[0]["size_bytes"] > 0
     assert created[1]["doc_type"] == "freetext"
 
