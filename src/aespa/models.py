@@ -54,6 +54,95 @@ class Credential(SQLModel, table=True):
     site: Optional[Site] = Relationship(back_populates="credentials")
 
 
+# ── API Collection ────────────────────────────────────────────────────────────
+
+class ApiCollection(SQLModel, table=True):
+    """A collection of APIs to be security-tested, defined from uploaded docs.
+
+    Parallel top-level entity to ``Site`` but targets a set of API endpoints
+    rather than a crawlable web application.
+    """
+
+    __tablename__ = "api_collection"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)
+    base_url: str
+    description: Optional[str] = Field(default=None)
+    servers: Optional[str] = Field(default=None)      # JSON list of additional server base URLs
+    scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApiDocument(SQLModel, table=True):
+    """An uploaded documentation file attached to an ``ApiCollection``.
+
+    The raw bytes are stored on disk (``stored_path``); only metadata lives in
+    the DB. Parsing into endpoints is performed in a later slice — until then
+    ``status`` stays ``uploaded``.
+    """
+
+    __tablename__ = "api_document"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    filename: str
+    doc_type: str = Field(default="unknown")  # openapi|swagger|postman|freetext|credentials|source_zip|unknown
+    content_type: Optional[str] = Field(default=None)
+    stored_path: str                          # absolute path to the stored file
+    size_bytes: int = Field(default=0)
+    status: str = Field(default="uploaded")   # uploaded|parsed|failed
+    error_message: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApiEndpoint(SQLModel, table=True):
+    """A single API endpoint discovered by parsing an ``ApiDocument``.
+
+    This is the attack-surface unit for API test runs (Slices 6+).
+    """
+
+    __tablename__ = "api_endpoint"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    source_doc_id: Optional[int] = Field(default=None, foreign_key="api_document.id")
+    method: str                               # GET, POST, PUT, …
+    path: str                                 # /v1/widgets/{id}
+    base_url: Optional[str] = Field(default=None)
+    operation_id: Optional[str] = Field(default=None)
+    summary: Optional[str] = Field(default=None)
+    parameters_json: str = Field(default="[]")          # [{name, in, required, schema}]
+    request_body_schema_json: str = Field(default="{}")
+    response_schema_json: str = Field(default="{}")
+    security_json: str = Field(default="[]")             # [{"BearerAuth": []}]
+    auth_required: bool = Field(default=False)
+    tags_json: str = Field(default="[]")
+    sample_request_json: str = Field(default="{}")       # populated from examples / Postman bodies
+    in_scope: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ApiCredential(SQLModel, table=True):
+    """An authentication credential attached to an ``ApiCollection``.
+
+    Populated from credentials/bearer files (Slice 3c) or entered manually.
+    """
+
+    __tablename__ = "api_credential"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    scheme: str = Field(default="bearer")  # bearer|apikey|basic|cookie|header
+    name: str = Field(default="Authorization")   # header/param name
+    value: str                                    # plaintext — local pentesting tool
+    label: Optional[str] = Field(default=None)
+    scope: str = Field(default="global")          # global|endpoint
+    endpoint_id: Optional[int] = Field(default=None, foreign_key="api_endpoint.id")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── LLM config ────────────────────────────────────────────────────────────────
 
 class LLMProviderAPI(str, Enum):

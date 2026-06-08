@@ -158,6 +158,94 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "burp_rest_api_config", "scan_ssrf", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "burp_rest_api_config", "scan_xxe", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "burp_rest_api_config", "scan_ssti", "INTEGER NOT NULL DEFAULT 1")
+    # api_collection — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_collection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                description TEXT,
+                servers TEXT,
+                scope_hosts TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_api_collection_name "
+            "ON api_collection (name)"
+        ))
+        conn.commit()
+    # api_document — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_document (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                filename TEXT NOT NULL,
+                doc_type TEXT NOT NULL DEFAULT 'unknown',
+                content_type TEXT,
+                stored_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'uploaded',
+                error_message TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_document_collection_id "
+            "ON api_document (collection_id)"
+        ))
+        conn.commit()
+    # api_endpoint — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_endpoint (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                source_doc_id INTEGER REFERENCES api_document(id),
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                base_url TEXT,
+                operation_id TEXT,
+                summary TEXT,
+                parameters_json TEXT NOT NULL DEFAULT '[]',
+                request_body_schema_json TEXT NOT NULL DEFAULT '{}',
+                response_schema_json TEXT NOT NULL DEFAULT '{}',
+                security_json TEXT NOT NULL DEFAULT '[]',
+                auth_required INTEGER NOT NULL DEFAULT 0,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                sample_request_json TEXT NOT NULL DEFAULT '{}',
+                in_scope INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_collection_id "
+            "ON api_endpoint (collection_id)"
+        ))
+        conn.commit()
+    # api_credential — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_credential (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                scheme TEXT NOT NULL DEFAULT 'bearer',
+                name TEXT NOT NULL DEFAULT 'Authorization',
+                value TEXT NOT NULL,
+                label TEXT,
+                scope TEXT NOT NULL DEFAULT 'global',
+                endpoint_id INTEGER REFERENCES api_endpoint(id),
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_credential_collection_id "
+            "ON api_credential (collection_id)"
+        ))
+        conn.commit()
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
