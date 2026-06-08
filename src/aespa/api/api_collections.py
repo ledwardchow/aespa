@@ -8,7 +8,7 @@ from pydantic import BaseModel as _BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import ApiCollection, ApiCredential, ApiEndpoint
+from aespa.models import ApiCollection, ApiCredential, ApiDocument, ApiEndpoint, ApiTestRun
 from aespa.schemas import (
     ApiCollectionCreate,
     ApiCollectionDetail,
@@ -18,6 +18,8 @@ from aespa.schemas import (
     ApiCredentialOut,
     ApiDocumentOut,
     ApiEndpointOut,
+    ApiTestRunCreate,
+    ApiTestRunSummary,
 )
 from aespa.services import api_collections as api_collections_service
 from aespa.services import api_documents as api_documents_service
@@ -200,10 +202,6 @@ async def upload_documents(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
-        # Parse immediately using the same session so the response reflects
-        # the real status. parse_document catches its own errors internally.
-        await api_docs_service.parse_document(session, collection_id, doc.id)
-        session.refresh(doc)
         created.append(_doc_to_out(doc))
     return created
 
@@ -439,6 +437,15 @@ def purge_collection_data(
     for cred in credentials:
         session.delete(cred)
 
+    # Reset document statuses back to "uploaded" so the user can re-parse
+    docs = session.exec(
+        select(ApiDocument).where(ApiDocument.collection_id == collection_id)
+    ).all()
+    for doc in docs:
+        doc.status = "uploaded"
+        doc.error_message = None
+        session.add(doc)
+
     # Clear persisted readiness too — it's now stale
     collection.readiness_json = None
     session.add(collection)
@@ -448,3 +455,52 @@ def purge_collection_data(
         "endpoints_deleted": ep_count,
         "credentials_deleted": cred_count,
     }
+
+
+# ── API Test Runs ─────────────────────────────────────────────────────────────
+
+
+def _utcnow():
+    from datetime import timezone
+    from datetime import datetime
+    return datetime.now(timezone.utc)
+
+
+@router.get("/{collection_id}/test-runs", response_model=list[ApiTestRunSummary])
+def list_api_test_runs(
+    collection_id: int, session: Session = Depends(get_session)
+) -> list[ApiTestRunSummary]:
+    if session.get(ApiCollection, collection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+    runs = session.exec(
+        select(ApiTestRun)
+        .where(ApiTestRun.collection_id == collection_id)
+        .order_by(ApiTestRun.id.desc())  # type: ignore[union-attr]
+    ).all()
+    return [ApiTestRunSummary.model_validate(r) for r in runs]
+
+
+@router.post(
+    "/{collection_id}/test-runs",
+    response_model=ApiTestRunSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_api_test_run(
+    collection_id: int,
+    payload: ApiTestRunCreate,
+    session: Session = Depends(get_session),
+) -> ApiTestRunSummary:
+    if session.get(ApiCollection, collection_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+    name = payload.name or f"Run {_utcnow().strftime('%Y-%m-%d %H:%M')}"
+    run = ApiTestRun(
+        collection_id=collection_id,
+        name=name,
+        llm_config_id=payload.llm_config_id,
+        coverage_mode=payload.coverage_mode,
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return ApiTestRunSummary.model_validate(run)
+

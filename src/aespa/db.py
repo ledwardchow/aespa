@@ -254,6 +254,30 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "api_endpoint", "prereq_notes", "TEXT NOT NULL DEFAULT '[]'")
     # login-flow credential support
     _ensure_column(engine, "api_credential", "auth_endpoint", "TEXT")
+    # api_test_run — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_test_run (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                coverage_mode TEXT NOT NULL DEFAULT 'track',
+                started_at DATETIME,
+                completed_at DATETIME,
+                error_message TEXT,
+                recon_summary_json TEXT,
+                token_usage_json TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_test_run_collection_id "
+            "ON api_test_run (collection_id)"
+        ))
+        conn.commit()
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""

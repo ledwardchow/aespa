@@ -10,8 +10,8 @@ coverage per endpoint in a matrix.
 - [x] **Slice 1 — Collections CRUD + "APIs" sidebar + list/create/detail UI** (2026-06-08)
 - [x] **Slice 2 — File upload/storage + files manager UI** (2026-06-08)
 - [x] **Slice 3 — Document parsing → endpoints populate (3a OpenAPI · 3b Postman · 3c creds · 3d freetext · 3e zip)** (2026-06-08)
-- [ ] Slice 4 — Readiness assessment + prerequisites display ✅ DONE (2026-06-08)
-- [ ] Slice 5 — API test runs + Agents tab with A.L.I.C.E.
+- [x] **Slice 4 — Readiness assessment + prerequisites display** ✅ DONE (2026-06-08)
+- [x] **Slice 5 — API test runs + Agents tab with A.L.I.C.E.** ✅ DONE (2026-06-08)
 - [ ] Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs
 - [ ] Slice 7 — Work Program coverage matrix (track mode) + live updates
 - [ ] Slice 8 — Enforce coverage mode
@@ -145,7 +145,7 @@ Goal: user can upload docs to a collection, see them listed, download and delete
 
 ---
 
-### Slice 3 — Document parsing → endpoints populate (format by format)
+### Slice 3 — Document parsing → endpoints populate (format by format) ✅ DONE (2026-06-08)
 Goal: uploading a spec populates the collection's endpoint list. Shipped in **sub-slices per
 format** so each is independently testable; UI is the same endpoints table, growing in coverage.
 - **Backend (new `services/api_docs.py`)** — `ingest_document(...)` dispatched by `doc_type`;
@@ -179,7 +179,7 @@ format** so each is independently testable; UI is the same endpoints table, grow
 
 ---
 
-### Slice 4 — Readiness assessment + prerequisites display
+### Slice 4 — Readiness assessment + prerequisites display ✅ DONE (2026-06-08)
 Goal: user can see, per endpoint and overall, whether there's enough info / auth / test data.
 - **Backend (new `services/api_readiness.py`)**
   - Add fields to `ApiEndpoint`: `prereq_can_test`, `prereq_can_test_auth`, `prereq_notes`
@@ -222,6 +222,37 @@ Goal: user can create a test run and chat with A.L.I.C.E. against the collection
 - **Test point:** create a run → open it → Agents tab → chat with A.L.I.C.E., confirm streaming +
   agent status render.
 - **Automated:** extend run-related API tests; smoke test alice alias endpoints.
+
+**Implementation notes (as built):**
+- `models.py`: `ApiTestRun` table (`api_test_run`) — id, collection_id FK, name, status
+  (pending|running|completed|failed|cancelled), llm_config_id FK, coverage_mode (track|enforce),
+  started_at, completed_at, error_message, recon_summary_json, token_usage_json, created_at,
+  updated_at.
+- `db.py::_migrate`: idempotent `CREATE TABLE IF NOT EXISTS api_test_run` + collection_id index.
+- `schemas.py`: `ApiTestRunCreate` (name optional, llm_config_id, coverage_mode) +
+  `ApiTestRunSummary` (all fields).
+- `api/api_collections.py`: `GET/POST /{collection_id}/test-runs` sub-routes; newest-first
+  ordering on list; auto-generates run name from timestamp if omitted.
+- `api/api_test_runs.py` (new): `GET/DELETE /api/api-test-runs/{id}` (with cascade cleanup of
+  AliceChatSession/AliceChatMessage/AgentLog rows); thin alias routes for:
+  `GET/PUT /api/api-test-runs/{id}/alice/sessions`, `POST/DELETE /api/api-test-runs/{id}/alice/run`,
+  `GET .../alice/stream`, `GET .../alice/status`, `GET .../events` (SSE), `GET .../agent-log`.
+  All alias routes validate `ApiTestRun` (not `TestRun`) then delegate to the same service layer
+  (SQLite FK non-enforcement allows AliceChatSession.test_run_id to point at ApiTestRun ids).
+- `main.py`: `api_test_runs_router` registered between api_collections and settings routers.
+- `web/app.js`: 11 new `api.*` methods (listApiRuns, createApiRun, getApiRun, deleteApiRun,
+  getApiAliceSessions, saveApiAliceSessions, getApiAliceStatus, startApiAliceRun, stopApiAliceRun,
+  getApiAgentLog). Router extended with `#/apis/{id}/runs/new` → `ApiTestRunForm` and
+  `#/api-runs/{id}/{tab}` → `ApiTestRunDetail`. **Test Runs** card added to `ApiCollectionDetail`
+  (list + "+ New test run" button, newest-first, status badge, coverage mode, Open link).
+  `ApiTestRunForm`: name (optional), LLM profile picker, coverage mode selector.
+  `ApiTestRunDetail`: topbar with breadcrumb + status badge + Delete; tab bar (Agents tab only
+  in Slice 5); `ApiRunAgentsTab`: agent roster sidebar (from agent-log) + self-contained
+  A.L.I.C.E. chat panel (session tabs, EventSource streaming against `/api/api-test-runs/{id}/
+  alice/stream`, send/stop, optimistic message insertion).
+- Tests: `tests/test_api_test_runs.py` — 17 tests (CRUD list/create/get/delete, auto-name,
+  coverage_mode, 404s, alice sessions save/reload, alice status, agent log, events 404).
+  Full suite: 383 passed (17 new, 0 regressions from 366).
 
 ---
 
