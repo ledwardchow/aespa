@@ -90,6 +90,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")

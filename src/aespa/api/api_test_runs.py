@@ -277,7 +277,7 @@ def get_api_traffic(
 ) -> list[dict]:
     _get_run_or_404(session, run_id)
     from aespa.services import traffic as traffic_svc
-    return traffic_svc.get_traffic(run_id, since_id)
+    return traffic_svc.get_traffic(0, since_id, api_run_id=run_id)
 
 
 @router.get("/{run_id}/traffic/count")
@@ -287,4 +287,4 @@ def get_api_traffic_count(
 ) -> dict[str, int]:
     _get_run_or_404(session, run_id)
     from aespa.services import traffic as traffic_svc
-    return {"count": traffic_svc.count_traffic(run_id)}
+    return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
