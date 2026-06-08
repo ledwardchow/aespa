@@ -33,7 +33,11 @@ const api = {
   patchEndpointScope:  (id,eid,b) => req(`/api/api-collections/${id}/endpoints/${eid}/scope`, { method:"PATCH", body:b }),
   listApiCredentials:  (id)       => req(`/api/api-collections/${id}/credentials`),
   createApiCredential: (id,b)     => req(`/api/api-collections/${id}/credentials`, { method:"POST", body:b }),
-  deleteApiCredential: (id,cid)   => req(`/api/api-collections/${id}/credentials/${cid}`, { method:"DELETE" }),     ()            => req("/api/settings/llm"),
+  deleteApiCredential: (id,cid)   => req(`/api/api-collections/${id}/credentials/${cid}`, { method:"DELETE" }),
+  getApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`),
+  runApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`, { method:"POST" }),
+  purgeCollectionData: (id)       => req(`/api/api-collections/${id}/data`, { method:"DELETE" }),
+  getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
   createLLMProfile: (b)           => req("/api/settings/llm/profiles", { method:"POST", body:b }),
@@ -1454,16 +1458,21 @@ function ApiCollectionForm({ collectionId }) {
 function ApiCollectionDetail({ collectionId }) {
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
+  const [readiness, setReadiness] = useState(null);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [assessing, setAssessing] = useState(false);
+  const [purging, setPurging] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [c, eps] = await Promise.all([
+      const [c, eps, rd] = await Promise.all([
         api.getApiCollection(collectionId),
         api.listApiEndpoints(collectionId),
+        api.getApiReadiness(collectionId),
       ]);
       setCollection(c); setEndpoints(eps);
+      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
     }
     catch(e) { setError(e.message); }
   }, [collectionId]);
@@ -1472,6 +1481,34 @@ function ApiCollectionDetail({ collectionId }) {
   const onRefresh = async () => {
     setRefreshing(true);
     try { await load(); } finally { setRefreshing(false); }
+  };
+
+  const onAssessReadiness = async () => {
+    setAssessing(true); setError(null);
+    try {
+      const rd = await api.runApiReadiness(collectionId);
+      setReadiness(rd);
+      // Reload endpoints so prereq columns update
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+    finally { setAssessing(false); }
+  };
+
+  const onPurgeData = async () => {
+    if (!confirm(
+      "Delete ALL endpoints and credentials for this collection?\n\n" +
+      "Documents are kept \u2014 you can re-parse them afterwards.\n\n" +
+      "Use this to clear duplicates from uploading the same file multiple times."
+    )) return;
+    setPurging(true); setError(null);
+    try {
+      const result = await api.purgeCollectionData(collectionId);
+      setEndpoints([]);
+      setReadiness(null);
+      alert(`Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`);
+    } catch(e) { setError(e.message); }
+    finally { setPurging(false); }
   };
 
   const onDelete = async () => {
@@ -1495,6 +1532,15 @@ function ApiCollectionDetail({ collectionId }) {
     return html`<span className=${cls[m] || "badge neutral"}>${m}</span>`;
   };
 
+  // Readiness helpers
+  const scoreColor = (score) => score >= 75 ? "var(--success,#22c55e)" : score >= 40 ? "var(--warning-text,#d97706)" : "var(--danger,#ef4444)";
+  const readinessLabel = (score) => score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready";
+  const prereqIcon = (ep) => {
+    if (!ep.prereq_can_test) return html`<span title="Cannot test — insufficient info" style=${{color:"var(--danger,#ef4444)",fontSize:14}}>✗</span>`;
+    if (!ep.prereq_can_test_auth) return html`<span title="Auth credentials missing" style=${{color:"var(--warning-text,#d97706)",fontSize:14}}>⚠</span>`;
+    return html`<span title="Ready to test" style=${{color:"var(--success,#22c55e)",fontSize:14}}>✓</span>`;
+  };
+
   return html`
     <div className="topbar">
       <div className="topbar-title">
@@ -1504,6 +1550,7 @@ function ApiCollectionDetail({ collectionId }) {
       </div>
       <div className="topbar-actions">
         ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onPurgeData} disabled=${purging}>${purging?"Purging…":"Purge data"}</button>`}
         ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>`}
         ${collection && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
       </div>
@@ -1516,6 +1563,51 @@ function ApiCollectionDetail({ collectionId }) {
           <div className="field" style=${{margin:0}}><label>Base URL</label><div className="url">${collection.base_url}</div></div>
           ${collection.description && html`<div className="field" style=${{marginTop:12,marginBottom:0}}><label>Description</label><div>${collection.description}</div></div>`}
         </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Readiness</span>
+            <button className="btn secondary sm" onClick=${onAssessReadiness} disabled=${assessing}>
+              ${assessing ? "Assessing…" : readiness ? "Re-assess" : "Assess Readiness"}
+            </button>
+          </div>
+          ${assessing && html`<div className="subtle" style=${{padding:"12px 0"}}>Running LLM readiness assessment…</div>`}
+          ${!assessing && !readiness && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              Click <strong>Assess Readiness</strong> to run an LLM-driven gap analysis — checks whether you have the
+              right credentials and enough spec detail to test each endpoint.
+            </div>`}
+          ${!assessing && readiness && html`
+            <div>
+              <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+                <span style=${{fontSize:22,fontWeight:700,color:scoreColor(readiness.overall.score)}}>${readiness.overall.score}/100</span>
+                <span className="badge" style=${{background:scoreColor(readiness.overall.score),color:"#fff",padding:"2px 10px"}}>${readinessLabel(readiness.overall.score)}</span>
+                <span style=${{fontSize:13,color:"var(--fg)"}}>${readiness.overall.summary}</span>
+              </div>
+              ${readiness.overall.blocking_gaps?.length > 0 && html`
+                <div style=${{marginBottom:8}}>
+                  <strong style=${{fontSize:12,color:"var(--danger,#ef4444)"}}>Blocking gaps</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--fg)"}}>
+                    ${readiness.overall.blocking_gaps.map((g,i) => html`<li key=${i}>${g}</li>`)}
+                  </ul>
+                </div>`}
+              ${readiness.overall.recommendations?.length > 0 && html`
+                <div>
+                  <strong style=${{fontSize:12,color:"var(--muted)"}}>Recommendations</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--muted)"}}>
+                    ${readiness.overall.recommendations.map((r,i) => html`<li key=${i}>${r}</li>`)}
+                  </ul>
+                </div>`}
+              <div style=${{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+                Assessed ${new Date(readiness.assessed_at).toLocaleString()}
+                ·
+                Auth understood: ${readiness.overall.auth_method_understood ? "✓" : "✗"}
+                · Credentials: ${readiness.overall.has_credentials ? "✓" : "✗"}
+                · Test data: ${readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
+              </div>
+            </div>`}
+        </div>
+
         <div className="card">
           <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <span>Endpoints ${endpoints!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${endpoints.length}</span>`:""}</span>
@@ -1535,20 +1627,26 @@ function ApiCollectionDetail({ collectionId }) {
               </div>
             </div>`}
           ${endpoints!==null && endpoints.length>0 && html`
-            <div className="table-wrap">
-              <table>
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{tableLayout:"fixed",width:"100%",minWidth:760}}>
                 <colgroup>
-                  <col style=${{width:"10%"}}/><col style=${{width:"34%"}}/><col style=${{width:"12%"}}/><col style=${{width:"24%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/>
+                  <col style=${{width:"8%"}}/><col style=${{width:"24%"}}/><col style=${{width:"28%"}}/><col style=${{width:"8%"}}/><col style=${{width:"16%"}}/><col style=${{width:"8%"}}/><col style=${{width:"8%"}}/>
                 </colgroup>
-                <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Tags</th><th>Summary</th><th>In scope</th></tr></thead>
+                <thead><tr>
+                  ${["Method","Path","Summary","Auth","Tags","Ready","In scope"].map(h=>html`
+                    <th key=${h} style=${{overflow:"hidden",whiteSpace:"nowrap",resize:"horizontal",position:"relative"}}>${h}</th>`)}
+                </tr></thead>
                 <tbody>${endpoints.map(ep=>html`
                   <tr key=${ep.id} style=${{opacity:ep.in_scope?1:0.5}}>
                     <td>${methodBadge(ep.method)}</td>
-                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12}}>${ep.path}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${ep.path}</td>
+                    <td style=${{fontSize:12,overflowWrap:"break-word"}}>${ep.summary||"—"}</td>
                     <td>${ep.auth_required?html`<span className="badge warning">yes</span>`:html`<span className="badge neutral">no</span>`}</td>
-                    <td style=${{fontSize:11}}>${(JSON.parse(ep.tags_json||"[]")).join(", ")||"—"}</td>
-                    <td style=${{fontSize:11,color:"var(--muted)"}}>${ep.summary||"—"}</td>
-                    <td>
+                    <td style=${{fontSize:11,overflowWrap:"break-word"}}>${(JSON.parse(ep.tags_json||"[]")).join(", ")||"—"}</td>
+                    <td style=${{textAlign:"center"}} title=${(JSON.parse(ep.prereq_notes||"[]")).join("; ")||undefined}>
+                      ${prereqIcon(ep)}
+                    </td>
+                    <td style=${{textAlign:"center"}}>
                       <input type="checkbox" checked=${ep.in_scope} onChange=${()=>toggleScope(ep)} style=${{cursor:"pointer"}}/>
                     </td>
                   </tr>`)}
@@ -1570,21 +1668,30 @@ function fmtBytes(n) {
 function ApiFilesManager({ collectionId }) {
   const [collection, setCollection] = useState(null);
   const [docs, setDocs] = useState(null);
+  const [endpoints, setEndpoints] = useState([]);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
   const fileRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const [c, d] = await Promise.all([
+      const [c, d, eps] = await Promise.all([
         api.getApiCollection(collectionId),
         api.listApiDocuments(collectionId),
+        api.listApiEndpoints(collectionId),
       ]);
-      setCollection(c); setDocs(d);
+      setCollection(c); setDocs(d); setEndpoints(eps);
     } catch(e) { setError(e.message); }
   }, [collectionId]);
   useEffect(() => { load(); }, [load]);
+
+  // Endpoint count keyed by source_doc_id
+  const epCountByDoc = endpoints.reduce((acc, ep) => {
+    if (ep.source_doc_id != null) acc[ep.source_doc_id] = (acc[ep.source_doc_id] || 0) + 1;
+    return acc;
+  }, {});
 
   const doUpload = async (fileList) => {
     const files = Array.from(fileList || []);
@@ -1607,10 +1714,36 @@ function ApiFilesManager({ collectionId }) {
   };
 
   const onReparse = async (doc) => {
+    setReparseState(s => ({...s, [doc.id]: "running"}));
     try {
       const updated = await api.parseApiDocument(collectionId, doc.id);
       setDocs(ds => ds.map(d => d.id === doc.id ? updated : d));
-    } catch(e) { setError(e.message); }
+      // Refresh endpoint counts too
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+      setReparseState(s => ({...s, [doc.id]: updated.status === "parsed" ? "done" : "failed"}));
+    } catch(e) {
+      setError(e.message);
+      setReparseState(s => ({...s, [doc.id]: "failed"}));
+    }
+  };
+
+  const statusCell = (d) => {
+    const count = epCountByDoc[d.id];
+    if (d.status === "failed") {
+      const tip = d.error_message || "";
+      return html`<span className="badge danger" title=${tip} style=${{cursor:"help"}}>failed</span>`;
+    }
+    if (d.status === "parsed") {
+      if (count != null && count > 0) {
+        return html`<span><span className="badge ok">parsed</span> <span style=${{fontSize:11,color:"var(--muted)",marginLeft:4}}>${count} endpoint${count===1?"":"s"}</span></span>`;
+      }
+      if (d.doc_type === "credentials") {
+        return html`<span className="badge ok" title="Credentials parsed — no endpoints from this type">parsed</span>`;
+      }
+      return html`<span className="badge ok">parsed</span>`;
+    }
+    return html`<span className="badge neutral">uploaded</span>`;
   };
 
   return html`
@@ -1639,6 +1772,11 @@ function ApiFilesManager({ collectionId }) {
         <div style=${{fontSize:13}}>${uploading?"Uploading…":"Drag & drop files here, or click to choose"}</div>
         <div className="subtle" style=${{marginTop:6, fontSize:11}}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip (max 25 MB each)</div>
       </div>
+      ${endpoints.length > 0 && html`
+        <div className="alert" style=${{background:"var(--surface-2,#1a2a1a)",borderColor:"var(--ok,#4caf50)",color:"var(--ok,#4caf50)",padding:"10px 14px",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>${endpoints.length} endpoint${endpoints.length===1?"":"s"} extracted</span>
+          <a href=${`#/apis/${collectionId}`} style=${{color:"var(--ok,#4caf50)",fontWeight:600,textDecoration:"none"}}>View endpoints →</a>
+        </div>`}
       ${docs===null && html`<div className="subtle">Loading…</div>`}
       ${docs!==null&&docs.length===0 && html`
         <div className="empty-state" style=${{padding:"24px 16px"}}>
@@ -1650,7 +1788,7 @@ function ApiFilesManager({ collectionId }) {
         <div className="table-wrap">
           <table>
             <colgroup>
-              <col style=${{width:"34%"}}/><col style=${{width:"16%"}}/><col style=${{width:"12%"}}/><col style=${{width:"14%"}}/><col style=${{width:"24%"}}/>
+              <col style=${{width:"32%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/><col style=${{width:"22%"}}/>
             </colgroup>
             <thead><tr><th>Filename</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr></thead>
             <tbody>${docs.map(d=>html`
@@ -1658,10 +1796,10 @@ function ApiFilesManager({ collectionId }) {
                 <td style=${{fontWeight:600}}>${d.filename}</td>
                 <td><span className="badge neutral">${d.doc_type}</span></td>
                 <td>${fmtBytes(d.size_bytes)}</td>
-                <td>${d.status==="failed"?html`<span className="badge danger" title=${d.error_message||""}>failed</span>`:d.status==="parsed"?html`<span className="badge ok">parsed</span>`:html`<span className="badge neutral">uploaded</span>`}</td>
+                <td>${statusCell(d)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
-                    <button className="btn secondary sm" onClick=${()=>onReparse(d)}>Reparse</button>
+                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":"Reparse"}</button>
                     <button className="btn secondary sm" onClick=${()=>api.downloadApiDocument(collectionId, d.id)}>Download</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(d)}>Delete</button>
                   </div>

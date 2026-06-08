@@ -10,7 +10,7 @@ coverage per endpoint in a matrix.
 - [x] **Slice 1 — Collections CRUD + "APIs" sidebar + list/create/detail UI** (2026-06-08)
 - [x] **Slice 2 — File upload/storage + files manager UI** (2026-06-08)
 - [x] **Slice 3 — Document parsing → endpoints populate (3a OpenAPI · 3b Postman · 3c creds · 3d freetext · 3e zip)** (2026-06-08)
-- [ ] Slice 4 — Readiness assessment + prerequisites display
+- [ ] Slice 4 — Readiness assessment + prerequisites display ✅ DONE (2026-06-08)
 - [ ] Slice 5 — API test runs + Agents tab with A.L.I.C.E.
 - [ ] Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs
 - [ ] Slice 7 — Work Program coverage matrix (track mode) + live updates

@@ -72,13 +72,9 @@ def _sniff_doc_type(filename: str, content: bytes) -> str:
         return "swagger"
     if ext in {"yaml", "yml"}:
         return "openapi"
-    # Markdown files are always documentation — never misclassify as credentials even
-    # if they mention auth headers in examples.
-    if ext in {"md", "markdown"}:
-        return "freetext"
-    if any(tok in head for tok in ("bearer ", "authorization:", "access_token", "api_key", "apikey")):
-        return "credentials"
-    if ext in {"txt"}:
+    # Everything else — markdown, txt, sql, html, json without openapi/swagger markers, etc.
+    # The LLM will determine whether it contains endpoints, credentials, or both.
+    if ext in {"md", "markdown", "txt", "html", "htm", "rst", "sql", "csv", "json"}:
         return "freetext"
     return "unknown"
 
