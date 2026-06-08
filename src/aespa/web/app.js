@@ -37,6 +37,16 @@ const api = {
   getApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`),
   runApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`, { method:"POST" }),
   purgeCollectionData: (id)       => req(`/api/api-collections/${id}/data`, { method:"DELETE" }),
+  listApiRuns:         (id)       => req(`/api/api-collections/${id}/test-runs`),
+  createApiRun:        (id,b)     => req(`/api/api-collections/${id}/test-runs`, { method:"POST", body:b }),
+  getApiRun:           (id)       => req(`/api/api-test-runs/${id}`),
+  deleteApiRun:        (id)       => req(`/api/api-test-runs/${id}`, { method:"DELETE" }),
+  getApiAliceSessions: (id)       => req(`/api/api-test-runs/${id}/alice/sessions`),
+  saveApiAliceSessions:(id,b)     => req(`/api/api-test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getApiAliceStatus:   (id)       => req(`/api/api-test-runs/${id}/alice/status`),
+  startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
+  getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -175,8 +185,11 @@ function useRoute() {
   if ((m = hash.match(/^#\/apis\/new$/)))                return { name: "api-new" };
   if ((m = hash.match(/^#\/apis\/(\d+)\/edit$/)))        return { name: "api-edit",    id: +m[1] };
   if ((m = hash.match(/^#\/apis\/(\d+)\/files$/)))       return { name: "api-files",   id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/runs\/new$/)))   return { name: "api-run-new", id: +m[1] };
   if ((m = hash.match(/^#\/apis\/(\d+)$/)))              return { name: "api-detail",  id: +m[1] };
   if (hash === "#/apis")                                 return { name: "api-list" };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)$/)))          return { name: "api-run-detail", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
@@ -1251,6 +1264,8 @@ function App() {
         ${route.name==="api-edit"    && html`<${ApiCollectionForm} key=${route.id} collectionId=${route.id}/>`}
         ${route.name==="api-detail"  && html`<${ApiCollectionDetail} key=${route.id} collectionId=${route.id}/>`}
         ${route.name==="api-files"   && html`<${ApiFilesManager} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-new"    && html`<${ApiTestRunForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-detail" && html`<${ApiTestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
         ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
@@ -1459,6 +1474,7 @@ function ApiCollectionDetail({ collectionId }) {
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
   const [readiness, setReadiness] = useState(null);
+  const [apiRuns, setApiRuns] = useState(null);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [assessing, setAssessing] = useState(false);
@@ -1466,13 +1482,15 @@ function ApiCollectionDetail({ collectionId }) {
 
   const load = useCallback(async () => {
     try {
-      const [c, eps, rd] = await Promise.all([
+      const [c, eps, rd, runs] = await Promise.all([
         api.getApiCollection(collectionId),
         api.listApiEndpoints(collectionId),
         api.getApiReadiness(collectionId),
+        api.listApiRuns(collectionId),
       ]);
       setCollection(c); setEndpoints(eps);
       setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
+      setApiRuns(runs);
     }
     catch(e) { setError(e.message); }
   }, [collectionId]);
@@ -1653,6 +1671,33 @@ function ApiCollectionDetail({ collectionId }) {
                 </tbody>
               </table>
             </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Test Runs</span>
+            <button className="btn sm" onClick=${()=>nav(`#/apis/${collectionId}/runs/new`)}>+ New test run</button>
+          </div>
+          ${apiRuns===null && html`<div className="subtle">Loading…</div>`}
+          ${apiRuns!==null && apiRuns.length===0 && html`
+            <div className="subtle" style=${{padding:"12px 0"}}>
+              No test runs yet. Click <strong>+ New test run</strong> to start one.
+            </div>`}
+          ${apiRuns!==null && apiRuns.length>0 && html`
+            <table style=${{width:"100%"}}>
+              <thead><tr>
+                <th>Name</th><th>Status</th><th>Coverage</th><th>Created</th><th></th>
+              </tr></thead>
+              <tbody>${apiRuns.map(r=>html`
+                <tr key=${r.id}>
+                  <td><a href=${`#/api-runs/${r.id}/agents`} style=${{fontWeight:600}}>${r.name}</a></td>
+                  <td><span className=${`badge ${r.status==="completed"?"success":r.status==="running"?"warning":r.status==="failed"?"danger":"neutral"}`}>${r.status}</span></td>
+                  <td>${r.coverage_mode}</td>
+                  <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(r.created_at).toLocaleString()}</td>
+                  <td><a href=${`#/api-runs/${r.id}/agents`} className="btn secondary sm">Open</a></td>
+                </tr>`)}
+              </tbody>
+            </table>`}
         </div>`}
     </div>
   `;
@@ -1799,7 +1844,7 @@ function ApiFilesManager({ collectionId }) {
                 <td>${statusCell(d)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
-                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":"Reparse"}</button>
+                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":d.status==="uploaded"?"Parse":"Reparse"}</button>
                     <button className="btn secondary sm" onClick=${()=>api.downloadApiDocument(collectionId, d.id)}>Download</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(d)}>Delete</button>
                   </div>
@@ -2219,6 +2264,449 @@ function SiteForm({ siteId }) {
 }
 
 // ── Test run form ─────────────────────────────────────────────────────────────
+
+// ── API test run form ─────────────────────────────────────────────────────────
+
+function ApiTestRunForm({ collectionId }) {
+  const [form, setForm] = useState({ name:"", llm_config_id:"", coverage_mode:"track" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
+  const upd = p => setForm(f=>({...f,...p}));
+
+  useEffect(() => {
+    api.listLLMProfiles().then(p => setProfiles(p||[])).catch(e => setError(e.message));
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setSaving(true); setError(null);
+    try {
+      const payload = {
+        name: form.name.trim()||null,
+        llm_config_id: form.llm_config_id ? +form.llm_config_id : null,
+        coverage_mode: form.coverage_mode,
+      };
+      const run = await api.createApiRun(collectionId, payload);
+      nav(`#/api-runs/${run.id}/agents`);
+    } catch(e) { setError(e.message); setSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>New test run
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <form className="card" style=${{maxWidth:560}} onSubmit=${onSubmit}>
+        <div className="form-section-title">New API test run</div>
+        <div className="field">
+          <label>Name <span className="subtle">(optional — auto-generated if blank)</span></label>
+          <input type="text" value=${form.name} onInput=${e=>upd({name:e.target.value})} placeholder="e.g. Sprint 12 auth test"/>
+        </div>
+        <div className="field">
+          <label>LLM profile</label>
+          <select value=${form.llm_config_id} onChange=${e=>upd({llm_config_id:e.target.value})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Coverage mode</label>
+          <select value=${form.coverage_mode} onChange=${e=>upd({coverage_mode:e.target.value})}>
+            <option value="track">Track — record coverage but don't enforce it</option>
+            <option value="enforce">Enforce — block completion until all endpoints covered</option>
+          </select>
+        </div>
+        <div className="row spread" style=${{marginTop:16}}>
+          <button type="button" className="btn ghost" onClick=${()=>nav(`#/apis/${collectionId}`)}>Cancel</button>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+// ── API test run detail ────────────────────────────────────────────────────────
+
+const API_RUN_TABS = [
+  { key: "agents", label: "Agents" },
+];
+
+// Reuse the same alice session management infrastructure as TestRunDetail but
+// bound to the /api/api-test-runs/{id}/* alias routes.
+function useApiAliceSession(runId) {
+  const [aliceSessions, setAliceSessions] = useState(null);
+  const [aliceLoaded, setAliceLoaded] = useState(false);
+  const [activeTabId, setActiveTabId] = useState("tab-default");
+  const [aliceStatus, setAliceStatus] = useState(null);
+  const streamRef = useRef(null);
+  const cursorRef = useRef(0);
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const data = await api.getApiAliceSessions(runId);
+      setAliceSessions(data.chats || []);
+      setActiveTabId(data.active_tab_id || "tab-default");
+      setAliceLoaded(true);
+    } catch(e) { console.error("alice sessions load error", e); setAliceLoaded(true); }
+  }, [runId]);
+
+  const saveSessions = useCallback(async (chats, activeId) => {
+    try { await api.saveApiAliceSessions(runId, { chats, active_tab_id: activeId }); }
+    catch(e) { console.error("alice sessions save error", e); }
+  }, [runId]);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await api.getApiAliceStatus(runId);
+      setAliceStatus(st);
+    } catch {}
+  }, [runId]);
+
+  return { aliceSessions, setAliceSessions, aliceLoaded, activeTabId, setActiveTabId, aliceStatus, setAliceStatus, loadSessions, saveSessions, pollStatus, streamRef, cursorRef };
+}
+
+function ApiTestRunDetail({ runId, initialTab }) {
+  const [run, setRun] = useState(null);
+  const [error, setError] = useState(null);
+  const tab = initialTab || "agents";
+
+  useEffect(() => {
+    api.getApiRun(runId).then(setRun).catch(e => setError(e.message));
+  }, [runId]);
+
+  const onDelete = async () => {
+    if (!run) return;
+    if (!confirm(`Delete test run "${run.name}"?`)) return;
+    try { await api.deleteApiRun(runId); nav(`#/apis/${run.collection_id}`); }
+    catch(e) { setError(e.message); }
+  };
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"success":s==="running"?"warning":s==="failed"?"danger":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${run?`#/apis/${run.collection_id}`:"#/apis"} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${run ? run.name : "…"}
+        ${run && html` ${statusBadge(run.status)}`}
+      </div>
+      <div className="topbar-actions">
+        ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="tab-bar" style=${{borderBottom:"1px solid var(--border)",display:"flex",gap:0,padding:"0 24px"}}>
+      ${API_RUN_TABS.map(t=>html`
+        <a key=${t.key}
+          href=${`#/api-runs/${runId}/${t.key}`}
+          className=${"tab-link"+(tab===t.key?" active":"")}
+          style=${{padding:"10px 18px",cursor:"pointer",fontWeight:tab===t.key?600:400,color:tab===t.key?"var(--accent)":"var(--muted)",borderBottom:tab===t.key?"2px solid var(--accent)":"2px solid transparent",textDecoration:"none",fontSize:14}}
+        >${t.label}</a>`)}
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${tab==="agents" && html`<${ApiRunAgentsTab} runId=${runId}/>`}
+    </div>
+  `;
+}
+
+function ApiRunAgentsTab({ runId }) {
+  const [agents, setAgents] = useState([]);
+  const [aliceSessions, setAliceSessions] = useState(null);
+  const [aliceLoaded, setAliceLoaded] = useState(false);
+  const [activeTabId, setActiveTabId] = useState("tab-default");
+  const [aliceStatus, setAliceStatus] = useState(null);
+  const [aliceInput, setAliceInput] = useState("");
+  const [aliceRunning, setAliceRunning] = useState(false);
+  const [expandedThinkIds, setExpandedThinkIds] = useState(new Set());
+  const streamRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  // Ref keeps activeTabId accessible in stable callbacks without triggering re-creation.
+  const activeTabIdRef = useRef("tab-default");
+  const updateActiveTabId = (id) => { activeTabIdRef.current = id; setActiveTabId(id); };
+  // Mirror sessions in a ref so the cleanup effect can save them without a stale closure.
+  const sessionsRef = useRef(null);
+
+  const saveSessionsToServer = useCallback((sessions, activeId) => {
+    sessionsRef.current = sessions;
+    api.saveApiAliceSessions(runId, { chats: sessions, active_tab_id: activeId }).catch(() => {});
+  }, [runId]);
+
+  // Stream handler — stable (only depends on runId).
+  // Events carry tab_id/msg_id injected by the server so no closure over activeTabId needed.
+  const connectStream = useCallback((cursor = 0) => {
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
+    streamRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const event = JSON.parse(ev.data);
+        if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceSessions(prev => {
+            const next = (prev || []).map(s => {
+              if (s.id !== event.tab_id) return s;
+              return { ...s, messages: s.messages.map(m =>
+                m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              )};
+            });
+            sessionsRef.current = next;
+            return next;
+          });
+        } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceSessions(prev => {
+            const next = (prev || []).map(s => {
+              if (s.id !== event.tab_id) return s;
+              return { ...s, messages: s.messages.map(m =>
+                m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              )};
+            });
+            sessionsRef.current = next;
+            return next;
+          });
+        } else if (event.type === "done") {
+          setAliceRunning(false);
+          es.close(); streamRef.current = null;
+          // Persist the locally-accumulated sessions to server (server doesn't auto-save).
+          setAliceSessions(prev => {
+            const sessions = prev || [];
+            api.saveApiAliceSessions(runId, {
+              chats: sessions, active_tab_id: activeTabIdRef.current,
+            }).catch(() => {});
+            return sessions;
+          });
+        }
+      } catch {}
+    };
+    es.onerror = () => { es.close(); streamRef.current = null; setAliceRunning(false); };
+  }, [runId]);
+
+  // On mount: load sessions, agent log, and reconnect stream if alice is still running.
+  useEffect(() => {
+    api.getApiAliceSessions(runId).then(data => {
+      const chats = data.chats || [];
+      const sessions = chats.length ? chats : [{ id:"tab-default", title:"Session 1", messages:[] }];
+      sessionsRef.current = sessions;
+      setAliceSessions(sessions);
+      const aid = data.active_tab_id || "tab-default";
+      activeTabIdRef.current = aid;
+      setActiveTabId(aid);
+      setAliceLoaded(true);
+    }).catch(() => {
+      const fallback = [{ id:"tab-default", title:"Session 1", messages:[] }];
+      sessionsRef.current = fallback;
+      setAliceSessions(fallback);
+      setAliceLoaded(true);
+    });
+    api.getApiAliceStatus(runId).then(st => {
+      setAliceStatus(st);
+      const running = st?.running === true;
+      setAliceRunning(running);
+      if (running) {
+        // Inject placeholder messages so incoming stream chunks can fill them in.
+        const { tab_id, think_msg_id, reply_msg_id } = st;
+        if (tab_id && think_msg_id && reply_msg_id) {
+          setAliceSessions(prev => {
+            const sessions = prev || [];
+            const idx = sessions.findIndex(s => s.id === tab_id);
+            if (idx === -1) return sessions;
+            if (sessions[idx].messages.some(m => m.id === think_msg_id)) return sessions;
+            const updated = [...sessions];
+            updated[idx] = { ...sessions[idx], messages: [
+              ...sessions[idx].messages,
+              { id:think_msg_id, sender:"alice", type:"thinking", text:"", ts:new Date().toISOString() },
+              { id:reply_msg_id, sender:"alice", type:"message", text:"", ts:new Date().toISOString() },
+            ]};
+            sessionsRef.current = updated;
+            return updated;
+          });
+          activeTabIdRef.current = tab_id;
+          setActiveTabId(tab_id);
+        }
+        connectStream(0);
+      }
+    }).catch(() => {});
+    api.getApiAgentLog(runId).then(rows => {
+      setAgents(rows.map(r => ({ id:r.agent_id, name:r.agent_id, status:r.status||"idle", task:r.current_task||"" })));
+    }).catch(() => {});
+  }, [runId]); // connectStream is stable (only depends on runId) — safe to omit from deps
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) streamRef.current.close();
+      // Save whatever sessions are in memory so navigate-away mid-stream
+      // doesn't lose partial chat history. sessionsRef always holds the
+      // latest value regardless of stale closures.
+      if (sessionsRef.current && sessionsRef.current.length) {
+        api.saveApiAliceSessions(runId, {
+          chats: sessionsRef.current,
+          active_tab_id: activeTabIdRef.current,
+        }).catch(() => {});
+      }
+    };
+  }, [runId]);
+
+  const scrollToBottom = () => {
+    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior:"smooth" });
+  };
+  useEffect(scrollToBottom, [aliceSessions, activeTabId]);
+
+  const onSend = async () => {
+    const text = aliceInput.trim();
+    if (!text || aliceRunning) return;
+    setAliceInput("");
+
+    const thinkId = `think-${Date.now()}`;
+    const replyId = `reply-${Date.now()+1}`;
+    const userMsg = { id:`u-${Date.now()}`, sender:"user", type:"message", text, ts:new Date().toISOString() };
+    const thinkMsg = { id:thinkId, sender:"alice", type:"thinking", text:"", ts:new Date().toISOString() };
+    const replyMsg = { id:replyId, sender:"alice", type:"message", text:"", ts:new Date().toISOString() };
+
+    const tabId = activeTabIdRef.current;
+    setAliceSessions(prev => {
+      const sessions = prev || [];
+      const next = sessions.map(s =>
+        s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
+      );
+      sessionsRef.current = next;
+      return next;
+    });
+    setAliceRunning(true);
+
+    const activeSession = (aliceSessions || []).find(s => s.id === tabId) || { messages:[] };
+    const history = activeSession.messages.map(m => ({ sender:m.sender, text:m.text }));
+
+    try {
+      // Start task first so the stream endpoint finds an active task to subscribe to.
+      await api.startApiAliceRun(runId, {
+        message: text, history, tab_id: tabId,
+        think_msg_id: thinkId, reply_msg_id: replyId,
+      });
+      connectStream(0);
+    } catch(e) { setAliceRunning(false); console.error("alice run error", e); }
+  };
+
+  const onStop = async () => {
+    try { await api.stopApiAliceRun(runId); } catch {}
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    setAliceRunning(false);
+  };
+
+  const activeSession = (aliceSessions || []).find(s => s.id === activeTabId) || (aliceSessions || [])[0];
+  const messages = activeSession?.messages || [];
+
+  const toggleThink = (id) => setExpandedThinkIds(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
+
+  const renderMessage = (msg) => {
+    if (msg.type === "thinking") {
+      const isExpanded = expandedThinkIds.has(msg.id);
+      const isEmpty = !msg.text;
+      return html`<div key=${msg.id} style=${{marginBottom:6}}>
+        <div onClick=${()=>toggleThink(msg.id)}
+          style=${{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",borderRadius:6,background:"var(--surface-2,#1e2433)",cursor:"pointer",fontSize:11,color:"var(--muted)",userSelect:"none"}}>
+          <span style=${{fontSize:13}}>🧠</span>
+          <span style=${{fontWeight:500}}>${isEmpty ? "Thinking…" : "Thought Process"}</span>
+          <span style=${{marginLeft:"auto"}}>${isExpanded ? "▲" : "▼"}</span>
+        </div>
+        ${isExpanded && msg.text && html`
+          <div style=${{padding:"6px 10px",background:"var(--surface-2,#1e2433)",borderRadius:"0 0 6px 6px",fontSize:11,color:"var(--muted)",whiteSpace:"pre-wrap",wordBreak:"break-word",lineHeight:1.5,maxHeight:300,overflowY:"auto",borderTop:"1px solid var(--border)"}}>
+            ${msg.text}
+          </div>`}
+      </div>`;
+    }
+    const isUser = msg.sender === "user";
+    return html`<div key=${msg.id} style=${{display:"flex",flexDirection:"column",alignItems:isUser?"flex-end":"flex-start",marginBottom:8}}>
+      <div style=${{maxWidth:"80%",padding:"8px 12px",borderRadius:8,fontSize:13,lineHeight:1.5,wordBreak:"break-word",background:isUser?"var(--accent)":"var(--surface-alt,var(--surface))",color:isUser?"#fff":"var(--fg)"}}>${isUser ? msg.text : renderMarkdown(msg.text)}</div>
+      <div style=${{fontSize:10,color:"var(--muted)",marginTop:2}}>${isUser?"You":"A.L.I.C.E."}</div>
+    </div>`;
+  };
+
+  return html`
+    <div style=${{display:"flex",gap:16,alignItems:"flex-start",height:"calc(100vh - 120px)"}}>
+      <div style=${{flex:"0 0 200px",display:"flex",flexDirection:"column",gap:8}}>
+        <div className="card" style=${{padding:12}}>
+          <div className="form-section-title" style=${{marginBottom:8,fontSize:12}}>Agents</div>
+          ${agents.length===0 && html`<div className="subtle" style=${{fontSize:11}}>No agents active.</div>`}
+          ${agents.map(a=>html`
+            <div key=${a.id} style=${{padding:"4px 0",borderBottom:"1px solid var(--border)",fontSize:11}}>
+              <div style=${{display:"flex",alignItems:"center",gap:6}}>
+                <span className=${"badge "+(a.status==="running"?"warning":"neutral")} style=${{fontSize:10}}>${a.status}</span>
+                <span style=${{fontWeight:500}}>${a.name}</span>
+              </div>
+              ${a.task && html`<div style=${{color:"var(--muted)",fontSize:10,marginTop:2}}>${a.task}</div>`}
+            </div>`)}
+        </div>
+      </div>
+      <div style=${{flex:1,display:"flex",flexDirection:"column",minWidth:0,height:"100%"}}>
+        <div className="card" style=${{flex:1,display:"flex",flexDirection:"column",padding:0,overflow:"hidden"}}>
+          ${/* session tabs */""}
+          <div style=${{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid var(--border)",padding:"0 8px",flexWrap:"nowrap",overflowX:"auto"}}>
+            ${(aliceSessions||[]).map(s=>html`
+              <div key=${s.id} style=${{display:"flex",alignItems:"center",borderBottom:s.id===activeTabId?"2px solid var(--accent)":"2px solid transparent"}}>
+                <button onClick=${()=>{ updateActiveTabId(s.id); saveSessionsToServer(aliceSessions||[],s.id); }}
+                  style=${{padding:"6px 8px 6px 12px",background:"none",border:"none",cursor:"pointer",fontWeight:s.id===activeTabId?600:400,color:s.id===activeTabId?"var(--accent)":"var(--muted)",fontSize:12,whiteSpace:"nowrap"}}>
+                  ${s.title||"Session"}
+                </button>
+                ${(aliceSessions||[]).length > 1 && html`
+                  <button onClick=${(e)=>{
+                    e.stopPropagation();
+                    const remaining = (aliceSessions||[]).filter(t=>t.id!==s.id);
+                    const newActive = s.id===activeTabId ? remaining[Math.max(0,(aliceSessions||[]).findIndex(t=>t.id===s.id)-1)].id : activeTabId;
+                    setAliceSessions(remaining);
+                    updateActiveTabId(newActive);
+                    saveSessionsToServer(remaining, newActive);
+                  }} title="Close session"
+                    style=${{padding:"0 4px",background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:12,lineHeight:1,opacity:0.6}}
+                    onMouseOver=${e=>e.currentTarget.style.opacity=1}
+                    onMouseOut=${e=>e.currentTarget.style.opacity=0.6}>
+                    ×
+                  </button>`}
+              </div>`)}
+            <button onClick=${()=>{
+              const id="tab-"+Date.now();
+              const newSessions=[...(aliceSessions||[]),{id,title:`Session ${(aliceSessions||[]).length+1}`,messages:[]}];
+              setAliceSessions(newSessions); updateActiveTabId(id); saveSessionsToServer(newSessions,id);
+            }} style=${{padding:"6px 8px",background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14}}>+</button>
+          </div>
+          ${/* messages area */""}
+          <div style=${{flex:1,overflowY:"auto",padding:12}}>
+            ${!aliceLoaded && html`<div className="subtle">Loading…</div>`}
+            ${aliceLoaded && messages.length===0 && html`
+              <div className="subtle" style=${{textAlign:"center",padding:"32px 0"}}>
+                Start a conversation with A.L.I.C.E. to begin the test run.
+              </div>`}
+            ${messages.map(renderMessage)}
+            <div ref=${messagesEndRef}/>
+          </div>
+          ${/* input */""}
+          <div style=${{borderTop:"1px solid var(--border)",padding:"8px 12px",display:"flex",gap:8,alignItems:"flex-end"}}>
+            <textarea
+              value=${aliceInput}
+              onInput=${e=>setAliceInput(e.target.value)}
+              onKeyDown=${e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); onSend(); }}}
+              disabled=${aliceRunning}
+              rows="2"
+              placeholder="Message A.L.I.C.E. (Enter to send, Shift+Enter for newline)…"
+              style=${{flex:1,resize:"none",fontSize:13,padding:"6px 8px",borderRadius:6,border:"1px solid var(--border)",background:"var(--surface)",color:"var(--fg)"}}
+            />
+            ${aliceRunning
+              ? html`<button className="btn danger-outline sm" onClick=${onStop}>Stop</button>`
+              : html`<button className="btn sm" onClick=${onSend} disabled=${!aliceInput.trim()}>Send</button>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+
 
 function TestRunForm({ siteId }) {
   const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
