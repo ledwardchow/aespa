@@ -387,7 +387,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     })
 
     # Run the agentic loop — no browser_ctx/pw_page needed for REST APIs.
-    async with _make_scanner_client(run_id=api_run_id, verify=False) as hx:
+    async with _make_scanner_client(run_id=None, api_run_id=api_run_id, verify=False) as hx:
         finding_count = await _do_agentic_thinking_loop(
             run_id=api_run_id,
             llm_cfg=llm_cfg,
@@ -556,6 +556,11 @@ async def stop_api_scan(api_run_id: int) -> bool:
         })
         return True
     return False
+
+
+def is_api_scan_running(api_run_id: int) -> bool:
+    """Return True if an API scan task is currently active for this run."""
+    return api_run_id in _scan_tasks and not _scan_tasks[api_run_id].done()
 
 
 def get_scan_status(api_run_id: int) -> dict:

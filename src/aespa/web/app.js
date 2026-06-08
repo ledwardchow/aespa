@@ -1906,10 +1906,18 @@ function ActiveJobsPage() {
     const key = `${j.job_type}-${j.run_id}`;
     setStopping(prev => ({ ...prev, [key]: true }));
     try {
-      if (j.job_type === "A.L.I.C.E.") {
-        await api.stopAliceRun(j.run_id);
+      if (j.run_type === "api") {
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopApiAliceRun(j.run_id);
+        } else {
+          await api.stopApiScan(j.run_id);
+        }
       } else {
-        await api.stopRun(j.run_id);
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopAliceRun(j.run_id);
+        } else {
+          await api.stopRun(j.run_id);
+        }
       }
       await load();
     } catch(e) {
@@ -1957,10 +1965,13 @@ function ActiveJobsPage() {
               return html`
               <tr key=${key}>
                 <td>
-                  <a href=${`#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  <a href=${j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
                 </td>
-                <td><a href=${`#/sites/${j.site_id}`}>${j.site_name}</a></td>
+                <td>${j.run_type==="api"
+                  ? html`<a href=${`#/apis/${j.collection_id}`}>${j.collection_name}</a>`
+                  : html`<a href=${`#/sites/${j.site_id}`}>${j.site_name}</a>`
+                }</td>
                 <td>${j.job_type}</td>
                 <td>${activeJobBadge(j)}</td>
                 <td>${activeJobProgress(j)}</td>
@@ -1968,7 +1979,7 @@ function ActiveJobsPage() {
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
-                    <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`)}>Open</button>
                     <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
@@ -2463,7 +2474,7 @@ function ApiTestRunDetail({ runId, initialTab }) {
           style=${{padding:"10px 18px",cursor:"pointer",fontWeight:tab===t.key?600:400,color:tab===t.key?"var(--accent)":"var(--muted)",borderBottom:tab===t.key?"2px solid var(--accent)":"2px solid transparent",textDecoration:"none",fontSize:14}}
         >${t.label}</a>`)}
     </div>
-    <div className="content scroll-content">
+    <div className="content scroll-content no-padding">
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="agents"   && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning}/>`}
@@ -2676,31 +2687,98 @@ function _buildAgentsFromLog(rows) {
 }
 
 function ApiRunAgentsTab({ runId, scanRunning }) {
+  // ── Agent list state ──────────────────────────────────────────────────────
   const [agents, setAgents] = useState([]);
   const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
-  const [aliceSessions, setAliceSessions] = useState(null);
-  const [aliceLoaded, setAliceLoaded] = useState(false);
-  const [activeTabId, setActiveTabId] = useState("tab-default");
-  const [aliceStatus, setAliceStatus] = useState(null);
-  const [aliceInput, setAliceInput] = useState("");
-  const [aliceRunning, setAliceRunning] = useState(false);
-  const [expandedThinkIds, setExpandedThinkIds] = useState(new Set());
-  const streamRef = useRef(null);
-  const messagesEndRef = useRef(null);
-  // Ref keeps activeTabId accessible in stable callbacks without triggering re-creation.
-  const activeTabIdRef = useRef("tab-default");
-  const updateActiveTabId = (id) => { activeTabIdRef.current = id; setActiveTabId(id); };
-  // Mirror sessions in a ref so the cleanup effect can save them without a stale closure.
-  const sessionsRef = useRef(null);
+  const toggleAgentId = (id) => setCollapsedAgentIds(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
 
-  const saveSessionsToServer = useCallback((sessions, activeId) => {
-    sessionsRef.current = sessions;
-    api.saveApiAliceSessions(runId, { chats: sessions, active_tab_id: activeId }).catch(() => {});
+  // ── ALICE chat state ──────────────────────────────────────────────────────
+  const [aliceChats, setAliceChats] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`api_alice_chats_${runId}`) || "null");
+      return saved && saved.length ? saved : [{ id: "tab-default", title: "Session 1", messages: [] }];
+    } catch { return [{ id: "tab-default", title: "Session 1", messages: [] }]; }
+  });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try { return localStorage.getItem(`api_alice_active_tab_${runId}`) || "tab-default"; } catch { return "tab-default"; }
+  });
+  const [aliceRunning, setAliceRunning] = useState(false);
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const streamRef = useRef(null);
+  const activeAliceTabIdRef = useRef(activeAliceTabId);
+  activeAliceTabIdRef.current = activeAliceTabId;
+  const sessionsRef = useRef(aliceChats);
+  sessionsRef.current = aliceChats;
+
+  // ── On mount: load sessions, agent log, check alice status ────────────────
+  useEffect(() => {
+    api.getApiAliceSessions(runId).then(data => {
+      const chats = data.chats || [];
+      if (chats.length) {
+        setAliceChats(chats);
+        const aid = data.active_tab_id || "tab-default";
+        setActiveAliceTabId(aid);
+        activeAliceTabIdRef.current = aid;
+      }
+    }).catch(() => {});
+    api.getApiAgentLog(runId).then(rows => {
+      setAgents(_buildAgentsFromLog(rows));
+    }).catch(() => {});
+    api.getApiAliceStatus(runId).then(st => {
+      if (st?.running) { setAliceRunning(true); connectAliceStream(0); }
+    }).catch(() => {});
   }, [runId]);
 
-  // Stream handler — stable (only depends on runId).
-  // Events carry tab_id/msg_id injected by the server so no closure over activeTabId needed.
-  const connectStream = useCallback((cursor = 0) => {
+  // ── SSE: real-time agent_status events ───────────────────────────────────
+  useEffect(() => {
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    es.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.type !== "agent_status") return;
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const idx = prev.findIndex(a => a.id === evt.agent_id);
+          const histEntry = { ts, task: evt.current_task || "", outcome: evt.outcome || "" };
+          const existing = idx >= 0 ? prev[idx] : { id: evt.agent_id, name: evt.role || evt.agent_id, status: evt.status, task: evt.current_task || "", taskHistory: [] };
+          const updated = { ...existing, name: evt.role || existing.name, status: evt.status, task: evt.current_task || "", taskHistory: [...(existing.taskHistory || []), histEntry] };
+          if (idx >= 0) { const next = [...prev]; next[idx] = updated; return next; }
+          return [...prev, updated];
+        });
+      } catch {}
+    };
+    return () => es.close();
+  }, [runId]);
+
+  // ── Poll agent log while scanning or alice is running ────────────────────
+  useEffect(() => {
+    if (!aliceRunning && !scanRunning) return;
+    const t = setInterval(() => {
+      api.getApiAgentLog(runId).then(rows => setAgents(_buildAgentsFromLog(rows))).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [aliceRunning, scanRunning, runId]);
+
+  // ── Persist alice chats ───────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      localStorage.setItem(`api_alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`api_alice_active_tab_${runId}`, activeAliceTabId);
+    } catch {}
+    api.saveApiAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId }).catch(() => {});
+  }, [aliceChats, activeAliceTabId]);
+
+  // ── Cleanup stream on unmount ─────────────────────────────────────────────
+  useEffect(() => {
+    return () => { if (streamRef.current) { streamRef.current.close(); streamRef.current = null; } };
+  }, []);
+
+  // ── ALICE stream connection ───────────────────────────────────────────────
+  const connectAliceStream = useCallback((cursor = 0) => {
     if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
     const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
     streamRef.current = es;
@@ -2708,330 +2786,346 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
       try {
         const event = JSON.parse(ev.data);
         if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
-          setAliceSessions(prev => {
-            const next = (prev || []).map(s => {
-              if (s.id !== event.tab_id) return s;
-              return { ...s, messages: s.messages.map(m =>
-                m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
-              )};
-            });
-            sessionsRef.current = next;
-            return next;
-          });
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
         } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
-          setAliceSessions(prev => {
-            const next = (prev || []).map(s => {
-              if (s.id !== event.tab_id) return s;
-              return { ...s, messages: s.messages.map(m =>
-                m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
-              )};
-            });
-            sessionsRef.current = next;
-            return next;
-          });
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
         } else if (event.type === "done") {
           setAliceRunning(false);
           es.close(); streamRef.current = null;
-          // Persist the locally-accumulated sessions to server (server doesn't auto-save).
-          setAliceSessions(prev => {
-            const sessions = prev || [];
-            api.saveApiAliceSessions(runId, {
-              chats: sessions, active_tab_id: activeTabIdRef.current,
-            }).catch(() => {});
-            return sessions;
-          });
         }
       } catch {}
     };
     es.onerror = () => { es.close(); streamRef.current = null; setAliceRunning(false); };
   }, [runId]);
 
-  // On mount: load sessions, agent log, and reconnect stream if alice is still running.
-  useEffect(() => {
-    api.getApiAliceSessions(runId).then(data => {
-      const chats = data.chats || [];
-      const sessions = chats.length ? chats : [{ id:"tab-default", title:"Session 1", messages:[] }];
-      sessionsRef.current = sessions;
-      setAliceSessions(sessions);
-      const aid = data.active_tab_id || "tab-default";
-      activeTabIdRef.current = aid;
-      setActiveTabId(aid);
-      setAliceLoaded(true);
-    }).catch(() => {
-      const fallback = [{ id:"tab-default", title:"Session 1", messages:[] }];
-      sessionsRef.current = fallback;
-      setAliceSessions(fallback);
-      setAliceLoaded(true);
-    });
-    api.getApiAliceStatus(runId).then(st => {
-      setAliceStatus(st);
-      const running = st?.running === true;
-      setAliceRunning(running);
-      if (running) {
-        // Inject placeholder messages so incoming stream chunks can fill them in.
-        const { tab_id, think_msg_id, reply_msg_id } = st;
-        if (tab_id && think_msg_id && reply_msg_id) {
-          setAliceSessions(prev => {
-            const sessions = prev || [];
-            const idx = sessions.findIndex(s => s.id === tab_id);
-            if (idx === -1) return sessions;
-            if (sessions[idx].messages.some(m => m.id === think_msg_id)) return sessions;
-            const updated = [...sessions];
-            updated[idx] = { ...sessions[idx], messages: [
-              ...sessions[idx].messages,
-              { id:think_msg_id, sender:"alice", type:"thinking", text:"", ts:new Date().toISOString() },
-              { id:reply_msg_id, sender:"alice", type:"message", text:"", ts:new Date().toISOString() },
-            ]};
-            sessionsRef.current = updated;
-            return updated;
-          });
-          activeTabIdRef.current = tab_id;
-          setActiveTabId(tab_id);
-        }
-        connectStream(0);
-      }
-    }).catch(() => {});
-    api.getApiAgentLog(runId).then(rows => {
-      setAgents(_buildAgentsFromLog(rows));
-    }).catch(() => {});
-  }, [runId]); // connectStream is stable (only depends on runId) — safe to omit from deps
-
-  // SSE events — receive agent_status in real-time (same mechanism as web scan).
-  useEffect(() => {
-    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
-    es.onmessage = (ev) => {
-      try {
-        const evt = JSON.parse(ev.data);
-        if (evt.type === "agent_status") {
-          const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-          setAgents(prev => {
-            const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
-            const idx = prev.findIndex(a => a.id === evt.agent_id);
-            const existing = idx >= 0 ? prev[idx] : { id: evt.agent_id, name: evt.role || evt.agent_id, status: evt.status, task: evt.current_task || "", taskHistory: [] };
-            const updated = { ...existing, name: evt.role || existing.name, status: evt.status, task: evt.current_task || "", taskHistory: [...(existing.taskHistory || []), histEntry] };
-            if (idx >= 0) { const next = [...prev]; next[idx] = updated; return next; }
-            return [...prev, updated];
-          });
-        }
-      } catch {}
-    };
-    return () => es.close();
-  }, [runId]);
-
-  // Poll agent log while scan (thinking or alice) is running so sidebar stays current.
-  useEffect(() => {
-    if (!aliceRunning && !scanRunning) return;
-    const t = setInterval(() => {
-      api.getApiAgentLog(runId).then(rows => {
-        setAgents(_buildAgentsFromLog(rows));
-      }).catch(() => {});
-    }, 4000);
-    return () => clearInterval(t);
-  }, [aliceRunning, scanRunning, runId]);
-
-  useEffect(() => {
-    return () => {
-      if (streamRef.current) streamRef.current.close();
-      // Save whatever sessions are in memory so navigate-away mid-stream
-      // doesn't lose partial chat history. sessionsRef always holds the
-      // latest value regardless of stale closures.
-      if (sessionsRef.current && sessionsRef.current.length) {
-        api.saveApiAliceSessions(runId, {
-          chats: sessionsRef.current,
-          active_tab_id: activeTabIdRef.current,
-        }).catch(() => {});
-      }
-    };
-  }, [runId]);
-
-  const scrollToBottom = () => {
-    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior:"smooth" });
-  };
-  useEffect(scrollToBottom, [aliceSessions, activeTabId]);
-
-  const onSend = async () => {
-    const text = aliceInput.trim();
-    if (!text || aliceRunning) return;
-    setAliceInput("");
-
+  // ── ALICE send / stop ─────────────────────────────────────────────────────
+  const handleAliceSend = async () => {
+    if (!aliceInputText.trim() || aliceRunning) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+    const tabId = activeAliceTabIdRef.current;
     const thinkId = `think-${Date.now()}`;
-    const replyId = `reply-${Date.now()+1}`;
-    const userMsg = { id:`u-${Date.now()}`, sender:"user", type:"message", text, ts:new Date().toISOString() };
-    const thinkMsg = { id:thinkId, sender:"alice", type:"thinking", text:"", ts:new Date().toISOString() };
-    const replyMsg = { id:replyId, sender:"alice", type:"message", text:"", ts:new Date().toISOString() };
-
-    const tabId = activeTabIdRef.current;
-    setAliceSessions(prev => {
-      const sessions = prev || [];
-      const next = sessions.map(s =>
-        s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
-      );
-      sessionsRef.current = next;
-      return next;
-    });
+    const replyId = `reply-${Date.now() + 1}`;
+    const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    const userMsg  = { id: `u-${Date.now()}`,  sender: "user",  type: "message",  text: userText, ts };
+    const thinkMsg = { id: thinkId,             sender: "alice", type: "thinking", text: "",       ts };
+    const replyMsg = { id: replyId,             sender: "alice", type: "message",  text: "",       ts };
+    setAliceChats(prev => prev.map(s =>
+      s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
+    ));
     setAliceRunning(true);
-
-    const activeSession = (aliceSessions || []).find(s => s.id === tabId) || { messages:[] };
-    const history = activeSession.messages.map(m => ({ sender:m.sender, text:m.text }));
-
+    setAliceExpandedThinkIds(prev => { const n = new Set(prev); n.add(thinkId); return n; });
+    const activeSession = sessionsRef.current.find(s => s.id === tabId) || { messages: [] };
+    const history = activeSession.messages.map(m => ({ sender: m.sender, text: m.text }));
     try {
-      // Start task first so the stream endpoint finds an active task to subscribe to.
-      await api.startApiAliceRun(runId, {
-        message: text, history, tab_id: tabId,
-        think_msg_id: thinkId, reply_msg_id: replyId,
-      });
-      connectStream(0);
-    } catch(e) { setAliceRunning(false); console.error("alice run error", e); }
+      await api.startApiAliceRun(runId, { message: userText, history, tab_id: tabId, think_msg_id: thinkId, reply_msg_id: replyId });
+      connectAliceStream(0);
+    } catch { setAliceRunning(false); }
   };
 
-  const onStop = async () => {
-    try { await api.stopApiAliceRun(runId); } catch {}
+  const handleAliceStop = () => {
+    api.stopApiAliceRun(runId).catch(() => {});
     if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
     setAliceRunning(false);
   };
 
-  const activeSession = (aliceSessions || []).find(s => s.id === activeTabId) || (aliceSessions || [])[0];
-  const messages = activeSession?.messages || [];
-
-  const toggleThink = (id) => setExpandedThinkIds(prev => {
-    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
-  });
-
-  const renderMessage = (msg) => {
-    if (msg.type === "thinking") {
-      const isExpanded = expandedThinkIds.has(msg.id);
-      const isEmpty = !msg.text;
-      return html`<div key=${msg.id} style=${{marginBottom:6}}>
-        <div onClick=${()=>toggleThink(msg.id)}
-          style=${{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",borderRadius:6,background:"var(--surface-2,#1e2433)",cursor:"pointer",fontSize:11,color:"var(--muted)",userSelect:"none"}}>
-          <span style=${{fontSize:13}}>🧠</span>
-          <span style=${{fontWeight:500}}>${isEmpty ? "Thinking…" : "Thought Process"}</span>
-          <span style=${{marginLeft:"auto"}}>${isExpanded ? "▲" : "▼"}</span>
-        </div>
-        ${isExpanded && msg.text && html`
-          <div style=${{padding:"6px 10px",background:"var(--surface-2,#1e2433)",borderRadius:"0 0 6px 6px",fontSize:11,color:"var(--muted)",whiteSpace:"pre-wrap",wordBreak:"break-word",lineHeight:1.5,maxHeight:300,overflowY:"auto",borderTop:"1px solid var(--border)"}}>
-            ${msg.text}
-          </div>`}
-      </div>`;
-    }
-    const isUser = msg.sender === "user";
-    return html`<div key=${msg.id} style=${{display:"flex",flexDirection:"column",alignItems:isUser?"flex-end":"flex-start",marginBottom:8}}>
-      <div style=${{maxWidth:"80%",padding:"8px 12px",borderRadius:8,fontSize:13,lineHeight:1.5,wordBreak:"break-word",background:isUser?"var(--accent)":"var(--surface-alt,var(--surface))",color:isUser?"#fff":"var(--fg)"}}>${isUser ? msg.text : renderMarkdown(msg.text)}</div>
-      <div style=${{fontSize:10,color:"var(--muted)",marginTop:2}}>${isUser?"You":"A.L.I.C.E."}</div>
-    </div>`;
+  // ── ALICE tab management ──────────────────────────────────────────────────
+  const createAliceTab = () => {
+    const id = "tab-" + Date.now();
+    setAliceChats(prev => [...prev, { id, title: `Session ${prev.length + 1}`, messages: [] }]);
+    setActiveAliceTabId(id);
   };
 
+  const deleteAliceTab = (tabId, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    if (aliceChats.length <= 1) {
+      setAliceChats([{ id: "tab-default", title: "Session 1", messages: [] }]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+    const idx = aliceChats.findIndex(t => t.id === tabId);
+    const remaining = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remaining);
+    if (activeAliceTabId === tabId) setActiveAliceTabId(remaining[Math.max(0, idx - 1)].id);
+  };
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault(); e.stopPropagation();
+    const startY = e.clientY; const startH = aliceChatHeight;
+    const onMove = ev => setAliceChatHeight(Math.max(150, Math.min(800, startH + (ev.clientY - startY))));
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  // ── Build agent roster ────────────────────────────────────────────────────
+  // API scan roster: A.L.I.C.E. → Test Lead → Specialist → Validator → Reporting
+  const buildRoster = () => {
+    const byId = Object.fromEntries(agents.map(a => [a.id, a]));
+    const specialistChildren = agents.filter(a => a.id.startsWith("specialist-"));
+    const validatorChildren  = agents.filter(a => a.id.startsWith("validator-"));
+    return [
+      {
+        id: "alice",
+        name: "A.L.I.C.E.",
+        status: aliceRunning ? "active" : (byId["alice"]?.status || "idle"),
+        task: aliceRunning ? "Processing directive…" : (byId["alice"]?.task || "Waiting for instruction"),
+        taskHistory: byId["alice"]?.taskHistory || [],
+      },
+      {
+        id: "scanner",
+        name: "Test Lead",
+        status: scanRunning && !byId["scanner"] ? "active" : (byId["scanner"]?.status || "idle"),
+        task: (scanRunning && !byId["scanner"]) ? "Coordinating API pentest" : (byId["scanner"]?.task || "Standing by"),
+        taskHistory: byId["scanner"]?.taskHistory || [],
+      },
+      { id: "specialist", name: "Specialist", children: specialistChildren },
+      { id: "validator",  name: "Validator",  children: validatorChildren  },
+      {
+        id: "reporting",
+        name: "Reporting",
+        status: byId["reporting"]?.status || "idle",
+        task: byId["reporting"]?.task || "Standing by",
+        taskHistory: byId["reporting"]?.taskHistory || [],
+      },
+    ];
+  };
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages  = activeAliceTab?.messages || [];
+  const roster = buildRoster();
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return html`
-    <div style=${{display:"flex",gap:16,alignItems:"flex-start",height:"calc(100vh - 120px)"}}>
-      <div style=${{flex:"0 0 220px",display:"flex",flexDirection:"column",gap:8}}>
-        <div className="card" style=${{padding:12}}>
-          <div className="form-section-title" style=${{marginBottom:8,fontSize:12}}>Agents</div>
-          ${agents.length===0 && !aliceRunning && !scanRunning && html`<div className="subtle" style=${{fontSize:11,padding:"8px 0"}}>No agents active.</div>`}
-          ${(aliceRunning || scanRunning) && agents.length===0 && html`
-            <div className="agent-row agent-row--active">
-              <span className="agent-dot agent-dot--active" aria-hidden="true"></span>
-              <span className="agent-role-name agent-role-name--pulse">Test Lead</span>
-              <span className="agent-badge agent-badge-active">ACTIVE</span>
-              <span className="agent-current-task">Starting scan…</span>
-            </div>`}
-          <div className="agents-panel" style=${{marginTop:0}}>
-            ${agents.map(a => {
-              const isActive = a.status==="active" || a.status==="running";
-              const isComplete = a.status==="complete" || a.status==="completed" || a.status==="done";
-              const canExpand = (a.taskHistory || []).length > 0;
-              const isExpanded = canExpand && !collapsedAgentIds.has(a.id);
-              const task = a.task || (a.taskHistory||[]).slice(-1)[0]?.task || "";
-              return html`
-                <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
-                     onClick=${canExpand ? ()=>{
-                       setCollapsedAgentIds(prev => {
-                         const next = new Set(prev); next.has(a.id) ? next.delete(a.id) : next.add(a.id); return next;
-                       });
-                     } : undefined}>
-                  <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
-                  <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>${a.name||a.id}</span>
-                  <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
-                    ${isActive?"ACTIVE":isComplete?"DONE":(a.status||"IDLE").toUpperCase()}
-                  </span>
-                  ${task && html`<span className="agent-current-task" title=${task}>${task.length>90?task.slice(0,89)+"…":task}</span>`}
-                  ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
-                  ${canExpand && isExpanded && html`
-                    <div className="agent-task-history">
-                      ${(a.taskHistory||[]).slice().reverse().slice(0,8).map((h,i)=>html`
-                        <div key=${i} className="agent-history-entry">
-                          <span className="activity-ts">${h.ts||""}</span>
-                          <span className="agent-current-task" title=${h.task||""}>${(h.task||"").slice(0,80)}</span>
-                          ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
-                        </div>`)}
-                    </div>`}
-                </div>`;
-            })}
-          </div>
-        </div>
-      </div>
-      <div style=${{flex:1,display:"flex",flexDirection:"column",minWidth:0,height:"100%"}}>
-        <div className="card" style=${{flex:1,display:"flex",flexDirection:"column",padding:0,overflow:"hidden"}}>
-          ${/* session tabs */""}
-          <div style=${{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid var(--border)",padding:"0 8px",flexWrap:"nowrap",overflowX:"auto"}}>
-            ${(aliceSessions||[]).map(s=>html`
-              <div key=${s.id} style=${{display:"flex",alignItems:"center",borderBottom:s.id===activeTabId?"2px solid var(--accent)":"2px solid transparent"}}>
-                <button onClick=${()=>{ updateActiveTabId(s.id); saveSessionsToServer(aliceSessions||[],s.id); }}
-                  style=${{padding:"6px 8px 6px 12px",background:"none",border:"none",cursor:"pointer",fontWeight:s.id===activeTabId?600:400,color:s.id===activeTabId?"var(--accent)":"var(--muted)",fontSize:12,whiteSpace:"nowrap"}}>
-                  ${s.title||"Session"}
-                </button>
-                ${(aliceSessions||[]).length > 1 && html`
-                  <button onClick=${(e)=>{
-                    e.stopPropagation();
-                    const remaining = (aliceSessions||[]).filter(t=>t.id!==s.id);
-                    const newActive = s.id===activeTabId ? remaining[Math.max(0,(aliceSessions||[]).findIndex(t=>t.id===s.id)-1)].id : activeTabId;
-                    setAliceSessions(remaining);
-                    updateActiveTabId(newActive);
-                    saveSessionsToServer(remaining, newActive);
-                  }} title="Close session"
-                    style=${{padding:"0 4px",background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:12,lineHeight:1,opacity:0.6}}
-                    onMouseOver=${e=>e.currentTarget.style.opacity=1}
-                    onMouseOut=${e=>e.currentTarget.style.opacity=0.6}>
-                    ×
-                  </button>`}
-              </div>`)}
-            <button onClick=${()=>{
-              const id="tab-"+Date.now();
-              const newSessions=[...(aliceSessions||[]),{id,title:`Session ${(aliceSessions||[]).length+1}`,messages:[]}];
-              setAliceSessions(newSessions); updateActiveTabId(id); saveSessionsToServer(newSessions,id);
-            }} style=${{padding:"6px 8px",background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14}}>+</button>
-          </div>
-          ${/* messages area */""}
-          <div style=${{flex:1,overflowY:"auto",padding:12}}>
-            ${!aliceLoaded && html`<div className="subtle">Loading…</div>`}
-            ${aliceLoaded && messages.length===0 && html`
-              <div className="subtle" style=${{textAlign:"center",padding:"32px 0"}}>
-                Start a conversation with A.L.I.C.E. to begin the test run.
+    <div className="agents-panel" style=${{ padding: "8px 0" }}>
+      ${roster.map(agent => {
+
+        // ── A.L.I.C.E. row with embedded chat ─────────────────────────────
+        if (agent.id === "alice") {
+          const isActive  = agent.status === "active";
+          const isExpanded = !collapsedAgentIds.has("alice");
+          return html`
+            <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                 onClick=${() => toggleAgentId("alice")}>
+              <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E.</span>
+              <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                ${isActive ? "ACTIVE" : "STANDBY"}
+              </span>
+              <span className="agent-current-task">${agent.task}</span>
+              <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+              ${isExpanded && html`
+                <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                  <div className="alice-chat-tabs-bar">
+                    ${aliceChats.map(tab => {
+                      const isActiveTab = tab.id === activeAliceTabId;
+                      return html`
+                        <div key=${tab.id}
+                             className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                             onClick=${() => setActiveAliceTabId(tab.id)}>
+                          <span>${tab.title || "Session"}</span>
+                          <span className="alice-chat-tab-close"
+                                onClick=${e => deleteAliceTab(tab.id, e)}
+                                title="Close">×</span>
+                        </div>`;
+                    })}
+                    <button className="alice-chat-add-tab-btn" onClick=${createAliceTab} title="New Session">+</button>
+                  </div>
+                  <div className="alice-chat-history"
+                       style=${{ height: `${aliceChatHeight}px` }}
+                       ref=${el => { if (el) el.scrollTop = el.scrollHeight; }}>
+                    ${aliceMessages.length === 0 && html`
+                      <div style=${{ padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                        Send A.L.I.C.E. an instruction to begin interactive API testing.
+                      </div>`}
+                    ${aliceMessages.map(msg => {
+                      if (msg.type === "thinking") {
+                        const isThinkExp = aliceExpandedThinkIds.has(msg.id);
+                        return html`
+                          <div key=${msg.id} className="alice-msg-row">
+                            <div className="alice-msg-bubble--thinking">
+                              <div className="alice-thinking-header" onClick=${() => {
+                                setAliceExpandedThinkIds(prev => {
+                                  const n = new Set(prev); n.has(msg.id) ? n.delete(msg.id) : n.add(msg.id); return n;
+                                });
+                              }}>
+                                <${IconBrain}/>
+                                <span>Thought Process ${isThinkExp ? "▲" : "▼"}</span>
+                                <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                              </div>
+                              ${isThinkExp && html`
+                                <div className="alice-thinking-body">${renderMarkdown(msg.text)}</div>`}
+                            </div>
+                          </div>`;
+                      }
+                      const isUser = msg.sender === "user";
+                      return html`
+                        <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                          <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                            ${renderMarkdown(msg.text)}
+                            <div className="alice-msg-meta"><span>${msg.ts}</span></div>
+                          </div>
+                        </div>`;
+                    })}
+                    ${aliceRunning && html`
+                      <div className="alice-msg-row alice-msg-row--alice">
+                        <div className="alice-typing-bubble">
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                        </div>
+                      </div>`}
+                  </div>
+                  <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                  <div className="alice-chat-input-bar">
+                    <input className="alice-chat-input"
+                           placeholder="Direct A.L.I.C.E. on what to test…"
+                           value=${aliceInputText}
+                           disabled=${aliceRunning}
+                           onInput=${e => setAliceInputText(e.target.value)}
+                           onKeyDown=${e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAliceSend(); } }}/>
+                    ${aliceRunning
+                      ? html`<button className="alice-chat-stop-btn" onClick=${handleAliceStop} title="Stop">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                          </svg>
+                        </button>`
+                      : html`<button className="alice-chat-input-btn" disabled=${!aliceInputText.trim()} onClick=${handleAliceSend} title="Send">
+                          <${IconSend}/>
+                        </button>`}
+                  </div>
+                </div>`}
+            </div>`;
+        }
+
+        // ── Specialist container row ───────────────────────────────────────
+        if (agent.id === "specialist") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No specialist dispatched"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} running, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+            : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+          return html`
+            <div key="specialist"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("specialist") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Specialist</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(c => {
+                    const cActive = c.status === "active";
+                    const cTask = c.task || (c.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    return html`
+                      <div key=${c.id} className=${"agent-thread-row" + (cActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (cActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">${c.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (cActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${cActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${cTask}>${cTask.length > 90 ? cTask.slice(0, 89) + "…" : cTask}</span>
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Validator container row ────────────────────────────────────────
+        if (agent.id === "validator") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No validation running"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} validating, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+            : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+          return html`
+            <div key="validator"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("validator") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Validator</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(va => {
+                    const vaActive  = va.status === "active";
+                    const vaTask    = va.task || (va.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    const vaOutcome = (va.taskHistory || []).slice(-1)[0]?.outcome;
+                    return html`
+                      <div key=${va.id} className=${"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">Finding #${va.id.replace("validator-", "")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (vaActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${vaActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${vaTask}>${vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}</span>
+                        ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Standard agent row (Test Lead, Reporting, etc.) ────────────────
+        const isActive   = agent.status === "active";
+        const isComplete = ["complete", "completed", "done"].includes(agent.status);
+        const taskHistory = agent.taskHistory || [];
+        const canExpand  = taskHistory.length > 1 || taskHistory.some(h => h.outcome);
+        const isExpanded = canExpand && !collapsedAgentIds.has(agent.id);
+        const task = agent.task || taskHistory.slice(-1)[0]?.task || "";
+        return html`
+          <div key=${agent.id}
+               className=${"agent-row" + (isActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+               onClick=${canExpand ? () => toggleAgentId(agent.id) : undefined}>
+            <span className=${"agent-dot" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+            <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>${agent.name}</span>
+            <span className=${"agent-badge" + (isActive ? " agent-badge-active" : " agent-badge-complete")}>
+              ${isActive ? "ACTIVE" : isComplete ? "DONE" : (agent.status || "IDLE").toUpperCase()}
+            </span>
+            ${task && html`<span className="agent-current-task" title=${task}>${task.length > 90 ? task.slice(0, 89) + "…" : task}</span>`}
+            ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+            ${canExpand && isExpanded && html`
+              <div className="agent-task-history">
+                ${taskHistory.slice().reverse().map((h, i) => html`
+                  <div key=${i} className="agent-history-entry">
+                    <span className="activity-ts">${h.ts || ""}</span>
+                    <span className="agent-history-task">${h.task || ""}</span>
+                    ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                  </div>`)}
               </div>`}
-            ${messages.map(renderMessage)}
-            <div ref=${messagesEndRef}/>
-          </div>
-          ${/* input */""}
-          <div style=${{borderTop:"1px solid var(--border)",padding:"8px 12px",display:"flex",gap:8,alignItems:"flex-end"}}>
-            <textarea
-              value=${aliceInput}
-              onInput=${e=>setAliceInput(e.target.value)}
-              onKeyDown=${e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); onSend(); }}}
-              disabled=${aliceRunning}
-              rows="2"
-              placeholder="Message A.L.I.C.E. (Enter to send, Shift+Enter for newline)…"
-              style=${{flex:1,resize:"none",fontSize:13,padding:"6px 8px",borderRadius:6,border:"1px solid var(--border)",background:"var(--surface)",color:"var(--fg)"}}
-            />
-            ${aliceRunning
-              ? html`<button className="btn danger-outline sm" onClick=${onStop}>Stop</button>`
-              : html`<button className="btn sm" onClick=${onSend} disabled=${!aliceInput.trim()}>Send</button>`}
-          </div>
-        </div>
-      </div>
+          </div>`;
+      })}
     </div>
   `;
 }
-
-
 
 function TestRunForm({ siteId }) {
   const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });

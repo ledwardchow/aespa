@@ -305,7 +305,8 @@ def test_get_api_traffic_returns_entries(client, db_engine):
 
     with Session(db_engine) as s:
         entry = TrafficEntry(
-            test_run_id=run_id,
+            test_run_id=0,
+            api_test_run_id=run_id,
             source="httpx",
             method="GET",
             url="http://target.api/health",
@@ -330,7 +331,7 @@ def test_get_api_traffic_count(client, db_engine):
     with Session(db_engine) as s:
         for i in range(3):
             s.add(TrafficEntry(
-                test_run_id=run_id, source="httpx",
+                test_run_id=0, api_test_run_id=run_id, source="httpx",
                 method="POST", url=f"http://target.api/ep{i}",
                 request_headers="{}", status=201,
             ))

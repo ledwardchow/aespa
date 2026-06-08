@@ -61,9 +61,10 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     
     run_id = kwargs.pop("run_id", None)
     username = kwargs.pop("username", None)
+    api_run_id = kwargs.pop("api_run_id", None)
     
     from aespa.services.traffic import LoggingAsyncClient
-    return LoggingAsyncClient(run_id=run_id, username=username, **kwargs)
+    return LoggingAsyncClient(run_id=run_id, username=username, api_run_id=api_run_id, **kwargs)
 
 
 def _playwright_proxy() -> dict:
