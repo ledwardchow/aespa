@@ -218,9 +218,7 @@ def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
             "status": r.status,
             "current_task": r.current_task,
             "outcome": r.outcome,
-            "task_history": r.task_history,
             "created_at": r.created_at.isoformat() if r.created_at else None,
-            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         }
         for r in rows
     ]

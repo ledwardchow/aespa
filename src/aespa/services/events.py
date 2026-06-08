@@ -27,7 +27,7 @@ def emit(run_id: int, event: dict) -> None:
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)
 
-    if event.get("type") == "agent_status" and event.get("_persist"):
+    if event.get("type") == "agent_status":
         _persist_agent_status_event(run_id, event)
 
 

@@ -448,6 +448,13 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
 async def _api_scan_task(api_run_id: int) -> None:
     _stop_requested.discard(api_run_id)
+    # Clear any leftover stop flag from a previous run so the loop doesn't
+    # exit immediately on the very first iteration.
+    try:
+        from aespa.services.scanner import _thinking_stop_requested
+        _thinking_stop_requested.discard(api_run_id)
+    except Exception:
+        pass
     try:
         await _do_api_thinking_scan(api_run_id)
     except asyncio.CancelledError:
