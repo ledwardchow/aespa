@@ -1,4 +1,4 @@
-const CACHE = "aespa-v2";
+const CACHE = "aespa-v6";
 
 // Versioned assets (cache-busted by ?v=... query param) — cache aggressively
 const STATIC_EXTS = [".js", ".css", ".png", ".ico", ".json"];
