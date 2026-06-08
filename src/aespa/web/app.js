@@ -47,6 +47,12 @@ const api = {
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  startApiScan:        (id)       => req(`/api/api-test-runs/${id}/scan/start`,    { method:"POST" }),
+  stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
+  getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
+  getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
+  getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
+  getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -2331,7 +2337,9 @@ function ApiTestRunForm({ collectionId }) {
 // ── API test run detail ────────────────────────────────────────────────────────
 
 const API_RUN_TABS = [
-  { key: "agents", label: "Agents" },
+  { key: "agents",   label: "Agents" },
+  { key: "findings", label: "Findings" },
+  { key: "traffic",  label: "Traffic Log" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
@@ -2371,11 +2379,48 @@ function useApiAliceSession(runId) {
 function ApiTestRunDetail({ runId, initialTab }) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
+  const [scanStatus, setScanStatus] = useState(null);
+  const [scanBusy, setScanBusy] = useState(false);
   const tab = initialTab || "agents";
 
   useEffect(() => {
     api.getApiRun(runId).then(setRun).catch(e => setError(e.message));
+    api.getApiScanStatus(runId).then(setScanStatus).catch(()=>{});
   }, [runId]);
+
+  // Poll scan status while scanning.
+  useEffect(() => {
+    if (!scanStatus?.running) return;
+    const t = setInterval(() => {
+      api.getApiScanStatus(runId).then(st => {
+        setScanStatus(st);
+        if (!st.running) api.getApiRun(runId).then(setRun).catch(()=>{});
+      }).catch(()=>{});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [scanStatus?.running, runId]);
+
+  const onStartScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.startApiScan(runId);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(setRun).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
+
+  const onStopScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.stopApiScan(runId);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(setRun).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
 
   const onDelete = async () => {
     if (!run) return;
@@ -2385,9 +2430,11 @@ function ApiTestRunDetail({ runId, initialTab }) {
   };
 
   const statusBadge = (s) => {
-    const cls = s==="completed"?"success":s==="running"?"warning":s==="failed"?"danger":"neutral";
+    const cls = s==="completed"?"success":s==="running"||s==="scanning"?"warning":s==="failed"||s==="cancelled"?"danger":"neutral";
     return html`<span className=${"badge "+cls}>${s}</span>`;
   };
+
+  const scanRunning = scanStatus?.running === true;
 
   return html`
     <div className="topbar">
@@ -2398,6 +2445,13 @@ function ApiTestRunDetail({ runId, initialTab }) {
         ${run && html` ${statusBadge(run.status)}`}
       </div>
       <div className="topbar-actions">
+        ${scanRunning
+          ? html`<button className="btn danger-outline" disabled=${scanBusy} onClick=${onStopScan}>
+                   ${scanBusy?"Stopping…":"Stop Scan"}
+                 </button>`
+          : html`<button className="btn" disabled=${scanBusy} onClick=${onStartScan}>
+                   ${scanBusy?"Starting…":"Start Scan"}
+                 </button>`}
         ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
       </div>
     </div>
@@ -2411,13 +2465,219 @@ function ApiTestRunDetail({ runId, initialTab }) {
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error">${error}</div>`}
-      ${tab==="agents" && html`<${ApiRunAgentsTab} runId=${runId}/>`}
+      ${tab==="agents"   && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="traffic"  && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
     </div>
   `;
 }
 
-function ApiRunAgentsTab({ runId }) {
+// ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
+
+function ApiRunFindingsTab({ runId, scanRunning }) {
+  const [findings, setFindings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+
+  const load = async () => {
+    try {
+      const data = await api.getApiFindings(runId);
+      setFindings(data);
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [runId]);
+
+  // Poll while scan is running.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const toggle = (id) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
+
+  if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
+  if (error)   return html`<div className="alert error">${error}</div>`;
+
+  return html`
+    <div style=${{padding:"16px 24px"}}>
+      <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+        <h3 style=${{margin:0}}>Security Findings</h3>
+        ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+        <span className="badge neutral" style=${{fontSize:12}}>${findings.length} finding${findings.length!==1?"s":""}</span>
+        <button className="btn sm" onClick=${load}>Refresh</button>
+      </div>
+      ${findings.length === 0
+        ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — findings will appear here as they are discovered."
+                              :"No findings yet. Start a scan to test this API collection."}
+               </div>`
+        : findings.map(f => html`
+          <div key=${f.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
+            <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
+                 onClick=${()=>toggle(f.id)}>
+              <span className=${"sev-badge "+sevCls(f.severity)}>${f.severity}</span>
+              <span style=${{fontWeight:600,flex:1}}>${f.title}</span>
+              ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
+              ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
+              <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+            </div>
+            ${expanded.has(f.id) && html`
+              <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
+                ${f.affected_url && html`<div style=${{marginBottom:8}}><b>URL:</b> <code style=${{fontSize:12}}>${f.affected_url}</code></div>`}
+                ${f.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
+                  <div style=${{marginTop:4}} dangerouslySetInnerHTML=${{__html:renderMarkdown(f.description)}}/></div>`}
+                ${f.impact && html`<div style=${{marginBottom:8}}><b>Impact:</b> ${f.impact}</div>`}
+                ${f.recommendation && html`<div style=${{marginBottom:8}}><b>Recommendation:</b> ${f.recommendation}</div>`}
+                ${f.evidence && html`<div style=${{marginBottom:8}}><b>Evidence:</b>
+                  <pre style=${{fontSize:11,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:8,borderRadius:4,overflow:"auto",maxHeight:200,whiteSpace:"pre-wrap"}}>${f.evidence}</pre></div>`}
+                <div style=${{fontSize:11,color:"var(--muted)"}}>${f.validation_status} · ${f.finding_source}</div>
+              </div>`}
+          </div>`)
+      }
+    </div>
+  `;
+}
+
+// ── ApiRunTrafficTab ───────────────────────────────────────────────────────────
+
+function ApiRunTrafficTab({ runId, scanRunning }) {
+  const [traffic, setTraffic] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const lastIdRef = useRef(0);
+  const tableRef = useRef(null);
+
+  const loadMore = async () => {
+    try {
+      const items = await api.getApiTraffic(runId, lastIdRef.current);
+      if (items.length) {
+        setTraffic(prev => {
+          const next = [...prev, ...items];
+          lastIdRef.current = Math.max(...next.map(e=>e.id));
+          return next;
+        });
+      }
+      const ct = await api.getApiTrafficCount(runId);
+      setTotal(ct.count || 0);
+    } catch {}
+  };
+
+  useEffect(() => { loadMore(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMore, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  useEffect(() => {
+    if (autoScroll && tableRef.current) {
+      tableRef.current.scrollTop = tableRef.current.scrollHeight;
+    }
+  }, [traffic.length, autoScroll]);
+
+  const fmtTs = (ts) => {
+    if (!ts) return "-";
+    try { return new Date(ts).toLocaleTimeString(); } catch { return ts; }
+  };
+
+  const statusCls = (s) => !s?"":s<300?"status-2xx":s<400?"status-3xx":s<500?"status-4xx":"status-5xx";
+
+  const filtered = filter
+    ? traffic.filter(e=>(e.url+e.method+(e.status??"")+e.source).toLowerCase().includes(filter.toLowerCase()))
+    : traffic;
+
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",height:"calc(100vh - 130px)"}}>
+      <div style=${{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
+        <input className="traffic-filter" type="text" placeholder="Filter…"
+          value=${filter} onInput=${e=>setFilter(e.target.value)} style=${{flex:1}}/>
+        <span className="traffic-count-label">${filtered.length} shown${total>filtered.length?` of ${total}`:""}</span>
+        <label style=${{fontSize:12,display:"flex",alignItems:"center",gap:4}}>
+          <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
+          Auto-scroll
+        </label>
+        <button className="btn ghost sm" onClick=${()=>{setTraffic([]);lastIdRef.current=0;setSelected(null);}}>Clear</button>
+      </div>
+      <div style=${{flex:1,overflow:"auto"}} ref=${tableRef}>
+        <table className="traffic-table" style=${{width:"100%"}}>
+          <thead>
+            <tr>
+              <th>#</th><th>Time</th><th>Source</th><th>User</th>
+              <th>Method</th><th>Status</th><th>URL</th><th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((e,i)=>html`
+              <tr key=${e.id}
+                className=${"traffic-row"+(selected?.id===e.id?" selected":"")}
+                onClick=${()=>setSelected(selected?.id===e.id?null:e)}>
+                <td className="tr-num">${i+1}</td>
+                <td className="tr-ts">${fmtTs(e.created_at)}</td>
+                <td><span className=${"src-badge src-"+e.source}>${e.source}</span></td>
+                <td className="tr-user">${e.username||"-"}</td>
+                <td className="tr-method">${e.method}</td>
+                <td><span className=${"status-pill "+statusCls(e.status)}>${e.status??"-"}</span></td>
+                <td className="tr-url" title=${e.url}>${e.url}</td>
+                <td className="tr-dur">${e.duration_ms!=null?e.duration_ms+"ms":"-"}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${filtered.length===0 && html`
+          <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+            ${scanRunning?"Capturing traffic…":"No traffic recorded yet. Start a scan to generate traffic."}
+          </div>`}
+      </div>
+      ${selected && html`
+        <div style=${{flexShrink:0,borderTop:"2px solid var(--accent)",padding:"10px 16px",maxHeight:220,overflow:"auto",background:"var(--surface)"}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <b style=${{fontSize:13}}>${selected.method} ${selected.url}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelected(null)}>✕</button>
+          </div>
+          ${selected.request_body && html`<div style=${{marginBottom:6}}><b style=${{fontSize:11}}>Request Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.request_body}</pre></div>`}
+          ${selected.response_body && html`<div><b style=${{fontSize:11}}>Response Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.response_body?.slice(0,2000)}</pre></div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+// Build the agent list from a raw agent-log API response, preserving task history.
+function _buildAgentsFromLog(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const id = r.agent_id;
+    const ts = r.created_at
+      ? new Date(r.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : "--:--:--";
+    const existing = map.get(id) || { id, name: r.role || id, status: r.status || "idle", task: r.current_task || "", taskHistory: [] };
+    existing.name = r.role || existing.name;
+    existing.status = r.status || existing.status;
+    existing.task = r.current_task || existing.task;
+    existing.taskHistory.push({ ts, task: r.current_task || "", outcome: r.outcome || "" });
+    map.set(id, existing);
+  }
+  return [...map.values()];
+}
+
+function ApiRunAgentsTab({ runId, scanRunning }) {
   const [agents, setAgents] = useState([]);
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
   const [aliceSessions, setAliceSessions] = useState(null);
   const [aliceLoaded, setAliceLoaded] = useState(false);
   const [activeTabId, setActiveTabId] = useState("tab-default");
@@ -2532,9 +2792,42 @@ function ApiRunAgentsTab({ runId }) {
       }
     }).catch(() => {});
     api.getApiAgentLog(runId).then(rows => {
-      setAgents(rows.map(r => ({ id:r.agent_id, name:r.agent_id, status:r.status||"idle", task:r.current_task||"" })));
+      setAgents(_buildAgentsFromLog(rows));
     }).catch(() => {});
   }, [runId]); // connectStream is stable (only depends on runId) — safe to omit from deps
+
+  // SSE events — receive agent_status in real-time (same mechanism as web scan).
+  useEffect(() => {
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    es.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.type === "agent_status") {
+          const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setAgents(prev => {
+            const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
+            const idx = prev.findIndex(a => a.id === evt.agent_id);
+            const existing = idx >= 0 ? prev[idx] : { id: evt.agent_id, name: evt.role || evt.agent_id, status: evt.status, task: evt.current_task || "", taskHistory: [] };
+            const updated = { ...existing, name: evt.role || existing.name, status: evt.status, task: evt.current_task || "", taskHistory: [...(existing.taskHistory || []), histEntry] };
+            if (idx >= 0) { const next = [...prev]; next[idx] = updated; return next; }
+            return [...prev, updated];
+          });
+        }
+      } catch {}
+    };
+    return () => es.close();
+  }, [runId]);
+
+  // Poll agent log while scan (thinking or alice) is running so sidebar stays current.
+  useEffect(() => {
+    if (!aliceRunning && !scanRunning) return;
+    const t = setInterval(() => {
+      api.getApiAgentLog(runId).then(rows => {
+        setAgents(_buildAgentsFromLog(rows));
+      }).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [aliceRunning, scanRunning, runId]);
 
   useEffect(() => {
     return () => {
@@ -2630,18 +2923,50 @@ function ApiRunAgentsTab({ runId }) {
 
   return html`
     <div style=${{display:"flex",gap:16,alignItems:"flex-start",height:"calc(100vh - 120px)"}}>
-      <div style=${{flex:"0 0 200px",display:"flex",flexDirection:"column",gap:8}}>
+      <div style=${{flex:"0 0 220px",display:"flex",flexDirection:"column",gap:8}}>
         <div className="card" style=${{padding:12}}>
           <div className="form-section-title" style=${{marginBottom:8,fontSize:12}}>Agents</div>
-          ${agents.length===0 && html`<div className="subtle" style=${{fontSize:11}}>No agents active.</div>`}
-          ${agents.map(a=>html`
-            <div key=${a.id} style=${{padding:"4px 0",borderBottom:"1px solid var(--border)",fontSize:11}}>
-              <div style=${{display:"flex",alignItems:"center",gap:6}}>
-                <span className=${"badge "+(a.status==="running"?"warning":"neutral")} style=${{fontSize:10}}>${a.status}</span>
-                <span style=${{fontWeight:500}}>${a.name}</span>
-              </div>
-              ${a.task && html`<div style=${{color:"var(--muted)",fontSize:10,marginTop:2}}>${a.task}</div>`}
-            </div>`)}
+          ${agents.length===0 && !aliceRunning && !scanRunning && html`<div className="subtle" style=${{fontSize:11,padding:"8px 0"}}>No agents active.</div>`}
+          ${(aliceRunning || scanRunning) && agents.length===0 && html`
+            <div className="agent-row agent-row--active">
+              <span className="agent-dot agent-dot--active" aria-hidden="true"></span>
+              <span className="agent-role-name agent-role-name--pulse">Test Lead</span>
+              <span className="agent-badge agent-badge-active">ACTIVE</span>
+              <span className="agent-current-task">Starting scan…</span>
+            </div>`}
+          <div className="agents-panel" style=${{marginTop:0}}>
+            ${agents.map(a => {
+              const isActive = a.status==="active" || a.status==="running";
+              const isComplete = a.status==="complete" || a.status==="completed" || a.status==="done";
+              const canExpand = (a.taskHistory || []).length > 0;
+              const isExpanded = canExpand && !collapsedAgentIds.has(a.id);
+              const task = a.task || (a.taskHistory||[]).slice(-1)[0]?.task || "";
+              return html`
+                <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                     onClick=${canExpand ? ()=>{
+                       setCollapsedAgentIds(prev => {
+                         const next = new Set(prev); next.has(a.id) ? next.delete(a.id) : next.add(a.id); return next;
+                       });
+                     } : undefined}>
+                  <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                  <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>${a.name||a.id}</span>
+                  <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
+                    ${isActive?"ACTIVE":isComplete?"DONE":(a.status||"IDLE").toUpperCase()}
+                  </span>
+                  ${task && html`<span className="agent-current-task" title=${task}>${task.length>90?task.slice(0,89)+"…":task}</span>`}
+                  ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                  ${canExpand && isExpanded && html`
+                    <div className="agent-task-history">
+                      ${(a.taskHistory||[]).slice().reverse().slice(0,8).map((h,i)=>html`
+                        <div key=${i} className="agent-history-entry">
+                          <span className="activity-ts">${h.ts||""}</span>
+                          <span className="agent-current-task" title=${h.task||""}>${(h.task||"").slice(0,80)}</span>
+                          ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                        </div>`)}
+                    </div>`}
+                </div>`;
+            })}
+          </div>
         </div>
       </div>
       <div style=${{flex:1,display:"flex",flexDirection:"column",minWidth:0,height:"100%"}}>

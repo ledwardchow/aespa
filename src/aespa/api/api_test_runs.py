@@ -21,8 +21,10 @@ from aespa.models import (
     AliceChatMessage,
     AliceChatSession,
     ApiTestRun,
+    ScanFinding,
+    TrafficEntry,
 )
-from aespa.schemas import ApiTestRunSummary
+from aespa.schemas import ApiTestRunSummary, ScanFindingOut
 from aespa.services import alice_tasks
 
 _UTC = timezone.utc
@@ -212,11 +214,77 @@ def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
         {
             "id": r.id,
             "agent_id": r.agent_id,
+            "role": r.role,
             "status": r.status,
             "current_task": r.current_task,
+            "outcome": r.outcome,
             "task_history": r.task_history,
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         }
         for r in rows
     ]
+
+
+# ── Scan start / stop ──────────────────────────────────────────────────────────
+
+@router.post("/{run_id}/scan/start")
+async def start_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import api_scanner
+    await api_scanner.start_api_scan(run_id)
+    return {"ok": True}
+
+
+@router.post("/{run_id}/scan/stop")
+async def stop_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import api_scanner
+    stopped = await api_scanner.stop_api_scan(run_id)
+    return {"ok": True, "stopped": stopped}
+
+
+@router.get("/{run_id}/scan/status")
+def api_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import api_scanner
+    return api_scanner.get_scan_status(run_id)
+
+
+# ── Findings alias ─────────────────────────────────────────────────────────────
+
+@router.get("/{run_id}/findings", response_model=list[ScanFindingOut])
+def get_api_findings(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[ScanFindingOut]:
+    _get_run_or_404(session, run_id)
+    findings = session.exec(
+        select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+    ).all()
+    _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
+    return [ScanFindingOut.model_validate(f) for f in findings]
+
+
+# ── Traffic alias ──────────────────────────────────────────────────────────────
+
+@router.get("/{run_id}/traffic")
+def get_api_traffic(
+    run_id: int,
+    since_id: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _get_run_or_404(session, run_id)
+    from aespa.services import traffic as traffic_svc
+    return traffic_svc.get_traffic(run_id, since_id)
+
+
+@router.get("/{run_id}/traffic/count")
+def get_api_traffic_count(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, int]:
+    _get_run_or_404(session, run_id)
+    from aespa.services import traffic as traffic_svc
+    return {"count": traffic_svc.count_traffic(run_id)}
