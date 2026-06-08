@@ -104,6 +104,119 @@ class SiteDetail(BaseModel):
     scope_hosts: list[str] = Field(default_factory=list)
 
 
+# ── API Collection schemas ────────────────────────────────────────────────
+
+class ApiCollectionBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    base_url: HttpUrl
+    description: str | None = None
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionCreate(ApiCollectionBase):
+    pass
+
+
+class ApiCollectionUpdate(ApiCollectionBase):
+    """Same shape as create; PUT replaces the full record."""
+
+
+class ApiCollectionSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    endpoint_count: int = 0
+    document_count: int = 0
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+    readiness_json: str | None = None  # raw JSON; frontend parses it
+
+
+class ApiDocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    filename: str
+    doc_type: str
+    content_type: str | None
+    size_bytes: int
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+
+class ApiEndpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    source_doc_id: int | None
+    method: str
+    path: str
+    base_url: str | None
+    operation_id: str | None
+    summary: str | None
+    parameters_json: str
+    request_body_schema_json: str
+    security_json: str
+    auth_required: bool
+    tags_json: str
+    sample_request_json: str
+    in_scope: bool
+    created_at: datetime
+    # Slice 4 — readiness assessment
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str  # JSON list of gap strings
+
+
+class ApiCredentialOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    scheme: str
+    name: str
+    # value intentionally omitted from output schema
+    label: str | None
+    scope: str
+    endpoint_id: int | None
+    auth_endpoint: str | None  # set when scheme == "login"
+    created_at: datetime
+
+
+class ApiCredentialCreate(BaseModel):
+    scheme: str = "bearer"
+    name: str = "Authorization"
+    value: str
+    label: str | None = None
+    scope: str = "global"
+    endpoint_id: int | None = None
+    auth_endpoint: str | None = None  # set when scheme == "login"
+
+
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderAPILiteral = Literal[
