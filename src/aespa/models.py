@@ -445,6 +445,7 @@ class TrafficEntry(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    api_test_run_id: Optional[int] = Field(default=None, index=True)  # set for API scan traffic
     source: str                                   # "playwright" | "httpx"
     created_at: datetime = Field(default_factory=_utcnow)
     method: str
