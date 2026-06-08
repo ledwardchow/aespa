@@ -14,6 +14,29 @@ const api = {
   updateSite:       (id,b)        => req(`/api/sites/${id}`,   { method:"PUT",    body:b }),
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
   importSite:       (text)        => fetch("/api/sites/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const d = r.ok ? await r.json() : (() => { throw new Error(`Import failed: ${r.status}`); })(); return d; }),
+  listApiCollections:  ()         => req("/api/api-collections"),
+  getApiCollection:    (id)       => req(`/api/api-collections/${id}`),
+  createApiCollection: (b)        => req("/api/api-collections",       { method:"POST",   body:b }),
+  updateApiCollection: (id,b)     => req(`/api/api-collections/${id}`, { method:"PUT",    body:b }),
+  deleteApiCollection: (id)       => req(`/api/api-collections/${id}`, { method:"DELETE" }),
+  listApiDocuments:    (id)       => req(`/api/api-collections/${id}/documents`),
+  uploadApiDocuments:  (id,files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    return fetch(`/api/api-collections/${id}/documents`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  downloadApiDocument: (id,docId) => { window.location.href = `/api/api-collections/${id}/documents/${docId}/download`; },
+  deleteApiDocument:   (id,docId) => req(`/api/api-collections/${id}/documents/${docId}`, { method:"DELETE" }),
+  parseApiDocument:    (id,docId) => req(`/api/api-collections/${id}/documents/${docId}/parse`, { method:"POST" }),
+  listApiEndpoints:    (id)       => req(`/api/api-collections/${id}/endpoints`),
+  patchEndpointScope:  (id,eid,b) => req(`/api/api-collections/${id}/endpoints/${eid}/scope`, { method:"PATCH", body:b }),
+  listApiCredentials:  (id)       => req(`/api/api-collections/${id}/credentials`),
+  createApiCredential: (id,b)     => req(`/api/api-collections/${id}/credentials`, { method:"POST", body:b }),
+  deleteApiCredential: (id,cid)   => req(`/api/api-collections/${id}/credentials/${cid}`, { method:"DELETE" }),
+  getApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`),
+  runApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`, { method:"POST" }),
+  purgeCollectionData: (id)       => req(`/api/api-collections/${id}/data`, { method:"DELETE" }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -149,6 +172,11 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)\/edit$/)))       return { name: "site-edit",   id: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)\/runs\/new$/)))  return { name: "run-new",     siteId: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/new$/)))                return { name: "api-new" };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/edit$/)))        return { name: "api-edit",    id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/files$/)))       return { name: "api-files",   id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)$/)))              return { name: "api-detail",  id: +m[1] };
+  if (hash === "#/apis")                                 return { name: "api-list" };
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
@@ -259,6 +287,11 @@ const IconSites = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fil
   <rect x="9" y="1" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="1" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="9" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+</svg>`;
+
+const IconApis = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M5 2.5 1.5 8 5 13.5M11 2.5 14.5 8 11 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9 3 7 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
 </svg>`;
 
 const IconSettings = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -1120,6 +1153,7 @@ const renderAliceBlocks = (text, isThinking, stepData = {}) => {
 function App() {
   const route = useRoute();
   const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
+  const onApis       = ["api-list","api-new","api-edit","api-detail","api-files"].includes(route.name);
   const onActiveJobs = route.name === "active-jobs";
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
@@ -1179,6 +1213,9 @@ function App() {
           <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
             <span className="nav-icon"><${IconSites}/></span>${!collapsed && " Sites"}
           </a>
+          <a href="#/apis" className=${"nav-item"+(onApis?" active":"")} title="APIs">
+            <span className="nav-icon"><${IconApis}/></span>${!collapsed && " APIs"}
+          </a>
           <a href="#/active-jobs" className=${"nav-item"+(onActiveJobs?" active":"")} title="Active Jobs">
             <span className="nav-icon"><${IconPlay}/></span>${!collapsed && " Active Jobs"}
           </a>
@@ -1209,6 +1246,11 @@ function App() {
         ${route.name==="site-new"    && html`<${SiteForm} key="new"/>`}
         ${route.name==="site-edit"   && html`<${SiteForm} key=${route.id} siteId=${route.id}/>`}
         ${route.name==="site-detail" && html`<${SiteDetail} key=${route.id} siteId=${route.id}/>`}
+        ${route.name==="api-list"    && html`<${ApiCollectionsList}/>`}
+        ${route.name==="api-new"     && html`<${ApiCollectionForm} key="api-new"/>`}
+        ${route.name==="api-edit"    && html`<${ApiCollectionForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-detail"  && html`<${ApiCollectionDetail} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-files"   && html`<${ApiFilesManager} key=${route.id} collectionId=${route.id}/>`}
         ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
@@ -1287,6 +1329,479 @@ function SitesList() {
                     <button className="btn secondary sm" onClick=${()=>nav(`#/sites/${s.id}`)}>Open</button>
                     <button className="btn secondary sm" onClick=${()=>onExport(s)}>Export</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(s)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+// ── API collections ───────────────────────────────────────────────────────────
+
+function ApiCollectionsList() {
+  const [collections, setCollections] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try { setCollections(await api.listApiCollections()); } catch(e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const onDelete = async (c) => {
+    if (!confirm(`Delete "${c.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(c.id); await load(); } catch(e) { setError(e.message); }
+  };
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">APIs</div>
+      <div className="topbar-actions">
+        <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${collections===null && html`<div className="subtle">Loading…</div>`}
+      ${collections!==null&&collections.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">⬡</div>
+          <div className="empty-msg">No API collections yet</div>
+          <div className="empty-sub">Create a collection, upload API docs, and run structured API security tests.</div>
+          <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+        </div>`}
+      ${collections&&collections.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"20%"}}/><col style=${{width:"38%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Name</th><th>Base URL</th><th>Endpoints</th><th>Files</th><th></th></tr></thead>
+            <tbody>${collections.map(c=>html`
+              <tr key=${c.id}>
+                <td><a href=${`#/apis/${c.id}`} style=${{fontWeight:600}}>${c.name}</a></td>
+                <td className="url">${c.base_url}</td>
+                <td>${c.endpoint_count>0?c.endpoint_count:html`<span className="subtle">—</span>`}</td>
+                <td>${c.document_count>0?c.document_count:html`<span className="subtle">—</span>`}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${c.id}`)}>Open</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(c)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+function ApiCollectionForm({ collectionId }) {
+  const isEdit = typeof collectionId === "number";
+  const [form, setForm]       = useState({ name:"", base_url:"", description:"" });
+  const [loading, setLoading] = useState(isEdit);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState(null);
+
+  useEffect(() => {
+    if (!isEdit) return;
+    (async () => {
+      try {
+        const d = await api.getApiCollection(collectionId);
+        setForm({ name:d.name, base_url:d.base_url, description:d.description||"" });
+      } catch(e) { setError(e.message); } finally { setLoading(false); }
+    })();
+  }, [isEdit, collectionId]);
+
+  const upd = p => setForm(f=>({...f,...p}));
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true);
+    const payload = {
+      name: form.name.trim(),
+      base_url: form.base_url.trim(),
+      description: form.description.trim() || null,
+    };
+    try {
+      if (isEdit) { await api.updateApiCollection(collectionId, payload); nav(`#/apis/${collectionId}`); }
+      else        { const c = await api.createApiCollection(payload); nav(`#/apis/${c.id}`); }
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const bc = isEdit
+    ? html`<a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${form.name||"API collection"}</a><span className="breadcrumb-sep"> / </span>Edit`
+    : html`<a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a><span className="breadcrumb-sep"> / </span>New API collection`;
+
+  return html`
+    <div className="topbar"><div className="topbar-title">${bc}</div></div>
+    <div className="content scroll-content">
+      ${loading && html`<div className="subtle">Loading…</div>`}
+      ${!loading && html`
+        <form className="card" onSubmit=${onSubmit}>
+          ${error && html`<div className="alert error">${error}</div>`}
+          <div className="form-section-title">API collection</div>
+          <div className="field"><label>Name</label>
+            <input type="text" required value=${form.name} placeholder="e.g. Payments API" onChange=${e=>upd({name:e.target.value})}/></div>
+          <div className="field"><label>Base URL</label>
+            <input type="url" required value=${form.base_url} placeholder="https://api.example.com" onChange=${e=>upd({base_url:e.target.value})}/></div>
+          <div className="field"><label>Description (optional)</label>
+            <textarea value=${form.description} placeholder="What these APIs do, scope, contacts…" onChange=${e=>upd({description:e.target.value})}/></div>
+          <div className="divider"/>
+          <div className="row spread">
+            <button type="button" className="btn ghost" onClick=${()=>isEdit?nav(`#/apis/${collectionId}`):nav("#/apis")}>Cancel</button>
+            <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":isEdit?"Save changes":"Create collection"}</button>
+          </div>
+        </form>`}
+    </div>`;
+}
+
+function ApiCollectionDetail({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [endpoints, setEndpoints] = useState(null);
+  const [readiness, setReadiness] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [assessing, setAssessing] = useState(false);
+  const [purging, setPurging] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, eps, rd] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiEndpoints(collectionId),
+        api.getApiReadiness(collectionId),
+      ]);
+      setCollection(c); setEndpoints(eps);
+      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
+    }
+    catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  };
+
+  const onAssessReadiness = async () => {
+    setAssessing(true); setError(null);
+    try {
+      const rd = await api.runApiReadiness(collectionId);
+      setReadiness(rd);
+      // Reload endpoints so prereq columns update
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+    finally { setAssessing(false); }
+  };
+
+  const onPurgeData = async () => {
+    if (!confirm(
+      "Delete ALL endpoints and credentials for this collection?\n\n" +
+      "Documents are kept \u2014 you can re-parse them afterwards.\n\n" +
+      "Use this to clear duplicates from uploading the same file multiple times."
+    )) return;
+    setPurging(true); setError(null);
+    try {
+      const result = await api.purgeCollectionData(collectionId);
+      setEndpoints([]);
+      setReadiness(null);
+      alert(`Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`);
+    } catch(e) { setError(e.message); }
+    finally { setPurging(false); }
+  };
+
+  const onDelete = async () => {
+    if (!collection) return;
+    if (!confirm(`Delete "${collection.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(collectionId); nav("#/apis"); } catch(e) { setError(e.message); }
+  };
+
+  const toggleScope = async (ep) => {
+    try {
+      const updated = await api.patchEndpointScope(collectionId, ep.id, { in_scope: !ep.in_scope });
+      setEndpoints(eps => eps.map(e => e.id === ep.id ? updated : e));
+    } catch(e) { setError(e.message); }
+  };
+
+  const methodBadge = (m) => {
+    const cls = {
+      GET:"badge method-get", POST:"badge method-post", PUT:"badge method-put",
+      PATCH:"badge method-patch", DELETE:"badge method-delete",
+    };
+    return html`<span className=${cls[m] || "badge neutral"}>${m}</span>`;
+  };
+
+  // Readiness helpers
+  const scoreColor = (score) => score >= 75 ? "var(--success,#22c55e)" : score >= 40 ? "var(--warning-text,#d97706)" : "var(--danger,#ef4444)";
+  const readinessLabel = (score) => score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready";
+  const prereqIcon = (ep) => {
+    if (!ep.prereq_can_test) return html`<span title="Cannot test — insufficient info" style=${{color:"var(--danger,#ef4444)",fontSize:14}}>✗</span>`;
+    if (!ep.prereq_can_test_auth) return html`<span title="Auth credentials missing" style=${{color:"var(--warning-text,#d97706)",fontSize:14}}>⚠</span>`;
+    return html`<span title="Ready to test" style=${{color:"var(--success,#22c55e)",fontSize:14}}>✓</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${collection ? collection.name : "…"}
+      </div>
+      <div className="topbar-actions">
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onPurgeData} disabled=${purging}>${purging?"Purging…":"Purge data"}</button>`}
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${collection && html`
+        <div className="card">
+          <div className="form-section-title">Overview</div>
+          <div className="field" style=${{margin:0}}><label>Base URL</label><div className="url">${collection.base_url}</div></div>
+          ${collection.description && html`<div className="field" style=${{marginTop:12,marginBottom:0}}><label>Description</label><div>${collection.description}</div></div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Readiness</span>
+            <button className="btn secondary sm" onClick=${onAssessReadiness} disabled=${assessing}>
+              ${assessing ? "Assessing…" : readiness ? "Re-assess" : "Assess Readiness"}
+            </button>
+          </div>
+          ${assessing && html`<div className="subtle" style=${{padding:"12px 0"}}>Running LLM readiness assessment…</div>`}
+          ${!assessing && !readiness && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              Click <strong>Assess Readiness</strong> to run an LLM-driven gap analysis — checks whether you have the
+              right credentials and enough spec detail to test each endpoint.
+            </div>`}
+          ${!assessing && readiness && html`
+            <div>
+              <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+                <span style=${{fontSize:22,fontWeight:700,color:scoreColor(readiness.overall.score)}}>${readiness.overall.score}/100</span>
+                <span className="badge" style=${{background:scoreColor(readiness.overall.score),color:"#fff",padding:"2px 10px"}}>${readinessLabel(readiness.overall.score)}</span>
+                <span style=${{fontSize:13,color:"var(--fg)"}}>${readiness.overall.summary}</span>
+              </div>
+              ${readiness.overall.blocking_gaps?.length > 0 && html`
+                <div style=${{marginBottom:8}}>
+                  <strong style=${{fontSize:12,color:"var(--danger,#ef4444)"}}>Blocking gaps</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--fg)"}}>
+                    ${readiness.overall.blocking_gaps.map((g,i) => html`<li key=${i}>${g}</li>`)}
+                  </ul>
+                </div>`}
+              ${readiness.overall.recommendations?.length > 0 && html`
+                <div>
+                  <strong style=${{fontSize:12,color:"var(--muted)"}}>Recommendations</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--muted)"}}>
+                    ${readiness.overall.recommendations.map((r,i) => html`<li key=${i}>${r}</li>`)}
+                  </ul>
+                </div>`}
+              <div style=${{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+                Assessed ${new Date(readiness.assessed_at).toLocaleString()}
+                ·
+                Auth understood: ${readiness.overall.auth_method_understood ? "✓" : "✗"}
+                · Credentials: ${readiness.overall.has_credentials ? "✓" : "✗"}
+                · Test data: ${readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
+              </div>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Endpoints ${endpoints!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${endpoints.length}</span>`:""}</span>
+            <div className="row" style=${{gap:8}}>
+              <button className="btn secondary sm" onClick=${onRefresh} disabled=${refreshing}>${refreshing?"…":"Refresh"}</button>
+              <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>
+            </div>
+          </div>
+          ${endpoints===null && html`<div className="subtle">Loading…</div>`}
+          ${endpoints!==null && endpoints.length===0 && html`
+            <div className="empty-state" style=${{padding:"32px 16px"}}>
+              <div className="empty-icon">⬡</div>
+              <div className="empty-msg">No endpoints yet</div>
+              <div className="empty-sub">
+                Upload an <strong>OpenAPI/Swagger</strong> or <strong>Postman</strong> file via <strong>Manage files</strong> — it parses automatically.<br/>
+                <span style=${{color:"var(--muted)",fontSize:11}}>Markdown/text files use LLM extraction and require an active LLM profile in Settings.</span>
+              </div>
+            </div>`}
+          ${endpoints!==null && endpoints.length>0 && html`
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{tableLayout:"fixed",width:"100%",minWidth:760}}>
+                <colgroup>
+                  <col style=${{width:"8%"}}/><col style=${{width:"24%"}}/><col style=${{width:"28%"}}/><col style=${{width:"8%"}}/><col style=${{width:"16%"}}/><col style=${{width:"8%"}}/><col style=${{width:"8%"}}/>
+                </colgroup>
+                <thead><tr>
+                  ${["Method","Path","Summary","Auth","Tags","Ready","In scope"].map(h=>html`
+                    <th key=${h} style=${{overflow:"hidden",whiteSpace:"nowrap",resize:"horizontal",position:"relative"}}>${h}</th>`)}
+                </tr></thead>
+                <tbody>${endpoints.map(ep=>html`
+                  <tr key=${ep.id} style=${{opacity:ep.in_scope?1:0.5}}>
+                    <td>${methodBadge(ep.method)}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${ep.path}</td>
+                    <td style=${{fontSize:12,overflowWrap:"break-word"}}>${ep.summary||"—"}</td>
+                    <td>${ep.auth_required?html`<span className="badge warning">yes</span>`:html`<span className="badge neutral">no</span>`}</td>
+                    <td style=${{fontSize:11,overflowWrap:"break-word"}}>${(JSON.parse(ep.tags_json||"[]")).join(", ")||"—"}</td>
+                    <td style=${{textAlign:"center"}} title=${(JSON.parse(ep.prereq_notes||"[]")).join("; ")||undefined}>
+                      ${prereqIcon(ep)}
+                    </td>
+                    <td style=${{textAlign:"center"}}>
+                      <input type="checkbox" checked=${ep.in_scope} onChange=${()=>toggleScope(ep)} style=${{cursor:"pointer"}}/>
+                    </td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ApiFilesManager({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [docs, setDocs] = useState(null);
+  const [endpoints, setEndpoints] = useState([]);
+  const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, d, eps] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiDocuments(collectionId),
+        api.listApiEndpoints(collectionId),
+      ]);
+      setCollection(c); setDocs(d); setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  // Endpoint count keyed by source_doc_id
+  const epCountByDoc = endpoints.reduce((acc, ep) => {
+    if (ep.source_doc_id != null) acc[ep.source_doc_id] = (acc[ep.source_doc_id] || 0) + 1;
+    return acc;
+  }, {});
+
+  const doUpload = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setUploading(true); setError(null);
+    try {
+      await api.uploadApiDocuments(collectionId, files);
+      await load();
+    } catch(e) { setError(e.message); }
+    finally { setUploading(false); }
+  };
+
+  const onPick = (e) => { doUpload(e.target.files); e.target.value = ""; };
+  const onDrop = (e) => { e.preventDefault(); setDragOver(false); doUpload(e.dataTransfer.files); };
+
+  const onDelete = async (doc) => {
+    if (!confirm(`Delete "${doc.filename}"?`)) return;
+    try { await api.deleteApiDocument(collectionId, doc.id); setDocs(ds=>ds.filter(d=>d.id!==doc.id)); }
+    catch(e) { setError(e.message); }
+  };
+
+  const onReparse = async (doc) => {
+    setReparseState(s => ({...s, [doc.id]: "running"}));
+    try {
+      const updated = await api.parseApiDocument(collectionId, doc.id);
+      setDocs(ds => ds.map(d => d.id === doc.id ? updated : d));
+      // Refresh endpoint counts too
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+      setReparseState(s => ({...s, [doc.id]: updated.status === "parsed" ? "done" : "failed"}));
+    } catch(e) {
+      setError(e.message);
+      setReparseState(s => ({...s, [doc.id]: "failed"}));
+    }
+  };
+
+  const statusCell = (d) => {
+    const count = epCountByDoc[d.id];
+    if (d.status === "failed") {
+      const tip = d.error_message || "";
+      return html`<span className="badge danger" title=${tip} style=${{cursor:"help"}}>failed</span>`;
+    }
+    if (d.status === "parsed") {
+      if (count != null && count > 0) {
+        return html`<span><span className="badge ok">parsed</span> <span style=${{fontSize:11,color:"var(--muted)",marginLeft:4}}>${count} endpoint${count===1?"":"s"}</span></span>`;
+      }
+      if (d.doc_type === "credentials") {
+        return html`<span className="badge ok" title="Credentials parsed — no endpoints from this type">parsed</span>`;
+      }
+      return html`<span className="badge ok">parsed</span>`;
+    }
+    return html`<span className="badge neutral">uploaded</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${collection ? collection.name : "…"}</a>
+        <span className="breadcrumb-sep"> / </span>
+        Files
+      </div>
+      <div className="topbar-actions">
+        <input ref=${fileRef} type="file" multiple style=${{display:"none"}} onChange=${onPick}/>
+        <button className="btn" onClick=${()=>fileRef.current.click()} disabled=${uploading}>${uploading?"Uploading…":"Upload files"}</button>
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <div
+        className=${"upload-dropzone"+(dragOver?" dragover":"")}
+        onDragOver=${e=>{e.preventDefault(); setDragOver(true);}}
+        onDragLeave=${()=>setDragOver(false)}
+        onDrop=${onDrop}
+        onClick=${()=>fileRef.current.click()}
+        style=${{border:"2px dashed var(--border)", borderRadius:8, padding:"28px 16px", textAlign:"center", cursor:"pointer", color:dragOver?"var(--accent)":"var(--muted)", background:dragOver?"var(--surface-2,#222)":"transparent"}}>
+        <div style=${{fontSize:13}}>${uploading?"Uploading…":"Drag & drop files here, or click to choose"}</div>
+        <div className="subtle" style=${{marginTop:6, fontSize:11}}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip (max 25 MB each)</div>
+      </div>
+      ${endpoints.length > 0 && html`
+        <div className="alert" style=${{background:"var(--surface-2,#1a2a1a)",borderColor:"var(--ok,#4caf50)",color:"var(--ok,#4caf50)",padding:"10px 14px",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>${endpoints.length} endpoint${endpoints.length===1?"":"s"} extracted</span>
+          <a href=${`#/apis/${collectionId}`} style=${{color:"var(--ok,#4caf50)",fontWeight:600,textDecoration:"none"}}>View endpoints →</a>
+        </div>`}
+      ${docs===null && html`<div className="subtle">Loading…</div>`}
+      ${docs!==null&&docs.length===0 && html`
+        <div className="empty-state" style=${{padding:"24px 16px"}}>
+          <div className="empty-icon">📄</div>
+          <div className="empty-msg">No files uploaded yet</div>
+          <div className="empty-sub">Upload API documentation to attach it to this collection.</div>
+        </div>`}
+      ${docs&&docs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"32%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Filename</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr></thead>
+            <tbody>${docs.map(d=>html`
+              <tr key=${d.id}>
+                <td style=${{fontWeight:600}}>${d.filename}</td>
+                <td><span className="badge neutral">${d.doc_type}</span></td>
+                <td>${fmtBytes(d.size_bytes)}</td>
+                <td>${statusCell(d)}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":"Reparse"}</button>
+                    <button className="btn secondary sm" onClick=${()=>api.downloadApiDocument(collectionId, d.id)}>Download</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(d)}>Delete</button>
                   </div>
                 </td>
               </tr>`)}

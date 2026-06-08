@@ -351,10 +351,15 @@ th, td {
   text-align: left;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
-  /* wrap text instead of compressing sibling columns */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* In fixed-layout tables let cells wrap so summaries / paths aren't truncated */
+table[style*="table-layout:fixed"] td,
+table[style*="table-layout: fixed"] td {
+  white-space: normal;
+  word-break: break-word;
 }
 /* Let action/button cells in the last column size to content */
 th:last-child, td:last-child { white-space: normal; overflow: visible; width: auto; }
@@ -365,7 +370,25 @@ th {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  /* resizable columns */
+  resize: horizontal;
+  overflow: hidden;
+  position: relative;
 }
+/* visual drag affordance on the right edge of each header */
+th::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 20%;
+  height: 60%;
+  width: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+th:hover::after { opacity: 1; }
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: rgba(255,255,255,0.02); }
 
