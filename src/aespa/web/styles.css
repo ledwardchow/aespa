@@ -272,6 +272,9 @@ a:hover { color: var(--accent-hover); }
   overflow-y: auto;
   overflow-x: hidden;
 }
+.content.scroll-content.no-padding {
+  padding: 0;
+}
 
 /* ── Buttons ────────────────────────────────────────────────── */
 

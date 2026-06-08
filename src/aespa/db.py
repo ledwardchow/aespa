@@ -80,6 +80,9 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "poc_command", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "poc_setup", "TEXT NOT NULL DEFAULT ''")
     _ensure_scan_finding_page_id_nullable(engine)
+    # Slice 6 — API test run attribution for findings
+    _ensure_column(engine, "scan_finding", "api_test_run_id", "INTEGER")
+    _ensure_column(engine, "scan_finding", "owasp_api_category", "TEXT")
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
@@ -87,6 +90,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
