@@ -792,11 +792,14 @@ class TestRunSummary(BaseModel):
 
 class ActiveJobSummary(BaseModel):
     run_id: int
-    site_id: int
-    site_name: str
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
+    run_type: str = "web"              # "web" | "api"
+    collection_id: Optional[int] = None
+    collection_name: Optional[str] = None
     pages_done: int | None = None
     total_pages: int | None = None
     findings_count: int | None = None
@@ -1026,6 +1029,8 @@ class ScanFindingOut(BaseModel):
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
+    api_test_run_id: int | None = None
+    owasp_api_category: str | None = None
     created_at: datetime
 
 
