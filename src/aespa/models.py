@@ -601,6 +601,9 @@ class ScanFinding(SQLModel, table=True):
     # Validation fields
     validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
+    # API test run attribution (nullable — only set for findings from API runs)
+    api_test_run_id: Optional[int] = Field(default=None, index=True)
+    owasp_api_category: Optional[str] = Field(default=None, index=True)  # "API1" … "API10"
     created_at: datetime = Field(default_factory=_utcnow)
 
     @property

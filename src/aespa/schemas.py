@@ -1026,6 +1026,8 @@ class ScanFindingOut(BaseModel):
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
+    api_test_run_id: int | None = None
+    owasp_api_category: str | None = None
     created_at: datetime
 
 
