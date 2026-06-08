@@ -2755,10 +2755,31 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
   }, [runId]);
 
   // ── Poll agent log while scanning or alice is running ────────────────────
+  // Merge with existing state so SSE-only (non-persisted) step history is
+  // not wiped on every poll cycle.
   useEffect(() => {
     if (!aliceRunning && !scanRunning) return;
     const t = setInterval(() => {
-      api.getApiAgentLog(runId).then(rows => setAgents(_buildAgentsFromLog(rows))).catch(() => {});
+      api.getApiAgentLog(runId).then(rows => {
+        const fromLog = _buildAgentsFromLog(rows);
+        setAgents(prev => {
+          const prevMap = new Map(prev.map(a => [a.id, a]));
+          const merged = fromLog.map(a => {
+            const existing = prevMap.get(a.id);
+            if (!existing) return a;
+            // Prefer the longer history — SSE may have more non-persisted entries
+            const history = existing.taskHistory.length >= a.taskHistory.length
+              ? existing.taskHistory
+              : a.taskHistory;
+            return { ...a, taskHistory: history };
+          });
+          // Keep SSE-only agents not yet written to the DB
+          for (const a of prev) {
+            if (!merged.find(m => m.id === a.id)) merged.push(a);
+          }
+          return merged;
+        });
+      }).catch(() => {});
     }, 4000);
     return () => clearInterval(t);
   }, [aliceRunning, scanRunning, runId]);
