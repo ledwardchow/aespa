@@ -42,6 +42,7 @@ from aespa.services.prompts.specialist import (
 )
 from aespa.services.prompts.test_lead import (
     _THINKING_AGENT_SYSTEM,
+    _API_THINKING_AGENT_SYSTEM,
 )
 
 log = logging.getLogger("aespa.scanner")
@@ -60,9 +61,10 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     
     run_id = kwargs.pop("run_id", None)
     username = kwargs.pop("username", None)
+    api_run_id = kwargs.pop("api_run_id", None)
     
     from aespa.services.traffic import LoggingAsyncClient
-    return LoggingAsyncClient(run_id=run_id, username=username, **kwargs)
+    return LoggingAsyncClient(run_id=run_id, username=username, api_run_id=api_run_id, **kwargs)
 
 
 def _playwright_proxy() -> dict:
@@ -5067,6 +5069,10 @@ async def _do_agentic_thinking_loop(
     site_id: int = 0,
     creds: list | None = None,
     login_url: str = "",
+    # API-mode overrides — when provided these replace the web-scan defaults
+    system_message_override: str | None = None,
+    context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
+    post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -5269,14 +5275,24 @@ async def _do_agentic_thinking_loop(
                     _consecutive_ctx_tools[0],
                 )
             else:
-                output = _run_thinking_context_tool(
-                    inner_tool, args,
-                    pages_snapshot=pages_snapshot,
-                    findings_snapshot=findings_snapshot,
-                    history=history,
-                    run_id=run_id,
-                    base_url=base_url,
-                )
+                if context_tool_fn is not None:
+                    output = context_tool_fn(
+                        inner_tool, args,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        history=history,
+                        run_id=run_id,
+                        base_url=base_url,
+                    )
+                else:
+                    output = _run_thinking_context_tool(
+                        inner_tool, args,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        history=history,
+                        run_id=run_id,
+                        base_url=base_url,
+                    )
                 if budget_reason:
                     output["context_budget_reason"] = budget_reason
                     output["context_budget_extended"] = True
@@ -5351,6 +5367,11 @@ async def _do_agentic_thinking_loop(
             )
             if saved is not None:
                 progressive_findings_count += 1
+                if post_finding_fn is not None:
+                    try:
+                        post_finding_fn(saved)
+                    except Exception as _pf_exc:
+                        log.warning("post_finding_fn error: %s", _pf_exc)
                 findings_snapshot.append({
                     "title": saved.title,
                     "severity": saved.severity,
@@ -6286,7 +6307,7 @@ async def _do_agentic_thinking_loop(
 
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
-        system_message=_THINKING_AGENT_SYSTEM,
+        system_message=system_message_override if system_message_override is not None else _THINKING_AGENT_SYSTEM,
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),

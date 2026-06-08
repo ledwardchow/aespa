@@ -1087,10 +1087,54 @@ def _run_api_context_tool(
             matches.append(f)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    # ── report_finding ────────────────────────────────────────────────────────
+    if tool_name == "report_finding":
+        from aespa.models import ScanFinding as _SF
+        from aespa.db import get_engine as _ge
+        from sqlmodel import Session as _Session
+        from datetime import datetime, timezone as _tz
+
+        severity = str(args.get("severity") or "info").lower()
+        if severity not in ("critical", "high", "medium", "low", "info"):
+            severity = "info"
+
+        owasp = str(args.get("owasp_category") or args.get("owasp_api_category") or "").strip()
+
+        finding = _SF(
+            test_run_id=run_id,
+            api_test_run_id=run_id,
+            page_id=None,
+            owasp_category=owasp or "A00",
+            owasp_api_category=owasp or None,
+            severity=severity,
+            title=str(args.get("title") or "Untitled Finding"),
+            description=str(args.get("description") or ""),
+            impact=str(args.get("impact") or ""),
+            likelihood=str(args.get("likelihood") or ""),
+            recommendation=str(args.get("recommendation") or ""),
+            affected_url=str(args.get("affected_url") or ""),
+            evidence=str(args.get("evidence") or ""),
+            request_evidence=str(args.get("request_evidence") or ""),
+            response_evidence=str(args.get("response_evidence") or ""),
+            finding_source="alice_api",
+            validation_status="unvalidated",
+        )
+        with _Session(_ge()) as s:
+            s.add(finding)
+            s.commit()
+            s.refresh(finding)
+        return {
+            "tool": "report_finding",
+            "ok": True,
+            "finding_id": finding.id,
+            "title": finding.title,
+            "severity": finding.severity,
+        }
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
-        "available_tools": ["endpoint_list", "endpoint_detail", "collection_info", "finding_list"],
+        "available_tools": ["endpoint_list", "endpoint_detail", "collection_info", "finding_list", "report_finding"],
     }
 
 
