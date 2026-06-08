@@ -150,6 +150,7 @@ class ApiCollectionDetail(BaseModel):
     updated_at: datetime
     servers: list[str] = Field(default_factory=list)
     scope_hosts: list[str] = Field(default_factory=list)
+    readiness_json: str | None = None  # raw JSON; frontend parses it
 
 
 class ApiDocumentOut(BaseModel):
@@ -185,6 +186,10 @@ class ApiEndpointOut(BaseModel):
     sample_request_json: str
     in_scope: bool
     created_at: datetime
+    # Slice 4 — readiness assessment
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str  # JSON list of gap strings
 
 
 class ApiCredentialOut(BaseModel):
@@ -198,6 +203,7 @@ class ApiCredentialOut(BaseModel):
     label: str | None
     scope: str
     endpoint_id: int | None
+    auth_endpoint: str | None  # set when scheme == "login"
     created_at: datetime
 
 
@@ -208,6 +214,7 @@ class ApiCredentialCreate(BaseModel):
     label: str | None = None
     scope: str = "global"
     endpoint_id: int | None = None
+    auth_endpoint: str | None = None  # set when scheme == "login"
 
 
 # ── LLM config schemas ────────────────────────────────────────────────────

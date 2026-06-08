@@ -281,9 +281,24 @@ def test_parse_postman_body_example(client, data_dir):
     assert sample.get("name") == "foo"
 
 
-# ── 3c Credentials ────────────────────────────────────────────────────────────
+# ── 3c Credentials (LLM-based extraction) ─────────────────────────────────────
 
-def test_parse_credentials_bearer(client, data_dir):
+_CREDS_LLM_RESULT = (
+    [],  # endpoints
+    [
+        {"scheme": "bearer", "name": "Authorization", "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.abc", "label": "bearer-token"},
+        {"scheme": "apikey", "name": "X-API-Key", "value": "my-api-key-12345", "label": "X-API-Key"},
+        {"scheme": "bearer", "name": "Authorization", "value": "Bearer curl-token-123", "label": "curl-header"},
+        {"scheme": "cookie", "name": "Cookie", "value": "session=abc123; csrf=xyz789", "label": "Cookie"},
+    ],
+)
+
+
+def test_parse_credentials_bearer(client, monkeypatch):
+    import aespa.services.api_docs as api_docs_mod
+    async def _mock_llm(session, content, doc):
+        return _CREDS_LLM_RESULT
+    monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
@@ -292,7 +307,11 @@ def test_parse_credentials_bearer(client, data_dir):
     assert len(bearer_creds) >= 1
 
 
-def test_parse_credentials_apikey(client, data_dir):
+def test_parse_credentials_apikey(client, monkeypatch):
+    import aespa.services.api_docs as api_docs_mod
+    async def _mock_llm(session, content, doc):
+        return _CREDS_LLM_RESULT
+    monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
@@ -301,17 +320,24 @@ def test_parse_credentials_apikey(client, data_dir):
     assert len(apikey_creds) >= 1
 
 
-def test_parse_credentials_curl_header(client, data_dir):
+def test_parse_credentials_curl_header(client, monkeypatch):
+    import aespa.services.api_docs as api_docs_mod
+    async def _mock_llm(session, content, doc):
+        return _CREDS_LLM_RESULT
+    monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     creds = client.get(f"/api/api-collections/{cid}/credentials").json()
-    # curl line should have produced at least one curl-header bearer credential
     curl_bearer = [c for c in creds if c.get("label") == "curl-header" and c["scheme"] == "bearer"]
     assert len(curl_bearer) >= 1
 
 
-def test_parse_credentials_cookie(client, data_dir):
+def test_parse_credentials_cookie(client, monkeypatch):
+    import aespa.services.api_docs as api_docs_mod
+    async def _mock_llm(session, content, doc):
+        return _CREDS_LLM_RESULT
+    monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")

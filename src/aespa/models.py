@@ -71,6 +71,8 @@ class ApiCollection(SQLModel, table=True):
     description: Optional[str] = Field(default=None)
     servers: Optional[str] = Field(default=None)      # JSON list of additional server base URLs
     scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
+    auth_summary_json: Optional[str] = Field(default=None)  # security schemes from parsed specs
+    readiness_json: Optional[str] = Field(default=None)     # latest readiness assessment result
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -122,6 +124,10 @@ class ApiEndpoint(SQLModel, table=True):
     sample_request_json: str = Field(default="{}")       # populated from examples / Postman bodies
     in_scope: bool = Field(default=True)
     created_at: datetime = Field(default_factory=_utcnow)
+    # Slice 4 — readiness assessment results
+    prereq_can_test: bool = Field(default=True)          # enough info to send a probe
+    prereq_can_test_auth: bool = Field(default=True)     # have credentials for auth-required paths
+    prereq_notes: str = Field(default="[]")              # JSON list of gap strings
 
 
 class ApiCredential(SQLModel, table=True):
@@ -134,12 +140,13 @@ class ApiCredential(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
-    scheme: str = Field(default="bearer")  # bearer|apikey|basic|cookie|header
-    name: str = Field(default="Authorization")   # header/param name
+    scheme: str = Field(default="bearer")  # bearer|apikey|basic|cookie|header|login
+    name: str = Field(default="Authorization")   # header/param name; for login: the auth endpoint path
     value: str                                    # plaintext — local pentesting tool
     label: Optional[str] = Field(default=None)
     scope: str = Field(default="global")          # global|endpoint
     endpoint_id: Optional[int] = Field(default=None, foreign_key="api_endpoint.id")
+    auth_endpoint: Optional[str] = Field(default=None)  # for login scheme: path of the token endpoint
     created_at: datetime = Field(default_factory=_utcnow)
 
 

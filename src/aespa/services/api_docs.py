@@ -67,15 +67,11 @@ async def parse_document(session: Session, collection_id: int, document_id: int)
             _update_collection_auth_summary(session, collection_id, content)
         elif doc.doc_type == "postman":
             endpoints, credentials = _parse_postman(content, doc)
-        elif doc.doc_type == "credentials":
-            credentials = _parse_credentials(content)
-        elif doc.doc_type == "freetext":
-            endpoints = await _parse_freetext(session, content, doc)
         elif doc.doc_type == "source_zip":
             endpoints = _parse_source_zip(content, doc)
         else:
-            # unknown — attempt freetext LLM fallback
-            endpoints = await _parse_freetext(session, content, doc)
+            # freetext, credentials, unknown — LLM extracts both endpoints and credentials.
+            endpoints, credentials = await _parse_freetext_llm(session, content, doc)
 
         _upsert_endpoints(session, collection_id, document_id, endpoints)
         _upsert_credentials(session, collection_id, credentials)
@@ -144,14 +140,29 @@ def _upsert_endpoints(
 def _upsert_credentials(
     session: Session, collection_id: int, credentials: list[dict]
 ) -> None:
+    """Insert credentials, deduplicating by (scheme, name, value) within the collection."""
+    existing_keys: set[tuple[str, str, str]] = set()
+    for c in session.exec(
+        select(ApiCredential).where(ApiCredential.collection_id == collection_id)
+    ).all():
+        existing_keys.add((c.scheme, c.name, c.value))
+
     for cred_data in credentials:
+        scheme = cred_data.get("scheme", "bearer")
+        name   = cred_data.get("name", "Authorization")
+        value  = cred_data.get("value", "")
+        key = (scheme, name, value)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
         cred = ApiCredential(
             collection_id=collection_id,
-            scheme=cred_data.get("scheme", "bearer"),
-            name=cred_data.get("name", "Authorization"),
-            value=cred_data.get("value", ""),
+            scheme=scheme,
+            name=name,
+            value=value,
             label=cred_data.get("label"),
             scope=cred_data.get("scope", "global"),
+            auth_endpoint=cred_data.get("auth_endpoint"),
         )
         session.add(cred)
     session.flush()
@@ -169,9 +180,7 @@ def _update_collection_auth_summary(
         if schemes:
             col = session.get(ApiCollection, collection_id)
             if col is not None:
-                existing = json.loads(col.servers or "{}") if col.servers else {}
-                existing["securitySchemes"] = schemes
-                col.servers = json.dumps(existing)
+                col.auth_summary_json = json.dumps({"securitySchemes": schemes})
                 session.add(col)
     except Exception:
         pass
@@ -459,148 +468,190 @@ def _parse_postman(content: bytes, doc: ApiDocument) -> tuple[list[dict], list[d
     return endpoints, credentials
 
 
-# ── 3c Credentials file ───────────────────────────────────────────────────────
+# ── 3c + 3d  Free text / credentials — combined LLM extraction ───────────────
 
-def _parse_credentials(content: bytes) -> list[dict]:
-    text = content.decode("utf-8", errors="replace")
-    credentials: list[dict] = []
+async def _parse_freetext_llm(
+    session: Session,
+    content: bytes,
+    doc: ApiDocument,
+) -> tuple[list[dict], list[dict]]:
+    """Use the LLM to extract both API endpoints and authentication credentials.
 
-    # Split into "blocks" on blank lines or obvious separators
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        # curl command with -H / -b / --cookie
-        if line.lower().startswith("curl ") or " curl " in line.lower():
-            parsed = _parse_curl_line(line)
-            credentials.extend(parsed)
-            continue
-
-        # Key: Value header lines
-        m = re.match(r"^([\w\-]+)\s*:\s*(.+)$", line)
-        if m:
-            key, val = m.group(1).strip(), m.group(2).strip()
-            key_lower = key.lower()
-            if key_lower == "authorization":
-                credentials.append({"scheme": _scheme_from_auth(val), "name": "Authorization", "value": val, "label": key})
-            elif key_lower in ("x-api-key", "api-key", "api_key", "apikey"):
-                credentials.append({"scheme": "apikey", "name": key, "value": val, "label": key})
-            elif key_lower == "cookie":
-                credentials.append({"scheme": "cookie", "name": "Cookie", "value": val, "label": "Cookie"})
-            elif key_lower in ("bearer", "token", "access_token"):
-                credentials.append({"scheme": "bearer", "name": "Authorization", "value": f"Bearer {val}", "label": key})
-            continue
-
-        # bare token / jwt (long, base64-ish string)
-        if len(line) > 30 and re.match(r"^[A-Za-z0-9\-_\.]+$", line):
-            # If it looks like a JWT (three base64 parts separated by dots)
-            if line.count(".") == 2:
-                credentials.append({"scheme": "bearer", "name": "Authorization", "value": f"Bearer {line}", "label": "jwt"})
-            else:
-                credentials.append({"scheme": "apikey", "name": "X-API-Key", "value": line, "label": "token"})
-
-    return credentials
-
-
-def _scheme_from_auth(value: str) -> str:
-    lower = value.lower()
-    if lower.startswith("bearer "):
-        return "bearer"
-    if lower.startswith("basic "):
-        return "basic"
-    if lower.startswith("apikey ") or lower.startswith("api-key "):
-        return "apikey"
-    return "bearer"
-
-
-def _parse_curl_line(line: str) -> list[dict]:
-    creds: list[dict] = []
-    # Extract -H / --header values
-    for m in re.finditer(r'-H\s+[\'"]([^\'"]+)[\'"]', line):
-        header_line = m.group(1)
-        colon_pos = header_line.find(":")
-        if colon_pos < 0:
-            continue
-        hname = header_line[:colon_pos].strip()
-        hval = header_line[colon_pos + 1:].strip()
-        if hname.lower() == "authorization":
-            creds.append({"scheme": _scheme_from_auth(hval), "name": "Authorization", "value": hval, "label": "curl-header"})
-        elif hname.lower() in ("x-api-key", "api-key"):
-            creds.append({"scheme": "apikey", "name": hname, "value": hval, "label": "curl-header"})
-        elif hname.lower() == "cookie":
-            creds.append({"scheme": "cookie", "name": "Cookie", "value": hval, "label": "curl-cookie"})
-    # Extract -b / --cookie values
-    for m in re.finditer(r'(?:-b|--cookie)\s+[\'"]([^\'"]+)[\'"]', line):
-        creds.append({"scheme": "cookie", "name": "Cookie", "value": m.group(1), "label": "curl-cookie"})
-    # Extract -u / --user basic auth
-    for m in re.finditer(r'(?:-u|--user)\s+[\'"]([^\'"]+)[\'"]', line):
-        creds.append({"scheme": "basic", "name": "Authorization", "value": f"Basic {m.group(1)}", "label": "curl-basic"})
-    return creds
-
-
-# ── 3d Free text / Confluence (LLM extraction) ────────────────────────────────
-
-async def _parse_freetext(session: Session, content: bytes, doc: ApiDocument) -> list[dict]:
+    Handles markdown docs, plain-text API references, SQL seed data,
+    credential/token files, curl snippets — anything that isn't a structured
+    spec format.  A single LLM call returns both arrays.
+    """
     try:
         from aespa.services.settings import get_llm_config
         from aespa.services import llm as llm_svc
     except ImportError:
-        return []
+        return [], []
 
     llm_cfg = get_llm_config(session)
     if llm_cfg is None:
-        raise ParseError("No active LLM config — configure an LLM profile in settings first")
+        raise ParseError("No active LLM config — configure an LLM profile in Settings first")
 
     text = content.decode("utf-8", errors="replace")[:_MAX_FREETEXT_LLM_CHARS]
 
-    prompt = f"""You are an API analysis assistant. Extract all API endpoints from the following documentation.
+    prompt = f"""Analyse the file below and extract two things:
 
-Return a JSON array (and ONLY the JSON array, no prose). Each element should be an object with:
-- "method": HTTP method (GET, POST, PUT, PATCH, DELETE, etc.)
-- "path": URL path (e.g. /v1/users/{{id}})
-- "summary": one-line description (or null)
-- "auth_required": true/false (true if the endpoint requires authentication)
-- "tags": array of tag strings (empty array if none)
+1. **API endpoints** — any HTTP routes or operations described or implied in the file.
+2. **Authentication credentials** — any tokens, passwords, API keys, bearer values,
+   email/password pairs, cookies, or other secrets that could be used to authenticate
+   against an API during a penetration test.
 
-Documentation:
+Reply with ONLY a valid JSON object in this exact shape — no preamble, no markdown fences:
+{{
+  "endpoints": [
+    {{
+      "method": "POST",
+      "path": "/v1/example",
+      "summary": "one-line description or null",
+      "auth_required": true,
+      "tags": ["optional", "tags"],
+      "parameters": [
+        {{"name": "id", "in": "path", "required": true, "example": "42"}},
+        {{"name": "filter", "in": "query", "required": false, "example": "active"}}
+      ],
+      "request_body": {{
+        "field_name": "string (required) — description",
+        "other_field": "number (optional)"
+      }},
+      "sample_request": {{
+        "field_name": "example value",
+        "other_field": 42
+      }}
+    }}
+  ],
+  "credentials": [
+    {{
+      "scheme": "bearer",
+      "name": "Authorization",
+      "value": "Bearer eyJ...",
+      "label": "human-readable label, e.g. jane.smith@example.com or admin-token"
+    }}
+  ]
+}}
+
+Rules:
+- "endpoints" MUST be an array (empty [] if none found).
+- "credentials" MUST be an array (empty [] if none found).
+- For each endpoint:
+  - "parameters" lists path, query, and header parameters (NOT the request body).
+    Include ALL path parameters from the URL template (e.g. {{id}} → name "id", in "path").
+    Include any documented query parameters.
+    Each entry: {{name, in (path|query|header), required (bool), example}}.
+  - "request_body" is a dict describing each body field: key=field name,
+    value=short description including type and required/optional.
+    Copy the schema exactly from the documentation — do NOT leave it empty for POST/PUT/PATCH.
+  - "sample_request" is a concrete filled-in example of the request body using
+    real-looking example values (use the documented examples if present, else make up
+    plausible ones). Leave empty {{}} only if there is genuinely no request body.
+- For credentials, "scheme" must be one of: bearer, apikey, basic, cookie, header, login.
+  - bearer  → value is the full header value e.g. "Bearer <token>"
+  - apikey  → value is the raw key string
+  - basic   → value is "username:password" for HTTP Basic Authentication ONLY
+             (i.e. the API uses the Authorization: Basic <base64> header — NOT a login form)
+  - cookie  → value is the cookie string
+  - header  → any other custom header value
+  - login   → credentials submitted as JSON/form to a token endpoint to OBTAIN a bearer
+             token (e.g. {{"email":"...","password":"..."}} POST-ed to /api/auth/login).
+             Use this whenever the API docs describe an auth endpoint that accepts
+             username/password/email and returns a JWT or session token.
+             For login credentials also include: "auth_endpoint": "/path/to/login"
+- "name" is the HTTP header or parameter name, e.g. "Authorization", "X-API-Key".
+  For login credentials, set name to "email" or "username" (whichever field the endpoint uses).
+- IMPORTANT: Do NOT use scheme "basic" for email+password credentials that are submitted
+  to a JSON login endpoint. Use scheme "login" with the correct auth_endpoint.
+  Only use "basic" for APIs that literally use Authorization: Basic <base64(user:pass)>.
+- For email/password pairs from seed data, use scheme "login", value "email:password",
+  label = the email address, auth_endpoint = the token endpoint path if identifiable.
+- If the file has no endpoint definitions return an empty endpoints array.
+- If the file has no credentials return an empty credentials array.
+
+File contents:
 ---
 {text}
 ---
 
-JSON array of endpoints:"""
+JSON object (reply with ONLY the object, nothing else):"""
 
     try:
         raw = await llm_svc.plain_completion(llm_cfg, prompt)
     except Exception as exc:
         raise ParseError(f"LLM extraction failed: {exc}") from exc
 
-    # Extract JSON array from the response
-    m = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not m:
-        raise ParseError("LLM did not return a JSON array of endpoints")
-    try:
-        items = json.loads(m.group(0))
-    except json.JSONDecodeError as exc:
-        raise ParseError(f"Could not parse LLM JSON response: {exc}") from exc
+    # Strip markdown fences if present
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned.strip())
 
-    endpoints = []
-    for item in items:
+    # Extract the outermost JSON object
+    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not m:
+        snippet = raw[:300].replace("\n", " ")
+        raise ParseError(f"LLM did not return a JSON object. Response: {snippet}")
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError as exc:
+        snippet = m.group(0)[:300].replace("\n", " ")
+        raise ParseError(f"Could not parse LLM JSON: {exc}. Snippet: {snippet}") from exc
+
+    # ── Parse endpoints ──────────────────────────────────────────────────────
+    _METHOD_ALIASES = ("method", "http_method", "verb", "type")
+    _PATH_ALIASES   = ("path", "endpoint", "url", "route", "uri")
+
+    endpoints: list[dict] = []
+    for item in (data.get("endpoints") or []):
         if not isinstance(item, dict):
             continue
-        if not item.get("method") or not item.get("path"):
+        method = next((item[k] for k in _METHOD_ALIASES if item.get(k)), None)
+        path   = next((item[k] for k in _PATH_ALIASES   if item.get(k)), None)
+        if not method or not path:
             continue
+        path = str(path)
+        if path.startswith(("http://", "https://")):
+            path = "/" + "/".join(path.split("/")[3:])
+        if not path.startswith("/"):
+            path = "/" + path
+        # Pull request body / parameters / sample from the LLM item
+        request_body = item.get("request_body") or item.get("body") or item.get("requestBody") or {}
+        sample = item.get("sample_request") or item.get("example") or item.get("sample") or {}
+        parameters = item.get("parameters") or item.get("params") or []
         endpoints.append({
-            "method": item["method"].upper(),
-            "path": item["path"],
-            "summary": item.get("summary"),
-            "auth_required": bool(item.get("auth_required", False)),
+            "method": str(method).upper(),
+            "path": path,
+            "summary": item.get("summary") or item.get("description"),
+            "auth_required": bool(item.get("auth_required", item.get("requires_auth", False))),
             "tags": item.get("tags", []),
+            "parameters": parameters if isinstance(parameters, list) else [],
+            "request_body": request_body if isinstance(request_body, dict) else {},
+            "sample_request": sample if isinstance(sample, dict) else {},
         })
 
-    if not endpoints:
-        raise ParseError("LLM returned no endpoints")
-    return endpoints
+    # ── Parse credentials ────────────────────────────────────────────────────
+    _VALID_SCHEMES = {"bearer", "apikey", "basic", "cookie", "header", "login"}
+
+    credentials: list[dict] = []
+    for item in (data.get("credentials") or []):
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value", "").strip()
+        if not value:
+            continue
+        scheme = item.get("scheme", "bearer").lower()
+        if scheme not in _VALID_SCHEMES:
+            scheme = "header"
+        cred: dict = {
+            "scheme": scheme,
+            "name": item.get("name", "Authorization"),
+            "value": value,
+            "label": item.get("label") or item.get("name") or scheme,
+        }
+        if scheme == "login" and item.get("auth_endpoint"):
+            cred["auth_endpoint"] = item["auth_endpoint"]
+        credentials.append(cred)
+
+    return endpoints, credentials
 
 
 # ── 3e Source zip ─────────────────────────────────────────────────────────────
