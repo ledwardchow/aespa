@@ -22,6 +22,7 @@ from aespa.schemas import (
 from aespa.services import api_collections as api_collections_service
 from aespa.services import api_documents as api_documents_service
 from aespa.services import api_docs as api_docs_service
+from aespa.services import api_readiness as api_readiness_service
 
 
 router = APIRouter(prefix="/api/api-collections", tags=["api-collections"])
@@ -340,6 +341,7 @@ def create_credential(
         label=payload.label,
         scope=payload.scope,
         endpoint_id=payload.endpoint_id,
+        auth_endpoint=payload.auth_endpoint,
     )
     session.add(cred)
     session.commit()
@@ -361,3 +363,88 @@ def delete_credential(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credential not found")
     session.delete(cred)
     session.commit()
+
+
+# ── Readiness assessment ────────────────────────────────────────────────────────────────
+
+
+@router.post("/{collection_id}/readiness", status_code=status.HTTP_200_OK)
+async def run_readiness(
+    collection_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Run (or re-run) the LLM-driven readiness assessment for this collection."""
+    collection = session.get(ApiCollection, collection_id)
+    if collection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
+    try:
+        result = await api_readiness_service.assess_readiness(session, collection_id)
+    except api_readiness_service.ReadinessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return result
+
+
+@router.get("/{collection_id}/readiness")
+def get_readiness(
+    collection_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return the most recent readiness assessment result, or a not-assessed stub."""
+    collection = session.get(ApiCollection, collection_id)
+    if collection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
+    result = api_readiness_service.get_readiness(session, collection_id)
+    if result is None:
+        return {"status": "not_assessed"}
+    return result
+
+
+# ── Purge all parsed data ─────────────────────────────────────────────────────
+
+
+@router.delete("/{collection_id}/data", status_code=status.HTTP_200_OK)
+def purge_collection_data(
+    collection_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Delete all endpoints and credentials parsed for this collection.
+
+    Documents and the collection itself are kept.  Use this to clear
+    duplicates caused by uploading the same file multiple times, then
+    re-parse the documents you want to keep.
+    """
+    collection = session.get(ApiCollection, collection_id)
+    if collection is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
+
+    endpoints = session.exec(
+        select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
+    ).all()
+    ep_count = len(endpoints)
+    for ep in endpoints:
+        session.delete(ep)
+
+    credentials = session.exec(
+        select(ApiCredential).where(ApiCredential.collection_id == collection_id)
+    ).all()
+    cred_count = len(credentials)
+    for cred in credentials:
+        session.delete(cred)
+
+    # Clear persisted readiness too — it's now stale
+    collection.readiness_json = None
+    session.add(collection)
+    session.commit()
+
+    return {
+        "endpoints_deleted": ep_count,
+        "credentials_deleted": cred_count,
+    }

@@ -246,6 +246,14 @@ def _migrate(engine: Engine) -> None:
             "ON api_credential (collection_id)"
         ))
         conn.commit()
+    # Slice 4 — readiness assessment columns (idempotent via _ensure_column)
+    _ensure_column(engine, "api_collection", "auth_summary_json", "TEXT")
+    _ensure_column(engine, "api_collection", "readiness_json", "TEXT")
+    _ensure_column(engine, "api_endpoint", "prereq_can_test", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "api_endpoint", "prereq_can_test_auth", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "api_endpoint", "prereq_notes", "TEXT NOT NULL DEFAULT '[]'")
+    # login-flow credential support
+    _ensure_column(engine, "api_credential", "auth_endpoint", "TEXT")
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
