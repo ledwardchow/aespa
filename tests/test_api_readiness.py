@@ -254,8 +254,9 @@ def test_prereq_columns_on_endpoints_updated_after_assessment(client, monkeypatc
     _mock_assess(monkeypatch, CANNED_NO_CREDS)
     cid = _make_collection(client)
 
-    # Upload and parse the OpenAPI spec using the real parser (no LLM involved for OpenAPI)
-    _upload(client, cid, "api.yaml", OPENAPI_WITH_AUTH, "application/yaml")
+    # Upload the OpenAPI spec, then explicitly parse it (upload no longer auto-parses)
+    doc = _upload(client, cid, "api.yaml", OPENAPI_WITH_AUTH, "application/yaml")
+    client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
 
     # Run readiness
     client.post(f"/api/api-collections/{cid}/readiness")
@@ -284,7 +285,8 @@ def test_prereq_columns_green_with_credentials(client, monkeypatch):
     """With credentials present, all endpoints should show can_test_auth=True."""
     _mock_assess(monkeypatch, CANNED_READY)
     cid = _make_collection(client)
-    _upload(client, cid, "api.yaml", OPENAPI_WITH_AUTH, "application/yaml")
+    doc = _upload(client, cid, "api.yaml", OPENAPI_WITH_AUTH, "application/yaml")
+    client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
 
     # Add a bearer credential
     cr = client.post(f"/api/api-collections/{cid}/credentials", json={
