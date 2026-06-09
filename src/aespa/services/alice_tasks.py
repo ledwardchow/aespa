@@ -28,6 +28,7 @@ class AliceTask:
     tab_id: str
     think_msg_id: str
     reply_msg_id: str
+    run_type: str = "site"           # "site" | "api"
     # All SSE events produced so far (for replay on reconnect).
     events: list[dict] = field(default_factory=list)
     # One asyncio.Queue per connected SSE client.
@@ -71,6 +72,7 @@ async def start(
     reply_msg_id: str,
     message: str,
     history: list[dict],
+    run_type: str = "site",
 ) -> AliceTask:
     """Start a new ALICE background task, cancelling any existing one first."""
     existing = _registry.get(run_id)
@@ -86,6 +88,7 @@ async def start(
         tab_id=tab_id,
         think_msg_id=think_msg_id,
         reply_msg_id=reply_msg_id,
+        run_type=run_type,
     )
     _registry[run_id] = task
     task.asyncio_task = asyncio.create_task(
@@ -144,13 +147,22 @@ def _append(task: AliceTask, event: dict) -> None:
     t = event.get("type")
     if t == "thinking_chunk" and event.get("delta"):
         task.accumulated_thought += event["delta"]
+        # Inject routing context so reconnecting clients can match the right message.
+        event = {**event, "tab_id": task.tab_id, "msg_id": task.think_msg_id}
     elif t == "message_chunk" and event.get("delta"):
         task.accumulated_message += event["delta"]
+        event = {**event, "tab_id": task.tab_id, "msg_id": task.reply_msg_id}
     elif t == "done":
         if event.get("thought"):
             task.accumulated_thought = event["thought"]
         if event.get("message"):
             task.accumulated_message = event["message"]
+        event = {
+            **event,
+            "tab_id": task.tab_id,
+            "think_msg_id": task.think_msg_id,
+            "reply_msg_id": task.reply_msg_id,
+        }
 
     if len(task.events) >= BUFFER_LIMIT:
         task.events = task.events[-(BUFFER_LIMIT - 1):]
@@ -163,8 +175,14 @@ def _append(task: AliceTask, event: dict) -> None:
 async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     from aespa.services import alice as alice_svc
 
+    # Choose the right streaming function based on whether this is an API run.
+    if task.run_type == "api":
+        stream_fn = alice_svc.run_api_alice_turn_stream
+    else:
+        stream_fn = alice_svc.run_alice_turn_stream
+
     try:
-        async for sse_line in alice_svc.run_alice_turn_stream(task.run_id, message, history):
+        async for sse_line in stream_fn(task.run_id, message, history):
             if sse_line.startswith("data: "):
                 try:
                     _append(task, json.loads(sse_line[6:].strip()))

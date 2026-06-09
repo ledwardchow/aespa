@@ -272,6 +272,16 @@ a:hover { color: var(--accent-hover); }
   overflow-y: auto;
   overflow-x: hidden;
 }
+.content.scroll-content.no-padding {
+  padding: 0;
+}
+/* Tab content that manages its own internal scroll (e.g. Status sub-tabs) */
+.content.flex-fill-noscroll {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 
 /* ── Buttons ────────────────────────────────────────────────── */
 
@@ -351,10 +361,15 @@ th, td {
   text-align: left;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
-  /* wrap text instead of compressing sibling columns */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* In fixed-layout tables let cells wrap so summaries / paths aren't truncated */
+table[style*="table-layout:fixed"] td,
+table[style*="table-layout: fixed"] td {
+  white-space: normal;
+  word-break: break-word;
 }
 /* Let action/button cells in the last column size to content */
 th:last-child, td:last-child { white-space: normal; overflow: visible; width: auto; }
@@ -365,7 +380,25 @@ th {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  /* resizable columns */
+  resize: horizontal;
+  overflow: hidden;
+  position: relative;
 }
+/* visual drag affordance on the right edge of each header */
+th::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 20%;
+  height: 60%;
+  width: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+th:hover::after { opacity: 1; }
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: rgba(255,255,255,0.02); }
 
@@ -1003,12 +1036,12 @@ legend {
 .traffic-row:hover { background:var(--hover); }
 .traffic-row.selected { background:rgba(99,102,241,0.1); }
 .traffic-row td { padding:5px 10px; border-bottom:1px solid var(--border-subtle,var(--border)); white-space:nowrap; vertical-align:middle; }
-.tr-num { color:var(--muted); font-size:11px; text-align:right; width:42px; }
-.tr-ts  { color:var(--muted); font-size:11px; font-family:monospace; width:90px; }
+.tr-num { color:var(--muted); font-size:11px; text-align:right; width:30px; }
+.tr-ts  { color:var(--muted); font-size:11px; font-family:monospace; width:88px; }
 .tr-user   { font-size:11px; color:var(--text-2); max-width:90px; overflow:hidden; text-overflow:ellipsis; }
-.tr-method { font-weight:700; font-family:monospace; font-size:11px; width:60px; }
+.tr-method { font-weight:700; font-family:monospace; font-size:11px; width:62px; }
 .tr-url { font-family:monospace; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.tr-dur { color:var(--muted); font-size:11px; text-align:right; width:70px; }
+.tr-dur { color:var(--muted); font-size:11px; text-align:right; width:66px; }
 .status-pill { display:inline-block; padding:1px 7px; border-radius:8px; font-size:11px; font-weight:700; font-family:monospace; }
 .tr-2xx { background:rgba(52,211,153,0.15); color:#34d399; }
 .tr-3xx { background:rgba(59,130,246,0.15); color:#60a5fa; }
@@ -1530,6 +1563,7 @@ legend {
 
 /* ── Target intelligence tab ─────────────────────────────────────────────── */
 .intel-panel { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; margin:0 -28px; }
+.no-padding .intel-panel { margin:0; }
 .intel-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 16px; border-bottom:1px solid var(--border); background:var(--panel); }
 .intel-title { display:flex; flex-direction:column; gap:2px; font-weight:700; color:var(--text); }
 .intel-filter { display:flex; align-items:center; gap:8px; }
@@ -2360,3 +2394,64 @@ legend {
 }
 
 
+
+/* ── Slice 7: Coverage matrix ─────────────────────────────────────────────── */
+
+/* Method badge */
+.method-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--mono-font, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.method-get    { background: #1e3a5f; color: #60a5fa; }
+.method-post   { background: #1e3d2a; color: #4ade80; }
+.method-put    { background: #3d2a1e; color: #fb923c; }
+.method-patch  { background: #3d1e3d; color: #e879f9; }
+.method-delete { background: #3d1e1e; color: #f87171; }
+.method-head   { background: #1e3d3d; color: #22d3ee; }
+.method-options{ background: #2a1e3d; color: #a78bfa; }
+
+/* Coverage matrix */
+.coverage-matrix {
+  width: 100%;
+  border-collapse: collapse;
+}
+.coverage-matrix th,
+.coverage-matrix td {
+  border: 1px solid var(--border);
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+.coverage-matrix thead th {
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* Coverage cell pill */
+.cov-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  transition: transform 0.1s;
+}
+.cov-cell:hover { transform: scale(1.15); }
+.cov-cell.selected { outline: 2px solid var(--accent); }
+.cov-not-started  { background: var(--surface);          color: var(--muted);          border: 1px solid var(--border); }
+.cov-in-progress  { background: #1e3a5f;                 color: #60a5fa; }
+.cov-covered      { background: #1e3d2a;                 color: #4ade80; }
+.cov-finding      { background: #3d1e1e;                 color: #f87171; }
+.cov-skipped      { background: var(--surface);          color: var(--muted);          text-decoration: line-through; }
+.cov-na           { background: transparent;             color: var(--muted); }
+.cov-cell.has-findings { box-shadow: 0 0 0 1px #f87171; }

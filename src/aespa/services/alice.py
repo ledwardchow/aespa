@@ -18,7 +18,7 @@ from aespa.services.settings import (
     get_llm_config_for_run,
     get_scanner_policy,
 )
-from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT
+from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT, ALICE_API_SYSTEM_PROMPT
 from aespa.services.prompts.specialist import get_specialist_tools, SPECIALIST_AGENT_TOOLS
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,8 @@ async def _execute_alice_tool(
     tool_input: dict,
     step: int,
     session_vault: dict[str, dict] | None = None,
+    scope_check_fn=None,    # Optional override: scope_check_fn(url) -> str | None
+    context_tool_fn=None,   # Optional override: context_tool_fn(tool_name, args) -> dict
 ) -> str:
     """Execute a single ALICE tool call and return the result string."""
     session_vault = session_vault or {}
@@ -103,7 +105,7 @@ async def _execute_alice_tool(
         from aespa.services import traffic as traffic_svc
 
         _url = str(tool_input.get("url") or base_url)
-        scope_err = check_scope(_url, site_id, run_id)
+        scope_err = scope_check_fn(_url) if scope_check_fn else check_scope(_url, site_id, run_id)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -153,26 +155,27 @@ async def _execute_alice_tool(
 
     # ── context_tool ─────────────────────────────────────────────────────────
     if tool_name == "context_tool":
-        from aespa.services.scanner import (
-            _load_findings_snapshot,
-            _run_thinking_context_tool,
-        )
-
         ctx_tool = str(tool_input.get("tool") or "")
         ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
         try:
-            with Session(get_engine()) as s:
-                pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
-                pages_snapshot = [p.model_dump() for p in pages]
-
-            output = _run_thinking_context_tool(
-                ctx_tool, ctx_args,
-                pages_snapshot=pages_snapshot,
-                findings_snapshot=_load_findings_snapshot(run_id),
-                history=[],
-                run_id=run_id,
-                base_url=base_url,
-            )
+            if context_tool_fn is not None:
+                output = context_tool_fn(ctx_tool, ctx_args)
+            else:
+                from aespa.services.scanner import (
+                    _load_findings_snapshot,
+                    _run_thinking_context_tool,
+                )
+                with Session(get_engine()) as s:
+                    pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+                    pages_snapshot = [p.model_dump() for p in pages]
+                output = _run_thinking_context_tool(
+                    ctx_tool, ctx_args,
+                    pages_snapshot=pages_snapshot,
+                    findings_snapshot=_load_findings_snapshot(run_id),
+                    history=[],
+                    run_id=run_id,
+                    base_url=base_url,
+                )
             result = json.dumps(output, separators=(",", ":"), default=str)
             return result[:8192]
         except Exception as exc:
@@ -386,7 +389,7 @@ async def _execute_alice_tool(
         import secrets as _secrets
 
         reg_url = str(tool_input.get("url") or base_url)
-        scope_err = check_scope(reg_url, site_id, run_id)
+        scope_err = scope_check_fn(reg_url) if scope_check_fn else check_scope(reg_url, site_id, run_id)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -481,7 +484,7 @@ async def _execute_alice_tool(
 
         url = str(tool_input.get("url") or base_url)
 
-        scope_err = check_scope(url, site_id, run_id)
+        scope_err = scope_check_fn(url) if scope_check_fn else check_scope(url, site_id, run_id)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -864,3 +867,528 @@ async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]
         "message": message or "I have completed the assessment step.",
         "status": status,
     }
+
+
+# ── API-collection ALICE helpers ──────────────────────────────────────────────
+
+def _check_api_scope(url: str, collection) -> str | None:
+    """Host-level scope check for API collections (no DB read needed).
+
+    Derives allowed hosts from the collection's ``base_url`` and ``servers``
+    list.  Returns a rejection message or ``None`` if the URL is in scope.
+    """
+    from urllib.parse import urlparse as _up
+    import json as _json
+
+    parsed = _up(url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return None
+
+    # Explicit scope_hosts list takes precedence when configured.
+    explicit: list[str] = _json.loads(collection.scope_hosts or "[]")
+    if explicit:
+        if hostname not in explicit:
+            allowed = ", ".join(explicit)
+            return (
+                f"Host '{hostname}' is outside the API collection scope "
+                f"(allowed: {allowed})."
+            )
+        return None
+
+    # Fall back to base_url host + any additional servers.
+    base_host = (_up(collection.base_url).hostname or "").lower()
+    server_hosts = [
+        (_up(s).hostname or "").lower()
+        for s in _json.loads(collection.servers or "[]")
+        if s
+    ]
+    allowed_hosts = {h for h in [base_host, *server_hosts] if h}
+    if allowed_hosts and hostname not in allowed_hosts:
+        return (
+            f"Host '{hostname}' is outside the API collection scope "
+            f"(allowed: {', '.join(sorted(allowed_hosts))})."
+        )
+    return None
+
+
+def _run_api_context_tool(
+    collection_id: int,
+    run_id: int,
+    tool_name: str,
+    args: dict,
+) -> dict:
+    """Handle context_tool calls for API test runs.
+
+    Exposes ``endpoint_list``, ``endpoint_detail``, ``collection_info``, and
+    ``finding_list`` instead of the crawl-oriented site_map / page_detail tools.
+    """
+    from aespa.models import ApiCollection, ApiCredential, ApiEndpoint
+    from sqlmodel import select as _sel
+
+    tool_name = (tool_name or "").strip()
+    try:
+        limit = max(1, min(200, int(args.get("limit") or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+    search = str(args.get("search") or "").lower()
+
+    # ── endpoint_list ─────────────────────────────────────────────────────────
+    if tool_name == "endpoint_list":
+        method_filter = str(args.get("method") or "").upper()
+        auth_filter = args.get("auth_required")
+        scope_filter = args.get("in_scope")
+
+        with Session(get_engine()) as s:
+            query = _sel(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
+            if method_filter:
+                query = query.where(ApiEndpoint.method == method_filter)
+            if auth_filter is not None:
+                query = query.where(ApiEndpoint.auth_required == bool(auth_filter))
+            if scope_filter is not False:
+                query = query.where(ApiEndpoint.in_scope == True)  # noqa: E712
+            endpoints = list(s.exec(
+                query.order_by(ApiEndpoint.path, ApiEndpoint.method)
+            ).all())
+
+        matches = []
+        for ep in endpoints:
+            if search:
+                haystack = f"{ep.method} {ep.path} {ep.summary or ''} {ep.operation_id or ''}".lower()
+                if search not in haystack:
+                    continue
+            try:
+                tags = json.loads(ep.tags_json or "[]")
+            except Exception:
+                tags = []
+            matches.append({
+                "id": ep.id,
+                "method": ep.method,
+                "path": ep.path,
+                "base_url": ep.base_url,
+                "operation_id": ep.operation_id,
+                "summary": ep.summary,
+                "auth_required": ep.auth_required,
+                "tags": tags,
+                "can_test": ep.prereq_can_test,
+                "can_test_auth": ep.prereq_can_test_auth,
+            })
+
+        return {
+            "tool": "endpoint_list",
+            "count": len(matches),
+            "endpoints": matches[:limit],
+            "truncated": len(matches) > limit,
+        }
+
+    # ── endpoint_detail ───────────────────────────────────────────────────────
+    if tool_name == "endpoint_detail":
+        ep_id = args.get("endpoint_id")
+        method = str(args.get("method") or "").upper()
+        path = str(args.get("path") or "")
+
+        with Session(get_engine()) as s:
+            ep = None
+            if ep_id is not None:
+                ep = s.get(ApiEndpoint, int(ep_id))
+                if ep and ep.collection_id != collection_id:
+                    ep = None
+            if ep is None and method and path:
+                ep = s.exec(
+                    _sel(ApiEndpoint)
+                    .where(ApiEndpoint.collection_id == collection_id)
+                    .where(ApiEndpoint.method == method)
+                    .where(ApiEndpoint.path == path)
+                ).first()
+
+        if ep is None:
+            return {
+                "tool": "endpoint_detail",
+                "error": "endpoint not found",
+                "hint": "Call endpoint_list first to get valid endpoint_id values.",
+            }
+
+        def _safe_json(val: str, default):
+            try:
+                return json.loads(val) if val else default
+            except Exception:
+                return default
+
+        return {
+            "tool": "endpoint_detail",
+            "id": ep.id,
+            "method": ep.method,
+            "path": ep.path,
+            "base_url": ep.base_url,
+            "operation_id": ep.operation_id,
+            "summary": ep.summary,
+            "auth_required": ep.auth_required,
+            "tags": _safe_json(ep.tags_json, []),
+            "parameters": _safe_json(ep.parameters_json, []),
+            "request_body_schema": _safe_json(ep.request_body_schema_json, {}),
+            "response_schema": _safe_json(ep.response_schema_json, {}),
+            "security": _safe_json(ep.security_json, []),
+            "sample_request": _safe_json(ep.sample_request_json, {}),
+            "prereq_notes": _safe_json(ep.prereq_notes, []),
+            "can_test": ep.prereq_can_test,
+            "can_test_auth": ep.prereq_can_test_auth,
+        }
+
+    # ── collection_info ───────────────────────────────────────────────────────
+    if tool_name == "collection_info":
+        with Session(get_engine()) as s:
+            coll = s.get(ApiCollection, collection_id)
+            if coll is None:
+                return {"tool": "collection_info", "error": "collection not found"}
+            creds = list(s.exec(
+                _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
+            ).all())
+
+        def _safe_json(val, default):
+            try:
+                return json.loads(val) if val else default
+            except Exception:
+                return default
+
+        return {
+            "tool": "collection_info",
+            "name": coll.name,
+            "base_url": coll.base_url,
+            "description": coll.description,
+            "servers": _safe_json(coll.servers, []),
+            "scope_hosts": _safe_json(coll.scope_hosts, []),
+            "auth_summary": _safe_json(coll.auth_summary_json, {}),
+            "readiness": _safe_json(coll.readiness_json, {}),
+            "credentials": [
+                {
+                    "label": c.label or c.scheme,
+                    "scheme": c.scheme,
+                    "name": c.name,
+                    "scope": c.scope,
+                    "auth_endpoint": c.auth_endpoint,
+                }
+                for c in creds
+            ],
+        }
+
+    # ── finding_list ──────────────────────────────────────────────────────────
+    if tool_name == "finding_list":
+        from aespa.services.scanner import _load_findings_snapshot
+        findings = _load_findings_snapshot(run_id)
+        severity = str(args.get("severity") or "").lower()
+        matches = []
+        for f in findings:
+            if severity and str(f.get("severity") or "").lower() != severity:
+                continue
+            if search:
+                haystack = json.dumps(f, default=str).lower()
+                if search not in haystack:
+                    continue
+            matches.append(f)
+        return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
+
+    # ── report_finding ────────────────────────────────────────────────────────
+    if tool_name == "report_finding":
+        from aespa.models import ScanFinding as _SF
+        from aespa.db import get_engine as _ge
+        from sqlmodel import Session as _Session
+        from datetime import datetime, timezone as _tz
+
+        severity = str(args.get("severity") or "info").lower()
+        if severity not in ("critical", "high", "medium", "low", "info"):
+            severity = "info"
+
+        owasp = str(args.get("owasp_category") or args.get("owasp_api_category") or "").strip()
+
+        finding = _SF(
+            test_run_id=run_id,
+            api_test_run_id=run_id,
+            page_id=None,
+            owasp_category=owasp or "A00",
+            owasp_api_category=owasp or None,
+            severity=severity,
+            title=str(args.get("title") or "Untitled Finding"),
+            description=str(args.get("description") or ""),
+            impact=str(args.get("impact") or ""),
+            likelihood=str(args.get("likelihood") or ""),
+            recommendation=str(args.get("recommendation") or ""),
+            affected_url=str(args.get("affected_url") or ""),
+            evidence=str(args.get("evidence") or ""),
+            request_evidence=str(args.get("request_evidence") or ""),
+            response_evidence=str(args.get("response_evidence") or ""),
+            finding_source="alice_api",
+            validation_status="unvalidated",
+        )
+        with _Session(_ge()) as s:
+            s.add(finding)
+            s.commit()
+            s.refresh(finding)
+        return {
+            "tool": "report_finding",
+            "ok": True,
+            "finding_id": finding.id,
+            "title": finding.title,
+            "severity": finding.severity,
+        }
+
+    return {
+        "tool": tool_name,
+        "error": "unknown tool",
+        "available_tools": ["endpoint_list", "endpoint_detail", "collection_info", "finding_list", "report_finding"],
+    }
+
+
+async def run_api_alice_turn_stream(
+    api_run_id: int,
+    user_instruction: str,
+    history: list[dict],
+) -> AsyncGenerator[str, None]:
+    """Execute an interactive API security testing turn for A.L.I.C.E.
+
+    Mirrors ``run_alice_turn_stream`` but operates against an ``ApiTestRun`` /
+    ``ApiCollection`` instead of a ``TestRun`` / ``Site``.  The context_tool
+    exposes the parsed endpoint inventory rather than crawled pages.
+    """
+    log.info("ALICE API turn started for api_run_id=%s instruction=%r", api_run_id, user_instruction)
+
+    from aespa.models import ApiCollection, ApiTestRun
+    from aespa.services.settings import get_llm_config_for_run
+
+    with Session(get_engine()) as s:
+        api_run = s.get(ApiTestRun, api_run_id)
+        if api_run is None:
+            raise ValueError(f"ApiTestRun {api_run_id} not found")
+        collection = s.get(ApiCollection, api_run.collection_id)
+        if collection is None:
+            raise ValueError(f"ApiCollection {api_run.collection_id} not found")
+        llm_cfg = get_llm_config_for_run(s, api_run)  # type: ignore[arg-type]
+        if llm_cfg is None:
+            raise RuntimeError("No LLM configuration configured in Settings.")
+        collection_name = collection.name
+        base_url = str(collection.base_url or "").strip()
+        # Capture a snapshot so the closure below is not DB-session-bound.
+        collection_id = collection.id
+        collection_scope_hosts = collection.scope_hosts
+        collection_servers = collection.servers
+
+    # Load stored API credentials into the session vault so http_request
+    # can carry authentication automatically.
+    from aespa.models import ApiCredential
+    from sqlmodel import select as _sel
+    session_vault: dict[str, dict] = {}
+    with Session(get_engine()) as s:
+        creds = list(s.exec(
+            _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
+        ).all())
+    for cred in creds:
+        label = cred.label or cred.scheme
+        entry: dict = {"label": label, "kind": cred.scheme, "cookies": {}, "extra_headers": {}}
+        if cred.scheme in ("bearer", "apikey"):
+            entry["extra_headers"] = {cred.name: f"Bearer {cred.value}" if cred.scheme == "bearer" else cred.value}
+        elif cred.scheme == "header":
+            entry["extra_headers"] = {cred.name: cred.value}
+        elif cred.scheme == "cookie":
+            entry["cookies"] = {cred.name: cred.value}
+        elif cred.scheme == "basic":
+            import base64 as _b64
+            encoded = _b64.b64encode(cred.value.encode()).decode()
+            entry["extra_headers"] = {"Authorization": f"Basic {encoded}"}
+        session_vault[label] = entry
+        # Mark the first credential as the default primary session.
+        if "configured_primary" not in session_vault:
+            session_vault["configured_primary"] = entry
+
+    llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
+
+    # Scope-check closure uses a minimal copy of collection data (no DB session).
+    import json as _json
+
+    class _CollProxy:
+        def __init__(self):
+            self.base_url = base_url
+            self.servers = collection_servers
+            self.scope_hosts = collection_scope_hosts
+
+    _coll_proxy = _CollProxy()
+    _scope_fn = lambda url: _check_api_scope(url, _coll_proxy)  # noqa: E731
+    _ctx_fn = lambda tool_name, args: _run_api_context_tool(collection_id, api_run_id, tool_name, args)  # noqa: E731
+
+    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. API Mode] Loading API collection endpoint inventory...\n'})}\n\n"
+    await asyncio.sleep(0.01)
+
+    # Build the system prompt.
+    system_message = ALICE_API_SYSTEM_PROMPT.format(
+        collection_name=collection_name,
+        base_url=base_url,
+        user_directive=user_instruction,
+    )
+
+    # Convert history to Anthropic-format messages.
+    messages: list[dict] = []
+    for h in history:
+        sender = h.get("sender")
+        text = h.get("text", "")
+        if sender and text:
+            role = "user" if sender == "user" else "assistant"
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": user_instruction})
+
+    alice_tools = _get_alice_tools()
+    accumulated_thought = ""
+    accumulated_message = ""
+    step_count = 0
+    consecutive_text_only = 0
+
+    try:
+        while step_count < ALICE_MAX_STEPS:
+            step_count += 1
+
+            yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Calling LLM...\n'})}\n\n"
+            try:
+                yield f"data: {json.dumps({'type': 'step_llm_call', 'step': step_count, 'messages': _build_step_messages(messages)})}\n\n"
+            except Exception:
+                pass
+
+            try:
+                content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
+                    llm_cfg, system_message, messages, tools=alice_tools
+                )
+            except Exception as exc:
+                log.exception("ALICE API loop: LLM call failed at step %d", step_count)
+                err = f"LLM error at step {step_count}: {exc}"
+                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\n\n⚠️ {err}'})}\n\n"
+                break
+
+            messages.append({"role": "assistant", "content": raw_content})
+
+            tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+            text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
+            thinking_blocks = [b for b in content_blocks if b.get("type") == "thinking" and b.get("thinking")]
+
+            for tb in thinking_blocks:
+                think_text = tb.get("thinking") or ""
+                if think_text:
+                    accumulated_thought += think_text
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
+                    await asyncio.sleep(0)
+
+            import re as _re
+            for tb in text_blocks:
+                text_content = tb.get("text") or ""
+                if not text_content:
+                    continue
+                think_match = _re.search(r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL)
+                if think_match:
+                    think_part = think_match.group(1).strip()
+                    outer_text = _re.sub(r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL).strip()
+                    if think_part:
+                        accumulated_thought += think_part
+                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
+                    if outer_text:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                        accumulated_message += outer_text
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
+                else:
+                    if accumulated_message and not accumulated_message.endswith("\n"):
+                        accumulated_message += "\n\n"
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                    accumulated_message += text_content
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                await asyncio.sleep(0)
+
+            if not tool_use_blocks:
+                consecutive_text_only += 1
+                if consecutive_text_only >= 3:
+                    log.warning("ALICE API: %d consecutive text-only turns; ending loop", consecutive_text_only)
+                    break
+                messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Your previous response did not call a tool. "
+                            "Please continue by calling exactly one tool now — "
+                            "http_request, context_tool, write_finding, forge_jwt, "
+                            "decode_jwt, credential_check, register_account, agent_dispatch, or done."
+                        ),
+                    }],
+                })
+                continue
+
+            consecutive_text_only = 0
+            tool_results = []
+            session_done = False
+
+            for block in tool_use_blocks:
+                tool_name = block.get("name") or ""
+                tool_input = block.get("input") or {}
+                tool_use_id = block.get("id") or ""
+
+                if tool_name == "done":
+                    summary = str(tool_input.get("summary") or "Assessment complete.")
+                    log.info("ALICE API done at step %d: %s", step_count, summary[:200])
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "Assessment complete.",
+                    })
+                    session_done = True
+                    break
+
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Executing tool: {tool_name}\n'})}\n\n"
+                try:
+                    tool_input_safe = json.loads(json.dumps(tool_input, default=str))
+                    yield f"data: {json.dumps({'type': 'step_tool_call', 'step': step_count, 'tool': tool_name, 'input': tool_input_safe})}\n\n"
+                except Exception:
+                    pass
+
+                try:
+                    result_str = await _execute_alice_tool(
+                        run_id=api_run_id,
+                        llm_cfg=llm_cfg,
+                        base_url=base_url,
+                        site_id=-1,             # unused — scope_check_fn overrides
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        step=step_count,
+                        session_vault=session_vault,
+                        scope_check_fn=_scope_fn,
+                        context_tool_fn=_ctx_fn,
+                    )
+                except Exception as exc:
+                    log.warning("ALICE API tool %r step %d failed: %s", tool_name, step_count, exc)
+                    result_str = f"Tool execution error: {exc}"
+
+                if len(result_str) > 16000:
+                    omitted = len(result_str) - 16000
+                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+
+                yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
+                try:
+                    result_preview = result_str[:3000] + (f"\n…[{len(result_str) - 3000} more chars]" if len(result_str) > 3000 else "")
+                    yield f"data: {json.dumps({'type': 'step_tool_result', 'step': step_count, 'tool': tool_name, 'result': result_preview})}\n\n"
+                except Exception:
+                    pass
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": result_str,
+                })
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+
+            if session_done:
+                break
+
+    except Exception as exc:
+        log.exception("ALICE API agentic loop failed")
+        err_msg = f"I encountered an error in the agentic loop: {exc}"
+        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
+        accumulated_message += err_msg
+
+    yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
+    llm_svc.clear_run_context()
