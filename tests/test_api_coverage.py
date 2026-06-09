@@ -222,6 +222,21 @@ def test_update_cell_updates_status(db_engine, db_session, collection, endpoint_
     assert cell.status == "covered"
 
 
+def test_update_cell_no_downgrade(db_engine, db_session, collection, endpoint_simple, api_run):
+    """A higher-ranked status must not be overwritten by a lower-ranked one."""
+    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "finding", finding_id=1)
+    # Attempt to downgrade back to in_progress — should be silently ignored.
+    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "in_progress")
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(ApiEndpointTest)
+        .where(ApiEndpointTest.api_test_run_id == api_run.id)
+        .where(ApiEndpointTest.endpoint_id == endpoint_simple.id)
+        .where(ApiEndpointTest.owasp_api_category == "API2")
+    ).first()
+    assert cell.status == "finding"  # still finding, not downgraded
+
+
 # ── 5. update_coverage_cell appends finding_id ────────────────────────────────
 
 def test_update_cell_appends_finding(db_engine, db_session, collection, endpoint_simple, api_run):
@@ -253,14 +268,21 @@ def test_update_cell_appends_finding(db_engine, db_session, collection, endpoint
 
 def test_mark_all_cells_covered(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
     seed_coverage_matrix(api_run.id)
-    # Manually set one cell to finding, one to skipped
     cells = db_session.exec(
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run.id)
     ).all()
+
+    # Flip some cells to in_progress (simulating traffic hits), one to finding, one to skipped.
+    finding_id = cells[0].id
+    skipped_id = cells[1].id
+    in_progress_ids = {c.id for c in cells[2:]}
+
     cells[0].status = "finding"
     cells[1].status = "skipped"
-    db_session.add(cells[0])
-    db_session.add(cells[1])
+    for c in cells[2:]:
+        c.status = "in_progress"
+    for c in cells:
+        db_session.add(c)
     db_session.commit()
 
     mark_all_cells_covered(api_run.id)
@@ -270,11 +292,25 @@ def test_mark_all_cells_covered(db_engine, db_session, collection, endpoint_simp
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run.id)
     ).all()
     for c in updated:
-        if c.id in (cells[0].id, cells[1].id):
-            # These should be unchanged
-            assert c.status in ("finding", "skipped")
+        if c.id == finding_id:
+            assert c.status == "finding"       # not downgraded
+        elif c.id == skipped_id:
+            assert c.status == "skipped"       # not downgraded
         else:
-            assert c.status == "covered"
+            assert c.status == "covered"       # in_progress → covered
+
+
+def test_mark_cells_covered_leaves_not_started(db_engine, db_session, collection, endpoint_simple, api_run):
+    """not_started cells (never hit by the scanner) must NOT become covered."""
+    seed_coverage_matrix(api_run.id)
+    mark_all_cells_covered(api_run.id)
+    db_session.expire_all()
+
+    cells = db_session.exec(
+        select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run.id)
+    ).all()
+    # All cells started as not_started and were never touched → should remain not_started.
+    assert all(c.status == "not_started" for c in cells)
 
 
 # ── 7. GET /coverage returns matrix shape ─────────────────────────────────────
