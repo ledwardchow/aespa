@@ -5102,6 +5102,7 @@ async def _do_agentic_thinking_loop(
     system_message_override: str | None = None,
     context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
     post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
+    post_probe_fn=None,     # callable(url, method, owasp_category) -> None; called after every http_request
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -6257,6 +6258,14 @@ async def _do_agentic_thinking_loop(
         })
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status)
+        # Notify coverage tracker with the declared OWASP category (API runs only).
+        if post_probe_fn is not None:
+            _hr_owasp = str(tool_input.get("owasp_category") or "").strip()
+            if _hr_owasp:
+                try:
+                    post_probe_fn(hr_url, hr_method, _hr_owasp)
+                except Exception as _pp_exc:
+                    log.debug("post_probe_fn error: %s", _pp_exc)
         # Evict expired/invalid named sessions from the vault on 401/403
         _hr_session_evicted = False
         if hr_resp_status in (401, 403) and hr_use_session and hr_use_session in session_vault:
