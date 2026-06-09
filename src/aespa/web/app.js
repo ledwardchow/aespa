@@ -47,10 +47,13 @@ const api = {
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
   startApiScan:        (id)       => req(`/api/api-test-runs/${id}/scan/start`,    { method:"POST" }),
   stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
   getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
+  clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
@@ -2350,7 +2353,7 @@ function ApiTestRunForm({ collectionId }) {
 // ── API test run detail ────────────────────────────────────────────────────────
 
 const API_RUN_TABS = [
-  { key: "agents",   label: "Agents" },
+  { key: "status",   label: "Status" },
   { key: "findings", label: "Findings" },
   { key: "sessions", label: "Sessions" },
   { key: "traffic",  label: "Traffic Log" },
@@ -2478,8 +2481,8 @@ function ApiTestRunDetail({ runId, initialTab }) {
     </div>
     <div className="content scroll-content no-padding">
       ${error && html`<div className="alert error">${error}</div>`}
-      ${tab==="agents"   && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="status"   && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
       ${tab==="sessions" && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="traffic"  && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
     </div>
@@ -2511,11 +2514,13 @@ function ApiRunSessionsTab({ runId, scanRunning }) {
 
 // ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
 
-function ApiRunFindingsTab({ runId, scanRunning }) {
+function ApiRunFindingsTab({ runId, scanRunning, run }) {
   const [findings, setFindings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
+  const [clearBusy, setClearBusy] = useState(false);
+  const issueImportInputRef = useRef(null);
 
   const load = async () => {
     try {
@@ -2542,18 +2547,59 @@ function ApiRunFindingsTab({ runId, scanRunning }) {
     });
   };
 
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, null), md, "text/markdown;charset=utf-8");
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportFindingsClick = () => { issueImportInputRef.current?.click(); };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importApiFindings(runId, imported);
+      setFindings(await api.getApiFindings(runId));
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onClearFindings = async () => {
+    if (!confirm("Clear all findings for this API test run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiFindings(runId); setFindings([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
   const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
 
   if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
-  if (error)   return html`<div className="alert error">${error}</div>`;
 
   return html`
     <div style=${{padding:"16px 24px"}}>
-      <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
-        <h3 style=${{margin:0}}>Security Findings</h3>
+      ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+      <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0,marginRight:4}}>Security Findings</h3>
         ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
         <span className="badge neutral" style=${{fontSize:12}}>${findings.length} finding${findings.length!==1?"s":""}</span>
+        <div style=${{flex:1}}></div>
         <button className="btn sm" onClick=${load}>Refresh</button>
+        ${findings.length>0 && html`<button className="btn sm" onClick=${onExportFindingsMarkdown}>Export Issues</button>`}
+        <button className="btn sm" onClick=${onImportFindingsClick}>Import Issues</button>
+        <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+          style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+        ${findings.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClearFindings}>${clearBusy?"Clearing…":"Clear all"}</button>`}
       </div>
       ${findings.length === 0
         ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
@@ -2711,6 +2757,84 @@ function _buildAgentsFromLog(rows) {
   }
   return [...map.values()];
 }
+
+// ── ApiRunStatusTab ────────────────────────────────────────────────────────────
+
+function ApiRunStatusTab({ runId, scanRunning }) {
+  const [subTab, setSubTab] = useState("agents");
+  return html`
+    <div>
+      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0"}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?" active":"")}
+          onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="log"?" active":"")}
+          onClick=${()=>setSubTab("log")}>Log</button>
+      </div>
+      ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+    </div>
+  `;
+}
+
+// ── ApiRunLogTab ───────────────────────────────────────────────────────────────
+
+function ApiRunLogTab({ runId, scanRunning }) {
+  const [log, setLog] = useState([]);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = () => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message));
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const onClear = async () => {
+    if (!confirm("Clear all agent log entries for this run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiAgentLog(runId); setLog([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"||s==="done"?"phase-ok":"phase-other";
+
+  return html`
+    <div className="activity-panel" style=${{margin:0}}>
+      <div className="activity-log-toolbar">
+        <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+        ${scanRunning && html`<span className="activity-mode-badge">Scan running</span>`}
+        <a className="btn ghost sm" href=${`/api/api-test-runs/${runId}/agent-log/export`} download>Export log ↓</a>
+        ${log.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClear}>${clearBusy?"Clearing…":"Clear"}</button>`}
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"0 16px 8px"}}>${error}</div>`}
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — agent activity will appear here.":"No agent log entries yet."}
+               </div>`
+        : html`<div className="activity-feed">
+          ${log.map(r => {
+            const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+            return html`
+              <div key=${r.id} className="activity-entry">
+                <span className="activity-ts">${ts}</span>
+                <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+              </div>`;
+          })}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunAgentsTab ────────────────────────────────────────────────────────────
 
 function ApiRunAgentsTab({ runId, scanRunning }) {
   // ── Agent list state ──────────────────────────────────────────────────────
@@ -3920,7 +4044,7 @@ function TestRunDetail({ runId, initialTab }) {
   const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -8374,7 +8498,9 @@ function findingsToMarkdown(findings, meta = {}) {
       "",
       `- Severity: ${markdownListValue(f.severity)}`,
       `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      ...(f.owasp_api_category ? [`- OWASP API: ${markdownListValue(f.owasp_api_category)}`] : []),
       `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
+
       `- Validation: ${markdownListValue(f.validation_status)}`,
       `- Affected URL: ${markdownListValue(f.affected_url)}`,
       `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
