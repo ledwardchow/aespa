@@ -422,6 +422,15 @@ def get_api_traffic_count(
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
 
 
+# ── Coverage matrix ────────────────────────────────────────────────────────────
+
+@router.get("/{run_id}/coverage")
+def get_api_coverage_matrix(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import api_scanner
+    return api_scanner.get_coverage_matrix(run_id)
+
+
 # ── Scanner sessions alias ─────────────────────────────────────────────────────
 
 import json as _json  # noqa: E402 — placed after other imports to avoid reorder

@@ -13,7 +13,7 @@ coverage per endpoint in a matrix.
 - [x] **Slice 4 — Readiness assessment + prerequisites display** ✅ DONE (2026-06-08)
 - [x] **Slice 5 — API test runs + Agents tab with A.L.I.C.E.** ✅ DONE (2026-06-08)
 - [x] **Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs** ✅ DONE (2026-06-09)
-- [ ] Slice 7 — Work Program coverage matrix (track mode) + live updates
+- [x] **Slice 7 — Work Program coverage matrix (track mode) + live updates** ✅ DONE (2026-06-09)
 - [ ] Slice 8 — Enforce coverage mode
 
 ## Decisions (from user)
@@ -347,6 +347,46 @@ Goal: user sees the per-endpoint × OWASP API category matrix fill in live durin
 - **Test point:** start a scan → open Work Program → watch cells move not_started → in_progress →
   covered/finding; click a finding cell.
 - **Automated:** coverage matrix endpoint shape test; matrix seeding/update unit test.
+
+**Implementation notes (as built):**
+- `models.py`: `ApiEndpointTest` table (`api_endpoint_test`) — id, api_test_run_id FK, endpoint_id
+  FK, owasp_api_category (API1–API10), status (not_started|in_progress|covered|skipped|finding),
+  skip_reason, finding_ids_json (JSON list of ScanFinding ids), last_updated.
+- `db.py::_migrate`: idempotent `CREATE TABLE IF NOT EXISTS api_endpoint_test` + two indices.
+- `schemas.py`: `ApiEndpointTestOut`, `ApiCoverageEndpointRow`, `ApiCoverageMatrixOut`.
+- `services/api_scanner.py` additions:
+  - `OWASP_API_CATEGORIES` + `OWASP_API_LABELS` constants.
+  - `_applicable_categories(endpoint)` — heuristic: API2/API4/API5/API8/API9/API10 always; API1
+    when path has `{param}`; API3 for PUT/PATCH; API6 for write methods; API7 when path/params
+    mention url/uri/redirect; deduplication preserving order.
+  - `seed_coverage_matrix(api_run_id)` — idempotent; seeds all in-scope endpoint × applicable
+    category cells as `not_started`.
+  - `update_coverage_cell(api_run_id, endpoint_id, category, status, finding_id=None)` — upsert;
+    appends finding_id to finding_ids_json; emits `coverage_update` SSE event for live UI.
+  - `mark_all_cells_covered(api_run_id)` — at scan completion, flips all `not_started`/
+    `in_progress` cells to `covered`.
+  - `get_coverage_matrix(api_run_id)` — returns full matrix dict for the coverage API route.
+  - `_match_endpoint_for_url(affected_url, endpoints, base_url)` — converts `{param}` template
+    segments to regex, returns longest-matching endpoint; used in post_finding_fn.
+  - `_make_post_finding_fn` updated to call `_match_endpoint_for_url` + `update_coverage_cell`
+    after stamping the finding, so cells flip to `finding` in real time.
+  - `start_api_scan` updated to call `seed_coverage_matrix` before launching the scan task.
+  - `_do_api_thinking_scan` updated to call `mark_all_cells_covered` at completion.
+- `api/api_test_runs.py`: `GET /{id}/coverage` → `api_scanner.get_coverage_matrix`.
+- `web/app.js`: `api.getApiCoverageMatrix(id)` client method; `API_RUN_TABS` extended with
+  `endpoints` and `workprogram` tabs; `ApiTestRunDetail` renders them.
+  - `ApiRunEndpointsTab` — table with per-endpoint method/path/auth/prereq_can_test/
+    prereq_can_test_auth indicators + gap notes list.
+  - `ApiRunWorkProgramTab` — matrix with endpoint rows × API1–API10 column cells; colored pills
+    (not_started=gray, in_progress=blue, covered=green, finding=red, skipped=strikethrough gray);
+    coverage% header; live SSE `coverage_update` event handler; click a `finding` cell to see
+    its finding IDs.  Polls every 5 s while scan is running.
+- `styles.css`: `.method-badge` + per-method colours; `.coverage-matrix` table layout;
+  `.cov-cell` pill variants per status; `.cov-cell.has-findings` red outline.
+- Tests: `tests/test_api_coverage.py` — 20 tests (seed/idempotency/update/mark-covered, route
+  shape, applicable-categories heuristics, URL matching, totals, post-finding cell update,
+  start-scan seeds matrix).  Full suite: **432 passed** (20 new, 0 regressions from 413 at end
+  of Slice 6 — one pre-existing Windows printf test remains failing as before).
 
 ---
 

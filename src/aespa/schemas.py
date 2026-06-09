@@ -243,6 +243,42 @@ class ApiTestRunSummary(BaseModel):
     updated_at: datetime
 
 
+# ── Slice 7 — Coverage matrix schemas ────────────────────────────────────────
+
+class ApiEndpointTestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    api_test_run_id: int
+    endpoint_id: int
+    owasp_api_category: str
+    status: str
+    skip_reason: str | None
+    finding_ids_json: str
+    last_updated: datetime
+
+
+class ApiCoverageEndpointRow(BaseModel):
+    """One endpoint row in the coverage matrix."""
+    endpoint_id: int
+    method: str
+    path: str
+    auth_required: bool
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str          # JSON list of gap strings
+    cells: dict[str, dict]     # owasp_api_category → {status, finding_ids}
+
+
+class ApiCoverageMatrixOut(BaseModel):
+    """Full coverage matrix for one ApiTestRun."""
+    run_id: int
+    coverage_mode: str
+    categories: list[str]      # ordered API1..API10
+    endpoints: list[ApiCoverageEndpointRow]
+    totals: dict[str, int]     # status → count across all cells
+
+
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderAPILiteral = Literal[
