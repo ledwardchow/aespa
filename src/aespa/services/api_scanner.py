@@ -151,7 +151,7 @@ def seed_coverage_matrix(api_run_id: int) -> int:
     Also populates the endpoint cache so the traffic hook can match URLs without extra
     DB round-trips.
     """
-    with Session(get_engine()) as s:
+    with Session(get_engine(), expire_on_commit=False) as s:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             return 0
