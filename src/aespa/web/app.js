@@ -1702,11 +1702,11 @@ function ApiCollectionDetail({ collectionId }) {
               </tr></thead>
               <tbody>${apiRuns.map(r=>html`
                 <tr key=${r.id}>
-                  <td><a href=${`#/api-runs/${r.id}/agents`} style=${{fontWeight:600}}>${r.name}</a></td>
+                  <td><a href=${`#/api-runs/${r.id}/status`} style=${{fontWeight:600}}>${r.name}</a></td>
                   <td><span className=${`badge ${r.status==="completed"?"success":r.status==="running"?"warning":r.status==="failed"?"danger":"neutral"}`}>${r.status}</span></td>
                   <td>${r.coverage_mode}</td>
                   <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(r.created_at).toLocaleString()}</td>
-                  <td><a href=${`#/api-runs/${r.id}/agents`} className="btn secondary sm">Open</a></td>
+                  <td><a href=${`#/api-runs/${r.id}/status`} className="btn secondary sm">Open</a></td>
                 </tr>`)}
               </tbody>
             </table>`}
@@ -1971,7 +1971,7 @@ function ActiveJobsPage() {
               return html`
               <tr key=${key}>
                 <td>
-                  <a href=${j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  <a href=${j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
                 </td>
                 <td>${j.run_type==="api"
@@ -1985,7 +1985,7 @@ function ActiveJobsPage() {
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
-                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`)}>Open</button>
                     <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
@@ -2310,7 +2310,7 @@ function ApiTestRunForm({ collectionId }) {
         coverage_mode: form.coverage_mode,
       };
       const run = await api.createApiRun(collectionId, payload);
-      nav(`#/api-runs/${run.id}/agents`);
+      nav(`#/api-runs/${run.id}/status`);
     } catch(e) { setError(e.message); setSaving(false); }
   };
 
