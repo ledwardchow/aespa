@@ -282,6 +282,29 @@ def _migrate(engine: Engine) -> None:
             "ON api_test_run (collection_id)"
         ))
         conn.commit()
+    # Slice 7 — api_endpoint_test (coverage matrix cells)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_endpoint_test (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_test_run_id INTEGER NOT NULL REFERENCES api_test_run(id),
+                endpoint_id INTEGER NOT NULL REFERENCES api_endpoint(id),
+                owasp_api_category TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'not_started',
+                skip_reason TEXT,
+                finding_ids_json TEXT NOT NULL DEFAULT '[]',
+                last_updated DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_test_run_id "
+            "ON api_endpoint_test (api_test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_test_endpoint_id "
+            "ON api_endpoint_test (endpoint_id)"
+        ))
+        conn.commit()
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""

@@ -47,12 +47,16 @@ const api = {
   startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
   startApiScan:        (id)       => req(`/api/api-test-runs/${id}/scan/start`,    { method:"POST" }),
   stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
   getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
+  clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
+  getApiCoverageMatrix:(id)       => req(`/api/api-test-runs/${id}/coverage`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -111,6 +115,8 @@ const api = {
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
@@ -2348,9 +2354,12 @@ function ApiTestRunForm({ collectionId }) {
 // ── API test run detail ────────────────────────────────────────────────────────
 
 const API_RUN_TABS = [
-  { key: "agents",   label: "Agents" },
-  { key: "findings", label: "Findings" },
-  { key: "traffic",  label: "Traffic Log" },
+  { key: "status",      label: "Status" },
+  { key: "findings",    label: "Findings" },
+  { key: "sessions",    label: "Sessions" },
+  { key: "traffic",     label: "Traffic Log" },
+  { key: "endpoints",   label: "Endpoints" },
+  { key: "workprogram", label: "Work Program" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
@@ -2466,30 +2475,57 @@ function ApiTestRunDetail({ runId, initialTab }) {
         ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
       </div>
     </div>
-    <div className="tab-bar" style=${{borderBottom:"1px solid var(--border)",display:"flex",gap:0,padding:"0 24px"}}>
+    <div className="tab-bar">
       ${API_RUN_TABS.map(t=>html`
-        <a key=${t.key}
-          href=${`#/api-runs/${runId}/${t.key}`}
-          className=${"tab-link"+(tab===t.key?" active":"")}
-          style=${{padding:"10px 18px",cursor:"pointer",fontWeight:tab===t.key?600:400,color:tab===t.key?"var(--accent)":"var(--muted)",borderBottom:tab===t.key?"2px solid var(--accent)":"2px solid transparent",textDecoration:"none",fontSize:14}}
-        >${t.label}</a>`)}
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>nav(`#/api-runs/${runId}/${t.key}`)}
+        >${t.label}</button>`)}
     </div>
     <div className="content scroll-content no-padding">
       ${error && html`<div className="alert error">${error}</div>`}
-      ${tab==="agents"   && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${tab==="traffic"  && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="status"      && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="findings"    && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+      ${tab==="sessions"    && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="traffic"     && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="endpoints"   && html`<${ApiRunEndpointsTab} runId=${runId} run=${run}/>`}
+      ${tab==="workprogram" && html`<${ApiRunWorkProgramTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
     </div>
   `;
 }
 
+// ── ApiRunSessionsTab ──────────────────────────────────────────────────────────
+
+function ApiRunSessionsTab({ runId, scanRunning }) {
+  const [data, setData] = useState(null);
+
+  const load = () => api.getApiScannerSessions(runId).then(setData).catch(() => {});
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  return html`<${ScannerSessionsPanel}
+    runId=${runId}
+    data=${data}
+    refresh=${load}
+    updateSession=${(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)}
+  />`;
+}
+
 // ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
 
-function ApiRunFindingsTab({ runId, scanRunning }) {
+function ApiRunFindingsTab({ runId, scanRunning, run }) {
   const [findings, setFindings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
+  const [clearBusy, setClearBusy] = useState(false);
+  const issueImportInputRef = useRef(null);
 
   const load = async () => {
     try {
@@ -2516,18 +2552,59 @@ function ApiRunFindingsTab({ runId, scanRunning }) {
     });
   };
 
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, null), md, "text/markdown;charset=utf-8");
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportFindingsClick = () => { issueImportInputRef.current?.click(); };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importApiFindings(runId, imported);
+      setFindings(await api.getApiFindings(runId));
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onClearFindings = async () => {
+    if (!confirm("Clear all findings for this API test run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiFindings(runId); setFindings([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
   const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
 
   if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
-  if (error)   return html`<div className="alert error">${error}</div>`;
 
   return html`
     <div style=${{padding:"16px 24px"}}>
-      <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
-        <h3 style=${{margin:0}}>Security Findings</h3>
+      ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+      <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0,marginRight:4}}>Security Findings</h3>
         ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
         <span className="badge neutral" style=${{fontSize:12}}>${findings.length} finding${findings.length!==1?"s":""}</span>
+        <div style=${{flex:1}}></div>
         <button className="btn sm" onClick=${load}>Refresh</button>
+        ${findings.length>0 && html`<button className="btn sm" onClick=${onExportFindingsMarkdown}>Export Issues</button>`}
+        <button className="btn sm" onClick=${onImportFindingsClick}>Import Issues</button>
+        <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+          style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+        ${findings.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClearFindings}>${clearBusy?"Clearing…":"Clear all"}</button>`}
       </div>
       ${findings.length === 0
         ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
@@ -2557,6 +2634,224 @@ function ApiRunFindingsTab({ runId, scanRunning }) {
               </div>`}
           </div>`)
       }
+    </div>
+  `;
+}
+
+// ── ApiRunEndpointsTab — per-endpoint prerequisites display ───────────────────
+
+function ApiRunEndpointsTab({ runId, run }) {
+  const [endpoints, setEndpoints] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!run) return;
+    api.listApiEndpoints(run.collection_id)
+      .then(data => { setEndpoints(data || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [run]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading endpoints…</div>`;
+  if (!endpoints.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No endpoints found. Upload and parse API documentation first.
+    </div>`;
+
+  const parsedNotes = (ep) => {
+    try { return JSON.parse(ep.prereq_notes || "[]"); } catch { return []; }
+  };
+
+  const readinessIcon = (ok) => ok
+    ? html`<span style=${{color:"var(--success,#4caf50)"}}>✔</span>`
+    : html`<span style=${{color:"var(--danger,#f44336)"}}>✘</span>`;
+
+  return html`
+    <div style=${{padding:"16px"}}>
+      <h3 style=${{marginBottom:12}}>Endpoint Prerequisites</h3>
+      <table className="data-table" style=${{width:"100%",borderCollapse:"collapse"}}>
+        <thead>
+          <tr>
+            <th>Method</th><th>Path</th><th>Auth Req.</th>
+            <th title="Enough info to probe this endpoint">Testable?</th>
+            <th title="Have credentials for auth-required paths">Auth Testable?</th>
+            <th>Notes / Gaps</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${endpoints.map(ep => {
+            const notes = parsedNotes(ep);
+            return html`
+              <tr key=${ep.id}>
+                <td><span className=${"method-badge method-"+ep.method.toLowerCase()}>${ep.method}</span></td>
+                <td className="mono" style=${{fontSize:12}}>${ep.path}</td>
+                <td style=${{textAlign:"center"}}>${ep.auth_required ? html`<span className="badge warning">Auth</span>` : html`<span className="badge neutral">Open</span>`}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test)}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test_auth)}</td>
+                <td style=${{fontSize:11,color:notes.length?"var(--danger,#f44336)":"var(--muted)"}}>
+                  ${notes.length ? notes.join(" · ") : "—"}
+                </td>
+              </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ── ApiRunWorkProgramTab — coverage matrix + live updates ─────────────────────
+
+const OWASP_LABELS = {
+  API1:"BOLA", API2:"Broken Auth", API3:"BOPLA", API4:"Consumption",
+  API5:"BFLA", API6:"Bus. Flows", API7:"SSRF",  API8:"Misconfig",
+  API9:"Inventory", API10:"Ext. APIs",
+};
+const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","API8","API9","API10"];
+
+function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
+  const [matrix, setMatrix] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const esRef = useRef(null);
+
+  const loadMatrix = () =>
+    api.getApiCoverageMatrix(runId)
+      .then(m => { setMatrix(m); setLoading(false); })
+      .catch(() => setLoading(false));
+
+  useEffect(() => { loadMatrix(); }, [runId]);
+
+  // Poll during scan.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMatrix, 5000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  // SSE live updates.
+  useEffect(() => {
+    if (!scanRunning) return;
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.type === "coverage_update") {
+          setMatrix(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              endpoints: prev.endpoints.map(ep => {
+                if (ep.endpoint_id !== d.endpoint_id) return ep;
+                const cells = { ...ep.cells };
+                const existing = cells[d.owasp_api_category] || { status:"not_started", finding_ids:[] };
+                const fids = [...existing.finding_ids];
+                if (d.finding_id && !fids.includes(d.finding_id)) fids.push(d.finding_id);
+                cells[d.owasp_api_category] = { status: d.status, finding_ids: fids };
+                return { ...ep, cells };
+              }),
+            };
+          });
+        }
+      } catch {}
+    };
+    return () => { es.close(); esRef.current = null; };
+  }, [scanRunning, runId]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading coverage matrix…</div>`;
+
+  if (!matrix || !matrix.endpoints?.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No coverage data yet.${" "}
+      ${run?.status === "pending"
+        ? "Start a scan to populate the Work Program matrix."
+        : "The matrix will appear once a scan has started."}
+    </div>`;
+
+  const cats = matrix.categories || COVERAGE_CATEGORIES;
+  const totals = matrix.totals || {};
+  const totalCells = Object.values(totals).reduce((a,b)=>a+b,0);
+  const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
+  const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
+
+  return html`
+    <div style=${{padding:16}}>
+      <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <span className=${"badge "+(run?.coverage_mode==="enforce"?"warning":"neutral")}>
+          ${run?.coverage_mode||"track"} mode
+        </span>
+        <span className="badge neutral">${pct}% coverage (${coveredCount}/${totalCells} cells)</span>
+        ${scanRunning && html`<span className="badge warning">● Live</span>`}
+      </div>
+
+      <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
+        ${[["not_started","cov-not-started","Not started"],["in_progress","cov-in-progress","In progress"],
+           ["covered","cov-covered","Covered"],["finding","cov-finding","Finding"],
+           ["skipped","cov-skipped","Skipped"]].map(([s,cls,label])=>html`
+          <span key=${s} style=${{display:"flex",alignItems:"center",gap:4}}>
+            <span className=${"cov-cell "+cls} style=${{display:"inline-block",width:14,height:14,borderRadius:3}}></span>
+            ${label} (${totals[s]||0})
+          </span>`)}
+      </div>
+
+      <div style=${{overflowX:"auto"}}>
+        <table className="coverage-matrix" style=${{borderCollapse:"collapse",fontSize:11,minWidth:600}}>
+          <thead>
+            <tr>
+              <th style=${{textAlign:"left",padding:"4px 8px",minWidth:180}}>Endpoint</th>
+              <th style=${{padding:"4px 6px",textAlign:"center",minWidth:50}}>Ready</th>
+              ${cats.map(cat=>html`
+                <th key=${cat} style=${{padding:"4px 4px",textAlign:"center",minWidth:60}}
+                  title=${cat+": "+(OWASP_LABELS[cat]||cat)}>
+                  <div style=${{fontWeight:600}}>${cat}</div>
+                  <div style=${{color:"var(--muted)",fontWeight:400,fontSize:10}}>${OWASP_LABELS[cat]||""}</div>
+                </th>`)}
+            </tr>
+          </thead>
+          <tbody>
+            ${matrix.endpoints.map(ep => {
+              const readyOk = ep.prereq_can_test && ep.prereq_can_test_auth;
+              return html`
+                <tr key=${ep.endpoint_id} style=${{borderBottom:"1px solid var(--border)"}}>
+                  <td style=${{padding:"4px 8px"}}>
+                    <span className=${"method-badge method-"+ep.method.toLowerCase()} style=${{marginRight:4}}>${ep.method}</span>
+                    <span className="mono" style=${{fontSize:11}}>${ep.path}</span>
+                  </td>
+                  <td style=${{textAlign:"center",padding:"4px 6px"}}>
+                    ${ep.auth_required
+                      ? html`<span title="Auth required" style=${{color:readyOk?"var(--success,#4caf50)":"var(--danger,#f44336)"}}>${readyOk?"✔":"✘"}</span>`
+                      : html`<span title="No auth" style=${{color:"var(--success,#4caf50)"}}>✔</span>`}
+                  </td>
+                  ${cats.map(cat => {
+                    const cell = ep.cells?.[cat];
+                    if (!cell) return html`<td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}><span className="cov-cell cov-na" title="N/A">—</span></td>`;
+                    const fids = cell.finding_ids || [];
+                    const isSelected = selectedCell?.endpoint_id===ep.endpoint_id && selectedCell?.cat===cat;
+                    return html`
+                      <td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}>
+                        <span
+                          className=${"cov-cell cov-"+cell.status.replace("_","-")+(isSelected?" selected":"")+(fids.length?" has-findings":"")}
+                          title=${cat+": "+cell.status+(fids.length?" ("+fids.length+" finding"+(fids.length>1?"s":"")+"":"")}
+                          style=${{cursor:fids.length?"pointer":"default"}}
+                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{endpoint_id:ep.endpoint_id,cat,path:ep.path,method:ep.method,fids})}
+                        >${fids.length>0?fids.length:""}</span>
+                      </td>`;
+                  })}
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      ${selectedCell && html`
+        <div style=${{marginTop:12,padding:12,background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <b style=${{fontSize:13}}>${selectedCell.method} ${selectedCell.path} — ${selectedCell.cat} ${OWASP_LABELS[selectedCell.cat]||""}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelectedCell(null)}>✕</button>
+          </div>
+          <div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>
+        </div>`}
     </div>
   `;
 }
@@ -2685,6 +2980,84 @@ function _buildAgentsFromLog(rows) {
   }
   return [...map.values()];
 }
+
+// ── ApiRunStatusTab ────────────────────────────────────────────────────────────
+
+function ApiRunStatusTab({ runId, scanRunning }) {
+  const [subTab, setSubTab] = useState("agents");
+  return html`
+    <div>
+      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0"}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?" active":"")}
+          onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="log"?" active":"")}
+          onClick=${()=>setSubTab("log")}>Log</button>
+      </div>
+      ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+    </div>
+  `;
+}
+
+// ── ApiRunLogTab ───────────────────────────────────────────────────────────────
+
+function ApiRunLogTab({ runId, scanRunning }) {
+  const [log, setLog] = useState([]);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = () => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message));
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const onClear = async () => {
+    if (!confirm("Clear all agent log entries for this run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiAgentLog(runId); setLog([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"||s==="done"?"phase-ok":"phase-other";
+
+  return html`
+    <div className="activity-panel" style=${{margin:0}}>
+      <div className="activity-log-toolbar">
+        <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+        ${scanRunning && html`<span className="activity-mode-badge">Scan running</span>`}
+        <a className="btn ghost sm" href=${`/api/api-test-runs/${runId}/agent-log/export`} download>Export log ↓</a>
+        ${log.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClear}>${clearBusy?"Clearing…":"Clear"}</button>`}
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"0 16px 8px"}}>${error}</div>`}
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — agent activity will appear here.":"No agent log entries yet."}
+               </div>`
+        : html`<div className="activity-feed">
+          ${log.map(r => {
+            const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+            return html`
+              <div key=${r.id} className="activity-entry">
+                <span className="activity-ts">${ts}</span>
+                <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+              </div>`;
+          })}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunAgentsTab ────────────────────────────────────────────────────────────
 
 function ApiRunAgentsTab({ runId, scanRunning }) {
   // ── Agent list state ──────────────────────────────────────────────────────
@@ -3894,7 +4267,7 @@ function TestRunDetail({ runId, initialTab }) {
   const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -6243,7 +6616,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear,
     </div>`;
 }
 
-function ScannerSessionsPanel({ runId, data, refresh }) {
+function ScannerSessionsPanel({ runId, data, refresh, onUpdate }) {
   const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
@@ -6254,11 +6627,14 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     if (!iso) return "—";
     try { return parseDate(iso).toLocaleString(); } catch { return iso; }
   };
+  const doUpdate = onUpdate
+    ? (sessionId, b) => onUpdate(sessionId, b)
+    : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
   const renameSession = async (session) => {
     const next = prompt("Session label", session.label);
     if (next === null) return;
     try {
-      await api.updateScannerSession(runId, session.id, { label: next });
+      await doUpdate(session.id, { label: next });
       await refresh();
     } catch(e) { alert(e.message); }
   };
@@ -6266,7 +6642,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     const verb = isActive ? "Reactivate" : "Deactivate";
     if (!confirm(`${verb} session "${session.label}"?`)) return;
     try {
-      await api.updateScannerSession(runId, session.id, { is_active: isActive });
+      await doUpdate(session.id, { is_active: isActive });
       await refresh();
     } catch(e) { alert(e.message); }
   };
@@ -8345,7 +8721,9 @@ function findingsToMarkdown(findings, meta = {}) {
       "",
       `- Severity: ${markdownListValue(f.severity)}`,
       `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      ...(f.owasp_api_category ? [`- OWASP API: ${markdownListValue(f.owasp_api_category)}`] : []),
       `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
+
       `- Validation: ${markdownListValue(f.validation_status)}`,
       `- Affected URL: ${markdownListValue(f.affected_url)}`,
       `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
