@@ -259,49 +259,31 @@ def update_coverage_cell(
         })
 
 
-def _mark_cells_in_progress(api_run_id: int, method: str, url: str) -> None:
-    """Called from the traffic hook (thread context) after each HTTP request.
+def _make_post_probe_fn(api_run_id: int):
+    """Return a callable ``(url, method, owasp_category) → None`` for per-category
+    in_progress tracking.
 
-    Matches the URL to an in-scope endpoint and marks all applicable categories
-    for that endpoint as ``in_progress`` (if they are still ``not_started``).
-    Uses the in-memory endpoint cache populated by ``seed_coverage_matrix``.
+    Called from the http_request executor after each API probe.  Uses the
+    OWASP category the LLM explicitly declared on the tool call, so only the
+    specific cell being tested flips to ``in_progress``.
     """
-    cached = _endpoint_cache.get(api_run_id)
-    if cached is None:
-        return
-    _, endpoints = cached
-    if not endpoints:
-        return
-    with Session(get_engine()) as s:
-        coll = s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
-        base_url = (coll.base_url if coll else "").rstrip("/")
-    ep = _match_endpoint_for_url(url, endpoints, base_url)
-    if ep is None:
-        return
-    cats = _applicable_categories(ep)
-    now = datetime.now(_UTC)
-    with Session(get_engine()) as s:
-        for cat in cats:
-            cell = s.exec(
-                select(ApiEndpointTest)
-                .where(ApiEndpointTest.api_test_run_id == api_run_id)
-                .where(ApiEndpointTest.endpoint_id == ep.id)
-                .where(ApiEndpointTest.owasp_api_category == cat)
-            ).first()
-            if cell is None:
-                cell = ApiEndpointTest(
-                    api_test_run_id=api_run_id,
-                    endpoint_id=ep.id,
-                    owasp_api_category=cat,
-                    status="in_progress",
-                    last_updated=now,
-                )
-                s.add(cell)
-            elif cell.status == "not_started":
-                cell.status = "in_progress"
-                cell.last_updated = now
-                s.add(cell)
-        s.commit()
+    def _post_probe(url: str, method: str, owasp_category: str) -> None:
+        cached = _endpoint_cache.get(api_run_id)
+        if cached is None:
+            return
+        _, endpoints = cached
+        if not endpoints:
+            return
+        with Session(get_engine()) as s:
+            coll = s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
+            base_url = (coll.base_url if coll else "").rstrip("/")
+        ep = _match_endpoint_for_url(url, endpoints, base_url)
+        if ep is None:
+            return
+        cat = owasp_category.strip().upper()
+        update_coverage_cell(api_run_id, ep.id, cat, "in_progress")
+
+    return _post_probe
 
 
 def mark_all_cells_covered(api_run_id: int) -> None:
@@ -747,9 +729,8 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     seed_sessions_from_credentials(api_run_id)
     session_vault = scanner_sessions.load_session_vault(api_run_id)
 
-    # Register the traffic hook so every HTTP request marks endpoint cells in_progress.
-    from aespa.services.traffic import _api_traffic_hooks
-    _api_traffic_hooks[api_run_id] = _mark_cells_in_progress
+    # Build the per-category probe hook (replaces the old broad traffic hook).
+    post_probe_fn = _make_post_probe_fn(api_run_id)
 
     # Build the initial LLM context from the API collection.
     crawl_context = _build_api_crawl_context(api_run_id)
@@ -825,13 +806,12 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             system_message_override=_API_THINKING_AGENT_SYSTEM,
             context_tool_fn=context_tool_fn,
             post_finding_fn=post_finding_fn,
+            post_probe_fn=post_probe_fn,
         )
 
     log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
 
-    # Promote in_progress → covered; remove traffic hook + endpoint cache.
-    from aespa.services.traffic import _api_traffic_hooks
-    _api_traffic_hooks.pop(api_run_id, None)
+    # Promote in_progress → covered; remove endpoint cache.
     _endpoint_cache.pop(api_run_id, None)
     mark_all_cells_covered(api_run_id)
 
@@ -904,12 +884,7 @@ async def _api_scan_task(api_run_id: int) -> None:
     finally:
         _scan_tasks.pop(api_run_id, None)
         _stop_requested.discard(api_run_id)
-        # Clean up traffic hook and endpoint cache regardless of outcome.
-        try:
-            from aespa.services.traffic import _api_traffic_hooks
-            _api_traffic_hooks.pop(api_run_id, None)
-        except Exception:
-            pass
+        # Clean up endpoint cache regardless of outcome.
         _endpoint_cache.pop(api_run_id, None)
 
 

@@ -634,6 +634,9 @@ _API_THINKING_AGENT_SYSTEM = (
 
     "Tool rules:\n"
     "- http_request: direct HTTP probes against API endpoints. No browser needed for REST.\n"
+    "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
+    "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
+    "  probe). This is required for coverage tracking — do not omit it.\n"
     "- context_tool: query the API endpoint inventory without hitting the target.\n"
     "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
     "  finding_list, history_search, target_inventory, traffic_search, extract_entities.\n"
@@ -645,6 +648,9 @@ _API_THINKING_AGENT_SYSTEM = (
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
     "- done: end the assessment when all surface is covered.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
+    "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
+    "so the Work Program matrix fills accurately. Probe each endpoint × category pair with\n"
+    "a distinct targeted request — do not batch multiple categories into one generic probe.\n"
 )
 
 
@@ -710,6 +716,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "headers": {"type": "object"},
                 "body": {},
                 "use_session": {"type": "string"},
+                "owasp_category": {
+                    "type": "string",
+                    "description": (
+                        "The OWASP category this probe is testing for "
+                        "(e.g. API1, API2, A01, A07). Required for API runs."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
