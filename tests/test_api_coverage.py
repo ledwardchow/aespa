@@ -18,6 +18,8 @@ Tests:
   15. get_coverage_matrix totals match actual cell counts
   16. _make_post_finding_fn updates coverage cell when finding is saved
   17. Start-scan endpoint triggers seed_coverage_matrix
+  18. _make_post_probe_fn marks only the declared OWASP category in_progress (per-category granularity)
+  19. _make_post_probe_fn is a no-op when the URL matches no endpoint
 """
 from __future__ import annotations
 
@@ -503,3 +505,70 @@ def test_start_scan_seeds_matrix(client, db_engine, db_session):
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == run["id"])
     ).all()
     assert len(cells) > 0
+
+
+# ── 18. _make_post_probe_fn — marks only the declared category in_progress ────
+
+def test_post_probe_fn_marks_single_category(db_engine, db_session, collection, endpoint_with_param, api_run):
+    """Calling the post_probe_fn with owasp_category=API1 should flip the API1
+    cell to in_progress while leaving other categories untouched."""
+    from aespa.services.api_scanner import _make_post_probe_fn
+
+    seed_coverage_matrix(api_run.id)
+
+    # Confirm API1 is applicable for this endpoint (has a path param)
+    cats = _applicable_categories(endpoint_with_param)
+    assert "API1" in cats
+
+    # Populate the endpoint cache so _make_post_probe_fn can match the URL.
+    from aespa.services.api_scanner import _endpoint_cache
+    _endpoint_cache[api_run.id] = (collection.id, [endpoint_with_param])
+
+    fn = _make_post_probe_fn(api_run.id)
+    fn("http://api.local/users/99", "GET", "API1")
+    db_session.expire_all()
+
+    # API1 cell must be in_progress
+    api1_cell = db_session.exec(
+        select(ApiEndpointTest)
+        .where(ApiEndpointTest.api_test_run_id == api_run.id)
+        .where(ApiEndpointTest.endpoint_id == endpoint_with_param.id)
+        .where(ApiEndpointTest.owasp_api_category == "API1")
+    ).first()
+    assert api1_cell is not None
+    assert api1_cell.status == "in_progress"
+
+    # All other cells for this endpoint must remain not_started
+    other_cells = db_session.exec(
+        select(ApiEndpointTest)
+        .where(ApiEndpointTest.api_test_run_id == api_run.id)
+        .where(ApiEndpointTest.endpoint_id == endpoint_with_param.id)
+        .where(ApiEndpointTest.owasp_api_category != "API1")
+    ).all()
+    for cell in other_cells:
+        assert cell.status == "not_started", (
+            f"Expected not_started for {cell.owasp_api_category}, got {cell.status}"
+        )
+
+    # Clean up cache
+    _endpoint_cache.pop(api_run.id, None)
+
+
+def test_post_probe_fn_no_match_is_noop(db_engine, db_session, collection, endpoint_with_param, api_run):
+    """When the URL doesn't match any endpoint, the probe fn should silently do nothing."""
+    from aespa.services.api_scanner import _make_post_probe_fn, _endpoint_cache
+
+    seed_coverage_matrix(api_run.id)
+    _endpoint_cache[api_run.id] = (collection.id, [endpoint_with_param])
+
+    fn = _make_post_probe_fn(api_run.id)
+    fn("http://api.local/completely/unknown/route/99", "GET", "API1")  # no match
+    db_session.expire_all()
+
+    all_cells = db_session.exec(
+        select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run.id)
+    ).all()
+    for cell in all_cells:
+        assert cell.status == "not_started"
+
+    _endpoint_cache.pop(api_run.id, None)
