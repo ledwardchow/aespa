@@ -117,6 +117,15 @@ def count_traffic(run_id: int, *, api_run_id: Optional[int] = None) -> int:
         return s.exec(q).one()
 
 
+# ── Per-api-run traffic callbacks ────────────────────────────────────────────
+
+# api_scanner.py registers a callable here when a scan starts so it can mark
+# coverage cells in_progress as HTTP requests are made.  The callable signature
+# is fn(api_run_id: int, method: str, url: str) -> None and is called from an
+# asyncio.to_thread context (so must be thread-safe / DB-only, no SSE emits).
+_api_traffic_hooks: dict[int, object] = {}  # api_run_id → callable
+
+
 # ── Custom client for automatic logging ───────────────────────────────────────
 
 class LoggingAsyncClient(httpx.AsyncClient):
@@ -169,6 +178,13 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 self.username,
                 self.api_run_id,
             )
+            # Fire any registered coverage-tracking callback for API runs.
+            if self.api_run_id is not None:
+                hook = _api_traffic_hooks.get(self.api_run_id)
+                if hook is not None:
+                    await asyncio.to_thread(
+                        hook, self.api_run_id, request.method, str(request.url)
+                    )
             return response
         except Exception as exc:
             duration_ms = int((time.monotonic() - t0) * 1000)
