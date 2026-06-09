@@ -2359,7 +2359,7 @@ const API_RUN_TABS = [
   { key: "sessions",    label: "Sessions" },
   { key: "traffic",     label: "Traffic Log" },
   { key: "endpoints",   label: "Endpoints" },
-  { key: "workprogram", label: "Work Program" },
+  { key: "workprogram", label: "Workprogram" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
@@ -2401,7 +2401,7 @@ function ApiTestRunDetail({ runId, initialTab }) {
   const [error, setError] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanBusy, setScanBusy] = useState(false);
-  const tab = initialTab || "agents";
+  const tab = initialTab || "status";
 
   useEffect(() => {
     api.getApiRun(runId).then(setRun).catch(e => setError(e.message));
@@ -2482,7 +2482,7 @@ function ApiTestRunDetail({ runId, initialTab }) {
           onClick=${()=>nav(`#/api-runs/${runId}/${t.key}`)}
         >${t.label}</button>`)}
     </div>
-    <div className="content scroll-content no-padding">
+    <div className=${"content no-padding"+(tab==="status"?" flex-fill-noscroll":" scroll-content")}>
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="status"      && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="findings"    && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
@@ -2799,7 +2799,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
         <table className="coverage-matrix" style=${{borderCollapse:"collapse",fontSize:11,minWidth:600}}>
           <thead>
             <tr>
-              <th style=${{textAlign:"left",padding:"4px 8px",minWidth:180}}>Endpoint</th>
+              <th style=${{textAlign:"left",padding:"4px 8px",minWidth:280,width:"30%"}}>Endpoint</th>
               <th style=${{padding:"4px 6px",textAlign:"center",minWidth:50}}>Ready</th>
               ${cats.map(cat=>html`
                 <th key=${cat} style=${{padding:"4px 4px",textAlign:"center",minWidth:60}}
@@ -2920,7 +2920,17 @@ function ApiRunTrafficTab({ runId, scanRunning }) {
         <button className="btn ghost sm" onClick=${()=>{setTraffic([]);lastIdRef.current=0;setSelected(null);}}>Clear</button>
       </div>
       <div style=${{flex:1,overflow:"auto"}} ref=${tableRef}>
-        <table className="traffic-table" style=${{width:"100%"}}>
+        <table className="traffic-table" style=${{width:"100%",tableLayout:"fixed"}}>
+          <colgroup>
+            <col style=${{width:"32px"}}/>
+            <col style=${{width:"82px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"90px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"56px"}}/>
+            <col/>
+            <col style=${{width:"72px"}}/>
+          </colgroup>
           <thead>
             <tr>
               <th>#</th><th>Time</th><th>Source</th><th>User</th>
@@ -2986,15 +2996,17 @@ function _buildAgentsFromLog(rows) {
 function ApiRunStatusTab({ runId, scanRunning }) {
   const [subTab, setSubTab] = useState("agents");
   return html`
-    <div>
-      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0"}}>
+    <div style=${{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0",flexShrink:0,position:"sticky",top:0,background:"var(--bg)",zIndex:2,borderBottom:"1px solid var(--border)"}}>
         <button className=${"activity-sub-tab-btn"+(subTab==="agents"?" active":"")}
           onClick=${()=>setSubTab("agents")}>Agents</button>
         <button className=${"activity-sub-tab-btn"+(subTab==="log"?" active":"")}
           onClick=${()=>setSubTab("log")}>Log</button>
       </div>
-      ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+      <div style=${{flex:1,overflow:"auto",minHeight:0}}>
+        ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+        ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+      </div>
     </div>
   `;
 }
