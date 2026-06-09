@@ -8,10 +8,11 @@ without any changes to the underlying services.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response as HTTPResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -25,7 +26,15 @@ from aespa.models import (
     ScannerSession,
     TrafficEntry,
 )
-from aespa.schemas import ApiTestRunSummary, ScanFindingOut, ScannerSessionOut, ScannerSessionSummary, ScannerSessionUpdate
+from aespa.schemas import (
+    ApiTestRunSummary,
+    ScanFindingImportIn,
+    ScanFindingImportResult,
+    ScanFindingOut,
+    ScannerSessionOut,
+    ScannerSessionSummary,
+    ScannerSessionUpdate,
+)
 from aespa.services import alice_tasks
 from aespa.services import scanner_sessions as scanner_session_svc
 
@@ -226,6 +235,57 @@ def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
     ]
 
 
+@router.delete("/{run_id}/agent-log", status_code=204)
+def clear_api_agent_log(run_id: int, session: Session = Depends(get_session)) -> None:
+    """Delete all persisted agent log entries for this API test run."""
+    _get_run_or_404(session, run_id)
+    for entry in session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id)
+    ).all():
+        session.delete(entry)
+    session.commit()
+
+
+@router.get("/{run_id}/agent-log/export")
+def export_api_agent_log(run_id: int, session: Session = Depends(get_session)) -> HTTPResponse:
+    """Download the agent activity log for this API test run as a markdown file."""
+    run = _get_run_or_404(session, run_id)
+    rows = session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id).order_by(AgentLog.id)
+    ).all()
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines: list[str] = [
+        f"# Agent Log — API Test Run #{run_id}",
+        "",
+        f"Run: {run.name or f'Run #{run_id}'}",
+        f"Exported: {exported_at}",
+        f"Entries: {len(rows)}",
+        "",
+        "---",
+        "",
+    ]
+    for r in rows:
+        ts = r.created_at.strftime("%H:%M:%S") if r.created_at else ""
+        status_upper = (r.status or "").upper()
+        lines.append(f"### `{ts}` [{status_upper}] {r.role} (`{r.agent_id}`)")
+        lines.append("")
+        if r.current_task:
+            lines.append(f"**Task:** {r.current_task}")
+            lines.append("")
+        if r.outcome:
+            lines.append(f"**Outcome:** {r.outcome}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+    md = "\n".join(lines)
+    filename = f"agent-log-api-run-{run_id}.md"
+    return HTTPResponse(
+        content=md.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Scan start / stop ──────────────────────────────────────────────────────────
 
 @router.post("/{run_id}/scan/start")
@@ -265,6 +325,78 @@ def get_api_findings(
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
     return [ScanFindingOut.model_validate(f) for f in findings]
+
+
+@router.delete("/{run_id}/findings", status_code=204)
+def clear_api_findings(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all findings for this API test run."""
+    _get_run_or_404(session, run_id)
+    for f in session.exec(
+        select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+    ).all():
+        session.delete(f)
+    session.commit()
+
+
+@router.post("/{run_id}/findings/import", response_model=ScanFindingImportResult)
+def import_api_findings(
+    run_id: int,
+    payload: list[ScanFindingImportIn],
+    session: Session = Depends(get_session),
+) -> ScanFindingImportResult:
+    """Import a list of findings into an API test run."""
+    run = _get_run_or_404(session, run_id)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No findings to import")
+    allowed_severities = {"critical", "high", "medium", "low", "info"}
+    allowed_validation = {"unvalidated", "validating", "confirmed", "unconfirmed", "false_positive"}
+    imported: list[ScanFinding] = []
+    for item in payload:
+        severity = item.severity.lower().strip()
+        validation_status = item.validation_status.lower().strip()
+        import_validation_status = (
+            validation_status
+            if validation_status in allowed_validation and validation_status != "validating"
+            else "unvalidated"
+        )
+        finding = ScanFinding(
+            test_run_id=run.id,  # ApiTestRun.id reused as test_run_id (FK not enforced in SQLite)
+            api_test_run_id=run.id,
+            page_id=None,
+            owasp_category=(item.owasp_category or "A00").strip()[:32],
+            severity=severity if severity in allowed_severities else "info",
+            title=item.title.strip() or "Imported finding",
+            description=item.description,
+            impact=item.impact,
+            likelihood=item.likelihood,
+            recommendation=item.recommendation,
+            cvss_score=item.cvss_score,
+            cvss_vector=item.cvss_vector,
+            affected_url=item.affected_url,
+            evidence=item.evidence,
+            request_evidence=item.request_evidence,
+            response_evidence=item.response_evidence,
+            evidence_json=json.dumps(item.evidence_items),
+            finding_source=(item.finding_source or "manual_import").strip()[:64],
+            validation_status=import_validation_status,
+            validation_note=item.validation_note,
+            merged_instances=item.merged_instances,
+            poc_command=item.poc_command,
+            poc_setup=item.poc_setup,
+        )
+        session.add(finding)
+        session.flush()
+        imported.append(finding)
+    session.commit()
+    for f in imported:
+        session.refresh(f)
+    return ScanFindingImportResult(
+        imported=len(imported),
+        findings=[ScanFindingOut.model_validate(f) for f in imported],
+    )
 
 
 # ── Traffic alias ──────────────────────────────────────────────────────────────
