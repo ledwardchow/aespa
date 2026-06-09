@@ -14,6 +14,49 @@ const api = {
   updateSite:       (id,b)        => req(`/api/sites/${id}`,   { method:"PUT",    body:b }),
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
   importSite:       (text)        => fetch("/api/sites/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const d = r.ok ? await r.json() : (() => { throw new Error(`Import failed: ${r.status}`); })(); return d; }),
+  listApiCollections:  ()         => req("/api/api-collections"),
+  getApiCollection:    (id)       => req(`/api/api-collections/${id}`),
+  createApiCollection: (b)        => req("/api/api-collections",       { method:"POST",   body:b }),
+  updateApiCollection: (id,b)     => req(`/api/api-collections/${id}`, { method:"PUT",    body:b }),
+  deleteApiCollection: (id)       => req(`/api/api-collections/${id}`, { method:"DELETE" }),
+  listApiDocuments:    (id)       => req(`/api/api-collections/${id}/documents`),
+  uploadApiDocuments:  (id,files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    return fetch(`/api/api-collections/${id}/documents`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  downloadApiDocument: (id,docId) => { window.location.href = `/api/api-collections/${id}/documents/${docId}/download`; },
+  deleteApiDocument:   (id,docId) => req(`/api/api-collections/${id}/documents/${docId}`, { method:"DELETE" }),
+  parseApiDocument:    (id,docId) => req(`/api/api-collections/${id}/documents/${docId}/parse`, { method:"POST" }),
+  listApiEndpoints:    (id)       => req(`/api/api-collections/${id}/endpoints`),
+  patchEndpointScope:  (id,eid,b) => req(`/api/api-collections/${id}/endpoints/${eid}/scope`, { method:"PATCH", body:b }),
+  listApiCredentials:  (id)       => req(`/api/api-collections/${id}/credentials`),
+  createApiCredential: (id,b)     => req(`/api/api-collections/${id}/credentials`, { method:"POST", body:b }),
+  deleteApiCredential: (id,cid)   => req(`/api/api-collections/${id}/credentials/${cid}`, { method:"DELETE" }),
+  getApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`),
+  runApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`, { method:"POST" }),
+  purgeCollectionData: (id)       => req(`/api/api-collections/${id}/data`, { method:"DELETE" }),
+  listApiRuns:         (id)       => req(`/api/api-collections/${id}/test-runs`),
+  createApiRun:        (id,b)     => req(`/api/api-collections/${id}/test-runs`, { method:"POST", body:b }),
+  getApiRun:           (id)       => req(`/api/api-test-runs/${id}`),
+  deleteApiRun:        (id)       => req(`/api/api-test-runs/${id}`, { method:"DELETE" }),
+  getApiAliceSessions: (id)       => req(`/api/api-test-runs/${id}/alice/sessions`),
+  saveApiAliceSessions:(id,b)     => req(`/api/api-test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getApiAliceStatus:   (id)       => req(`/api/api-test-runs/${id}/alice/status`),
+  startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
+  getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
+  startApiScan:        (id)       => req(`/api/api-test-runs/${id}/scan/start`,    { method:"POST" }),
+  stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
+  getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
+  getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
+  clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
+  getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
+  getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
+  getApiCoverageMatrix:(id)       => req(`/api/api-test-runs/${id}/coverage`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -72,6 +115,8 @@ const api = {
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
@@ -149,6 +194,14 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)\/edit$/)))       return { name: "site-edit",   id: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)\/runs\/new$/)))  return { name: "run-new",     siteId: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/new$/)))                return { name: "api-new" };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/edit$/)))        return { name: "api-edit",    id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/files$/)))       return { name: "api-files",   id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/runs\/new$/)))   return { name: "api-run-new", id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)$/)))              return { name: "api-detail",  id: +m[1] };
+  if (hash === "#/apis")                                 return { name: "api-list" };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)$/)))          return { name: "api-run-detail", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
@@ -259,6 +312,11 @@ const IconSites = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fil
   <rect x="9" y="1" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="1" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="9" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+</svg>`;
+
+const IconApis = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M5 2.5 1.5 8 5 13.5M11 2.5 14.5 8 11 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9 3 7 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
 </svg>`;
 
 const IconSettings = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -1120,6 +1178,7 @@ const renderAliceBlocks = (text, isThinking, stepData = {}) => {
 function App() {
   const route = useRoute();
   const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
+  const onApis       = ["api-list","api-new","api-edit","api-detail","api-files"].includes(route.name);
   const onActiveJobs = route.name === "active-jobs";
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
@@ -1179,6 +1238,9 @@ function App() {
           <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
             <span className="nav-icon"><${IconSites}/></span>${!collapsed && " Sites"}
           </a>
+          <a href="#/apis" className=${"nav-item"+(onApis?" active":"")} title="APIs">
+            <span className="nav-icon"><${IconApis}/></span>${!collapsed && " APIs"}
+          </a>
           <a href="#/active-jobs" className=${"nav-item"+(onActiveJobs?" active":"")} title="Active Jobs">
             <span className="nav-icon"><${IconPlay}/></span>${!collapsed && " Active Jobs"}
           </a>
@@ -1209,6 +1271,13 @@ function App() {
         ${route.name==="site-new"    && html`<${SiteForm} key="new"/>`}
         ${route.name==="site-edit"   && html`<${SiteForm} key=${route.id} siteId=${route.id}/>`}
         ${route.name==="site-detail" && html`<${SiteDetail} key=${route.id} siteId=${route.id}/>`}
+        ${route.name==="api-list"    && html`<${ApiCollectionsList}/>`}
+        ${route.name==="api-new"     && html`<${ApiCollectionForm} key="api-new"/>`}
+        ${route.name==="api-edit"    && html`<${ApiCollectionForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-detail"  && html`<${ApiCollectionDetail} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-files"   && html`<${ApiFilesManager} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-new"    && html`<${ApiTestRunForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-detail" && html`<${ApiTestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
         ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
@@ -1297,6 +1366,509 @@ function SitesList() {
   `;
 }
 
+// ── API collections ───────────────────────────────────────────────────────────
+
+function ApiCollectionsList() {
+  const [collections, setCollections] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try { setCollections(await api.listApiCollections()); } catch(e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const onDelete = async (c) => {
+    if (!confirm(`Delete "${c.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(c.id); await load(); } catch(e) { setError(e.message); }
+  };
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">APIs</div>
+      <div className="topbar-actions">
+        <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${collections===null && html`<div className="subtle">Loading…</div>`}
+      ${collections!==null&&collections.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">⬡</div>
+          <div className="empty-msg">No API collections yet</div>
+          <div className="empty-sub">Create a collection, upload API docs, and run structured API security tests.</div>
+          <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+        </div>`}
+      ${collections&&collections.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"20%"}}/><col style=${{width:"38%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Name</th><th>Base URL</th><th>Endpoints</th><th>Files</th><th></th></tr></thead>
+            <tbody>${collections.map(c=>html`
+              <tr key=${c.id}>
+                <td><a href=${`#/apis/${c.id}`} style=${{fontWeight:600}}>${c.name}</a></td>
+                <td className="url">${c.base_url}</td>
+                <td>${c.endpoint_count>0?c.endpoint_count:html`<span className="subtle">—</span>`}</td>
+                <td>${c.document_count>0?c.document_count:html`<span className="subtle">—</span>`}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${c.id}`)}>Open</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(c)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+function ApiCollectionForm({ collectionId }) {
+  const isEdit = typeof collectionId === "number";
+  const [form, setForm]       = useState({ name:"", base_url:"", description:"" });
+  const [loading, setLoading] = useState(isEdit);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState(null);
+
+  useEffect(() => {
+    if (!isEdit) return;
+    (async () => {
+      try {
+        const d = await api.getApiCollection(collectionId);
+        setForm({ name:d.name, base_url:d.base_url, description:d.description||"" });
+      } catch(e) { setError(e.message); } finally { setLoading(false); }
+    })();
+  }, [isEdit, collectionId]);
+
+  const upd = p => setForm(f=>({...f,...p}));
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true);
+    const payload = {
+      name: form.name.trim(),
+      base_url: form.base_url.trim(),
+      description: form.description.trim() || null,
+    };
+    try {
+      if (isEdit) { await api.updateApiCollection(collectionId, payload); nav(`#/apis/${collectionId}`); }
+      else        { const c = await api.createApiCollection(payload); nav(`#/apis/${c.id}`); }
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const bc = isEdit
+    ? html`<a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${form.name||"API collection"}</a><span className="breadcrumb-sep"> / </span>Edit`
+    : html`<a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a><span className="breadcrumb-sep"> / </span>New API collection`;
+
+  return html`
+    <div className="topbar"><div className="topbar-title">${bc}</div></div>
+    <div className="content scroll-content">
+      ${loading && html`<div className="subtle">Loading…</div>`}
+      ${!loading && html`
+        <form className="card" onSubmit=${onSubmit}>
+          ${error && html`<div className="alert error">${error}</div>`}
+          <div className="form-section-title">API collection</div>
+          <div className="field"><label>Name</label>
+            <input type="text" required value=${form.name} placeholder="e.g. Payments API" onChange=${e=>upd({name:e.target.value})}/></div>
+          <div className="field"><label>Base URL</label>
+            <input type="url" required value=${form.base_url} placeholder="https://api.example.com" onChange=${e=>upd({base_url:e.target.value})}/></div>
+          <div className="field"><label>Description (optional)</label>
+            <textarea value=${form.description} placeholder="What these APIs do, scope, contacts…" onChange=${e=>upd({description:e.target.value})}/></div>
+          <div className="divider"/>
+          <div className="row spread">
+            <button type="button" className="btn ghost" onClick=${()=>isEdit?nav(`#/apis/${collectionId}`):nav("#/apis")}>Cancel</button>
+            <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":isEdit?"Save changes":"Create collection"}</button>
+          </div>
+        </form>`}
+    </div>`;
+}
+
+function ApiCollectionDetail({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [endpoints, setEndpoints] = useState(null);
+  const [readiness, setReadiness] = useState(null);
+  const [apiRuns, setApiRuns] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [assessing, setAssessing] = useState(false);
+  const [purging, setPurging] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, eps, rd, runs] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiEndpoints(collectionId),
+        api.getApiReadiness(collectionId),
+        api.listApiRuns(collectionId),
+      ]);
+      setCollection(c); setEndpoints(eps);
+      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
+      setApiRuns(runs);
+    }
+    catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  };
+
+  const onAssessReadiness = async () => {
+    setAssessing(true); setError(null);
+    try {
+      const rd = await api.runApiReadiness(collectionId);
+      setReadiness(rd);
+      // Reload endpoints so prereq columns update
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+    finally { setAssessing(false); }
+  };
+
+  const onPurgeData = async () => {
+    if (!confirm(
+      "Delete ALL endpoints and credentials for this collection?\n\n" +
+      "Documents are kept \u2014 you can re-parse them afterwards.\n\n" +
+      "Use this to clear duplicates from uploading the same file multiple times."
+    )) return;
+    setPurging(true); setError(null);
+    try {
+      const result = await api.purgeCollectionData(collectionId);
+      setEndpoints([]);
+      setReadiness(null);
+      alert(`Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`);
+    } catch(e) { setError(e.message); }
+    finally { setPurging(false); }
+  };
+
+  const onDelete = async () => {
+    if (!collection) return;
+    if (!confirm(`Delete "${collection.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(collectionId); nav("#/apis"); } catch(e) { setError(e.message); }
+  };
+
+  const toggleScope = async (ep) => {
+    try {
+      const updated = await api.patchEndpointScope(collectionId, ep.id, { in_scope: !ep.in_scope });
+      setEndpoints(eps => eps.map(e => e.id === ep.id ? updated : e));
+    } catch(e) { setError(e.message); }
+  };
+
+  const methodBadge = (m) => {
+    const cls = {
+      GET:"badge method-get", POST:"badge method-post", PUT:"badge method-put",
+      PATCH:"badge method-patch", DELETE:"badge method-delete",
+    };
+    return html`<span className=${cls[m] || "badge neutral"}>${m}</span>`;
+  };
+
+  // Readiness helpers
+  const scoreColor = (score) => score >= 75 ? "var(--success,#22c55e)" : score >= 40 ? "var(--warning-text,#d97706)" : "var(--danger,#ef4444)";
+  const readinessLabel = (score) => score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready";
+  const prereqIcon = (ep) => {
+    if (!ep.prereq_can_test) return html`<span title="Cannot test — insufficient info" style=${{color:"var(--danger,#ef4444)",fontSize:14}}>✗</span>`;
+    if (!ep.prereq_can_test_auth) return html`<span title="Auth credentials missing" style=${{color:"var(--warning-text,#d97706)",fontSize:14}}>⚠</span>`;
+    return html`<span title="Ready to test" style=${{color:"var(--success,#22c55e)",fontSize:14}}>✓</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${collection ? collection.name : "…"}
+      </div>
+      <div className="topbar-actions">
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onPurgeData} disabled=${purging}>${purging?"Purging…":"Purge data"}</button>`}
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${collection && html`
+        <div className="card">
+          <div className="form-section-title">Overview</div>
+          <div className="field" style=${{margin:0}}><label>Base URL</label><div className="url">${collection.base_url}</div></div>
+          ${collection.description && html`<div className="field" style=${{marginTop:12,marginBottom:0}}><label>Description</label><div>${collection.description}</div></div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Readiness</span>
+            <button className="btn secondary sm" onClick=${onAssessReadiness} disabled=${assessing}>
+              ${assessing ? "Assessing…" : readiness ? "Re-assess" : "Assess Readiness"}
+            </button>
+          </div>
+          ${assessing && html`<div className="subtle" style=${{padding:"12px 0"}}>Running LLM readiness assessment…</div>`}
+          ${!assessing && !readiness && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              Click <strong>Assess Readiness</strong> to run an LLM-driven gap analysis — checks whether you have the
+              right credentials and enough spec detail to test each endpoint.
+            </div>`}
+          ${!assessing && readiness && html`
+            <div>
+              <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+                <span style=${{fontSize:22,fontWeight:700,color:scoreColor(readiness.overall.score)}}>${readiness.overall.score}/100</span>
+                <span className="badge" style=${{background:scoreColor(readiness.overall.score),color:"#fff",padding:"2px 10px"}}>${readinessLabel(readiness.overall.score)}</span>
+                <span style=${{fontSize:13,color:"var(--fg)"}}>${readiness.overall.summary}</span>
+              </div>
+              ${readiness.overall.blocking_gaps?.length > 0 && html`
+                <div style=${{marginBottom:8}}>
+                  <strong style=${{fontSize:12,color:"var(--danger,#ef4444)"}}>Blocking gaps</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--fg)"}}>
+                    ${readiness.overall.blocking_gaps.map((g,i) => html`<li key=${i}>${g}</li>`)}
+                  </ul>
+                </div>`}
+              ${readiness.overall.recommendations?.length > 0 && html`
+                <div>
+                  <strong style=${{fontSize:12,color:"var(--muted)"}}>Recommendations</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--muted)"}}>
+                    ${readiness.overall.recommendations.map((r,i) => html`<li key=${i}>${r}</li>`)}
+                  </ul>
+                </div>`}
+              <div style=${{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+                Assessed ${new Date(readiness.assessed_at).toLocaleString()}
+                ·
+                Auth understood: ${readiness.overall.auth_method_understood ? "✓" : "✗"}
+                · Credentials: ${readiness.overall.has_credentials ? "✓" : "✗"}
+                · Test data: ${readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
+              </div>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Endpoints ${endpoints!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${endpoints.length}</span>`:""}</span>
+            <div className="row" style=${{gap:8}}>
+              <button className="btn secondary sm" onClick=${onRefresh} disabled=${refreshing}>${refreshing?"…":"Refresh"}</button>
+              <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>
+            </div>
+          </div>
+          ${endpoints===null && html`<div className="subtle">Loading…</div>`}
+          ${endpoints!==null && endpoints.length===0 && html`
+            <div className="empty-state" style=${{padding:"32px 16px"}}>
+              <div className="empty-icon">⬡</div>
+              <div className="empty-msg">No endpoints yet</div>
+              <div className="empty-sub">
+                Upload an <strong>OpenAPI/Swagger</strong> or <strong>Postman</strong> file via <strong>Manage files</strong> — it parses automatically.<br/>
+                <span style=${{color:"var(--muted)",fontSize:11}}>Markdown/text files use LLM extraction and require an active LLM profile in Settings.</span>
+              </div>
+            </div>`}
+          ${endpoints!==null && endpoints.length>0 && html`
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{tableLayout:"fixed",width:"100%",minWidth:760}}>
+                <colgroup>
+                  <col style=${{width:"8%"}}/><col style=${{width:"24%"}}/><col style=${{width:"28%"}}/><col style=${{width:"8%"}}/><col style=${{width:"16%"}}/><col style=${{width:"8%"}}/><col style=${{width:"8%"}}/>
+                </colgroup>
+                <thead><tr>
+                  ${["Method","Path","Summary","Auth","Tags","Ready","In scope"].map(h=>html`
+                    <th key=${h} style=${{overflow:"hidden",whiteSpace:"nowrap",resize:"horizontal",position:"relative"}}>${h}</th>`)}
+                </tr></thead>
+                <tbody>${endpoints.map(ep=>html`
+                  <tr key=${ep.id} style=${{opacity:ep.in_scope?1:0.5}}>
+                    <td>${methodBadge(ep.method)}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${ep.path}</td>
+                    <td style=${{fontSize:12,overflowWrap:"break-word"}}>${ep.summary||"—"}</td>
+                    <td>${ep.auth_required?html`<span className="badge warning">yes</span>`:html`<span className="badge neutral">no</span>`}</td>
+                    <td style=${{fontSize:11,overflowWrap:"break-word"}}>${(JSON.parse(ep.tags_json||"[]")).join(", ")||"—"}</td>
+                    <td style=${{textAlign:"center"}} title=${(JSON.parse(ep.prereq_notes||"[]")).join("; ")||undefined}>
+                      ${prereqIcon(ep)}
+                    </td>
+                    <td style=${{textAlign:"center"}}>
+                      <input type="checkbox" checked=${ep.in_scope} onChange=${()=>toggleScope(ep)} style=${{cursor:"pointer"}}/>
+                    </td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Test Runs</span>
+            <button className="btn sm" onClick=${()=>nav(`#/apis/${collectionId}/runs/new`)}>+ New test run</button>
+          </div>
+          ${apiRuns===null && html`<div className="subtle">Loading…</div>`}
+          ${apiRuns!==null && apiRuns.length===0 && html`
+            <div className="subtle" style=${{padding:"12px 0"}}>
+              No test runs yet. Click <strong>+ New test run</strong> to start one.
+            </div>`}
+          ${apiRuns!==null && apiRuns.length>0 && html`
+            <table style=${{width:"100%"}}>
+              <thead><tr>
+                <th>Name</th><th>Status</th><th>Coverage</th><th>Created</th><th></th>
+              </tr></thead>
+              <tbody>${apiRuns.map(r=>html`
+                <tr key=${r.id}>
+                  <td><a href=${`#/api-runs/${r.id}/agents`} style=${{fontWeight:600}}>${r.name}</a></td>
+                  <td><span className=${`badge ${r.status==="completed"?"success":r.status==="running"?"warning":r.status==="failed"?"danger":"neutral"}`}>${r.status}</span></td>
+                  <td>${r.coverage_mode}</td>
+                  <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(r.created_at).toLocaleString()}</td>
+                  <td><a href=${`#/api-runs/${r.id}/agents`} className="btn secondary sm">Open</a></td>
+                </tr>`)}
+              </tbody>
+            </table>`}
+        </div>`}
+    </div>
+  `;
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ApiFilesManager({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [docs, setDocs] = useState(null);
+  const [endpoints, setEndpoints] = useState([]);
+  const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, d, eps] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiDocuments(collectionId),
+        api.listApiEndpoints(collectionId),
+      ]);
+      setCollection(c); setDocs(d); setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  // Endpoint count keyed by source_doc_id
+  const epCountByDoc = endpoints.reduce((acc, ep) => {
+    if (ep.source_doc_id != null) acc[ep.source_doc_id] = (acc[ep.source_doc_id] || 0) + 1;
+    return acc;
+  }, {});
+
+  const doUpload = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setUploading(true); setError(null);
+    try {
+      await api.uploadApiDocuments(collectionId, files);
+      await load();
+    } catch(e) { setError(e.message); }
+    finally { setUploading(false); }
+  };
+
+  const onPick = (e) => { doUpload(e.target.files); e.target.value = ""; };
+  const onDrop = (e) => { e.preventDefault(); setDragOver(false); doUpload(e.dataTransfer.files); };
+
+  const onDelete = async (doc) => {
+    if (!confirm(`Delete "${doc.filename}"?`)) return;
+    try { await api.deleteApiDocument(collectionId, doc.id); setDocs(ds=>ds.filter(d=>d.id!==doc.id)); }
+    catch(e) { setError(e.message); }
+  };
+
+  const onReparse = async (doc) => {
+    setReparseState(s => ({...s, [doc.id]: "running"}));
+    try {
+      const updated = await api.parseApiDocument(collectionId, doc.id);
+      setDocs(ds => ds.map(d => d.id === doc.id ? updated : d));
+      // Refresh endpoint counts too
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+      setReparseState(s => ({...s, [doc.id]: updated.status === "parsed" ? "done" : "failed"}));
+    } catch(e) {
+      setError(e.message);
+      setReparseState(s => ({...s, [doc.id]: "failed"}));
+    }
+  };
+
+  const statusCell = (d) => {
+    const count = epCountByDoc[d.id];
+    if (d.status === "failed") {
+      const tip = d.error_message || "";
+      return html`<span className="badge danger" title=${tip} style=${{cursor:"help"}}>failed</span>`;
+    }
+    if (d.status === "parsed") {
+      if (count != null && count > 0) {
+        return html`<span><span className="badge ok">parsed</span> <span style=${{fontSize:11,color:"var(--muted)",marginLeft:4}}>${count} endpoint${count===1?"":"s"}</span></span>`;
+      }
+      if (d.doc_type === "credentials") {
+        return html`<span className="badge ok" title="Credentials parsed — no endpoints from this type">parsed</span>`;
+      }
+      return html`<span className="badge ok">parsed</span>`;
+    }
+    return html`<span className="badge neutral">uploaded</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${collection ? collection.name : "…"}</a>
+        <span className="breadcrumb-sep"> / </span>
+        Files
+      </div>
+      <div className="topbar-actions">
+        <input ref=${fileRef} type="file" multiple style=${{display:"none"}} onChange=${onPick}/>
+        <button className="btn" onClick=${()=>fileRef.current.click()} disabled=${uploading}>${uploading?"Uploading…":"Upload files"}</button>
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <div
+        className=${"upload-dropzone"+(dragOver?" dragover":"")}
+        onDragOver=${e=>{e.preventDefault(); setDragOver(true);}}
+        onDragLeave=${()=>setDragOver(false)}
+        onDrop=${onDrop}
+        onClick=${()=>fileRef.current.click()}
+        style=${{border:"2px dashed var(--border)", borderRadius:8, padding:"28px 16px", textAlign:"center", cursor:"pointer", color:dragOver?"var(--accent)":"var(--muted)", background:dragOver?"var(--surface-2,#222)":"transparent"}}>
+        <div style=${{fontSize:13}}>${uploading?"Uploading…":"Drag & drop files here, or click to choose"}</div>
+        <div className="subtle" style=${{marginTop:6, fontSize:11}}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip (max 25 MB each)</div>
+      </div>
+      ${endpoints.length > 0 && html`
+        <div className="alert" style=${{background:"var(--surface-2,#1a2a1a)",borderColor:"var(--ok,#4caf50)",color:"var(--ok,#4caf50)",padding:"10px 14px",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>${endpoints.length} endpoint${endpoints.length===1?"":"s"} extracted</span>
+          <a href=${`#/apis/${collectionId}`} style=${{color:"var(--ok,#4caf50)",fontWeight:600,textDecoration:"none"}}>View endpoints →</a>
+        </div>`}
+      ${docs===null && html`<div className="subtle">Loading…</div>`}
+      ${docs!==null&&docs.length===0 && html`
+        <div className="empty-state" style=${{padding:"24px 16px"}}>
+          <div className="empty-icon">📄</div>
+          <div className="empty-msg">No files uploaded yet</div>
+          <div className="empty-sub">Upload API documentation to attach it to this collection.</div>
+        </div>`}
+      ${docs&&docs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"32%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Filename</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr></thead>
+            <tbody>${docs.map(d=>html`
+              <tr key=${d.id}>
+                <td style=${{fontWeight:600}}>${d.filename}</td>
+                <td><span className="badge neutral">${d.doc_type}</span></td>
+                <td>${fmtBytes(d.size_bytes)}</td>
+                <td>${statusCell(d)}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":d.status==="uploaded"?"Parse":"Reparse"}</button>
+                    <button className="btn secondary sm" onClick=${()=>api.downloadApiDocument(collectionId, d.id)}>Download</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(d)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
 // ── Active jobs ───────────────────────────────────────────────────────────────
 
 function activeJobBadge(job) {
@@ -1340,10 +1912,18 @@ function ActiveJobsPage() {
     const key = `${j.job_type}-${j.run_id}`;
     setStopping(prev => ({ ...prev, [key]: true }));
     try {
-      if (j.job_type === "A.L.I.C.E.") {
-        await api.stopAliceRun(j.run_id);
+      if (j.run_type === "api") {
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopApiAliceRun(j.run_id);
+        } else {
+          await api.stopApiScan(j.run_id);
+        }
       } else {
-        await api.stopRun(j.run_id);
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopAliceRun(j.run_id);
+        } else {
+          await api.stopRun(j.run_id);
+        }
       }
       await load();
     } catch(e) {
@@ -1391,10 +1971,13 @@ function ActiveJobsPage() {
               return html`
               <tr key=${key}>
                 <td>
-                  <a href=${`#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  <a href=${j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
                 </td>
-                <td><a href=${`#/sites/${j.site_id}`}>${j.site_name}</a></td>
+                <td>${j.run_type==="api"
+                  ? html`<a href=${`#/apis/${j.collection_id}`}>${j.collection_name}</a>`
+                  : html`<a href=${`#/sites/${j.site_id}`}>${j.site_name}</a>`
+                }</td>
                 <td>${j.job_type}</td>
                 <td>${activeJobBadge(j)}</td>
                 <td>${activeJobProgress(j)}</td>
@@ -1402,7 +1985,7 @@ function ActiveJobsPage() {
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
-                    <button className="btn secondary sm" onClick=${()=>nav(`#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="api" ? `#/api-runs/${j.run_id}/agents` : `#/runs/${j.run_id}`)}>Open</button>
                     <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
@@ -1704,6 +2287,1251 @@ function SiteForm({ siteId }) {
 }
 
 // ── Test run form ─────────────────────────────────────────────────────────────
+
+// ── API test run form ─────────────────────────────────────────────────────────
+
+function ApiTestRunForm({ collectionId }) {
+  const [form, setForm] = useState({ name:"", llm_config_id:"", coverage_mode:"track" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
+  const upd = p => setForm(f=>({...f,...p}));
+
+  useEffect(() => {
+    api.listLLMProfiles().then(p => setProfiles(p||[])).catch(e => setError(e.message));
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setSaving(true); setError(null);
+    try {
+      const payload = {
+        name: form.name.trim()||null,
+        llm_config_id: form.llm_config_id ? +form.llm_config_id : null,
+        coverage_mode: form.coverage_mode,
+      };
+      const run = await api.createApiRun(collectionId, payload);
+      nav(`#/api-runs/${run.id}/agents`);
+    } catch(e) { setError(e.message); setSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>New test run
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <form className="card" style=${{maxWidth:560}} onSubmit=${onSubmit}>
+        <div className="form-section-title">New API test run</div>
+        <div className="field">
+          <label>Name <span className="subtle">(optional — auto-generated if blank)</span></label>
+          <input type="text" value=${form.name} onInput=${e=>upd({name:e.target.value})} placeholder="e.g. Sprint 12 auth test"/>
+        </div>
+        <div className="field">
+          <label>LLM profile</label>
+          <select value=${form.llm_config_id} onChange=${e=>upd({llm_config_id:e.target.value})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Coverage mode</label>
+          <select value=${form.coverage_mode} onChange=${e=>upd({coverage_mode:e.target.value})}>
+            <option value="track">Track — record coverage but don't enforce it</option>
+            <option value="enforce">Enforce — block completion until all endpoints covered</option>
+          </select>
+        </div>
+        <div className="row spread" style=${{marginTop:16}}>
+          <button type="button" className="btn ghost" onClick=${()=>nav(`#/apis/${collectionId}`)}>Cancel</button>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+// ── API test run detail ────────────────────────────────────────────────────────
+
+const API_RUN_TABS = [
+  { key: "status",      label: "Status" },
+  { key: "findings",    label: "Findings" },
+  { key: "sessions",    label: "Sessions" },
+  { key: "traffic",     label: "Traffic Log" },
+  { key: "endpoints",   label: "Endpoints" },
+  { key: "workprogram", label: "Workprogram" },
+];
+
+// Reuse the same alice session management infrastructure as TestRunDetail but
+// bound to the /api/api-test-runs/{id}/* alias routes.
+function useApiAliceSession(runId) {
+  const [aliceSessions, setAliceSessions] = useState(null);
+  const [aliceLoaded, setAliceLoaded] = useState(false);
+  const [activeTabId, setActiveTabId] = useState("tab-default");
+  const [aliceStatus, setAliceStatus] = useState(null);
+  const streamRef = useRef(null);
+  const cursorRef = useRef(0);
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const data = await api.getApiAliceSessions(runId);
+      setAliceSessions(data.chats || []);
+      setActiveTabId(data.active_tab_id || "tab-default");
+      setAliceLoaded(true);
+    } catch(e) { console.error("alice sessions load error", e); setAliceLoaded(true); }
+  }, [runId]);
+
+  const saveSessions = useCallback(async (chats, activeId) => {
+    try { await api.saveApiAliceSessions(runId, { chats, active_tab_id: activeId }); }
+    catch(e) { console.error("alice sessions save error", e); }
+  }, [runId]);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await api.getApiAliceStatus(runId);
+      setAliceStatus(st);
+    } catch {}
+  }, [runId]);
+
+  return { aliceSessions, setAliceSessions, aliceLoaded, activeTabId, setActiveTabId, aliceStatus, setAliceStatus, loadSessions, saveSessions, pollStatus, streamRef, cursorRef };
+}
+
+function ApiTestRunDetail({ runId, initialTab }) {
+  const [run, setRun] = useState(null);
+  const [error, setError] = useState(null);
+  const [scanStatus, setScanStatus] = useState(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const tab = initialTab || "status";
+
+  useEffect(() => {
+    api.getApiRun(runId).then(setRun).catch(e => setError(e.message));
+    api.getApiScanStatus(runId).then(setScanStatus).catch(()=>{});
+  }, [runId]);
+
+  // Poll scan status while scanning.
+  useEffect(() => {
+    if (!scanStatus?.running) return;
+    const t = setInterval(() => {
+      api.getApiScanStatus(runId).then(st => {
+        setScanStatus(st);
+        if (!st.running) api.getApiRun(runId).then(setRun).catch(()=>{});
+      }).catch(()=>{});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [scanStatus?.running, runId]);
+
+  const onStartScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.startApiScan(runId);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(setRun).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
+
+  const onStopScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.stopApiScan(runId);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(setRun).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
+
+  const onDelete = async () => {
+    if (!run) return;
+    if (!confirm(`Delete test run "${run.name}"?`)) return;
+    try { await api.deleteApiRun(runId); nav(`#/apis/${run.collection_id}`); }
+    catch(e) { setError(e.message); }
+  };
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"success":s==="running"||s==="scanning"?"warning":s==="failed"||s==="cancelled"?"danger":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  const scanRunning = scanStatus?.running === true;
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${run?`#/apis/${run.collection_id}`:"#/apis"} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${run ? run.name : "…"}
+        ${run && html` ${statusBadge(run.status)}`}
+      </div>
+      <div className="topbar-actions">
+        ${scanRunning
+          ? html`<button className="btn danger-outline" disabled=${scanBusy} onClick=${onStopScan}>
+                   ${scanBusy?"Stopping…":"Stop Scan"}
+                 </button>`
+          : html`<button className="btn" disabled=${scanBusy} onClick=${onStartScan}>
+                   ${scanBusy?"Starting…":"Start Scan"}
+                 </button>`}
+        ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="tab-bar">
+      ${API_RUN_TABS.map(t=>html`
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>nav(`#/api-runs/${runId}/${t.key}`)}
+        >${t.label}</button>`)}
+    </div>
+    <div className=${"content no-padding"+(tab==="status"?" flex-fill-noscroll":" scroll-content")}>
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${tab==="status"      && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="findings"    && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+      ${tab==="sessions"    && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="traffic"     && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="endpoints"   && html`<${ApiRunEndpointsTab} runId=${runId} run=${run}/>`}
+      ${tab==="workprogram" && html`<${ApiRunWorkProgramTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+    </div>
+  `;
+}
+
+// ── ApiRunSessionsTab ──────────────────────────────────────────────────────────
+
+function ApiRunSessionsTab({ runId, scanRunning }) {
+  const [data, setData] = useState(null);
+
+  const load = () => api.getApiScannerSessions(runId).then(setData).catch(() => {});
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  return html`<${ScannerSessionsPanel}
+    runId=${runId}
+    data=${data}
+    refresh=${load}
+    updateSession=${(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)}
+  />`;
+}
+
+// ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
+
+function ApiRunFindingsTab({ runId, scanRunning, run }) {
+  const [findings, setFindings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+  const [clearBusy, setClearBusy] = useState(false);
+  const issueImportInputRef = useRef(null);
+
+  const load = async () => {
+    try {
+      const data = await api.getApiFindings(runId);
+      setFindings(data);
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [runId]);
+
+  // Poll while scan is running.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const toggle = (id) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, null), md, "text/markdown;charset=utf-8");
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportFindingsClick = () => { issueImportInputRef.current?.click(); };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importApiFindings(runId, imported);
+      setFindings(await api.getApiFindings(runId));
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onClearFindings = async () => {
+    if (!confirm("Clear all findings for this API test run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiFindings(runId); setFindings([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
+
+  if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
+
+  return html`
+    <div style=${{padding:"16px 24px"}}>
+      ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+      <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0,marginRight:4}}>Security Findings</h3>
+        ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+        <span className="badge neutral" style=${{fontSize:12}}>${findings.length} finding${findings.length!==1?"s":""}</span>
+        <div style=${{flex:1}}></div>
+        <button className="btn sm" onClick=${load}>Refresh</button>
+        ${findings.length>0 && html`<button className="btn sm" onClick=${onExportFindingsMarkdown}>Export Issues</button>`}
+        <button className="btn sm" onClick=${onImportFindingsClick}>Import Issues</button>
+        <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+          style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+        ${findings.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClearFindings}>${clearBusy?"Clearing…":"Clear all"}</button>`}
+      </div>
+      ${findings.length === 0
+        ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — findings will appear here as they are discovered."
+                              :"No findings yet. Start a scan to test this API collection."}
+               </div>`
+        : findings.map(f => html`
+          <div key=${f.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
+            <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
+                 onClick=${()=>toggle(f.id)}>
+              <span className=${"sev-badge "+sevCls(f.severity)}>${f.severity}</span>
+              <span style=${{fontWeight:600,flex:1}}>${f.title}</span>
+              ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
+              ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
+              <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+            </div>
+            ${expanded.has(f.id) && html`
+              <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
+                ${f.affected_url && html`<div style=${{marginBottom:8}}><b>URL:</b> <code style=${{fontSize:12}}>${f.affected_url}</code></div>`}
+                ${f.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
+                  <div style=${{marginTop:4}} dangerouslySetInnerHTML=${{__html:renderMarkdown(f.description)}}/></div>`}
+                ${f.impact && html`<div style=${{marginBottom:8}}><b>Impact:</b> ${f.impact}</div>`}
+                ${f.recommendation && html`<div style=${{marginBottom:8}}><b>Recommendation:</b> ${f.recommendation}</div>`}
+                ${f.evidence && html`<div style=${{marginBottom:8}}><b>Evidence:</b>
+                  <pre style=${{fontSize:11,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:8,borderRadius:4,overflow:"auto",maxHeight:200,whiteSpace:"pre-wrap"}}>${f.evidence}</pre></div>`}
+                <div style=${{fontSize:11,color:"var(--muted)"}}>${f.validation_status} · ${f.finding_source}</div>
+              </div>`}
+          </div>`)
+      }
+    </div>
+  `;
+}
+
+// ── ApiRunEndpointsTab — per-endpoint prerequisites display ───────────────────
+
+function ApiRunEndpointsTab({ runId, run }) {
+  const [endpoints, setEndpoints] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!run) return;
+    api.listApiEndpoints(run.collection_id)
+      .then(data => { setEndpoints(data || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [run]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading endpoints…</div>`;
+  if (!endpoints.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No endpoints found. Upload and parse API documentation first.
+    </div>`;
+
+  const parsedNotes = (ep) => {
+    try { return JSON.parse(ep.prereq_notes || "[]"); } catch { return []; }
+  };
+
+  const readinessIcon = (ok) => ok
+    ? html`<span style=${{color:"var(--success,#4caf50)"}}>✔</span>`
+    : html`<span style=${{color:"var(--danger,#f44336)"}}>✘</span>`;
+
+  return html`
+    <div style=${{padding:"16px"}}>
+      <h3 style=${{marginBottom:12}}>Endpoint Prerequisites</h3>
+      <table className="data-table" style=${{width:"100%",borderCollapse:"collapse"}}>
+        <thead>
+          <tr>
+            <th>Method</th><th>Path</th><th>Auth Req.</th>
+            <th title="Enough info to probe this endpoint">Testable?</th>
+            <th title="Have credentials for auth-required paths">Auth Testable?</th>
+            <th>Notes / Gaps</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${endpoints.map(ep => {
+            const notes = parsedNotes(ep);
+            return html`
+              <tr key=${ep.id}>
+                <td><span className=${"method-badge method-"+ep.method.toLowerCase()}>${ep.method}</span></td>
+                <td className="mono" style=${{fontSize:12}}>${ep.path}</td>
+                <td style=${{textAlign:"center"}}>${ep.auth_required ? html`<span className="badge warning">Auth</span>` : html`<span className="badge neutral">Open</span>`}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test)}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test_auth)}</td>
+                <td style=${{fontSize:11,color:notes.length?"var(--danger,#f44336)":"var(--muted)"}}>
+                  ${notes.length ? notes.join(" · ") : "—"}
+                </td>
+              </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ── ApiRunWorkProgramTab — coverage matrix + live updates ─────────────────────
+
+const OWASP_LABELS = {
+  API1:"BOLA", API2:"Broken Auth", API3:"BOPLA", API4:"Consumption",
+  API5:"BFLA", API6:"Bus. Flows", API7:"SSRF",  API8:"Misconfig",
+  API9:"Inventory", API10:"Ext. APIs",
+};
+const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","API8","API9","API10"];
+
+function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
+  const [matrix, setMatrix] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const esRef = useRef(null);
+
+  const loadMatrix = () =>
+    api.getApiCoverageMatrix(runId)
+      .then(m => { setMatrix(m); setLoading(false); })
+      .catch(() => setLoading(false));
+
+  useEffect(() => { loadMatrix(); }, [runId]);
+
+  // Poll during scan.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMatrix, 5000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  // SSE live updates.
+  useEffect(() => {
+    if (!scanRunning) return;
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.type === "coverage_update") {
+          setMatrix(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              endpoints: prev.endpoints.map(ep => {
+                if (ep.endpoint_id !== d.endpoint_id) return ep;
+                const cells = { ...ep.cells };
+                const existing = cells[d.owasp_api_category] || { status:"not_started", finding_ids:[] };
+                const fids = [...existing.finding_ids];
+                if (d.finding_id && !fids.includes(d.finding_id)) fids.push(d.finding_id);
+                cells[d.owasp_api_category] = { status: d.status, finding_ids: fids };
+                return { ...ep, cells };
+              }),
+            };
+          });
+        }
+      } catch {}
+    };
+    return () => { es.close(); esRef.current = null; };
+  }, [scanRunning, runId]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading coverage matrix…</div>`;
+
+  if (!matrix || !matrix.endpoints?.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No coverage data yet.${" "}
+      ${run?.status === "pending"
+        ? "Start a scan to populate the Work Program matrix."
+        : "The matrix will appear once a scan has started."}
+    </div>`;
+
+  const cats = matrix.categories || COVERAGE_CATEGORIES;
+  const totals = matrix.totals || {};
+  const totalCells = Object.values(totals).reduce((a,b)=>a+b,0);
+  const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
+  const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
+
+  return html`
+    <div style=${{padding:16}}>
+      <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <span className=${"badge "+(run?.coverage_mode==="enforce"?"warning":"neutral")}>
+          ${run?.coverage_mode||"track"} mode
+        </span>
+        <span className="badge neutral">${pct}% coverage (${coveredCount}/${totalCells} cells)</span>
+        ${scanRunning && html`<span className="badge warning">● Live</span>`}
+      </div>
+
+      <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
+        ${[["not_started","cov-not-started","Not started"],["in_progress","cov-in-progress","In progress"],
+           ["covered","cov-covered","Covered"],["finding","cov-finding","Finding"],
+           ["skipped","cov-skipped","Skipped"]].map(([s,cls,label])=>html`
+          <span key=${s} style=${{display:"flex",alignItems:"center",gap:4}}>
+            <span className=${"cov-cell "+cls} style=${{display:"inline-block",width:14,height:14,borderRadius:3}}></span>
+            ${label} (${totals[s]||0})
+          </span>`)}
+      </div>
+
+      <div style=${{overflowX:"auto"}}>
+        <table className="coverage-matrix" style=${{borderCollapse:"collapse",fontSize:11,minWidth:600}}>
+          <thead>
+            <tr>
+              <th style=${{textAlign:"left",padding:"4px 8px",minWidth:280,width:"30%"}}>Endpoint</th>
+              <th style=${{padding:"4px 6px",textAlign:"center",minWidth:50}}>Ready</th>
+              ${cats.map(cat=>html`
+                <th key=${cat} style=${{padding:"4px 4px",textAlign:"center",minWidth:60}}
+                  title=${cat+": "+(OWASP_LABELS[cat]||cat)}>
+                  <div style=${{fontWeight:600}}>${cat}</div>
+                  <div style=${{color:"var(--muted)",fontWeight:400,fontSize:10}}>${OWASP_LABELS[cat]||""}</div>
+                </th>`)}
+            </tr>
+          </thead>
+          <tbody>
+            ${matrix.endpoints.map(ep => {
+              const readyOk = ep.prereq_can_test && ep.prereq_can_test_auth;
+              return html`
+                <tr key=${ep.endpoint_id} style=${{borderBottom:"1px solid var(--border)"}}>
+                  <td style=${{padding:"4px 8px"}}>
+                    <span className=${"method-badge method-"+ep.method.toLowerCase()} style=${{marginRight:4}}>${ep.method}</span>
+                    <span className="mono" style=${{fontSize:11}}>${ep.path}</span>
+                  </td>
+                  <td style=${{textAlign:"center",padding:"4px 6px"}}>
+                    ${ep.auth_required
+                      ? html`<span title="Auth required" style=${{color:readyOk?"var(--success,#4caf50)":"var(--danger,#f44336)"}}>${readyOk?"✔":"✘"}</span>`
+                      : html`<span title="No auth" style=${{color:"var(--success,#4caf50)"}}>✔</span>`}
+                  </td>
+                  ${cats.map(cat => {
+                    const cell = ep.cells?.[cat];
+                    if (!cell) return html`<td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}><span className="cov-cell cov-na" title="N/A">—</span></td>`;
+                    const fids = cell.finding_ids || [];
+                    const isSelected = selectedCell?.endpoint_id===ep.endpoint_id && selectedCell?.cat===cat;
+                    return html`
+                      <td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}>
+                        <span
+                          className=${"cov-cell cov-"+cell.status.replace("_","-")+(isSelected?" selected":"")+(fids.length?" has-findings":"")}
+                          title=${cat+": "+cell.status+(fids.length?" ("+fids.length+" finding"+(fids.length>1?"s":"")+"":"")}
+                          style=${{cursor:fids.length?"pointer":"default"}}
+                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{endpoint_id:ep.endpoint_id,cat,path:ep.path,method:ep.method,fids})}
+                        >${fids.length>0?fids.length:""}</span>
+                      </td>`;
+                  })}
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      ${selectedCell && html`
+        <div style=${{marginTop:12,padding:12,background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <b style=${{fontSize:13}}>${selectedCell.method} ${selectedCell.path} — ${selectedCell.cat} ${OWASP_LABELS[selectedCell.cat]||""}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelectedCell(null)}>✕</button>
+          </div>
+          <div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunTrafficTab ───────────────────────────────────────────────────────────
+
+function ApiRunTrafficTab({ runId, scanRunning }) {
+  const [traffic, setTraffic] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const lastIdRef = useRef(0);
+  const tableRef = useRef(null);
+
+  const loadMore = async () => {
+    try {
+      const items = await api.getApiTraffic(runId, lastIdRef.current);
+      if (items.length) {
+        setTraffic(prev => {
+          const next = [...prev, ...items];
+          lastIdRef.current = Math.max(...next.map(e=>e.id));
+          return next;
+        });
+      }
+      const ct = await api.getApiTrafficCount(runId);
+      setTotal(ct.count || 0);
+    } catch {}
+  };
+
+  useEffect(() => { loadMore(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMore, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  useEffect(() => {
+    if (autoScroll && tableRef.current) {
+      tableRef.current.scrollTop = tableRef.current.scrollHeight;
+    }
+  }, [traffic.length, autoScroll]);
+
+  const fmtTs = (ts) => {
+    if (!ts) return "-";
+    try { return new Date(ts).toLocaleTimeString(); } catch { return ts; }
+  };
+
+  const statusCls = (s) => !s?"":s<300?"status-2xx":s<400?"status-3xx":s<500?"status-4xx":"status-5xx";
+
+  const filtered = filter
+    ? traffic.filter(e=>(e.url+e.method+(e.status??"")+e.source).toLowerCase().includes(filter.toLowerCase()))
+    : traffic;
+
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",height:"calc(100vh - 130px)"}}>
+      <div style=${{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
+        <input className="traffic-filter" type="text" placeholder="Filter…"
+          value=${filter} onInput=${e=>setFilter(e.target.value)} style=${{flex:1}}/>
+        <span className="traffic-count-label">${filtered.length} shown${total>filtered.length?` of ${total}`:""}</span>
+        <label style=${{fontSize:12,display:"flex",alignItems:"center",gap:4}}>
+          <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
+          Auto-scroll
+        </label>
+        <button className="btn ghost sm" onClick=${()=>{setTraffic([]);lastIdRef.current=0;setSelected(null);}}>Clear</button>
+      </div>
+      <div style=${{flex:1,overflow:"auto"}} ref=${tableRef}>
+        <table className="traffic-table" style=${{width:"100%",tableLayout:"fixed"}}>
+          <colgroup>
+            <col style=${{width:"32px"}}/>
+            <col style=${{width:"82px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"90px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"56px"}}/>
+            <col/>
+            <col style=${{width:"72px"}}/>
+          </colgroup>
+          <thead>
+            <tr>
+              <th>#</th><th>Time</th><th>Source</th><th>User</th>
+              <th>Method</th><th>Status</th><th>URL</th><th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((e,i)=>html`
+              <tr key=${e.id}
+                className=${"traffic-row"+(selected?.id===e.id?" selected":"")}
+                onClick=${()=>setSelected(selected?.id===e.id?null:e)}>
+                <td className="tr-num">${i+1}</td>
+                <td className="tr-ts">${fmtTs(e.created_at)}</td>
+                <td><span className=${"src-badge src-"+e.source}>${e.source}</span></td>
+                <td className="tr-user">${e.username||"-"}</td>
+                <td className="tr-method">${e.method}</td>
+                <td><span className=${"status-pill "+statusCls(e.status)}>${e.status??"-"}</span></td>
+                <td className="tr-url" title=${e.url}>${e.url}</td>
+                <td className="tr-dur">${e.duration_ms!=null?e.duration_ms+"ms":"-"}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${filtered.length===0 && html`
+          <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+            ${scanRunning?"Capturing traffic…":"No traffic recorded yet. Start a scan to generate traffic."}
+          </div>`}
+      </div>
+      ${selected && html`
+        <div style=${{flexShrink:0,borderTop:"2px solid var(--accent)",padding:"10px 16px",maxHeight:220,overflow:"auto",background:"var(--surface)"}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <b style=${{fontSize:13}}>${selected.method} ${selected.url}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelected(null)}>✕</button>
+          </div>
+          ${selected.request_body && html`<div style=${{marginBottom:6}}><b style=${{fontSize:11}}>Request Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.request_body}</pre></div>`}
+          ${selected.response_body && html`<div><b style=${{fontSize:11}}>Response Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.response_body?.slice(0,2000)}</pre></div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+// Build the agent list from a raw agent-log API response, preserving task history.
+function _buildAgentsFromLog(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const id = r.agent_id;
+    const ts = r.created_at
+      ? new Date(r.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : "--:--:--";
+    const existing = map.get(id) || { id, name: r.role || id, status: r.status || "idle", task: r.current_task || "", taskHistory: [] };
+    existing.name = r.role || existing.name;
+    existing.status = r.status || existing.status;
+    existing.task = r.current_task || existing.task;
+    existing.taskHistory.push({ ts, task: r.current_task || "", outcome: r.outcome || "" });
+    map.set(id, existing);
+  }
+  return [...map.values()];
+}
+
+// ── ApiRunStatusTab ────────────────────────────────────────────────────────────
+
+function ApiRunStatusTab({ runId, scanRunning }) {
+  const [subTab, setSubTab] = useState("agents");
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0",flexShrink:0,position:"sticky",top:0,background:"var(--bg)",zIndex:2,borderBottom:"1px solid var(--border)"}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?" active":"")}
+          onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="log"?" active":"")}
+          onClick=${()=>setSubTab("log")}>Log</button>
+      </div>
+      <div style=${{flex:1,overflow:"auto",minHeight:0}}>
+        ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+        ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+      </div>
+    </div>
+  `;
+}
+
+// ── ApiRunLogTab ───────────────────────────────────────────────────────────────
+
+function ApiRunLogTab({ runId, scanRunning }) {
+  const [log, setLog] = useState([]);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = () => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message));
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const onClear = async () => {
+    if (!confirm("Clear all agent log entries for this run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiAgentLog(runId); setLog([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"||s==="done"?"phase-ok":"phase-other";
+
+  return html`
+    <div className="activity-panel" style=${{margin:0}}>
+      <div className="activity-log-toolbar">
+        <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+        ${scanRunning && html`<span className="activity-mode-badge">Scan running</span>`}
+        <a className="btn ghost sm" href=${`/api/api-test-runs/${runId}/agent-log/export`} download>Export log ↓</a>
+        ${log.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClear}>${clearBusy?"Clearing…":"Clear"}</button>`}
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"0 16px 8px"}}>${error}</div>`}
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — agent activity will appear here.":"No agent log entries yet."}
+               </div>`
+        : html`<div className="activity-feed">
+          ${log.map(r => {
+            const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+            return html`
+              <div key=${r.id} className="activity-entry">
+                <span className="activity-ts">${ts}</span>
+                <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+              </div>`;
+          })}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunAgentsTab ────────────────────────────────────────────────────────────
+
+function ApiRunAgentsTab({ runId, scanRunning }) {
+  // ── Agent list state ──────────────────────────────────────────────────────
+  const [agents, setAgents] = useState([]);
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const toggleAgentId = (id) => setCollapsedAgentIds(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  // ── ALICE chat state ──────────────────────────────────────────────────────
+  const [aliceChats, setAliceChats] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`api_alice_chats_${runId}`) || "null");
+      return saved && saved.length ? saved : [{ id: "tab-default", title: "Session 1", messages: [] }];
+    } catch { return [{ id: "tab-default", title: "Session 1", messages: [] }]; }
+  });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try { return localStorage.getItem(`api_alice_active_tab_${runId}`) || "tab-default"; } catch { return "tab-default"; }
+  });
+  const [aliceRunning, setAliceRunning] = useState(false);
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const streamRef = useRef(null);
+  const activeAliceTabIdRef = useRef(activeAliceTabId);
+  activeAliceTabIdRef.current = activeAliceTabId;
+  const sessionsRef = useRef(aliceChats);
+  sessionsRef.current = aliceChats;
+
+  // ── On mount: load sessions, agent log, check alice status ────────────────
+  useEffect(() => {
+    api.getApiAliceSessions(runId).then(data => {
+      const chats = data.chats || [];
+      if (chats.length) {
+        setAliceChats(chats);
+        const aid = data.active_tab_id || "tab-default";
+        setActiveAliceTabId(aid);
+        activeAliceTabIdRef.current = aid;
+      }
+    }).catch(() => {});
+    api.getApiAgentLog(runId).then(rows => {
+      setAgents(_buildAgentsFromLog(rows));
+    }).catch(() => {});
+    api.getApiAliceStatus(runId).then(st => {
+      if (st?.running) { setAliceRunning(true); connectAliceStream(0); }
+    }).catch(() => {});
+  }, [runId]);
+
+  // ── SSE: real-time agent_status events ───────────────────────────────────
+  useEffect(() => {
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    es.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.type !== "agent_status") return;
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const idx = prev.findIndex(a => a.id === evt.agent_id);
+          const histEntry = { ts, task: evt.current_task || "", outcome: evt.outcome || "" };
+          const existing = idx >= 0 ? prev[idx] : { id: evt.agent_id, name: evt.role || evt.agent_id, status: evt.status, task: evt.current_task || "", taskHistory: [] };
+          const updated = { ...existing, name: evt.role || existing.name, status: evt.status, task: evt.current_task || "", taskHistory: [...(existing.taskHistory || []), histEntry] };
+          if (idx >= 0) { const next = [...prev]; next[idx] = updated; return next; }
+          return [...prev, updated];
+        });
+      } catch {}
+    };
+    return () => es.close();
+  }, [runId]);
+
+  // ── Poll agent log while scanning or alice is running ────────────────────
+  // Merge with existing state so SSE-only (non-persisted) step history is
+  // not wiped on every poll cycle.
+  useEffect(() => {
+    if (!aliceRunning && !scanRunning) return;
+    const t = setInterval(() => {
+      api.getApiAgentLog(runId).then(rows => {
+        const fromLog = _buildAgentsFromLog(rows);
+        setAgents(prev => {
+          const prevMap = new Map(prev.map(a => [a.id, a]));
+          const merged = fromLog.map(a => {
+            const existing = prevMap.get(a.id);
+            if (!existing) return a;
+            // Prefer the longer history — SSE may have more non-persisted entries
+            const history = existing.taskHistory.length >= a.taskHistory.length
+              ? existing.taskHistory
+              : a.taskHistory;
+            return { ...a, taskHistory: history };
+          });
+          // Keep SSE-only agents not yet written to the DB
+          for (const a of prev) {
+            if (!merged.find(m => m.id === a.id)) merged.push(a);
+          }
+          return merged;
+        });
+      }).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [aliceRunning, scanRunning, runId]);
+
+  // ── Persist alice chats ───────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      localStorage.setItem(`api_alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`api_alice_active_tab_${runId}`, activeAliceTabId);
+    } catch {}
+    api.saveApiAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId }).catch(() => {});
+  }, [aliceChats, activeAliceTabId]);
+
+  // ── Cleanup stream on unmount ─────────────────────────────────────────────
+  useEffect(() => {
+    return () => { if (streamRef.current) { streamRef.current.close(); streamRef.current = null; } };
+  }, []);
+
+  // ── ALICE stream connection ───────────────────────────────────────────────
+  const connectAliceStream = useCallback((cursor = 0) => {
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
+    streamRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const event = JSON.parse(ev.data);
+        if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
+        } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
+        } else if (event.type === "done") {
+          setAliceRunning(false);
+          es.close(); streamRef.current = null;
+        }
+      } catch {}
+    };
+    es.onerror = () => { es.close(); streamRef.current = null; setAliceRunning(false); };
+  }, [runId]);
+
+  // ── ALICE send / stop ─────────────────────────────────────────────────────
+  const handleAliceSend = async () => {
+    if (!aliceInputText.trim() || aliceRunning) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+    const tabId = activeAliceTabIdRef.current;
+    const thinkId = `think-${Date.now()}`;
+    const replyId = `reply-${Date.now() + 1}`;
+    const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    const userMsg  = { id: `u-${Date.now()}`,  sender: "user",  type: "message",  text: userText, ts };
+    const thinkMsg = { id: thinkId,             sender: "alice", type: "thinking", text: "",       ts };
+    const replyMsg = { id: replyId,             sender: "alice", type: "message",  text: "",       ts };
+    setAliceChats(prev => prev.map(s =>
+      s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
+    ));
+    setAliceRunning(true);
+    setAliceExpandedThinkIds(prev => { const n = new Set(prev); n.add(thinkId); return n; });
+    const activeSession = sessionsRef.current.find(s => s.id === tabId) || { messages: [] };
+    const history = activeSession.messages.map(m => ({ sender: m.sender, text: m.text }));
+    try {
+      await api.startApiAliceRun(runId, { message: userText, history, tab_id: tabId, think_msg_id: thinkId, reply_msg_id: replyId });
+      connectAliceStream(0);
+    } catch { setAliceRunning(false); }
+  };
+
+  const handleAliceStop = () => {
+    api.stopApiAliceRun(runId).catch(() => {});
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    setAliceRunning(false);
+  };
+
+  // ── ALICE tab management ──────────────────────────────────────────────────
+  const createAliceTab = () => {
+    const id = "tab-" + Date.now();
+    setAliceChats(prev => [...prev, { id, title: `Session ${prev.length + 1}`, messages: [] }]);
+    setActiveAliceTabId(id);
+  };
+
+  const deleteAliceTab = (tabId, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    if (aliceChats.length <= 1) {
+      setAliceChats([{ id: "tab-default", title: "Session 1", messages: [] }]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+    const idx = aliceChats.findIndex(t => t.id === tabId);
+    const remaining = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remaining);
+    if (activeAliceTabId === tabId) setActiveAliceTabId(remaining[Math.max(0, idx - 1)].id);
+  };
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault(); e.stopPropagation();
+    const startY = e.clientY; const startH = aliceChatHeight;
+    const onMove = ev => setAliceChatHeight(Math.max(150, Math.min(800, startH + (ev.clientY - startY))));
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  // ── Build agent roster ────────────────────────────────────────────────────
+  // API scan roster: A.L.I.C.E. → Test Lead → Specialist → Validator → Reporting
+  const buildRoster = () => {
+    const byId = Object.fromEntries(agents.map(a => [a.id, a]));
+    const specialistChildren = agents.filter(a => a.id.startsWith("specialist-"));
+    const validatorChildren  = agents.filter(a => a.id.startsWith("validator-"));
+    return [
+      {
+        id: "alice",
+        name: "A.L.I.C.E.",
+        status: aliceRunning ? "active" : (byId["alice"]?.status || "idle"),
+        task: aliceRunning ? "Processing directive…" : (byId["alice"]?.task || "Waiting for instruction"),
+        taskHistory: byId["alice"]?.taskHistory || [],
+      },
+      {
+        id: "scanner",
+        name: "Test Lead",
+        status: scanRunning && !byId["scanner"] ? "active" : (byId["scanner"]?.status || "idle"),
+        task: (scanRunning && !byId["scanner"]) ? "Coordinating API pentest" : (byId["scanner"]?.task || "Standing by"),
+        taskHistory: byId["scanner"]?.taskHistory || [],
+      },
+      { id: "specialist", name: "Specialist", children: specialistChildren },
+      { id: "validator",  name: "Validator",  children: validatorChildren  },
+      {
+        id: "reporting",
+        name: "Reporting",
+        status: byId["reporting"]?.status || "idle",
+        task: byId["reporting"]?.task || "Standing by",
+        taskHistory: byId["reporting"]?.taskHistory || [],
+      },
+    ];
+  };
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages  = activeAliceTab?.messages || [];
+  const roster = buildRoster();
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return html`
+    <div className="agents-panel" style=${{ padding: "8px 0" }}>
+      ${roster.map(agent => {
+
+        // ── A.L.I.C.E. row with embedded chat ─────────────────────────────
+        if (agent.id === "alice") {
+          const isActive  = agent.status === "active";
+          const isExpanded = !collapsedAgentIds.has("alice");
+          return html`
+            <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                 onClick=${() => toggleAgentId("alice")}>
+              <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E.</span>
+              <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                ${isActive ? "ACTIVE" : "STANDBY"}
+              </span>
+              <span className="agent-current-task">${agent.task}</span>
+              <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+              ${isExpanded && html`
+                <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                  <div className="alice-chat-tabs-bar">
+                    ${aliceChats.map(tab => {
+                      const isActiveTab = tab.id === activeAliceTabId;
+                      return html`
+                        <div key=${tab.id}
+                             className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                             onClick=${() => setActiveAliceTabId(tab.id)}>
+                          <span>${tab.title || "Session"}</span>
+                          <span className="alice-chat-tab-close"
+                                onClick=${e => deleteAliceTab(tab.id, e)}
+                                title="Close">×</span>
+                        </div>`;
+                    })}
+                    <button className="alice-chat-add-tab-btn" onClick=${createAliceTab} title="New Session">+</button>
+                  </div>
+                  <div className="alice-chat-history"
+                       style=${{ height: `${aliceChatHeight}px` }}
+                       ref=${el => { if (el) el.scrollTop = el.scrollHeight; }}>
+                    ${aliceMessages.length === 0 && html`
+                      <div style=${{ padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                        Send A.L.I.C.E. an instruction to begin interactive API testing.
+                      </div>`}
+                    ${aliceMessages.map(msg => {
+                      if (msg.type === "thinking") {
+                        const isThinkExp = aliceExpandedThinkIds.has(msg.id);
+                        return html`
+                          <div key=${msg.id} className="alice-msg-row">
+                            <div className="alice-msg-bubble--thinking">
+                              <div className="alice-thinking-header" onClick=${() => {
+                                setAliceExpandedThinkIds(prev => {
+                                  const n = new Set(prev); n.has(msg.id) ? n.delete(msg.id) : n.add(msg.id); return n;
+                                });
+                              }}>
+                                <${IconBrain}/>
+                                <span>Thought Process ${isThinkExp ? "▲" : "▼"}</span>
+                                <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                              </div>
+                              ${isThinkExp && html`
+                                <div className="alice-thinking-body">${renderMarkdown(msg.text)}</div>`}
+                            </div>
+                          </div>`;
+                      }
+                      const isUser = msg.sender === "user";
+                      return html`
+                        <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                          <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                            ${renderMarkdown(msg.text)}
+                            <div className="alice-msg-meta"><span>${msg.ts}</span></div>
+                          </div>
+                        </div>`;
+                    })}
+                    ${aliceRunning && html`
+                      <div className="alice-msg-row alice-msg-row--alice">
+                        <div className="alice-typing-bubble">
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                        </div>
+                      </div>`}
+                  </div>
+                  <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                  <div className="alice-chat-input-bar">
+                    <input className="alice-chat-input"
+                           placeholder="Direct A.L.I.C.E. on what to test…"
+                           value=${aliceInputText}
+                           disabled=${aliceRunning}
+                           onInput=${e => setAliceInputText(e.target.value)}
+                           onKeyDown=${e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAliceSend(); } }}/>
+                    ${aliceRunning
+                      ? html`<button className="alice-chat-stop-btn" onClick=${handleAliceStop} title="Stop">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                          </svg>
+                        </button>`
+                      : html`<button className="alice-chat-input-btn" disabled=${!aliceInputText.trim()} onClick=${handleAliceSend} title="Send">
+                          <${IconSend}/>
+                        </button>`}
+                  </div>
+                </div>`}
+            </div>`;
+        }
+
+        // ── Specialist container row ───────────────────────────────────────
+        if (agent.id === "specialist") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No specialist dispatched"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} running, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+            : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+          return html`
+            <div key="specialist"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("specialist") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Specialist</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(c => {
+                    const cActive = c.status === "active";
+                    const cTask = c.task || (c.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    return html`
+                      <div key=${c.id} className=${"agent-thread-row" + (cActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (cActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">${c.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (cActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${cActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${cTask}>${cTask.length > 90 ? cTask.slice(0, 89) + "…" : cTask}</span>
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Validator container row ────────────────────────────────────────
+        if (agent.id === "validator") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No validation running"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} validating, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+            : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+          return html`
+            <div key="validator"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("validator") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Validator</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(va => {
+                    const vaActive  = va.status === "active";
+                    const vaTask    = va.task || (va.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    const vaOutcome = (va.taskHistory || []).slice(-1)[0]?.outcome;
+                    return html`
+                      <div key=${va.id} className=${"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">Finding #${va.id.replace("validator-", "")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (vaActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${vaActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${vaTask}>${vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}</span>
+                        ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Standard agent row (Test Lead, Reporting, etc.) ────────────────
+        const isActive   = agent.status === "active";
+        const isComplete = ["complete", "completed", "done"].includes(agent.status);
+        const taskHistory = agent.taskHistory || [];
+        const canExpand  = taskHistory.length > 1 || taskHistory.some(h => h.outcome);
+        const isExpanded = canExpand && !collapsedAgentIds.has(agent.id);
+        const task = agent.task || taskHistory.slice(-1)[0]?.task || "";
+        return html`
+          <div key=${agent.id}
+               className=${"agent-row" + (isActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+               onClick=${canExpand ? () => toggleAgentId(agent.id) : undefined}>
+            <span className=${"agent-dot" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+            <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>${agent.name}</span>
+            <span className=${"agent-badge" + (isActive ? " agent-badge-active" : " agent-badge-complete")}>
+              ${isActive ? "ACTIVE" : isComplete ? "DONE" : (agent.status || "IDLE").toUpperCase()}
+            </span>
+            ${task && html`<span className="agent-current-task" title=${task}>${task.length > 90 ? task.slice(0, 89) + "…" : task}</span>`}
+            ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+            ${canExpand && isExpanded && html`
+              <div className="agent-task-history">
+                ${taskHistory.slice().reverse().map((h, i) => html`
+                  <div key=${i} className="agent-history-entry">
+                    <span className="activity-ts">${h.ts || ""}</span>
+                    <span className="agent-history-task">${h.task || ""}</span>
+                    ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                  </div>`)}
+              </div>`}
+          </div>`;
+      })}
+    </div>
+  `;
+}
 
 function TestRunForm({ siteId }) {
   const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
@@ -2451,7 +4279,7 @@ function TestRunDetail({ runId, initialTab }) {
   const lastRunPollOkRef                    = useRef(Date.now());
 
   const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic",  [40, 70, 80, 90, 60, 54, null, 70]);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -4800,7 +6628,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear,
     </div>`;
 }
 
-function ScannerSessionsPanel({ runId, data, refresh }) {
+function ScannerSessionsPanel({ runId, data, refresh, onUpdate }) {
   const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
@@ -4811,11 +6639,14 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     if (!iso) return "—";
     try { return parseDate(iso).toLocaleString(); } catch { return iso; }
   };
+  const doUpdate = onUpdate
+    ? (sessionId, b) => onUpdate(sessionId, b)
+    : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
   const renameSession = async (session) => {
     const next = prompt("Session label", session.label);
     if (next === null) return;
     try {
-      await api.updateScannerSession(runId, session.id, { label: next });
+      await doUpdate(session.id, { label: next });
       await refresh();
     } catch(e) { alert(e.message); }
   };
@@ -4823,7 +6654,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     const verb = isActive ? "Reactivate" : "Deactivate";
     if (!confirm(`${verb} session "${session.label}"?`)) return;
     try {
-      await api.updateScannerSession(runId, session.id, { is_active: isActive });
+      await doUpdate(session.id, { is_active: isActive });
       await refresh();
     } catch(e) { alert(e.message); }
   };
@@ -6902,7 +8733,9 @@ function findingsToMarkdown(findings, meta = {}) {
       "",
       `- Severity: ${markdownListValue(f.severity)}`,
       `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      ...(f.owasp_api_category ? [`- OWASP API: ${markdownListValue(f.owasp_api_category)}`] : []),
       `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
+
       `- Validation: ${markdownListValue(f.validation_status)}`,
       `- Affected URL: ${markdownListValue(f.affected_url)}`,
       `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,

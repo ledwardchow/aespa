@@ -14,6 +14,7 @@ except PackageNotFoundError:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "aespa.db"
 DEFAULT_WEB_DIR = Path(__file__).resolve().parent / "web"
+DEFAULT_DATA_DIR = PROJECT_ROOT / "aespa_data"
 
 
 class Settings(BaseSettings):
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     web_dir: Path = DEFAULT_WEB_DIR
+    data_dir: Path = DEFAULT_DATA_DIR
     app_version: str = _pkg_version
 
 
