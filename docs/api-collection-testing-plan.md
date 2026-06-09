@@ -12,8 +12,8 @@ coverage per endpoint in a matrix.
 - [x] **Slice 3 — Document parsing → endpoints populate (3a OpenAPI · 3b Postman · 3c creds · 3d freetext · 3e zip)** (2026-06-08)
 - [x] **Slice 4 — Readiness assessment + prerequisites display** ✅ DONE (2026-06-08)
 - [x] **Slice 5 — API test runs + Agents tab with A.L.I.C.E.** ✅ DONE (2026-06-08)
-- [ ] Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs
-- [ ] Slice 7 — Work Program coverage matrix (track mode) + live updates
+- [x] **Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs** ✅ DONE (2026-06-09)
+- [x] **Slice 7 — Work Program coverage matrix (track mode) + live updates** ✅ DONE (2026-06-09)
 - [ ] Slice 8 — Enforce coverage mode
 
 ## Decisions (from user)
@@ -280,6 +280,50 @@ Goal: user can start a real scan against the endpoints and see findings + traffi
 - **Automated:** scanner generalization test (build_recon_summary + unit selection for ApiEndpoint
   without breaking the CrawledPage path; existing scanner tests stay green).
 
+**Implementation notes (as built):**
+- `models.py`: `ScanFinding.api_test_run_id` (FK, indexed) and `ScanFinding.owasp_api_category`
+  ("API1"…"API10") added; `TrafficEntry.api_test_run_id` added so traffic is keyed to the run.
+- `db.py::_migrate`: idempotent `_ensure_column` calls for `scan_finding.api_test_run_id`,
+  `scan_finding.owasp_api_category`, and `traffic_entry.api_test_run_id`.
+- `schemas.py`: `ScanFindingOut` extended with `api_test_run_id` and `owasp_api_category`.
+- `services/api_scanner.py` (new): full agentic scan pipeline for `ApiTestRun`s:
+  - `seed_sessions_from_credentials` — maps `ApiCredential` → `ScannerSession` (bearer/cookie/
+    basic/apikey; anonymous session always seeded first).
+  - `_build_api_crawl_context` — builds initial LLM context string from collection + in-scope
+    endpoints + credentials (up to 80 endpoints inline, remainder via `endpoint_list`).
+  - `_make_api_context_tool_fn` — combined context tool: API inventory sub-commands
+    (`endpoint_list`, `endpoint_detail`, `collection_info`, `finding_list`) dispatch to
+    `_run_api_context_tool`; shared sub-commands (`history_search`, `traffic_search`, …) fall
+    through to the scanner's context tool. `site_map`/`page_detail` redirected with a helpful
+    note.
+  - `_make_post_finding_fn` — stamps `api_test_run_id` and maps OWASP Web Top 10 codes →
+    OWASP API Top 10 (e.g. A01→API5, A07→API2, A10→API7) on every persisted finding.
+  - `_do_api_thinking_scan` — drives `_do_agentic_thinking_loop` with API-mode overrides:
+    `_API_THINKING_AGENT_SYSTEM` (OWASP API Top 10 focused system prompt),
+    custom `context_tool_fn`, `post_finding_fn`, `pages_snapshot=[]`, `browser_ctx=None`,
+    `pw_page=None` (no Playwright needed for REST APIs).
+  - `start_api_scan` / `stop_api_scan` / `is_api_scan_running` / `get_scan_status` public API.
+  - **Architecture note**: the planned `AttackSurfaceUnit` abstraction + `task_graph`
+    generalization were not built. Instead the API scanner bypasses `scanner.py`'s CrawledPage
+    selection queries entirely by calling `_do_agentic_thinking_loop` directly with
+    `pages_snapshot=[]` and a custom context tool — achieving the same agentic result without
+    modifying the web-scanner path. `task_graph.build_recon_summary` remains CrawledPage-only;
+    `services/attack_surface.py` was not created.
+- `api/api_test_runs.py`: added `POST /{id}/scan/start`, `POST /{id}/scan/stop`,
+  `GET /{id}/scan/status`, `GET /{id}/findings` (sorted by severity), `GET /{id}/traffic`,
+  `GET /{id}/traffic/count`.
+- `web/app.js`: `api.*` methods `startApiScan`, `stopApiScan`, `getApiScanStatus` added.
+  `ApiTestRunDetail` tab bar extended with **Findings** and **Traffic Log** tabs; scan
+  start/stop control (polls status, shows Start Scan / Stop Scan / Starting… / Stopping…).
+  `ApiRunFindingsTab`: findings table (severity badge, OWASP API category, title, URL); validate-
+  all control using the shared `/api/test-runs/{id}/validate` endpoint; auto-polls while scan
+  is running. `ApiRunTrafficTab`: traffic table (method, URL, status, response size, session);
+  auto-scroll; polls while scan is running.
+- Tests: `tests/test_api_scanner.py` — 17 tests (session seeding for bearer/cookie/no-creds,
+  report_finding persistence + api_test_run_id attribution, owasp_api_category, finding_source,
+  severity default, findings route scoping, traffic route, scan start/stop/status endpoints).
+  Full suite: **413 passed** (17 new, 0 regressions from 383 at end of Slice 5).
+
 ---
 
 ### Slice 7 — Work Program coverage matrix (track mode) + live updates
@@ -303,6 +347,46 @@ Goal: user sees the per-endpoint × OWASP API category matrix fill in live durin
 - **Test point:** start a scan → open Work Program → watch cells move not_started → in_progress →
   covered/finding; click a finding cell.
 - **Automated:** coverage matrix endpoint shape test; matrix seeding/update unit test.
+
+**Implementation notes (as built):**
+- `models.py`: `ApiEndpointTest` table (`api_endpoint_test`) — id, api_test_run_id FK, endpoint_id
+  FK, owasp_api_category (API1–API10), status (not_started|in_progress|covered|skipped|finding),
+  skip_reason, finding_ids_json (JSON list of ScanFinding ids), last_updated.
+- `db.py::_migrate`: idempotent `CREATE TABLE IF NOT EXISTS api_endpoint_test` + two indices.
+- `schemas.py`: `ApiEndpointTestOut`, `ApiCoverageEndpointRow`, `ApiCoverageMatrixOut`.
+- `services/api_scanner.py` additions:
+  - `OWASP_API_CATEGORIES` + `OWASP_API_LABELS` constants.
+  - `_applicable_categories(endpoint)` — heuristic: API2/API4/API5/API8/API9/API10 always; API1
+    when path has `{param}`; API3 for PUT/PATCH; API6 for write methods; API7 when path/params
+    mention url/uri/redirect; deduplication preserving order.
+  - `seed_coverage_matrix(api_run_id)` — idempotent; seeds all in-scope endpoint × applicable
+    category cells as `not_started`.
+  - `update_coverage_cell(api_run_id, endpoint_id, category, status, finding_id=None)` — upsert;
+    appends finding_id to finding_ids_json; emits `coverage_update` SSE event for live UI.
+  - `mark_all_cells_covered(api_run_id)` — at scan completion, flips all `not_started`/
+    `in_progress` cells to `covered`.
+  - `get_coverage_matrix(api_run_id)` — returns full matrix dict for the coverage API route.
+  - `_match_endpoint_for_url(affected_url, endpoints, base_url)` — converts `{param}` template
+    segments to regex, returns longest-matching endpoint; used in post_finding_fn.
+  - `_make_post_finding_fn` updated to call `_match_endpoint_for_url` + `update_coverage_cell`
+    after stamping the finding, so cells flip to `finding` in real time.
+  - `start_api_scan` updated to call `seed_coverage_matrix` before launching the scan task.
+  - `_do_api_thinking_scan` updated to call `mark_all_cells_covered` at completion.
+- `api/api_test_runs.py`: `GET /{id}/coverage` → `api_scanner.get_coverage_matrix`.
+- `web/app.js`: `api.getApiCoverageMatrix(id)` client method; `API_RUN_TABS` extended with
+  `endpoints` and `workprogram` tabs; `ApiTestRunDetail` renders them.
+  - `ApiRunEndpointsTab` — table with per-endpoint method/path/auth/prereq_can_test/
+    prereq_can_test_auth indicators + gap notes list.
+  - `ApiRunWorkProgramTab` — matrix with endpoint rows × API1–API10 column cells; colored pills
+    (not_started=gray, in_progress=blue, covered=green, finding=red, skipped=strikethrough gray);
+    coverage% header; live SSE `coverage_update` event handler; click a `finding` cell to see
+    its finding IDs.  Polls every 5 s while scan is running.
+- `styles.css`: `.method-badge` + per-method colours; `.coverage-matrix` table layout;
+  `.cov-cell` pill variants per status; `.cov-cell.has-findings` red outline.
+- Tests: `tests/test_api_coverage.py` — 20 tests (seed/idempotency/update/mark-covered, route
+  shape, applicable-categories heuristics, URL matching, totals, post-finding cell update,
+  start-scan seeds matrix).  Full suite: **432 passed** (20 new, 0 regressions from 413 at end
+  of Slice 6 — one pre-existing Windows printf test remains failing as before).
 
 ---
 
