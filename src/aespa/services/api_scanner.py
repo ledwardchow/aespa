@@ -138,10 +138,18 @@ def _applicable_categories(endpoint: ApiEndpoint) -> list[str]:
 
 # ── Coverage matrix helpers ───────────────────────────────────────────────────
 
+# ── Endpoint cache (populated at scan start, cleared at scan end) ─────────────────
+
+# api_run_id → (collection_id, [ApiEndpoint, ...])
+_endpoint_cache: dict[int, tuple[int, list]] = {}
+
+
 def seed_coverage_matrix(api_run_id: int) -> int:
     """Create ``ApiEndpointTest`` rows for every in-scope endpoint × applicable category.
 
     Idempotent — skips cells that already exist.  Returns the number of new cells created.
+    Also populates the endpoint cache so the traffic hook can match URLs without extra
+    DB round-trips.
     """
     with Session(get_engine()) as s:
         run = s.get(ApiTestRun, api_run_id)
@@ -152,6 +160,7 @@ def seed_coverage_matrix(api_run_id: int) -> int:
             .where(ApiEndpoint.collection_id == run.collection_id)
             .where(ApiEndpoint.in_scope == True)  # noqa: E712
         ).all())
+        collection_id = run.collection_id
         # Load existing cells so we can skip duplicates
         existing = set(
             (row.endpoint_id, row.owasp_api_category)
@@ -175,8 +184,20 @@ def seed_coverage_matrix(api_run_id: int) -> int:
                 s.add(cell)
                 created += 1
         s.commit()
+    # Populate the endpoint cache for use by the traffic hook.
+    _endpoint_cache[api_run_id] = (collection_id, endpoints)
     log.info("seed_coverage_matrix: api_run_id=%s created=%d cells", api_run_id, created)
     return created
+
+
+# Status precedence: a higher-ranked status must not be downgraded.
+_STATUS_RANK: dict[str, int] = {
+    "not_started": 0,
+    "in_progress": 1,
+    "covered":     2,
+    "skipped":     2,
+    "finding":     3,
+}
 
 
 def update_coverage_cell(
@@ -186,7 +207,11 @@ def update_coverage_cell(
     status: str,
     finding_id: int | None = None,
 ) -> None:
-    """Upsert a coverage cell.  If ``finding_id`` is given it is appended to finding_ids_json."""
+    """Upsert a coverage cell.  If ``finding_id`` is given it is appended to finding_ids_json.
+
+    Status is never downgraded: once a cell is ``finding`` it cannot go back to
+    ``covered``; once ``in_progress`` it cannot go back to ``not_started``, etc.
+    """
     with Session(get_engine()) as s:
         cell = s.exec(
             select(ApiEndpointTest)
@@ -203,8 +228,15 @@ def update_coverage_cell(
                 last_updated=datetime.now(_UTC),
             )
         else:
-            cell.status = status
-            cell.last_updated = datetime.now(_UTC)
+            # Only upgrade, never downgrade.
+            current_rank = _STATUS_RANK.get(cell.status, 0)
+            new_rank = _STATUS_RANK.get(status, 0)
+            if new_rank > current_rank:
+                cell.status = status
+                cell.last_updated = datetime.now(_UTC)
+            elif finding_id is None:
+                # Nothing to update.
+                return
         if finding_id is not None:
             try:
                 ids: list = json.loads(cell.finding_ids_json or "[]")
@@ -215,23 +247,75 @@ def update_coverage_cell(
                 cell.finding_ids_json = json.dumps(ids)
         s.add(cell)
         s.commit()
-    # Emit a live SSE event so the frontend matrix updates without polling.
-    events_svc.emit(api_run_id, {
-        "type": "coverage_update",
-        "endpoint_id": endpoint_id,
-        "owasp_api_category": owasp_api_category,
-        "status": status,
-        "finding_id": finding_id,
-    })
+    # Emit a live SSE event only for high-value status changes (finding/covered/skipped).
+    # in_progress is updated too frequently to justify SSE noise; the 5s poll handles it.
+    if status in ("finding", "covered", "skipped"):
+        events_svc.emit(api_run_id, {
+            "type": "coverage_update",
+            "endpoint_id": endpoint_id,
+            "owasp_api_category": owasp_api_category,
+            "status": status,
+            "finding_id": finding_id,
+        })
+
+
+def _mark_cells_in_progress(api_run_id: int, method: str, url: str) -> None:
+    """Called from the traffic hook (thread context) after each HTTP request.
+
+    Matches the URL to an in-scope endpoint and marks all applicable categories
+    for that endpoint as ``in_progress`` (if they are still ``not_started``).
+    Uses the in-memory endpoint cache populated by ``seed_coverage_matrix``.
+    """
+    cached = _endpoint_cache.get(api_run_id)
+    if cached is None:
+        return
+    _, endpoints = cached
+    if not endpoints:
+        return
+    with Session(get_engine()) as s:
+        coll = s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
+        base_url = (coll.base_url if coll else "").rstrip("/")
+    ep = _match_endpoint_for_url(url, endpoints, base_url)
+    if ep is None:
+        return
+    cats = _applicable_categories(ep)
+    now = datetime.now(_UTC)
+    with Session(get_engine()) as s:
+        for cat in cats:
+            cell = s.exec(
+                select(ApiEndpointTest)
+                .where(ApiEndpointTest.api_test_run_id == api_run_id)
+                .where(ApiEndpointTest.endpoint_id == ep.id)
+                .where(ApiEndpointTest.owasp_api_category == cat)
+            ).first()
+            if cell is None:
+                cell = ApiEndpointTest(
+                    api_test_run_id=api_run_id,
+                    endpoint_id=ep.id,
+                    owasp_api_category=cat,
+                    status="in_progress",
+                    last_updated=now,
+                )
+                s.add(cell)
+            elif cell.status == "not_started":
+                cell.status = "in_progress"
+                cell.last_updated = now
+                s.add(cell)
+        s.commit()
 
 
 def mark_all_cells_covered(api_run_id: int) -> None:
-    """At scan completion, mark all still-not_started / in_progress cells as covered."""
+    """At scan completion, promote ``in_progress`` cells to ``covered``.
+
+    Only ``in_progress`` cells are promoted — these are endpoints the scanner
+    actually sent requests to but raised no finding for.  ``not_started`` cells
+    are left alone: they mean the scanner never touched that endpoint.
+    """
     with Session(get_engine()) as s:
         cells = list(s.exec(
             select(ApiEndpointTest)
             .where(ApiEndpointTest.api_test_run_id == api_run_id)
-            .where(ApiEndpointTest.status.in_(["not_started", "in_progress"]))  # type: ignore[attr-defined]
+            .where(ApiEndpointTest.status == "in_progress")
         ).all())
         now = datetime.now(_UTC)
         for cell in cells:
@@ -239,7 +323,7 @@ def mark_all_cells_covered(api_run_id: int) -> None:
             cell.last_updated = now
             s.add(cell)
         s.commit()
-    log.info("mark_all_cells_covered: api_run_id=%s marked=%d", api_run_id, len(cells))
+    log.info("mark_in_progress_to_covered: api_run_id=%s promoted=%d", api_run_id, len(cells))
 
 
 def get_coverage_matrix(api_run_id: int) -> dict:
@@ -663,6 +747,10 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     seed_sessions_from_credentials(api_run_id)
     session_vault = scanner_sessions.load_session_vault(api_run_id)
 
+    # Register the traffic hook so every HTTP request marks endpoint cells in_progress.
+    from aespa.services.traffic import _api_traffic_hooks
+    _api_traffic_hooks[api_run_id] = _mark_cells_in_progress
+
     # Build the initial LLM context from the API collection.
     crawl_context = _build_api_crawl_context(api_run_id)
 
@@ -741,7 +829,10 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
 
-    # Mark remaining coverage cells as covered.
+    # Promote in_progress → covered; remove traffic hook + endpoint cache.
+    from aespa.services.traffic import _api_traffic_hooks
+    _api_traffic_hooks.pop(api_run_id, None)
+    _endpoint_cache.pop(api_run_id, None)
     mark_all_cells_covered(api_run_id)
 
     # Mark run completed.
@@ -813,6 +904,13 @@ async def _api_scan_task(api_run_id: int) -> None:
     finally:
         _scan_tasks.pop(api_run_id, None)
         _stop_requested.discard(api_run_id)
+        # Clean up traffic hook and endpoint cache regardless of outcome.
+        try:
+            from aespa.services.traffic import _api_traffic_hooks
+            _api_traffic_hooks.pop(api_run_id, None)
+        except Exception:
+            pass
+        _endpoint_cache.pop(api_run_id, None)
 
 
 def _update_run_status(api_run_id: int, status: str, error: str | None = None) -> None:
