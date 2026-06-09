@@ -15,6 +15,8 @@ from aespa.api.reporting_debug import router as reporting_debug_router
 from aespa.api.scan import router as scan_router
 from aespa.api.settings import router as settings_router
 from aespa.api.sites import router as sites_router
+from aespa.api.api_collections import router as api_collections_router
+from aespa.api.api_test_runs import router as api_test_runs_router
 from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.api.alice import router as alice_router
@@ -86,6 +88,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
 
     app.include_router(sites_router)
+    app.include_router(api_collections_router)
+    app.include_router(api_test_runs_router)
     app.include_router(settings_router)
     app.include_router(test_runs_router)
     app.include_router(events_router)

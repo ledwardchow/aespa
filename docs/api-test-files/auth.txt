@@ -1,0 +1,14 @@
+
+
+-- All passwords are "password" (bcrypt hash)
+INSERT INTO users (email, password, first_name, last_name, address_line1, suburb, state, postcode, phone) VALUES
+('amelia.chen@example.com',     'password', 'Amelia',   'Chen',       '14 Harbour View Tce',  'Pyrmont',       'NSW', '2009', '0411 234 567'),
+('wei.zhang@example.com',       'password', 'Wei',      'Zhang',      '7 Collins St',         'Melbourne',     'VIC', '3000', '0422 345 678'),
+('zoe.williams@example.com',    'password', 'Zoe',      'Williams',   '3 Queen St',           'Brisbane',      'QLD', '4000', '0433 456 789'),
+('mia.nguyen@example.com',      'password', 'Mia',      'Nguyen',     '88 Richmond Rd',       'Subiaco',       'WA',  '6008', '0444 567 890'),
+('isabella.thompson@example.com','password', 'Isabella', 'Thompson',   '21 Rundle Mall',       'Adelaide',      'SA',  '5000', '0455 678 901'),
+('sophie.anderson@example.com', 'password', 'Sophie',   'Anderson',   '55 Salamanca Pl',      'Battery Point', 'TAS', '7004', '0466 789 012'),
+('jing.wu@example.com',         'password', 'Jing',     'Wu',         '19 Lonsdale St',       'Braddon',       'ACT', '2612', '0477 890 123'),
+('grace.kim@example.com',       'password', 'Grace',    'Kim',        '6 Smith St',           'Darwin',        'NT',  '0800', '0488 901 234'),
+('emma.obrien@example.com',     'password', 'Emma',     'O\'Brien',   '42 Peel St',           'Newtown',       'NSW', '2042', '0499 012 345'),
+('natasha.kowalski@example.com','password', 'Natasha',  'Kowalski',   '30 St Kilda Rd',       'St Kilda',      'VIC', '3182', '0411 123 456');
