@@ -29,6 +29,7 @@ from aespa.models import (
     ApiCollection,
     ApiCredential,
     ApiEndpoint,
+    ApiEndpointTest,
     ApiTestRun,
     ScanFinding,
 )
@@ -44,6 +45,300 @@ _UTC = timezone.utc
 
 _scan_tasks: dict[int, asyncio.Task] = {}   # api_run_id → running asyncio.Task
 _stop_requested: set[int] = set()
+
+
+# ── OWASP API Top 10 (2023) ───────────────────────────────────────────────────
+
+OWASP_API_CATEGORIES: list[str] = [
+    "API1",   # BOLA
+    "API2",   # Broken Authentication
+    "API3",   # BOPLA (Broken Object Property Level Authorization)
+    "API4",   # Unrestricted Resource Consumption
+    "API5",   # BFLA (Broken Function Level Authorization)
+    "API6",   # Unrestricted Access to Sensitive Business Flows
+    "API7",   # SSRF
+    "API8",   # Security Misconfiguration
+    "API9",   # Improper Inventory Management
+    "API10",  # Unsafe Consumption of APIs
+]
+
+OWASP_API_LABELS: dict[str, str] = {
+    "API1":  "BOLA",
+    "API2":  "Broken Auth",
+    "API3":  "BOPLA",
+    "API4":  "Resource Consumption",
+    "API5":  "BFLA",
+    "API6":  "Business Flows",
+    "API7":  "SSRF",
+    "API8":  "Misconfiguration",
+    "API9":  "Inventory",
+    "API10": "Unsafe Consumption",
+}
+
+
+def _applicable_categories(endpoint: ApiEndpoint) -> list[str]:
+    """Return the OWASP API categories applicable to this endpoint (heuristic)."""
+    import re as _re
+    cats: list[str] = []
+    method = (endpoint.method or "GET").upper()
+    path = endpoint.path or ""
+
+    # API1 BOLA — endpoints with a path parameter (/{id}, /{uuid}, etc.)
+    if _re.search(r"\{[^}]+\}", path):
+        cats.append("API1")
+
+    # API2 Broken Authentication — all endpoints
+    cats.append("API2")
+
+    # API3 BOPLA — write operations that modify objects
+    if method in ("PUT", "PATCH"):
+        cats.append("API3")
+
+    # API4 Unrestricted Resource Consumption — all endpoints
+    cats.append("API4")
+
+    # API5 BFLA — all endpoints (admin paths get higher weight, but we track all)
+    cats.append("API5")
+
+    # API6 Business Flows — POST endpoints (create/action verbs)
+    if method in ("POST", "PUT", "PATCH"):
+        cats.append("API6")
+
+    # API7 SSRF — endpoints likely to accept URL-like inputs
+    if any(kw in path.lower() for kw in ("url", "uri", "link", "redirect", "webhook", "callback", "proxy", "fetch", "import")):
+        cats.append("API7")
+    try:
+        params = json.loads(endpoint.parameters_json or "[]")
+        if any(
+            any(kw in str(p.get("name", "")).lower() for kw in ("url", "uri", "link", "target", "src", "redirect"))
+            for p in params
+        ):
+            cats.append("API7")
+    except Exception:
+        pass
+
+    # API8 Security Misconfiguration — all endpoints
+    cats.append("API8")
+
+    # API9 Improper Inventory Management — every endpoint (track exposure)
+    cats.append("API9")
+
+    # API10 Unsafe Consumption of APIs — all endpoints
+    cats.append("API10")
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for c in cats:
+        if c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
+# ── Coverage matrix helpers ───────────────────────────────────────────────────
+
+def seed_coverage_matrix(api_run_id: int) -> int:
+    """Create ``ApiEndpointTest`` rows for every in-scope endpoint × applicable category.
+
+    Idempotent — skips cells that already exist.  Returns the number of new cells created.
+    """
+    with Session(get_engine()) as s:
+        run = s.get(ApiTestRun, api_run_id)
+        if run is None:
+            return 0
+        endpoints = list(s.exec(
+            select(ApiEndpoint)
+            .where(ApiEndpoint.collection_id == run.collection_id)
+            .where(ApiEndpoint.in_scope == True)  # noqa: E712
+        ).all())
+        # Load existing cells so we can skip duplicates
+        existing = set(
+            (row.endpoint_id, row.owasp_api_category)
+            for row in s.exec(
+                select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run_id)
+            ).all()
+        )
+        created = 0
+        now = datetime.now(_UTC)
+        for ep in endpoints:
+            for cat in _applicable_categories(ep):
+                if (ep.id, cat) in existing:
+                    continue
+                cell = ApiEndpointTest(
+                    api_test_run_id=api_run_id,
+                    endpoint_id=ep.id,
+                    owasp_api_category=cat,
+                    status="not_started",
+                    last_updated=now,
+                )
+                s.add(cell)
+                created += 1
+        s.commit()
+    log.info("seed_coverage_matrix: api_run_id=%s created=%d cells", api_run_id, created)
+    return created
+
+
+def update_coverage_cell(
+    api_run_id: int,
+    endpoint_id: int,
+    owasp_api_category: str,
+    status: str,
+    finding_id: int | None = None,
+) -> None:
+    """Upsert a coverage cell.  If ``finding_id`` is given it is appended to finding_ids_json."""
+    with Session(get_engine()) as s:
+        cell = s.exec(
+            select(ApiEndpointTest)
+            .where(ApiEndpointTest.api_test_run_id == api_run_id)
+            .where(ApiEndpointTest.endpoint_id == endpoint_id)
+            .where(ApiEndpointTest.owasp_api_category == owasp_api_category)
+        ).first()
+        if cell is None:
+            cell = ApiEndpointTest(
+                api_test_run_id=api_run_id,
+                endpoint_id=endpoint_id,
+                owasp_api_category=owasp_api_category,
+                status=status,
+                last_updated=datetime.now(_UTC),
+            )
+        else:
+            cell.status = status
+            cell.last_updated = datetime.now(_UTC)
+        if finding_id is not None:
+            try:
+                ids: list = json.loads(cell.finding_ids_json or "[]")
+            except Exception:
+                ids = []
+            if finding_id not in ids:
+                ids.append(finding_id)
+                cell.finding_ids_json = json.dumps(ids)
+        s.add(cell)
+        s.commit()
+    # Emit a live SSE event so the frontend matrix updates without polling.
+    events_svc.emit(api_run_id, {
+        "type": "coverage_update",
+        "endpoint_id": endpoint_id,
+        "owasp_api_category": owasp_api_category,
+        "status": status,
+        "finding_id": finding_id,
+    })
+
+
+def mark_all_cells_covered(api_run_id: int) -> None:
+    """At scan completion, mark all still-not_started / in_progress cells as covered."""
+    with Session(get_engine()) as s:
+        cells = list(s.exec(
+            select(ApiEndpointTest)
+            .where(ApiEndpointTest.api_test_run_id == api_run_id)
+            .where(ApiEndpointTest.status.in_(["not_started", "in_progress"]))  # type: ignore[attr-defined]
+        ).all())
+        now = datetime.now(_UTC)
+        for cell in cells:
+            cell.status = "covered"
+            cell.last_updated = now
+            s.add(cell)
+        s.commit()
+    log.info("mark_all_cells_covered: api_run_id=%s marked=%d", api_run_id, len(cells))
+
+
+def get_coverage_matrix(api_run_id: int) -> dict:
+    """Return the full coverage matrix for an ApiTestRun as a dict."""
+    with Session(get_engine()) as s:
+        run = s.get(ApiTestRun, api_run_id)
+        if run is None:
+            return {}
+        endpoints = list(s.exec(
+            select(ApiEndpoint)
+            .where(ApiEndpoint.collection_id == run.collection_id)
+            .where(ApiEndpoint.in_scope == True)  # noqa: E712
+            .order_by(ApiEndpoint.path, ApiEndpoint.method)
+        ).all())
+        cells = list(s.exec(
+            select(ApiEndpointTest)
+            .where(ApiEndpointTest.api_test_run_id == api_run_id)
+        ).all())
+
+    # Build a lookup: (endpoint_id, category) → cell
+    cell_lookup: dict[tuple[int, str], ApiEndpointTest] = {
+        (c.endpoint_id, c.owasp_api_category): c for c in cells
+    }
+
+    totals: dict[str, int] = {s: 0 for s in ("not_started", "in_progress", "covered", "skipped", "finding")}
+    endpoint_rows: list[dict] = []
+    for ep in endpoints:
+        ep_cats = _applicable_categories(ep)
+        ep_cells: dict[str, dict] = {}
+        for cat in ep_cats:
+            cell = cell_lookup.get((ep.id, cat))
+            if cell:
+                cell_status = cell.status
+                try:
+                    fids = json.loads(cell.finding_ids_json or "[]")
+                except Exception:
+                    fids = []
+            else:
+                cell_status = "not_started"
+                fids = []
+            ep_cells[cat] = {"status": cell_status, "finding_ids": fids}
+            totals[cell_status] = totals.get(cell_status, 0) + 1
+
+        endpoint_rows.append({
+            "endpoint_id": ep.id,
+            "method": ep.method,
+            "path": ep.path,
+            "auth_required": ep.auth_required,
+            "prereq_can_test": ep.prereq_can_test,
+            "prereq_can_test_auth": ep.prereq_can_test_auth,
+            "prereq_notes": ep.prereq_notes,
+            "cells": ep_cells,
+        })
+
+    return {
+        "run_id": api_run_id,
+        "coverage_mode": run.coverage_mode,
+        "categories": OWASP_API_CATEGORIES,
+        "endpoints": endpoint_rows,
+        "totals": totals,
+    }
+
+
+def _match_endpoint_for_url(
+    affected_url: str,
+    endpoints: list[ApiEndpoint],
+    collection_base_url: str,
+) -> ApiEndpoint | None:
+    """Find the best-matching endpoint for a finding's affected_url.
+
+    Strategy:
+    1. Extract path from the URL.
+    2. For each endpoint, convert path-template params (``{id}``) to a regex.
+    3. Return the longest-matching endpoint path.
+    """
+    import re as _re
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(affected_url)
+        url_path = parsed.path.rstrip("/") or "/"
+    except Exception:
+        return None
+
+    best: ApiEndpoint | None = None
+    best_len = -1
+
+    for ep in endpoints:
+        ep_path = ep.path.rstrip("/") or "/"
+        # Convert {param} → a regex segment
+        pattern = _re.sub(r"\{[^}]+\}", r"[^/]+", _re.escape(ep_path).replace(r"\{", "{").replace(r"\}", "}"))
+        try:
+            if _re.fullmatch(pattern, url_path) and len(ep_path) > best_len:
+                best = ep
+                best_len = len(ep_path)
+        except Exception:
+            pass
+
+    return best
 
 
 # ── Scope helpers ─────────────────────────────────────────────────────────────
@@ -204,7 +499,8 @@ _OWASP_WEB_TO_API: dict[str, str] = {
 
 
 def _make_post_finding_fn(api_run_id: int):
-    """Return a hook that stamps ``api_test_run_id`` and ``owasp_api_category`` on each finding."""
+    """Return a hook that stamps ``api_test_run_id`` and ``owasp_api_category`` on each finding
+    and updates the coverage matrix cell for the finding's endpoint + category."""
 
     def _fn(finding: ScanFinding) -> None:
         with Session(get_engine()) as s:
@@ -221,6 +517,33 @@ def _make_post_finding_fn(api_run_id: int):
             f.finding_source = f.finding_source or "api_scanner"
             s.add(f)
             s.commit()
+            s.refresh(f)
+            owasp_api_cat = f.owasp_api_category
+            affected_url = f.affected_url
+            finding_id = f.id
+
+        # Update the coverage matrix cell for this finding.
+        if owasp_api_cat:
+            with Session(get_engine()) as s:
+                run = s.get(ApiTestRun, api_run_id)
+                if run is not None:
+                    endpoints = list(s.exec(
+                        select(ApiEndpoint)
+                        .where(ApiEndpoint.collection_id == run.collection_id)
+                        .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                    ).all())
+                    coll = s.get(ApiCollection, run.collection_id)
+                    base_url = (coll.base_url if coll else "").rstrip("/")
+
+            ep = _match_endpoint_for_url(affected_url or "", endpoints, base_url)
+            if ep is not None:
+                update_coverage_cell(
+                    api_run_id,
+                    ep.id,
+                    owasp_api_cat,
+                    "finding",
+                    finding_id=finding_id,
+                )
 
     return _fn
 
@@ -418,6 +741,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
 
+    # Mark remaining coverage cells as covered.
+    mark_all_cells_covered(api_run_id)
+
     # Mark run completed.
     with Session(get_engine()) as s:
         r = s.get(ApiTestRun, api_run_id)
@@ -520,6 +846,9 @@ async def start_api_scan(api_run_id: int) -> None:
         run.updated_at = datetime.now(_UTC)
         s.add(run)
         s.commit()
+
+    # Seed the coverage matrix before starting the scan task.
+    seed_coverage_matrix(api_run_id)
 
     # Emit an immediate agent_status row so the Agents sidebar is non-empty.
     events_svc.emit(api_run_id, {
