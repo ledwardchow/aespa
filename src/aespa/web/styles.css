@@ -275,6 +275,13 @@ a:hover { color: var(--accent-hover); }
 .content.scroll-content.no-padding {
   padding: 0;
 }
+/* Tab content that manages its own internal scroll (e.g. Status sub-tabs) */
+.content.flex-fill-noscroll {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 
 /* ── Buttons ────────────────────────────────────────────────── */
 
