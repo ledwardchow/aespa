@@ -22,10 +22,12 @@ from aespa.models import (
     AliceChatSession,
     ApiTestRun,
     ScanFinding,
+    ScannerSession,
     TrafficEntry,
 )
-from aespa.schemas import ApiTestRunSummary, ScanFindingOut
+from aespa.schemas import ApiTestRunSummary, ScanFindingOut, ScannerSessionOut, ScannerSessionSummary, ScannerSessionUpdate
 from aespa.services import alice_tasks
+from aespa.services import scanner_sessions as scanner_session_svc
 
 _UTC = timezone.utc
 
@@ -286,3 +288,110 @@ def get_api_traffic_count(
     _get_run_or_404(session, run_id)
     from aespa.services import traffic as traffic_svc
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
+
+
+# ── Scanner sessions alias ─────────────────────────────────────────────────────
+
+import json as _json  # noqa: E402 — placed after other imports to avoid reorder
+
+
+def _json_dict(value: str | None) -> dict:
+    try:
+        parsed = _json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _redacted_metadata(value: dict) -> dict:
+    sensitive_terms = ("password", "secret", "token", "cookie", "authorization")
+    redacted: dict = {}
+    for key, raw in value.items():
+        if any(term in str(key).lower() for term in sensitive_terms):
+            redacted[key] = "[REDACTED]"
+        elif isinstance(raw, dict):
+            redacted[key] = _redacted_metadata(raw)
+        else:
+            redacted[key] = raw
+    return redacted
+
+
+def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
+    cookies = _json_dict(record.cookies_json)
+    headers = _json_dict(record.extra_headers_json)
+    metadata = _redacted_metadata(_json_dict(record.session_metadata))
+    return ScannerSessionOut(
+        id=record.id,
+        test_run_id=record.test_run_id,
+        label=record.label,
+        kind=record.kind,
+        username=record.username,
+        credential_id=record.credential_id,
+        source=record.source,
+        cookie_names=sorted(str(k) for k in cookies.keys()),
+        header_names=sorted(str(k) for k in headers.keys()),
+        token_hint=record.token_hint,
+        session_metadata=metadata,
+        is_active=record.is_active,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+@router.get("/{run_id}/scanner-sessions", response_model=ScannerSessionSummary)
+def get_api_scanner_sessions(
+    run_id: int,
+    include_inactive: bool = False,
+    session: Session = Depends(get_session),
+) -> ScannerSessionSummary:
+    _get_run_or_404(session, run_id)
+    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    if not include_inactive:
+        query = query.where(ScannerSession.is_active == True)  # noqa: E712
+    records = session.exec(query.order_by(ScannerSession.label)).all()
+    counts: dict[str, int] = {"total": len(records)}
+    for record in records:
+        counts[record.kind] = counts.get(record.kind, 0) + 1
+        if record.is_active:
+            counts["active"] = counts.get("active", 0) + 1
+        else:
+            counts["inactive"] = counts.get("inactive", 0) + 1
+    return ScannerSessionSummary(
+        counts=counts,
+        sessions=[_scanner_session_out(record) for record in records],
+    )
+
+
+@router.patch("/{run_id}/scanner-sessions/{session_id}", response_model=ScannerSessionOut)
+def update_api_scanner_session(
+    run_id: int,
+    session_id: int,
+    payload: ScannerSessionUpdate,
+    session: Session = Depends(get_session),
+) -> ScannerSessionOut:
+    _get_run_or_404(session, run_id)
+    record = session.get(ScannerSession, session_id)
+    if record is None or record.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
+
+    if payload.label is not None:
+        normalized = scanner_session_svc.stable_label(payload.label)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="Session label cannot be blank")
+        duplicate = session.exec(
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.label == normalized)
+            .where(ScannerSession.id != session_id)
+        ).first()
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail=f"Session label '{normalized}' already exists")
+        record.label = normalized
+    if payload.is_active is not None:
+        record.is_active = payload.is_active
+    from aespa.models import _utcnow
+    record.updated_at = _utcnow()
+    session.add(record)
+    session.commit()
+    session.refresh(record)
+    return _scanner_session_out(record)

@@ -12,7 +12,7 @@ coverage per endpoint in a matrix.
 - [x] **Slice 3 — Document parsing → endpoints populate (3a OpenAPI · 3b Postman · 3c creds · 3d freetext · 3e zip)** (2026-06-08)
 - [x] **Slice 4 — Readiness assessment + prerequisites display** ✅ DONE (2026-06-08)
 - [x] **Slice 5 — API test runs + Agents tab with A.L.I.C.E.** ✅ DONE (2026-06-08)
-- [ ] Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs
+- [x] **Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs** ✅ DONE (2026-06-09)
 - [ ] Slice 7 — Work Program coverage matrix (track mode) + live updates
 - [ ] Slice 8 — Enforce coverage mode
 
@@ -279,6 +279,50 @@ Goal: user can start a real scan against the endpoints and see findings + traffi
   attributed to endpoints → run validator.
 - **Automated:** scanner generalization test (build_recon_summary + unit selection for ApiEndpoint
   without breaking the CrawledPage path; existing scanner tests stay green).
+
+**Implementation notes (as built):**
+- `models.py`: `ScanFinding.api_test_run_id` (FK, indexed) and `ScanFinding.owasp_api_category`
+  ("API1"…"API10") added; `TrafficEntry.api_test_run_id` added so traffic is keyed to the run.
+- `db.py::_migrate`: idempotent `_ensure_column` calls for `scan_finding.api_test_run_id`,
+  `scan_finding.owasp_api_category`, and `traffic_entry.api_test_run_id`.
+- `schemas.py`: `ScanFindingOut` extended with `api_test_run_id` and `owasp_api_category`.
+- `services/api_scanner.py` (new): full agentic scan pipeline for `ApiTestRun`s:
+  - `seed_sessions_from_credentials` — maps `ApiCredential` → `ScannerSession` (bearer/cookie/
+    basic/apikey; anonymous session always seeded first).
+  - `_build_api_crawl_context` — builds initial LLM context string from collection + in-scope
+    endpoints + credentials (up to 80 endpoints inline, remainder via `endpoint_list`).
+  - `_make_api_context_tool_fn` — combined context tool: API inventory sub-commands
+    (`endpoint_list`, `endpoint_detail`, `collection_info`, `finding_list`) dispatch to
+    `_run_api_context_tool`; shared sub-commands (`history_search`, `traffic_search`, …) fall
+    through to the scanner's context tool. `site_map`/`page_detail` redirected with a helpful
+    note.
+  - `_make_post_finding_fn` — stamps `api_test_run_id` and maps OWASP Web Top 10 codes →
+    OWASP API Top 10 (e.g. A01→API5, A07→API2, A10→API7) on every persisted finding.
+  - `_do_api_thinking_scan` — drives `_do_agentic_thinking_loop` with API-mode overrides:
+    `_API_THINKING_AGENT_SYSTEM` (OWASP API Top 10 focused system prompt),
+    custom `context_tool_fn`, `post_finding_fn`, `pages_snapshot=[]`, `browser_ctx=None`,
+    `pw_page=None` (no Playwright needed for REST APIs).
+  - `start_api_scan` / `stop_api_scan` / `is_api_scan_running` / `get_scan_status` public API.
+  - **Architecture note**: the planned `AttackSurfaceUnit` abstraction + `task_graph`
+    generalization were not built. Instead the API scanner bypasses `scanner.py`'s CrawledPage
+    selection queries entirely by calling `_do_agentic_thinking_loop` directly with
+    `pages_snapshot=[]` and a custom context tool — achieving the same agentic result without
+    modifying the web-scanner path. `task_graph.build_recon_summary` remains CrawledPage-only;
+    `services/attack_surface.py` was not created.
+- `api/api_test_runs.py`: added `POST /{id}/scan/start`, `POST /{id}/scan/stop`,
+  `GET /{id}/scan/status`, `GET /{id}/findings` (sorted by severity), `GET /{id}/traffic`,
+  `GET /{id}/traffic/count`.
+- `web/app.js`: `api.*` methods `startApiScan`, `stopApiScan`, `getApiScanStatus` added.
+  `ApiTestRunDetail` tab bar extended with **Findings** and **Traffic Log** tabs; scan
+  start/stop control (polls status, shows Start Scan / Stop Scan / Starting… / Stopping…).
+  `ApiRunFindingsTab`: findings table (severity badge, OWASP API category, title, URL); validate-
+  all control using the shared `/api/test-runs/{id}/validate` endpoint; auto-polls while scan
+  is running. `ApiRunTrafficTab`: traffic table (method, URL, status, response size, session);
+  auto-scroll; polls while scan is running.
+- Tests: `tests/test_api_scanner.py` — 17 tests (session seeding for bearer/cookie/no-creds,
+  report_finding persistence + api_test_run_id attribution, owasp_api_category, finding_source,
+  severity default, findings route scoping, traffic route, scan start/stop/status endpoints).
+  Full suite: **413 passed** (17 new, 0 regressions from 383 at end of Slice 5).
 
 ---
 

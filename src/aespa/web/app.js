@@ -111,6 +111,8 @@ const api = {
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
   seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
@@ -2350,6 +2352,7 @@ function ApiTestRunForm({ collectionId }) {
 const API_RUN_TABS = [
   { key: "agents",   label: "Agents" },
   { key: "findings", label: "Findings" },
+  { key: "sessions", label: "Sessions" },
   { key: "traffic",  label: "Traffic Log" },
 ];
 
@@ -2466,21 +2469,44 @@ function ApiTestRunDetail({ runId, initialTab }) {
         ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
       </div>
     </div>
-    <div className="tab-bar" style=${{borderBottom:"1px solid var(--border)",display:"flex",gap:0,padding:"0 24px"}}>
+    <div className="tab-bar">
       ${API_RUN_TABS.map(t=>html`
-        <a key=${t.key}
-          href=${`#/api-runs/${runId}/${t.key}`}
-          className=${"tab-link"+(tab===t.key?" active":"")}
-          style=${{padding:"10px 18px",cursor:"pointer",fontWeight:tab===t.key?600:400,color:tab===t.key?"var(--accent)":"var(--muted)",borderBottom:tab===t.key?"2px solid var(--accent)":"2px solid transparent",textDecoration:"none",fontSize:14}}
-        >${t.label}</a>`)}
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>nav(`#/api-runs/${runId}/${t.key}`)}
+        >${t.label}</button>`)}
     </div>
     <div className="content scroll-content no-padding">
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="agents"   && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="findings" && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="sessions" && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="traffic"  && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
     </div>
   `;
+}
+
+// ── ApiRunSessionsTab ──────────────────────────────────────────────────────────
+
+function ApiRunSessionsTab({ runId, scanRunning }) {
+  const [data, setData] = useState(null);
+
+  const load = () => api.getApiScannerSessions(runId).then(setData).catch(() => {});
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  return html`<${ScannerSessionsPanel}
+    runId=${runId}
+    data=${data}
+    refresh=${load}
+    updateSession=${(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)}
+  />`;
 }
 
 // ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
@@ -6243,7 +6269,7 @@ function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear,
     </div>`;
 }
 
-function ScannerSessionsPanel({ runId, data, refresh }) {
+function ScannerSessionsPanel({ runId, data, refresh, onUpdate }) {
   const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
@@ -6254,11 +6280,14 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     if (!iso) return "—";
     try { return parseDate(iso).toLocaleString(); } catch { return iso; }
   };
+  const doUpdate = onUpdate
+    ? (sessionId, b) => onUpdate(sessionId, b)
+    : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
   const renameSession = async (session) => {
     const next = prompt("Session label", session.label);
     if (next === null) return;
     try {
-      await api.updateScannerSession(runId, session.id, { label: next });
+      await doUpdate(session.id, { label: next });
       await refresh();
     } catch(e) { alert(e.message); }
   };
@@ -6266,7 +6295,7 @@ function ScannerSessionsPanel({ runId, data, refresh }) {
     const verb = isActive ? "Reactivate" : "Deactivate";
     if (!confirm(`${verb} session "${session.label}"?`)) return;
     try {
-      await api.updateScannerSession(runId, session.id, { is_active: isActive });
+      await doUpdate(session.id, { is_active: isActive });
       await refresh();
     } catch(e) { alert(e.message); }
   };
