@@ -179,6 +179,27 @@ class ApiTestRun(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+# ── API Endpoint Test (coverage matrix cell) ──────────────────────────────────
+
+class ApiEndpointTest(SQLModel, table=True):
+    """One coverage-matrix cell: a (ApiTestRun, ApiEndpoint, OWASP API category) triple.
+
+    Seeded at scan start for every in-scope endpoint × applicable category
+    (all API1–API10 in track mode).  Status progresses as the scan runs.
+    """
+
+    __tablename__ = "api_endpoint_test"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    api_test_run_id: int = Field(foreign_key="api_test_run.id", index=True)
+    endpoint_id: int = Field(foreign_key="api_endpoint.id", index=True)
+    owasp_api_category: str                      # API1 … API10
+    status: str = Field(default="not_started")   # not_started|in_progress|covered|skipped|finding
+    skip_reason: Optional[str] = Field(default=None)
+    finding_ids_json: str = Field(default="[]")  # JSON list of ScanFinding.id
+    last_updated: datetime = Field(default_factory=_utcnow)
+
+
 # ── LLM config ────────────────────────────────────────────────────────────────
 
 class LLMProviderAPI(str, Enum):
