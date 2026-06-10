@@ -23,6 +23,7 @@ Tests:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock
@@ -42,7 +43,11 @@ from aespa.models import (
 )
 from aespa.services.api_scanner import (
     _applicable_categories,
+    _build_enforce_directive,
+    _enforce_coverage_loop,
+    _make_enforce_prober,
     _match_endpoint_for_url,
+    _uncovered_cells,
     get_coverage_matrix,
     mark_all_cells_covered,
     seed_coverage_matrix,
@@ -572,3 +577,171 @@ def test_post_probe_fn_no_match_is_noop(db_engine, db_session, collection, endpo
         assert cell.status == "not_started"
 
     _endpoint_cache.pop(api_run.id, None)
+
+
+# ── Slice 8: Enforce coverage mode ────────────────────────────────────────────
+
+def _all_cells(db_session, api_run_id):
+    return db_session.exec(
+        select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run_id)
+    ).all()
+
+
+# ── _uncovered_cells returns only non-terminal cells ──────────────────────────
+
+def test_uncovered_cells_excludes_terminal(db_engine, db_session, collection, endpoint_simple, api_run):
+    seed_coverage_matrix(api_run.id)
+    # Flip one cell to covered (terminal) — it should drop out of the uncovered list.
+    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "covered")
+    uncovered = _uncovered_cells(api_run.id)
+    cats = {cat for _ep, cat, _status in uncovered}
+    assert "API2" not in cats
+    # The remaining applicable categories are still uncovered.
+    assert "API4" in cats
+
+
+# ── enforce loop drives every cell to a terminal state ────────────────────────
+
+def test_enforce_loop_covers_all_cells(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+    seed_coverage_matrix(api_run.id)
+
+    async def prober(ep, cat, status):
+        return ("covered", None)
+
+    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999))
+
+    db_session.expire_all()
+    cells = _all_cells(db_session, api_run.id)
+    assert cells
+    assert all(c.status == "covered" for c in cells)
+    assert stats["covered"] == len(cells)
+    assert _uncovered_cells(api_run.id) == []
+
+
+# ── enforce loop records skip reasons ─────────────────────────────────────────
+
+def test_enforce_loop_records_skip_reasons(db_engine, db_session, collection, endpoint_simple, api_run):
+    seed_coverage_matrix(api_run.id)
+
+    async def prober(ep, cat, status):
+        return ("skipped", f"not applicable: {cat}")
+
+    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999))
+
+    db_session.expire_all()
+    cells = _all_cells(db_session, api_run.id)
+    assert all(c.status == "skipped" for c in cells)
+    assert all(c.skip_reason and c.skip_reason.startswith("not applicable") for c in cells)
+    assert stats["skipped"] == len(cells)
+
+
+# ── enforce loop respects the attempt budget ──────────────────────────────────
+
+def test_enforce_loop_respects_budget(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+    seed_coverage_matrix(api_run.id)
+    total = len(_all_cells(db_session, api_run.id))
+    assert total > 2  # need headroom so the budget actually bites
+
+    async def prober(ep, cat, status):
+        return ("covered", None)
+
+    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=2, time_budget_s=999))
+
+    assert stats["attempted"] == 2
+    assert stats["covered"] == 2
+    assert stats["budget_exhausted"] is True
+
+    db_session.expire_all()
+    cells = _all_cells(db_session, api_run.id)
+    covered = [c for c in cells if c.status == "covered"]
+    skipped = [c for c in cells if c.status == "skipped"]
+    assert len(covered) == 2
+    assert len(skipped) == total - 2
+    # Cells not reached within budget are skipped with a clear reason.
+    assert all(c.skip_reason == "coverage budget exhausted" for c in skipped)
+    # No cell is left dangling.
+    assert _uncovered_cells(api_run.id) == []
+
+
+# ── enforce loop halts on stop_check ──────────────────────────────────────────
+
+def test_enforce_loop_stop_check_halts(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+    seed_coverage_matrix(api_run.id)
+    calls = {"n": 0}
+
+    async def prober(ep, cat, status):
+        calls["n"] += 1
+        return ("covered", None)
+
+    # Stop after the first attempt completes.
+    stats = asyncio.run(
+        _enforce_coverage_loop(
+            api_run.id, prober,
+            max_attempts=999, time_budget_s=999,
+            stop_check=lambda: calls["n"] >= 1,
+        )
+    )
+    assert stats["attempted"] == 1
+    assert stats["budget_exhausted"] is True
+    # Everything else is closed out as budget-exhausted.
+    assert _uncovered_cells(api_run.id) == []
+
+
+# ── default prober: in_progress cells are promoted to covered (no LLM) ─────────
+
+def test_enforce_prober_promotes_in_progress(db_engine, db_session, collection, endpoint_simple, api_run):
+    prober = _make_enforce_prober(api_run.id, llm_cfg=None, base_url="")
+    status, reason = asyncio.run(prober(endpoint_simple, "API2", "in_progress"))
+    assert status == "covered"
+    assert reason is None
+
+
+# ── default prober: not_started cells classified N/A via the LLM ──────────────
+
+def test_enforce_prober_classifies_not_applicable(db_engine, db_session, collection, endpoint_simple, api_run):
+    import aespa.services.llm as llm_mod
+
+    fake = AsyncMock(return_value='{"API2": {"applicable": false, "reason": "no auth required"}}')
+    with patch.object(llm_mod, "plain_completion", new=fake):
+        prober = _make_enforce_prober(api_run.id, llm_cfg=object(), base_url="")
+        status, reason = asyncio.run(prober(endpoint_simple, "API2", "not_started"))
+
+    assert status == "skipped"
+    assert "not applicable" in reason
+    assert "no auth required" in reason
+
+
+# ── enforce directive lists endpoints + categories ───────────────────────────
+
+def test_build_enforce_directive_lists_checklist(db_engine, db_session, collection, endpoint_simple, api_run):
+    seed_coverage_matrix(api_run.id)
+    text = _build_enforce_directive(api_run.id)
+    assert "ENFORCE COVERAGE MODE" in text
+    assert "/health" in text
+    assert "API2" in text
+
+
+def test_build_enforce_directive_empty_when_nothing_uncovered(db_engine, db_session, collection, endpoint_simple, api_run):
+    seed_coverage_matrix(api_run.id)
+    # Cover every cell so there is nothing left to enforce.
+    for ep, cat, _status in _uncovered_cells(api_run.id):
+        update_coverage_cell(api_run.id, ep.id, cat, "covered")
+    assert _build_enforce_directive(api_run.id) == ""
+
+
+# ── scan-start accepts a coverage_mode override ───────────────────────────────
+
+def test_scan_start_overrides_coverage_mode(client, db_engine, db_session):
+    coll, run = _make_collection_and_run(client)  # defaults to track
+    with (
+        patch("aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock),
+        patch("asyncio.create_task") as mock_task,
+    ):
+        mock_task.return_value = AsyncMock()
+        r = client.post(f"/api/api-test-runs/{run['id']}/scan/start", json={"coverage_mode": "enforce"})
+    assert r.status_code == 200
+    assert r.json()["coverage_mode"] == "enforce"
+
+    db_session.expire_all()
+    refreshed = db_session.get(ApiTestRun, run["id"])
+    assert refreshed.coverage_mode == "enforce"
