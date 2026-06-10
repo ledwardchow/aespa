@@ -14,7 +14,7 @@ coverage per endpoint in a matrix.
 - [x] **Slice 5 — API test runs + Agents tab with A.L.I.C.E.** ✅ DONE (2026-06-08)
 - [x] **Slice 6 — Scanner generalization → run scan, Findings + Traffic tabs** ✅ DONE (2026-06-09)
 - [x] **Slice 7 — Work Program coverage matrix (track mode) + live updates** ✅ DONE (2026-06-09)
-- [ ] Slice 8 — Enforce coverage mode
+- [x] **Slice 8 — Enforce coverage mode** ✅ DONE (2026-06-10)
 
 ## Decisions (from user)
 - OWASP set: **OWASP API Security Top 10 (2023)** (API1 BOLA ... API10 Unsafe Consumption of APIs).
@@ -402,6 +402,47 @@ Goal: user can force the scanner to drive every applicable cell to covered/skipp
 - **Test point:** start a scan in enforce mode → confirm previously-uncovered cells get driven to
   covered or skipped-with-reason.
 - **Automated:** enforce-loop unit test (drives cells, respects budget, records skip reasons).
+
+**Implementation notes (as built):**
+- `services/api_scanner.py`:
+  - `update_coverage_cell` gained a `skip_reason` param (recorded on the `ApiEndpointTest` cell
+    whenever supplied; the no-downgrade rule is unchanged).
+  - `_uncovered_cells(api_run_id)` — returns `[(endpoint, category, status)]` for non-terminal
+    (`not_started`/`in_progress`) cells.
+  - `_build_enforce_directive(api_run_id)` — steering text appended to the agent's crawl context
+    in enforce mode: a per-endpoint checklist of applicable OWASP API categories plus an
+    instruction to tag every `http_request` with its `owasp_category` so `post_probe_fn` flips the
+    right cell. This is the **primary** enforcement mechanism — the agent itself drives coverage
+    during the main loop (no new agent-facing tool commands were added, keeping the shared scanner
+    tool surface untouched, consistent with Slices 6–7).
+  - `_enforce_coverage_loop(api_run_id, prober, *, max_attempts, time_budget_s, stop_check, now_fn)`
+    — the budget-aware orchestrator (unit-testable via an injected `prober`). For each uncovered
+    cell it awaits `prober(endpoint, category, status) -> (status, reason)`, persists the result
+    (skip reasons included), and emits `enforce_progress` SSE events. Respects an attempt cap, a
+    wall-clock budget, and a stop check; any cell not reached when a budget is hit is marked
+    `skipped` with reason "coverage budget exhausted", so no cell is left dangling. A failing
+    prober degrades that one cell to skipped rather than aborting the loop.
+  - `_make_enforce_prober(...)` — the default prober: cells the broad scan already touched
+    (`in_progress`) are promoted to `covered`; untouched (`not_started`) cells are classified by a
+    single cached LLM call per endpoint into `skipped` with either an N/A reason or a
+    "not covered within scan budget" note. Honest by construction — it never fabricates `covered`
+    for an untested cell.
+  - `_do_api_thinking_scan` reads `run.coverage_mode`; in enforce mode it appends the directive to
+    the crawl context and, after the agentic loop, runs `_enforce_coverage_loop` instead of the
+    track-mode `mark_all_cells_covered` (guarded by `api_run_id not in _stop_requested`).
+- `api/api_test_runs.py`: `POST /{id}/scan/start` now accepts an optional `{coverage_mode}` body
+  (`ScanStartIn`) that overrides the run's stored mode before launching; returns the effective
+  `coverage_mode`.
+- `web/app.js`: `api.startApiScan(id, coverageMode)` sends the override. `ApiTestRunDetail` adds a
+  **Coverage: Track / Enforce** selector beside the Start Scan button (initialised from the run,
+  hidden while scanning). `ApiRunWorkProgramTab` consumes `enforce_progress` SSE events and shows
+  a live "Enforcing… N/M" badge that turns into an "Enforce done · X covered, Y skipped" summary
+  (flagging "(budget hit)" when a budget was exhausted), and reloads the matrix on completion.
+- Tests: `tests/test_api_coverage.py` grew by 11 (now 34) — `_uncovered_cells` terminal-exclusion,
+  enforce loop covers-all / records-skip-reasons / respects-attempt-budget / stop-check-halts,
+  default prober in_progress→covered (no LLM) and not_started N/A classification (mocked LLM),
+  enforce directive checklist + empty-when-nothing-uncovered, and the scan-start coverage_mode
+  override route. Full suite: **452 passed**, 0 regressions.
 
 ## Relevant files
 - `src/aespa/models.py` — add ApiCollection, ApiDocument, ApiEndpoint, ApiCredential, ApiTestRun,

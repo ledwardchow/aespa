@@ -288,12 +288,26 @@ def export_api_agent_log(run_id: int, session: Session = Depends(get_session)) -
 
 # ── Scan start / stop ──────────────────────────────────────────────────────────
 
+class ScanStartIn(BaseModel):
+    coverage_mode: str | None = None  # "track" | "enforce"; overrides the run setting
+
+
 @router.post("/{run_id}/scan/start")
-async def start_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
-    _get_run_or_404(session, run_id)
+async def start_api_scan(
+    run_id: int,
+    body: ScanStartIn | None = None,
+    session: Session = Depends(get_session),
+) -> dict:
+    run = _get_run_or_404(session, run_id)
+    # Allow the scan-start control to override the run's coverage mode.
+    if body and body.coverage_mode in ("track", "enforce"):
+        run.coverage_mode = body.coverage_mode
+        run.updated_at = datetime.now(timezone.utc)
+        session.add(run)
+        session.commit()
     from aespa.services import api_scanner
     await api_scanner.start_api_scan(run_id)
-    return {"ok": True}
+    return {"ok": True, "coverage_mode": run.coverage_mode}
 
 
 @router.post("/{run_id}/scan/stop")
