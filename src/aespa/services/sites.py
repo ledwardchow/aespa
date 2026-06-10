@@ -234,7 +234,9 @@ def export_site(session: Session, site_id: int) -> dict:
         hyps    = list(session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == rid)).all())
         tasks   = list(session.exec(select(PentestTask).where(PentestTask.test_run_id == rid)).all())
         findings = list(session.exec(select(ScanFinding).where(ScanFinding.test_run_id == rid)).all())
-        logs    = list(session.exec(select(ScanLog).where(ScanLog.test_run_id == rid)).all())
+        logs    = list(session.exec(
+            select(ScanLog).where(ScanLog.test_run_id == rid).where(ScanLog.run_kind == "web")
+        ).all())
 
         run_bundles.append({
             "test_run": _row(run),

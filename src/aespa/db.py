@@ -41,6 +41,45 @@ def init_db() -> None:
     _migrate(engine)
 
 
+def _backfill_run_kind(engine: Engine) -> None:
+    """Tag historical agent_log / scan_log rows that unambiguously belong to an
+    API run.  A row whose test_run_id exists in api_test_run but NOT in test_run
+    can only have come from an API scan, so flip it to ``run_kind='api'``.
+    Rows whose id collides (present in both tables) are left as the default
+    ``'web'`` — they cannot be disambiguated after the fact, and new runs are
+    tagged correctly at write time.  Idempotent and best-effort.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            # Skip cleanly on fresh DBs where api_test_run may not exist yet.
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    _text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            if "api_test_run" not in tables:
+                return
+            api_only = (
+                "SELECT id FROM api_test_run "
+                "WHERE id NOT IN (SELECT id FROM test_run)"
+            )
+            for table in ("agent_log", "scan_log"):
+                if table not in tables:
+                    continue
+                conn.execute(
+                    _text(
+                        f"UPDATE {table} SET run_kind='api' "
+                        f"WHERE run_kind='web' AND test_run_id IN ({api_only})"
+                    )
+                )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort backfill
+
+
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
@@ -94,6 +133,12 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    # agent_log / scan_log share the test_run_id column between web TestRuns and
+    # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
+    # row with the run kind so the two panels stop reading each other's rows.
+    _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _backfill_run_kind(engine)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS reporting_debug_config (

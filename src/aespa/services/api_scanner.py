@@ -1241,6 +1241,10 @@ async def start_api_scan(api_run_id: int) -> None:
 
     log.info("start_api_scan: api_run_id=%s", api_run_id)
 
+    # Tag this id as an API run so its agent_log / scan_log rows are written with
+    # run_kind='api' and never collide with a web TestRun that shares the id.
+    events_svc.register_api_run(api_run_id)
+
     with Session(get_engine()) as s:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
