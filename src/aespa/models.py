@@ -644,6 +644,9 @@ class ScanLog(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
+    # test_run_id column but draw ids from independent counters.  "web" | "api".
+    run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     phase: str                              # thinking_step | site_plan | page_plan | …
     status: str = Field(default="")        # start | complete | running | deciding | …
@@ -722,6 +725,9 @@ class AgentLog(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # Disambiguates the otherwise-shared test_run_id namespace: web TestRun ids
+    # and ApiTestRun ids come from separate counters and collide.  "web" | "api".
+    run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     agent_id: str = Field(index=True)   # e.g. "scanner", "validator-42", "burp-api-login"
     role: str                            # Scanner | Specialist | Burp | Validator
