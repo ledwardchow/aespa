@@ -206,11 +206,13 @@ def update_coverage_cell(
     owasp_api_category: str,
     status: str,
     finding_id: int | None = None,
+    skip_reason: str | None = None,
 ) -> None:
     """Upsert a coverage cell.  If ``finding_id`` is given it is appended to finding_ids_json.
 
     Status is never downgraded: once a cell is ``finding`` it cannot go back to
     ``covered``; once ``in_progress`` it cannot go back to ``not_started``, etc.
+    ``skip_reason`` (used by enforce mode) is recorded whenever supplied.
     """
     with Session(get_engine()) as s:
         cell = s.exec(
@@ -234,9 +236,11 @@ def update_coverage_cell(
             if new_rank > current_rank:
                 cell.status = status
                 cell.last_updated = datetime.now(_UTC)
-            elif finding_id is None:
+            elif finding_id is None and skip_reason is None:
                 # Nothing to update.
                 return
+        if skip_reason is not None:
+            cell.skip_reason = skip_reason
         if finding_id is not None:
             try:
                 ids: list = json.loads(cell.finding_ids_json or "[]")
@@ -306,6 +310,226 @@ def mark_all_cells_covered(api_run_id: int) -> None:
             s.add(cell)
         s.commit()
     log.info("mark_in_progress_to_covered: api_run_id=%s promoted=%d", api_run_id, len(cells))
+
+
+# ── Enforce coverage mode (Slice 8) ───────────────────────────────────────────
+
+_ENFORCE_DEFAULT_MAX_ATTEMPTS = 300
+_ENFORCE_DEFAULT_TIME_BUDGET_S = 1800.0
+
+# Cells in these states still need work; everything else is terminal.
+_UNCOVERED_STATES = ("not_started", "in_progress")
+
+
+def _uncovered_cells(api_run_id: int) -> list[tuple[ApiEndpoint, str, str]]:
+    """Return ``[(endpoint, category, current_status)]`` for non-terminal cells."""
+    with Session(get_engine(), expire_on_commit=False) as s:
+        cells = list(s.exec(
+            select(ApiEndpointTest)
+            .where(ApiEndpointTest.api_test_run_id == api_run_id)
+            .where(ApiEndpointTest.status.in_(_UNCOVERED_STATES))  # type: ignore[attr-defined]
+        ).all())
+        ep_ids = {c.endpoint_id for c in cells}
+        endpoints = {
+            ep.id: ep
+            for ep in s.exec(
+                select(ApiEndpoint).where(ApiEndpoint.id.in_(ep_ids))  # type: ignore[attr-defined]
+            ).all()
+        } if ep_ids else {}
+    out: list[tuple[ApiEndpoint, str, str]] = []
+    for c in cells:
+        ep = endpoints.get(c.endpoint_id)
+        if ep is not None:
+            out.append((ep, c.owasp_api_category, c.status))
+    return out
+
+
+def _build_enforce_directive(api_run_id: int) -> str:
+    """Build the enforce-mode steering text appended to the agent's crawl context.
+
+    Lists the in-scope endpoints with their applicable OWASP API categories and
+    instructs the Test Lead to drive every cell to coverage, tagging each
+    ``http_request`` with the ``owasp_category`` it exercises (so ``post_probe_fn``
+    flips the right cell to ``in_progress``)."""
+    cells = _uncovered_cells(api_run_id)
+    if not cells:
+        return ""
+    grouped: dict[int, tuple[ApiEndpoint, list[str]]] = {}
+    for ep, cat, _status in cells:
+        grouped.setdefault(ep.id, (ep, []))[1].append(cat)
+
+    lines = [
+        "=== ENFORCE COVERAGE MODE ===",
+        "You MUST systematically test every in-scope endpoint against each "
+        "applicable OWASP API Top-10 category in the checklist below. For EVERY "
+        "http_request you send, set the `owasp_category` field to the category "
+        "you are testing (API1–API10) so coverage is tracked. Work through the "
+        "checklist methodically; do not call `done` until every endpoint/category "
+        "pair has been exercised, or you have documented why a category does not "
+        "apply to an endpoint.",
+        "",
+        "Coverage checklist (endpoint → categories still to cover):",
+    ]
+    items = sorted(grouped.values(), key=lambda t: (t[0].path, t[0].method))
+    for ep, cats in items[:60]:
+        ordered = [c for c in OWASP_API_CATEGORIES if c in set(cats)]
+        lines.append(f"  [{ep.method}] {ep.path} → {', '.join(ordered)}")
+    if len(items) > 60:
+        lines.append(f"  … and {len(items) - 60} more endpoints (use endpoint_list).")
+    return "\n".join(lines)
+
+
+async def _enforce_coverage_loop(
+    api_run_id: int,
+    prober,
+    *,
+    max_attempts: int = _ENFORCE_DEFAULT_MAX_ATTEMPTS,
+    time_budget_s: float = _ENFORCE_DEFAULT_TIME_BUDGET_S,
+    stop_check=None,
+    now_fn=None,
+) -> dict:
+    """Drive every still-uncovered coverage cell to a terminal state.
+
+    For each uncovered ``(endpoint, category)`` cell, ``prober(endpoint, category,
+    current_status)`` is awaited and must return ``(status, reason)`` where
+    ``status`` is one of ``covered`` / ``finding`` / ``skipped`` and ``reason`` is
+    an optional string (recorded as the cell's skip reason for skips).
+
+    The loop respects three budgets — a max attempt count, a wall-clock budget,
+    and an optional ``stop_check`` (defaults to the module stop-request set).
+    Any cells still uncovered when a budget is hit are marked ``skipped`` with
+    reason "coverage budget exhausted". Returns a stats dict.
+    """
+    import time as _time
+    now_fn = now_fn or _time.monotonic
+    if stop_check is None:
+        def stop_check() -> bool:
+            return api_run_id in _stop_requested
+
+    deadline = now_fn() + max(0.0, time_budget_s)
+    stats: dict[str, Any] = {
+        "attempted": 0, "covered": 0, "finding": 0, "skipped": 0,
+        "budget_exhausted": False, "remaining": 0,
+    }
+
+    cells = _uncovered_cells(api_run_id)
+    total = len(cells)
+    events_svc.emit(api_run_id, {
+        "type": "enforce_progress", "phase": "start",
+        "remaining": total, "total": total,
+        "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+    })
+
+    for idx, (endpoint, category, current_status) in enumerate(cells):
+        if stop_check() or stats["attempted"] >= max_attempts or now_fn() >= deadline:
+            stats["budget_exhausted"] = True
+            break
+        stats["attempted"] += 1
+        try:
+            status, reason = await prober(endpoint, category, current_status)
+        except Exception as exc:  # a failing prober must not abort the whole loop
+            log.warning("enforce prober error ep=%s cat=%s: %s", endpoint.id, category, exc)
+            status, reason = "skipped", f"prober error: {exc}"
+        if status not in ("covered", "finding", "skipped"):
+            status, reason = "skipped", reason or "prober returned no decision"
+        update_coverage_cell(
+            api_run_id, endpoint.id, category, status,
+            skip_reason=reason if status == "skipped" else None,
+        )
+        stats[status] += 1
+        if (idx + 1) % 5 == 0 or idx + 1 == total:
+            events_svc.emit(api_run_id, {
+                "type": "enforce_progress", "phase": "progress",
+                "remaining": total - (idx + 1), "total": total, "resolved": idx + 1,
+            })
+
+    # Close out anything not reached within budget so no cell is left dangling.
+    for endpoint, category, _status in _uncovered_cells(api_run_id):
+        update_coverage_cell(
+            api_run_id, endpoint.id, category, "skipped",
+            skip_reason="coverage budget exhausted",
+        )
+        stats["skipped"] += 1
+
+    events_svc.emit(api_run_id, {
+        "type": "enforce_progress", "phase": "complete",
+        "covered": stats["covered"], "finding": stats["finding"],
+        "skipped": stats["skipped"], "budget_exhausted": stats["budget_exhausted"],
+        "message": (
+            f"Enforce complete: {stats['covered']} covered, "
+            f"{stats['finding']} finding, {stats['skipped']} skipped."
+        ),
+    })
+    log.info("enforce_coverage_loop: api_run_id=%s stats=%s", api_run_id, stats)
+    return stats
+
+
+def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
+    """Build the default enforce prober.
+
+    Cells the broad agentic scan already exercised (``in_progress``) are promoted
+    to ``covered``. For untouched (``not_started``) cells, a single LLM
+    classification call per endpoint (cached) decides, per category, whether it is
+    genuinely not-applicable (→ ``skipped`` with an N/A reason) or applicable but
+    not reached (→ ``skipped`` noting it was not covered within budget). This
+    guarantees every cell ends with a recorded rationale; the actual driving of
+    coverage happens via the steered agent during the main loop.
+    """
+    from aespa.services import llm as llm_svc
+
+    # endpoint_id → {category: (status, reason)}
+    _cache: dict[int, dict[str, tuple[str, str]]] = {}
+
+    async def _classify_endpoint(endpoint: ApiEndpoint) -> dict[str, tuple[str, str]]:
+        import re
+        cats = _applicable_categories(endpoint)
+        cat_lines = "\n".join(f"  - {c} ({OWASP_API_LABELS.get(c, c)})" for c in cats)
+        prompt = (
+            "You are triaging OWASP API Security Top-10 (2023) test coverage for a "
+            "single REST API endpoint that an automated scan did not explicitly "
+            "exercise. For each category below, decide whether it is genuinely "
+            "applicable to this endpoint.\n\n"
+            f"Endpoint: [{endpoint.method}] {endpoint.path}\n"
+            f"Auth required: {bool(endpoint.auth_required)}\n"
+            f"Summary: {endpoint.summary or '(none)'}\n\n"
+            f"Categories to triage:\n{cat_lines}\n\n"
+            "Reply with ONLY a JSON object mapping each category id to "
+            '{\"applicable\": true|false, \"reason\": \"one short sentence\"}. '
+            "Mark applicable=false only when the category cannot meaningfully apply "
+            "to this endpoint (e.g. SSRF on an endpoint that takes no URL-like "
+            "input). No prose, no markdown fences."
+        )
+        decisions: dict[str, tuple[str, str]] = {}
+        try:
+            raw = await llm_svc.plain_completion(llm_cfg, prompt)
+            cleaned = re.sub(r"^```(?:json)?\s*", "", (raw or "").strip(), flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*```$", "", cleaned.strip())
+            m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            parsed = json.loads(m.group(0)) if m else {}
+        except Exception as exc:
+            log.debug("enforce classify failed ep=%s: %s", endpoint.id, exc)
+            parsed = {}
+        for cat in cats:
+            d = parsed.get(cat) if isinstance(parsed, dict) else None
+            reason = (d or {}).get("reason", "") if isinstance(d, dict) else ""
+            if isinstance(d, dict) and d.get("applicable") is False:
+                decisions[cat] = ("skipped", f"not applicable: {reason}".strip().rstrip(":"))
+            else:
+                note = reason or "applicable but not reached by the scan"
+                decisions[cat] = ("skipped", f"not covered within scan budget — {note}")
+        return decisions
+
+    async def _prober(endpoint: ApiEndpoint, category: str, current_status: str):
+        # The agent already sent requests for this cell → it counts as covered.
+        if current_status == "in_progress":
+            return ("covered", None)
+        if endpoint.id not in _cache:
+            _cache[endpoint.id] = await _classify_endpoint(endpoint)
+        return _cache[endpoint.id].get(
+            category, ("skipped", "applicable but not reached by the scan")
+        )
+
+    return _prober
 
 
 def get_coverage_matrix(api_run_id: int) -> dict:
@@ -763,6 +987,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         global_header_cfg = get_global_http_header_config(s)
         coll = s.get(ApiCollection, run.collection_id)
         base_url = (coll.base_url if coll else "").rstrip("/")
+        coverage_mode = run.coverage_mode or "track"
         for obj in [run, llm_cfg]:
             s.expunge(obj)
 
@@ -789,6 +1014,13 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     # Build the initial LLM context from the API collection.
     crawl_context = _build_api_crawl_context(api_run_id)
+
+    # In enforce mode, append the coverage checklist + directive so the agent
+    # systematically drives every endpoint × applicable category to coverage.
+    if coverage_mode == "enforce":
+        directive = _build_enforce_directive(api_run_id)
+        if directive:
+            crawl_context = f"{crawl_context}\n\n{directive}"
 
     # Credential list for the LLM initial message.
     with Session(get_engine()) as s:
@@ -873,9 +1105,25 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
 
-    # Promote in_progress → covered; remove endpoint cache.
+    # Resolve the coverage matrix to a terminal state.
+    if coverage_mode == "enforce" and api_run_id not in _stop_requested:
+        # Drive every still-uncovered cell to covered / skipped-with-reason.
+        events_svc.emit(api_run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": "Enforcing coverage — resolving remaining cells…",
+            "outcome": None,
+            "_persist": True,
+        })
+        prober = _make_enforce_prober(api_run_id, llm_cfg, base_url)
+        await _enforce_coverage_loop(api_run_id, prober)
+    else:
+        # Track mode: promote cells the scan actually touched to covered.
+        mark_all_cells_covered(api_run_id)
+    # Remove endpoint cache.
     _endpoint_cache.pop(api_run_id, None)
-    mark_all_cells_covered(api_run_id)
 
     # Mark run completed.
     with Session(get_engine()) as s:

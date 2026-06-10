@@ -48,7 +48,7 @@ const api = {
   stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
   clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
-  startApiScan:        (id)       => req(`/api/api-test-runs/${id}/scan/start`,    { method:"POST" }),
+  startApiScan:        (id, coverageMode) => req(`/api/api-test-runs/${id}/scan/start`, { method:"POST", body: coverageMode ? { coverage_mode: coverageMode } : undefined }),
   stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
   getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
@@ -2438,10 +2438,11 @@ function ApiTestRunDetail({ runId, initialTab }) {
   const [error, setError] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanBusy, setScanBusy] = useState(false);
+  const [coverageMode, setCoverageMode] = useState("track");
   const tab = initialTab || "status";
 
   useEffect(() => {
-    api.getApiRun(runId).then(setRun).catch(e => setError(e.message));
+    api.getApiRun(runId).then(r => { setRun(r); setCoverageMode(r.coverage_mode || "track"); }).catch(e => setError(e.message));
     api.getApiScanStatus(runId).then(setScanStatus).catch(()=>{});
   }, [runId]);
 
@@ -2460,10 +2461,10 @@ function ApiTestRunDetail({ runId, initialTab }) {
   const onStartScan = async () => {
     setScanBusy(true);
     try {
-      await api.startApiScan(runId);
+      await api.startApiScan(runId, coverageMode);
       const st = await api.getApiScanStatus(runId);
       setScanStatus(st);
-      api.getApiRun(runId).then(setRun).catch(()=>{});
+      api.getApiRun(runId).then(r => { setRun(r); setCoverageMode(r.coverage_mode || "track"); }).catch(()=>{});
     } catch(e) { setError(e.message); }
     finally { setScanBusy(false); }
   };
@@ -2506,9 +2507,17 @@ function ApiTestRunDetail({ runId, initialTab }) {
           ? html`<button className="btn danger-outline" disabled=${scanBusy} onClick=${onStopScan}>
                    ${scanBusy?"Stopping…":"Stop Scan"}
                  </button>`
-          : html`<button className="btn" disabled=${scanBusy} onClick=${onStartScan}>
-                   ${scanBusy?"Starting…":"Start Scan"}
-                 </button>`}
+          : html`
+            <label className="subtle" style=${{display:"flex",alignItems:"center",gap:6,fontSize:12}} title="Track: observe coverage as the scan runs. Enforce: drive every applicable endpoint × category to covered or skipped-with-reason.">
+              Coverage:
+              <select value=${coverageMode} disabled=${scanBusy} onChange=${e=>setCoverageMode(e.target.value)}>
+                <option value="track">Track</option>
+                <option value="enforce">Enforce</option>
+              </select>
+            </label>
+            <button className="btn" disabled=${scanBusy} onClick=${onStartScan}>
+              ${scanBusy?"Starting…":"Start Scan"}
+            </button>`}
         ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
       </div>
     </div>
@@ -2748,6 +2757,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
   const [matrix, setMatrix] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedCell, setSelectedCell] = useState(null);
+  const [enforce, setEnforce] = useState(null);   // latest enforce_progress event
   const esRef = useRef(null);
 
   const loadMatrix = () =>
@@ -2789,6 +2799,9 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
               }),
             };
           });
+        } else if (d.type === "enforce_progress") {
+          setEnforce(d);
+          if (d.phase === "complete") loadMatrix();
         }
       } catch {}
     };
@@ -2820,6 +2833,14 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
         </span>
         <span className="badge neutral">${pct}% coverage (${coveredCount}/${totalCells} cells)</span>
         ${scanRunning && html`<span className="badge warning">● Live</span>`}
+        ${enforce && enforce.phase !== "complete" && html`
+          <span className="badge warning" title="Enforce mode is resolving remaining coverage cells">
+            Enforcing… ${enforce.resolved!=null?`${enforce.resolved}/${enforce.total}`:`${enforce.remaining} left`}
+          </span>`}
+        ${enforce && enforce.phase === "complete" && html`
+          <span className="badge success" title=${enforce.message||""}>
+            Enforce done · ${enforce.covered||0} covered, ${enforce.skipped||0} skipped${enforce.budget_exhausted?" (budget hit)":""}
+          </span>`}
       </div>
 
       <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
