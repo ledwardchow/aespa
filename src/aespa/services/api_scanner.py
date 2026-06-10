@@ -548,10 +548,27 @@ def get_coverage_matrix(api_run_id: int) -> dict:
             select(ApiEndpointTest)
             .where(ApiEndpointTest.api_test_run_id == api_run_id)
         ).all())
+        findings = list(s.exec(
+            select(ScanFinding)
+            .where(ScanFinding.api_test_run_id == api_run_id)
+        ).all())
 
     # Build a lookup: (endpoint_id, category) → cell
     cell_lookup: dict[tuple[int, str], ApiEndpointTest] = {
         (c.endpoint_id, c.owasp_api_category): c for c in cells
+    }
+    # Build a lookup: finding_id → summary dict (for the detail panel)
+    finding_lookup: dict[int, dict] = {
+        f.id: {
+            "id": f.id,
+            "title": f.title,
+            "severity": f.severity,
+            "owasp_api_category": f.owasp_api_category,
+            "validation_status": f.validation_status,
+            "description": f.description,
+        }
+        for f in findings
+        if f.id is not None
     }
 
     totals: dict[str, int] = {s: 0 for s in ("not_started", "in_progress", "covered", "skipped", "finding")}
@@ -570,7 +587,11 @@ def get_coverage_matrix(api_run_id: int) -> dict:
             else:
                 cell_status = "not_started"
                 fids = []
-            ep_cells[cat] = {"status": cell_status, "finding_ids": fids}
+            ep_cells[cat] = {
+                "status": cell_status,
+                "finding_ids": fids,
+                "findings": [finding_lookup[i] for i in fids if i in finding_lookup],
+            }
             totals[cell_status] = totals.get(cell_status, 0) + 1
 
         endpoint_rows.append({
