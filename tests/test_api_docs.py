@@ -142,6 +142,73 @@ SWAGGER_JSON = json.dumps({
     },
 }).encode()
 
+# OpenAPI spec exercising recursive $ref resolution and allOf composition.
+OPENAPI_REFS_YAML = b"""
+openapi: "3.0.0"
+info:
+  title: Refs API
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /accounts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdParam'
+    post:
+      operationId: createAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountCreate'
+      responses:
+        "201": {description: created}
+components:
+  parameters:
+    IdParam:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer}
+  schemas:
+    Base:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+    AccountCreate:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - type: object
+          required: [owner]
+          properties:
+            owner:
+              $ref: '#/components/schemas/Owner'
+    Owner:
+      type: object
+      properties:
+        email: {type: string}
+"""
+
+# Spec whose ONLY refs are external — must be parsed without fetching them.
+OPENAPI_SSRF_YAML = b"""
+openapi: "3.0.0"
+info:
+  title: SSRF API
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - $ref: 'http://169.254.169.254/latest/meta-data/x.json#/foo'
+      responses:
+        "200": {description: ok}
+"""
+
 POSTMAN_V21 = json.dumps({
     "info": {"name": "Widgets API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
     "variable": [{"key": "baseUrl", "value": "https://widgets.example.com"}],
@@ -250,6 +317,65 @@ def test_parse_swagger_json(client, data_dir):
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     eps = client.get(f"/api/api-collections/{cid}/endpoints").json()
     assert any(e["path"] == "/pets" and e["method"] == "GET" for e in eps)
+
+
+def test_parse_openapi_resolves_nested_refs(client, data_dir):
+    """Path-level + operation refs and nested schema refs are dereferenced."""
+    cid = _make_collection(client)
+    doc = _upload(client, cid, "refs.yaml", OPENAPI_REFS_YAML, "application/yaml")
+    r = client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
+    assert r.json()["status"] == "parsed"
+    ep = next(e for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
+              if e["path"] == "/accounts/{id}" and e["method"] == "POST")
+
+    # Path-level $ref parameter resolved into a concrete {name,in,required}.
+    params = json.loads(ep["parameters_json"])
+    assert {"name": "id", "in": "path", "required": True} in params
+
+    # allOf members merged: name (from Base) + owner (inline), nested Owner ref resolved.
+    schema = json.loads(ep["request_body_schema_json"])["schema"]
+    props = schema["properties"]
+    assert "name" in props and "owner" in props
+    assert set(schema["required"]) == {"name", "owner"}
+    assert props["owner"]["properties"]["email"]["type"] == "string"
+    # No unresolved $ref left behind in the surfaced schema.
+    assert "$ref" not in json.dumps(schema)
+
+
+def test_dereference_internal_does_not_fetch_external_refs():
+    """External http/file $refs are left verbatim (never fetched) — SSRF guard."""
+    from aespa.services.api_docs import _dereference_internal
+
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "t", "version": "1"},
+        "paths": {
+            "/x": {
+                "get": {
+                    "parameters": [
+                        {"$ref": "http://169.254.169.254/latest/meta-data/x.json#/foo"},
+                        {"$ref": "../../../../etc/passwd"},
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    out = _dereference_internal(spec)
+    params = out["paths"]["/x"]["get"]["parameters"]
+    # Both external refs preserved exactly — proof nothing was dereferenced/fetched.
+    assert params[0] == {"$ref": "http://169.254.169.254/latest/meta-data/x.json#/foo"}
+    assert params[1] == {"$ref": "../../../../etc/passwd"}
+
+
+def test_parse_openapi_with_external_refs_still_parses(client, data_dir):
+    """A spec whose only refs are external still parses without fetching them."""
+    cid = _make_collection(client)
+    doc = _upload(client, cid, "ssrf.yaml", OPENAPI_SSRF_YAML, "application/yaml")
+    r = client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
+    assert r.json()["status"] == "parsed"
+    eps = client.get(f"/api/api-collections/{cid}/endpoints").json()
+    assert any(e["path"] == "/x" and e["method"] == "GET" for e in eps)
 
 
 # ── 3b Postman ────────────────────────────────────────────────────────────────
