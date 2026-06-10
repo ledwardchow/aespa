@@ -359,7 +359,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(p)
     for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
         session.delete(finding)
-    for log_entry in session.exec(select(ScanLog).where(ScanLog.test_run_id == run_id)).all():
+    for log_entry in session.exec(
+        select(ScanLog).where(ScanLog.test_run_id == run_id).where(ScanLog.run_kind == "web")
+    ).all():
         session.delete(log_entry)
     for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
         session.delete(ckpt)
@@ -369,7 +371,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(hyp)
     for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
         session.delete(task)
-    for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+    for log_entry in session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id).where(AgentLog.run_kind == "web")
+    ).all():
         session.delete(log_entry)
     session.delete(run)
     session.commit()

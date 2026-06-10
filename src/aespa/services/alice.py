@@ -1152,6 +1152,10 @@ async def run_api_alice_turn_stream(
     """
     log.info("ALICE API turn started for api_run_id=%s instruction=%r", api_run_id, user_instruction)
 
+    # Tag this id as an API run so persisted agent_log / scan_log rows are
+    # written with run_kind='api' (see events.register_api_run).
+    events_svc.register_api_run(api_run_id)
+
     from aespa.models import ApiCollection, ApiTestRun
     from aespa.services.settings import get_llm_config_for_run
 
