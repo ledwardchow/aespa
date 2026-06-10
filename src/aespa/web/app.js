@@ -846,7 +846,9 @@ const parseAliceThinking = (text) => {
 
 const renderMarkdown = (text) => {
   if (!text) return "";
-  
+  if (typeof text !== "string") text = markdownText(text);
+  if (!text) return "";
+
   const lines = text.split("\n");
   const elements = [];
   let inList = false;
@@ -2885,6 +2887,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                     const cell = ep.cells?.[cat];
                     if (!cell) return html`<td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}><span className="cov-cell cov-na" title="N/A">—</span></td>`;
                     const fids = cell.finding_ids || [];
+                    const findings = cell.findings || [];
                     const isSelected = selectedCell?.endpoint_id===ep.endpoint_id && selectedCell?.cat===cat;
                     return html`
                       <td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}>
@@ -2892,7 +2895,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
                           className=${"cov-cell cov-"+cell.status.replace("_","-")+(isSelected?" selected":"")+(fids.length?" has-findings":"")}
                           title=${cat+": "+cell.status+(fids.length?" ("+fids.length+" finding"+(fids.length>1?"s":"")+"":"")}
                           style=${{cursor:fids.length?"pointer":"default"}}
-                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{endpoint_id:ep.endpoint_id,cat,path:ep.path,method:ep.method,fids})}
+                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{endpoint_id:ep.endpoint_id,cat,path:ep.path,method:ep.method,fids,findings})}
                         >${fids.length>0?fids.length:""}</span>
                       </td>`;
                   })}
@@ -2908,7 +2911,19 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
             <b style=${{fontSize:13}}>${selectedCell.method} ${selectedCell.path} — ${selectedCell.cat} ${OWASP_LABELS[selectedCell.cat]||""}</b>
             <button className="btn ghost sm" onClick=${()=>setSelectedCell(null)}>✕</button>
           </div>
-          <div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>
+          ${(selectedCell.findings && selectedCell.findings.length)
+            ? selectedCell.findings.map(f => html`
+                <div key=${f.id} style=${{padding:"6px 0",borderTop:"1px solid var(--border)"}}>
+                  <div style=${{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span className=${"sev-badge sev-"+(f.severity||"info")}>${f.severity||"info"}</span>
+                    <b style=${{fontSize:12}}>${f.title}</b>
+                    ${f.validation_status && f.validation_status!=="unvalidated"
+                      ? html`<span style=${{fontSize:11,color:"var(--muted)"}}>(${f.validation_status})</span>` : ""}
+                  </div>
+                  ${f.description ? html`<div style=${{fontSize:12,color:"var(--muted)",whiteSpace:"pre-wrap"}}>${f.description}</div>` : ""}
+                  <div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>Finding #${f.id} — view in the Findings tab.</div>
+                </div>`)
+            : html`<div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>`}
         </div>`}
     </div>
   `;
@@ -5775,13 +5790,13 @@ function TestRunDetail({ runId, initialTab }) {
                       <td colSpan="5">
                         <div className="finding-description">
                           <div><strong>Description</strong></div>
-                          <div>${f.description || "—"}</div>
+                          <div>${markdownText(f.description) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Impact</strong></div>
-                          <div>${f.impact || "—"}</div>
+                          <div>${markdownText(f.impact) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
-                          <div>${f.likelihood || "—"}</div>
+                          <div>${markdownText(f.likelihood) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
-                          <div>${f.recommendation || "—"}</div>
+                          <div>${markdownText(f.recommendation) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                           <div>
                             ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
@@ -8656,10 +8671,10 @@ function DebugFindingsTable({ findings }) {
               <tr className="finding-evidence-row">
                 <td colSpan="2">
                   <div className="finding-description">
-                    <div><strong>Description</strong></div><div>${f.description || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${f.impact || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${f.likelihood || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${f.recommendation || "—"}</div>
+                    <div><strong>Description</strong></div><div>${markdownText(f.description) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${markdownText(f.impact) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${markdownText(f.likelihood) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${markdownText(f.recommendation) || "—"}</div>
                     <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                     <div>${f.cvss_score ?? "—"} ${f.cvss_vector && html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>`}</div>
                   </div>
@@ -8720,7 +8735,16 @@ function apiTranscriptText(text) {
 }
 
 function markdownText(value) {
-  return String(value ?? "").trim();
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "object") {
+    // Flatten content-block shapes ({text}/[{text}]) the LLM sometimes returns
+    // so they never render as the literal "[object Object]".
+    if (Array.isArray(value)) return value.map(markdownText).filter(Boolean).join("\n").trim();
+    if (typeof value.text === "string") return value.text.trim();
+    try { return JSON.stringify(value); } catch (_) { return ""; }
+  }
+  return String(value).trim();
 }
 
 function markdownListValue(value) {
