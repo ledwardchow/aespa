@@ -1093,12 +1093,13 @@ def _run_api_context_tool(
         from aespa.db import get_engine as _ge
         from sqlmodel import Session as _Session
         from datetime import datetime, timezone as _tz
+        from aespa.services.scanner import _as_text
 
-        severity = str(args.get("severity") or "info").lower()
+        severity = _as_text(args.get("severity") or "info").lower()
         if severity not in ("critical", "high", "medium", "low", "info"):
             severity = "info"
 
-        owasp = str(args.get("owasp_category") or args.get("owasp_api_category") or "").strip()
+        owasp = _as_text(args.get("owasp_category") or args.get("owasp_api_category")).strip()
 
         finding = _SF(
             test_run_id=run_id,
@@ -1107,15 +1108,15 @@ def _run_api_context_tool(
             owasp_category=owasp or "A00",
             owasp_api_category=owasp or None,
             severity=severity,
-            title=str(args.get("title") or "Untitled Finding"),
-            description=str(args.get("description") or ""),
-            impact=str(args.get("impact") or ""),
-            likelihood=str(args.get("likelihood") or ""),
-            recommendation=str(args.get("recommendation") or ""),
-            affected_url=str(args.get("affected_url") or ""),
-            evidence=str(args.get("evidence") or ""),
-            request_evidence=str(args.get("request_evidence") or ""),
-            response_evidence=str(args.get("response_evidence") or ""),
+            title=_as_text(args.get("title")) or "Untitled Finding",
+            description=_as_text(args.get("description")),
+            impact=_as_text(args.get("impact")),
+            likelihood=_as_text(args.get("likelihood")),
+            recommendation=_as_text(args.get("recommendation")),
+            affected_url=_as_text(args.get("affected_url")),
+            evidence=_as_text(args.get("evidence")),
+            request_evidence=_as_text(args.get("request_evidence")),
+            response_evidence=_as_text(args.get("response_evidence")),
             finding_source="alice_api",
             validation_status="unvalidated",
         )
