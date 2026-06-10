@@ -1487,6 +1487,7 @@ function ApiCollectionDetail({ collectionId }) {
   const [endpoints, setEndpoints] = useState(null);
   const [readiness, setReadiness] = useState(null);
   const [apiRuns, setApiRuns] = useState(null);
+  const [credentials, setCredentials] = useState(null);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [assessing, setAssessing] = useState(false);
@@ -1494,15 +1495,17 @@ function ApiCollectionDetail({ collectionId }) {
 
   const load = useCallback(async () => {
     try {
-      const [c, eps, rd, runs] = await Promise.all([
+      const [c, eps, rd, runs, creds] = await Promise.all([
         api.getApiCollection(collectionId),
         api.listApiEndpoints(collectionId),
         api.getApiReadiness(collectionId),
         api.listApiRuns(collectionId),
+        api.listApiCredentials(collectionId),
       ]);
       setCollection(c); setEndpoints(eps);
       setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
       setApiRuns(runs);
+      setCredentials(creds);
     }
     catch(e) { setError(e.message); }
   }, [collectionId]);
@@ -1536,6 +1539,7 @@ function ApiCollectionDetail({ collectionId }) {
       const result = await api.purgeCollectionData(collectionId);
       setEndpoints([]);
       setReadiness(null);
+      setCredentials([]);
       alert(`Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`);
     } catch(e) { setError(e.message); }
     finally { setPurging(false); }
@@ -1635,6 +1639,39 @@ function ApiCollectionDetail({ collectionId }) {
                 · Credentials: ${readiness.overall.has_credentials ? "✓" : "✗"}
                 · Test data: ${readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
               </div>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title">
+            <span>Credentials ${credentials!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${credentials.length}</span>`:""}</span>
+          </div>
+          ${credentials===null && html`<div className="subtle">Loading…</div>`}
+          ${credentials!==null && credentials.length===0 && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              No credentials. They are parsed from uploaded auth/credentials files, or discovered automatically during a scan.
+              Secret values are never displayed.
+            </div>`}
+          ${credentials!==null && credentials.length>0 && html`
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{width:"100%"}}>
+                <thead><tr>
+                  ${["Scheme","Name","Label","Scope","Auth endpoint","Added"].map(h=>html`<th key=${h}>${h}</th>`)}
+                </tr></thead>
+                <tbody>${credentials.map(c=>html`
+                  <tr key=${c.id}>
+                    <td><span className=${`badge ${c.scheme==="login"?"warning":"neutral"}`}>${c.scheme}</span></td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12}}>${c.name||"—"}</td>
+                    <td>${c.label||html`<span className="subtle">—</span>`}</td>
+                    <td style=${{fontSize:12}}>${c.scope}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${c.auth_endpoint||html`<span className="subtle">—</span>`}</td>
+                    <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(c.created_at).toLocaleString()}</td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>
+            <div className="subtle" style=${{marginTop:8,fontSize:11}}>
+              Secret values are stored but never shown. <strong>login</strong>-scheme entries are username/password test accounts used to obtain tokens during a scan.
             </div>`}
         </div>
 
