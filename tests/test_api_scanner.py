@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa.db import set_engine, get_engine
 from aespa.models import (
@@ -419,3 +419,61 @@ def test_scan_finding_model_has_api_columns(db_engine):
         s.refresh(f)
         assert f.api_test_run_id == 999
         assert f.owasp_api_category == "API1"
+
+
+# ── Tests: discovered-credential persistence (regression) ─────────────────────
+
+def test_discovered_credential_saved_to_collection_not_site(db_engine, collection, api_run):
+    """A credential discovered during an API scan must be saved as an ApiCredential
+    on the collection — never as a site Credential.
+
+    Regression: the shared loop previously called _maybe_persist_discovered_credential,
+    which resolves run_id as a TestRun id and writes a site Credential. Because
+    test_run/api_test_run ids overlap, that attached the credential to an unrelated site.
+    """
+    from aespa.services.api_scanner import _make_persist_credential_fn
+    from aespa.models import ApiCredential, Credential, Site, TestRun
+
+    # Seed a Site + TestRun whose id collides with the ApiTestRun id, to prove the
+    # hook does not touch the site even when a colliding TestRun exists.
+    with Session(db_engine) as s:
+        site = Site(name="Unrelated Site", base_url="http://unrelated.local")
+        s.add(site)
+        s.commit()
+        s.refresh(site)
+        tr = TestRun(id=api_run.id, site_id=site.id, name="unrelated run", status="completed")
+        s.add(tr)
+        s.commit()
+
+    persist = _make_persist_credential_fn(collection.id, api_run.id)
+    persist(username="alice@example.com", password="hunter2", login_url="/api/auth/login")
+
+    with Session(db_engine) as s:
+        api_creds = list(s.exec(
+            select(ApiCredential).where(ApiCredential.collection_id == collection.id)
+        ).all())
+        site_creds = list(s.exec(select(Credential)).all())
+
+    assert len(site_creds) == 0, "discovered cred must not be written to a site"
+    assert len(api_creds) == 1
+    cred = api_creds[0]
+    assert cred.scheme == "login"
+    assert cred.value == "alice@example.com:hunter2"
+    assert cred.label == "alice@example.com"
+    assert cred.auth_endpoint == "/api/auth/login"
+
+
+def test_discovered_credential_dedup(db_engine, collection, api_run):
+    """Persisting the same discovered credential twice creates only one ApiCredential."""
+    from aespa.services.api_scanner import _make_persist_credential_fn
+    from aespa.models import ApiCredential
+
+    persist = _make_persist_credential_fn(collection.id, api_run.id)
+    persist(username="bob", password="pw", login_url=None)
+    persist(username="bob", password="pw", login_url=None)
+
+    with Session(db_engine) as s:
+        api_creds = list(s.exec(
+            select(ApiCredential).where(ApiCredential.collection_id == collection.id)
+        ).all())
+    assert len(api_creds) == 1

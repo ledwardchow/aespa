@@ -28,7 +28,13 @@
       "Bash(python -m pytest tests/ -x -q --tb=short)",
       "Bash(python -c \"from aespa.services.prompts.specialist import SPECIALIST_SYSTEM_PROMPTS; print\\(list\\(SPECIALIST_SYSTEM_PROMPTS.keys\\(\\)\\)\\)\")",
       "Bash(python3 -c \"import sys, urllib.parse, json; data = sys.stdin.read\\(\\).strip\\(\\); decoded = urllib.parse.unquote\\(data\\); findings = json.loads\\(decoded\\); [print\\(f['owasp_category'], '|', f['title'], '|', f.get\\('validation_status',''\\)\\) for f in findings]\")",
-      "Bash(find /Users/ledwardchow -name \"vuln-scanner-comparison.md\" 2>/dev/null)"
+      "Bash(find /Users/ledwardchow -name \"vuln-scanner-comparison.md\" 2>/dev/null)",
+      "PowerShell(git ls-files | ForEach-Object { \\($_ -split '/'\\)[0] } | Sort-Object -Unique)",
+      "Bash(awk 'NR>=4000 && NR<=4460 && /^\\(async \\)?def /{ln=NR; name=$0} END{}' src/aespa/services/scanner.py)",
+      "Bash(awk -F: '$1<=4454')",
+      "Bash(awk -F: '$1<=5803')",
+      "Bash(tail -n 30 src/aespa/services/../../tests/test_api_scanner.py; echo \"=== total lines ===\"; wc -l < tests/test_api_scanner.py)",
+      "Bash(python -m pytest tests/test_api_scanner.py -x -q)"
     ]
   }
 }

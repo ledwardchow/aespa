@@ -5103,6 +5103,7 @@ async def _do_agentic_thinking_loop(
     context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
     post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
     post_probe_fn=None,     # callable(url, method, owasp_category) -> None; called after every http_request
+    persist_credential_fn=None,  # callable(username, password, login_url) -> None; replaces site-credential persistence
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -5800,16 +5801,31 @@ async def _do_agentic_thinking_loop(
                         )
                         _mark_session_pending(cc_created_label)
                     if cc_success:
-                        _maybe_persist_discovered_credential(
-                            run_id,
-                            username=str(
-                                candidate.get("username")
-                                or candidate.get("email")
-                                or "discovered"
-                            ),
-                            password=str(candidate.get("password") or ""),
-                            login_url=cc_url or None,
+                        cc_disc_user = str(
+                            candidate.get("username")
+                            or candidate.get("email")
+                            or "discovered"
                         )
+                        cc_disc_pass = str(candidate.get("password") or "")
+                        if persist_credential_fn is not None:
+                            # API mode: route to the collection-aware persister.
+                            # run_id is an ApiTestRun id here, so the TestRun-based
+                            # site persister must not be used.
+                            try:
+                                persist_credential_fn(
+                                    username=cc_disc_user,
+                                    password=cc_disc_pass,
+                                    login_url=cc_url or None,
+                                )
+                            except Exception as _pc_exc:
+                                log.warning("persist_credential_fn error: %s", _pc_exc)
+                        else:
+                            _maybe_persist_discovered_credential(
+                                run_id,
+                                username=cc_disc_user,
+                                password=cc_disc_pass,
+                                login_url=cc_url or None,
+                            )
                 except Exception as exc:
                     cc_excerpt = f"Request failed: {exc}"
                     cc_success = False
