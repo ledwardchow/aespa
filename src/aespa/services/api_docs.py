@@ -1,7 +1,8 @@
 """Parse API documentation files into ``ApiEndpoint`` and ``ApiCredential`` rows.
 
 Dispatch is by ``ApiDocument.doc_type``:
-  3a  openapi / swagger  — walk OpenAPI 3.x / Swagger 2.x ``paths``
+  3a  openapi / swagger  — prance dereferences internal $refs, then we walk
+                           OpenAPI 3.x / Swagger 2.x ``paths``
   3b  postman            — walk Postman Collection v2/v2.1 item tree
   3c  credentials        — parse bearer/key:value/curl -H/-b lines → ``ApiCredential``
   3d  freetext           — LLM extraction of endpoint list + auth notes
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 import yaml
+from prance.util.resolver import RESOLVE_INTERNAL, RefResolver
 from sqlmodel import Session, select
 
 from aespa.models import ApiCollection, ApiCredential, ApiDocument, ApiEndpoint
@@ -229,6 +231,72 @@ def _openapi_server_urls(spec: dict) -> list[str]:
     return urls
 
 
+def _dereference_internal(spec: dict) -> dict:
+    """Recursively resolve internal (``$ref: '#/...'``) references via prance.
+
+    Only *internal* refs are resolved. External ``http(s)://`` and ``file://``
+    refs are left as literal ``$ref`` values and never fetched — this prevents
+    SSRF and local-file disclosure from an untrusted uploaded spec (e.g. a
+    ``$ref`` pointing at ``http://169.254.169.254/...`` or ``../../etc/passwd``).
+
+    On any resolver error we fall back to the raw spec so parsing degrades
+    gracefully rather than failing outright; the manual ``_resolve_schema_ref``
+    below then handles top-level refs as a best-effort backstop.
+    """
+    try:
+        resolver = RefResolver(
+            spec,
+            # Synthetic base URL: only used to anchor fragment ('#/...') paths.
+            # No file is ever read because resolve_types excludes file/http.
+            url="file:///openapi-spec.yaml",
+            resolve_types=RESOLVE_INTERNAL,
+        )
+        resolver.resolve_references()
+        if isinstance(resolver.specs, dict):
+            return resolver.specs
+    except Exception:
+        pass
+    return spec
+
+
+def _flatten_all_of(schema: dict | None) -> dict:
+    """Merge a schema's ``allOf`` members into a single object schema.
+
+    OpenAPI composition (``allOf``) is common for request bodies; merging the
+    members yields a flat property map that's more useful downstream than a raw
+    ``allOf`` list. Best-effort and shallow: later members win on key conflicts,
+    and ``required`` lists are unioned.
+    """
+    if not isinstance(schema, dict):
+        return {}
+    all_of = schema.get("allOf")
+    if not isinstance(all_of, list):
+        return schema
+
+    merged: dict = {k: v for k, v in schema.items() if k != "allOf"}
+    props: dict = dict(merged.get("properties") or {})
+    required: list = list(merged.get("required") or [])
+
+    for member in all_of:
+        member = _flatten_all_of(member) if isinstance(member, dict) else member
+        if not isinstance(member, dict):
+            continue
+        props.update(member.get("properties") or {})
+        for r in member.get("required") or []:
+            if r not in required:
+                required.append(r)
+        for k, v in member.items():
+            if k not in ("properties", "required", "allOf"):
+                merged.setdefault(k, v)
+
+    if props:
+        merged["properties"] = props
+        merged.setdefault("type", "object")
+    if required:
+        merged["required"] = required
+    return merged
+
+
 def _resolve_schema_ref(spec: dict, obj: dict | None) -> dict:
     if obj is None:
         return {}
@@ -249,6 +317,10 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
     spec = _load_yaml_or_json(content)
     if not isinstance(spec, dict):
         raise ParseError("Could not parse as YAML/JSON")
+
+    # Resolve internal $refs recursively (parameters, schemas, request bodies)
+    # before walking. External refs are deliberately NOT fetched.
+    spec = _dereference_internal(spec)
 
     server_urls = _openapi_server_urls(spec)
     base_url = server_urls[0] if server_urls else None
@@ -289,6 +361,7 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
                 content_map = rb.get("content", {})
                 for media_type, media_obj in content_map.items():
                     schema = _resolve_schema_ref(spec, media_obj.get("schema", {}))
+                    schema = _flatten_all_of(schema)
                     req_body = {"media_type": media_type, "schema": schema}
                     break
 
