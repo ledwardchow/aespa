@@ -72,7 +72,11 @@ def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) ->
         for msg in session.exec(select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)).all():
             session.delete(msg)
         session.delete(sess)
-    for log in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+    for log in session.exec(
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "api")
+    ).all():
         session.delete(log)
     session.delete(run)
     session.commit()
@@ -219,7 +223,10 @@ def stream_events(run_id: int, session: Session = Depends(get_session)) -> Strea
 def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
     _get_run_or_404(session, run_id)
     rows = session.exec(
-        select(AgentLog).where(AgentLog.test_run_id == run_id).order_by(AgentLog.id)
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "api")
+        .order_by(AgentLog.id)
     ).all()
     return [
         {
@@ -240,7 +247,9 @@ def clear_api_agent_log(run_id: int, session: Session = Depends(get_session)) ->
     """Delete all persisted agent log entries for this API test run."""
     _get_run_or_404(session, run_id)
     for entry in session.exec(
-        select(AgentLog).where(AgentLog.test_run_id == run_id)
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "api")
     ).all():
         session.delete(entry)
     session.commit()
@@ -251,7 +260,10 @@ def export_api_agent_log(run_id: int, session: Session = Depends(get_session)) -
     """Download the agent activity log for this API test run as a markdown file."""
     run = _get_run_or_404(session, run_id)
     rows = session.exec(
-        select(AgentLog).where(AgentLog.test_run_id == run_id).order_by(AgentLog.id)
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "api")
+        .order_by(AgentLog.id)
     ).all()
     exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = [
