@@ -1744,6 +1744,34 @@ def _http_evidence_items_json(
     return _evidence_items_json(*items)
 
 
+def _as_text(value: Any) -> str:
+    """Coerce an LLM-provided field to readable text.
+
+    LLMs occasionally return a structured object (a list of content blocks, or a
+    ``{"text": ...}`` wrapper) where a plain string is expected.  Assigning that
+    object straight to a string column yields a Python ``repr`` server-side and a
+    ``[object Object]`` once the value is rendered in the browser.  Flatten such
+    values to text instead.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(_as_text(v) for v in value if v is not None)
+    if isinstance(value, dict):
+        for key in ("text", "value", "content", "body", "description"):
+            inner = value.get(key)
+            if isinstance(inner, (str, list, dict)):
+                return _as_text(inner)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1759,7 +1787,7 @@ def _finding_from_llm(
     if llm_url and llm_url != page_url:
         affected_url = llm_url
     elif probe_urls:
-        desc = (raw.get("description", "") + " " + raw.get("title", "")).lower()
+        desc = (_as_text(raw.get("description")) + " " + _as_text(raw.get("title"))).lower()
         affected_url = next((u for u in probe_urls if u.lower() in desc), probe_urls[0])
     else:
         affected_url = page_url
@@ -1798,15 +1826,15 @@ def _finding_from_llm(
     return ScanFinding(
         test_run_id=run_id,
         page_id=page_id,
-        owasp_category=raw.get("owasp_category", "A00"),
+        owasp_category=_as_text(raw.get("owasp_category")) or "A00",
         severity=_severity_from_cvss(cvss_score),
-        title=raw.get("title", "Untitled finding"),
-        description=raw.get("description", ""),
-        impact=raw.get("impact", ""),
-        likelihood=raw.get("likelihood", ""),
-        recommendation=raw.get("recommendation", ""),
+        title=_as_text(raw.get("title")) or "Untitled finding",
+        description=_as_text(raw.get("description")),
+        impact=_as_text(raw.get("impact")),
+        likelihood=_as_text(raw.get("likelihood")),
+        recommendation=_as_text(raw.get("recommendation")),
         cvss_score=cvss_score,
-        cvss_vector=raw.get("cvss_vector", ""),
+        cvss_vector=_as_text(raw.get("cvss_vector")),
         affected_url=affected_url,
         evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
         request_evidence=_request_evidence(request_evidence),
@@ -3154,17 +3182,17 @@ async def _persist_dynamic_finding(
             with Session(get_engine()) as s2:
                 db_finding = s2.get(ScanFinding, finding_id)
                 if db_finding is not None:
-                    db_finding.owasp_category = str(rewritten.get("owasp_category") or db_finding.owasp_category)
-                    db_finding.title = str(rewritten.get("title") or db_finding.title)
-                    db_finding.description = str(rewritten.get("description") or db_finding.description)
-                    db_finding.impact = str(rewritten.get("impact") or db_finding.impact)
-                    db_finding.likelihood = str(rewritten.get("likelihood") or db_finding.likelihood)
-                    db_finding.recommendation = str(rewritten.get("recommendation") or db_finding.recommendation)
+                    db_finding.owasp_category = _as_text(rewritten.get("owasp_category")) or db_finding.owasp_category
+                    db_finding.title = _as_text(rewritten.get("title")) or db_finding.title
+                    db_finding.description = _as_text(rewritten.get("description")) or db_finding.description
+                    db_finding.impact = _as_text(rewritten.get("impact")) or db_finding.impact
+                    db_finding.likelihood = _as_text(rewritten.get("likelihood")) or db_finding.likelihood
+                    db_finding.recommendation = _as_text(rewritten.get("recommendation")) or db_finding.recommendation
                     db_finding.cvss_score = _cvss_score(rewritten.get("cvss_score"))
-                    db_finding.cvss_vector = str(rewritten.get("cvss_vector") or db_finding.cvss_vector)
+                    db_finding.cvss_vector = _as_text(rewritten.get("cvss_vector")) or db_finding.cvss_vector
                     db_finding.severity = _severity_from_cvss(db_finding.cvss_score)
-                    db_finding.evidence = str(rewritten.get("evidence") or db_finding.evidence)
-                    db_finding.affected_url = str(rewritten.get("affected_url") or db_finding.affected_url)
+                    db_finding.evidence = _as_text(rewritten.get("evidence")) or db_finding.evidence
+                    db_finding.affected_url = _as_text(rewritten.get("affected_url")) or db_finding.affected_url
                     s2.add(db_finding)
                     s2.commit()
                     s2.refresh(db_finding)
