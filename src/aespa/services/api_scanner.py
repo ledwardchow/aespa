@@ -614,6 +614,61 @@ def _make_post_finding_fn(api_run_id: int):
     return _fn
 
 
+# ── Discovered-credential persistence ─────────────────────────────────────────
+
+def _make_persist_credential_fn(collection_id: int, api_run_id: int):
+    """Return a hook that saves a credential discovered mid-scan to the API
+    collection (as an ``ApiCredential``), not to a ``Site``.
+
+    The shared scanner loop, when run for an ``ApiTestRun``, would otherwise call
+    ``_maybe_persist_discovered_credential`` which resolves ``run_id`` as a
+    ``TestRun`` id and writes a site ``Credential`` — wrong table, and (because
+    test_run/api_test_run ids overlap) attached to an unrelated site.
+
+    Discovered credentials are username/password test accounts validated against a
+    login endpoint, so they map to ``scheme="login"`` with ``value="user:pass"`` —
+    the same representation doc-derived login creds use (see ``api_docs.py``).
+    """
+
+    def _fn(username: str, password: str, login_url: str | None) -> None:
+        value = f"{username}:{password}"
+        with Session(get_engine()) as s:
+            existing = s.exec(
+                select(ApiCredential)
+                .where(ApiCredential.collection_id == collection_id)
+                .where(ApiCredential.value == value)
+            ).first()
+            if existing is not None:
+                return
+            cred = ApiCredential(
+                collection_id=collection_id,
+                scheme="login",
+                name="username",
+                value=value,
+                label=username,
+                scope="global",
+                auth_endpoint=login_url or None,
+            )
+            s.add(cred)
+            s.commit()
+
+        log.info(
+            "Discovered API credential saved: username=%r collection_id=%s",
+            username, collection_id,
+        )
+        events_svc.emit(api_run_id, {
+            "type": "credential_discovered",
+            "username": username,
+            "login_url": login_url,
+            "message": (
+                f"Valid credential discovered: {username!r}. "
+                "Saved to the API collection's credential store as a login account."
+            ),
+        })
+
+    return _fn
+
+
 # ── Crawl context builder ─────────────────────────────────────────────────────
 
 def _build_api_crawl_context(api_run_id: int) -> str:
@@ -746,14 +801,19 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         ).all()) if coll2 else []
         collection_id = coll2.id if coll2 else 0
 
-    creds_for_llm = [
-        {
-            "username": c.label or c.scheme,
-            "password": c.value,
+    creds_for_llm = []
+    for c in creds_raw:
+        # For login-scheme creds the value is "username:password" (see api_docs.py);
+        # split it so the agent receives a usable password rather than the joined string.
+        if (c.scheme or "").lower() == "login" and ":" in (c.value or ""):
+            uname, _, pword = c.value.partition(":")
+        else:
+            uname, pword = (c.label or c.scheme), c.value
+        creds_for_llm.append({
+            "username": uname,
+            "password": pword,
             "login_url": c.auth_endpoint or "",
-        }
-        for c in creds_raw
-    ]
+        })
 
     # Pre-existing findings snapshot.
     findings_snapshot = _load_findings_snapshot(api_run_id)
@@ -761,6 +821,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # Context tool + finding hooks.
     context_tool_fn = _make_api_context_tool_fn(collection_id, api_run_id)
     post_finding_fn = _make_post_finding_fn(api_run_id)
+    persist_credential_fn = _make_persist_credential_fn(collection_id, api_run_id)
 
     events_svc.emit(api_run_id, {
         "type": "scanner_phase",
@@ -807,6 +868,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             context_tool_fn=context_tool_fn,
             post_finding_fn=post_finding_fn,
             post_probe_fn=post_probe_fn,
+            persist_credential_fn=persist_credential_fn,
         )
 
     log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
