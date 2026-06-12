@@ -28,6 +28,7 @@ from aespa.db import get_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
+    ApiDocument,
     ApiEndpoint,
     ApiEndpointTest,
     ApiTestRun,
@@ -968,6 +969,15 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     except Exception:
         pass
 
+    # Append any open SAST leads so the dynamic scanner can investigate them.
+    try:
+        from aespa.services.scan_leads import format_leads_for_context
+        leads_block = format_leads_for_context(coll.id)
+        if leads_block:
+            lines.append(leads_block)
+    except Exception:
+        pass
+
     return "\n\n".join(lines)
 
 
@@ -1025,6 +1035,61 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
 
     log.info("=== API thinking scan start: api_run_id=%s base_url=%s ===", api_run_id, base_url)
+
+    # ── SAST pre-phase (best-effort, awaited before dynamic loop) ─────────────
+    # Auto-create a linked SastRun when the collection has a source_zip and no
+    # recent completed SAST run exists.
+    sast_run_id_for_phase: int | None = None
+    try:
+        from aespa.services import sast_scanner as sast_svc
+        from aespa.services.scan_leads import needs_fresh_sast
+
+        with Session(get_engine()) as s:
+            source_doc = s.exec(
+                select(ApiDocument)
+                .where(ApiDocument.collection_id == collection_id)
+                .where(ApiDocument.doc_type == "source_zip")
+                .order_by(ApiDocument.id.desc())  # type: ignore[attr-defined]
+            ).first()
+
+        if source_doc is not None and needs_fresh_sast(collection_id):
+            events_svc.emit(api_run_id, {
+                "type": "scanner_phase",
+                "phase": "sast_prephase",
+                "status": "start",
+                "message": "Static analysis (SAST) pre-phase starting…",
+            })
+            sast_run = sast_svc.create_sast_run(
+                collection_id=collection_id,
+                name=f"SAST for API run #{api_run_id}",
+                document_id=source_doc.id,
+                llm_config_id=run.llm_config_id,
+                triggered_by_run_type="api",
+                triggered_by_run_id=api_run_id,
+            )
+            sast_run_id_for_phase = sast_run.id
+            # Write the back-reference on the API run.
+            with Session(get_engine()) as s:
+                api_run_row = s.get(ApiTestRun, api_run_id)
+                if api_run_row is not None:
+                    api_run_row.sast_run_id = sast_run.id
+                    api_run_row.updated_at = datetime.now(_UTC)
+                    s.add(api_run_row)
+                    s.commit()
+            # Await the SAST scan to completion so leads are ready.
+            await sast_svc.run_sast_scan(sast_run_id_for_phase)
+            events_svc.emit(api_run_id, {
+                "type": "scanner_phase",
+                "phase": "sast_prephase",
+                "status": "complete",
+                "message": "SAST pre-phase complete. Proceeding with dynamic scan.",
+            })
+    except Exception as _sast_exc:
+        log.warning(
+            "SAST pre-phase failed or skipped for api_run_id=%s: %s",
+            api_run_id, _sast_exc,
+        )
+        # Best-effort: always continue with the dynamic scan.
 
     # Seed scanner sessions from credentials.
     seed_sessions_from_credentials(api_run_id)
@@ -1277,7 +1342,7 @@ async def start_api_scan(api_run_id: int) -> None:
 
 
 async def stop_api_scan(api_run_id: int) -> bool:
-    """Stop an in-progress API scan."""
+    """Stop an in-progress API scan (and any linked SAST pre-phase)."""
     task = _scan_tasks.get(api_run_id)
     if task is not None:
         _stop_requested.add(api_run_id)
@@ -1286,6 +1351,16 @@ async def stop_api_scan(api_run_id: int) -> bool:
         try:
             from aespa.services.scanner import _thinking_stop_requested
             _thinking_stop_requested.add(api_run_id)
+        except Exception:
+            pass
+        # Cancel any linked SAST pre-phase that may still be running.
+        try:
+            from aespa.services import sast_scanner as sast_svc
+            with Session(get_engine()) as s:
+                from aespa.models import ApiTestRun as _ATR
+                api_run = s.get(_ATR, api_run_id)
+                if api_run is not None and api_run.sast_run_id:
+                    await sast_svc.stop_sast_scan(api_run.sast_run_id)
         except Exception:
             pass
         _update_run_status(api_run_id, "cancelled")

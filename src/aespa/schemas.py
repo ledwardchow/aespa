@@ -279,6 +279,51 @@ class ApiCoverageMatrixOut(BaseModel):
     totals: dict[str, int]     # status → count across all cells
 
 
+# ── SAST schemas ──────────────────────────────────────────────────────────────
+
+class SastRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    document_id: int | None
+    name: str
+    status: str
+    triggered_by_run_type: str | None
+    triggered_by_run_id: int | None
+    llm_config_id: int | None
+    leads_count: int
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScanLeadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int | None
+    producer_run_type: str
+    producer_run_id: int
+    source: str
+    category: str
+    severity: str
+    confidence: float
+    title: str
+    description: str
+    location: str
+    evidence: str
+    note: str
+    status: str
+    investigated_by_run_type: str | None
+    investigated_by_run_id: int | None
+    linked_finding_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderAPILiteral = Literal[

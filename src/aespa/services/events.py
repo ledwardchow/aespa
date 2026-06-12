@@ -18,6 +18,7 @@ _queues: dict[int, list[asyncio.Queue]] = {}
 # when their run_id is registered (or the event carries ``_run_kind="api"``),
 # and "web" otherwise.
 _api_run_ids: set[int] = set()
+_sast_run_ids: set[int] = set()
 
 
 def register_api_run(run_id: int) -> None:
@@ -26,8 +27,19 @@ def register_api_run(run_id: int) -> None:
     _api_run_ids.add(run_id)
 
 
+def register_sast_run(run_id: int) -> None:
+    """Mark a run id as belonging to a SAST scan so its persisted log rows are
+    tagged ``run_kind='sast'``.  Safe to call repeatedly."""
+    _sast_run_ids.add(run_id)
+
+
 def _run_kind_for(run_id: int, event: dict) -> str:
-    if event.get("_run_kind") == "api" or run_id in _api_run_ids:
+    explicit = event.get("_run_kind")
+    if explicit:
+        return str(explicit)
+    if run_id in _sast_run_ids:
+        return "sast"
+    if run_id in _api_run_ids:
         return "api"
     return "web"
 
