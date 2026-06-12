@@ -325,6 +325,29 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                 )
             )
 
+    # ── SAST run jobs ─────────────────────────────────────────────────────────
+    from aespa.models import SastRun
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    sast_runs = session.exec(select(SastRun).order_by(SastRun.created_at.desc())).all()
+    for sast_run in sast_runs:
+        if sast_scanner_svc.is_sast_scan_running(sast_run.id):
+            coll = session.get(ApiCollection, sast_run.collection_id)
+            coll_name = coll.name if coll else f"Collection #{sast_run.collection_id}"
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=sast_run.id,
+                    run_name=sast_run.name,
+                    job_type="SAST Scan",
+                    status="scanning",
+                    started_at=sast_run.started_at,
+                    created_at=sast_run.created_at,
+                    run_type="sast",
+                    collection_id=sast_run.collection_id,
+                    collection_name=coll_name,
+                )
+            )
+
     return jobs
 
 

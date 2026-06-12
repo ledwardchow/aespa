@@ -175,6 +175,8 @@ class ApiTestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     recon_summary_json: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
+    # Soft back-reference to the SAST pre-phase run auto-created when this scan started
+    sast_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -694,6 +696,58 @@ class AliceChatSession(SQLModel, table=True):
     title: str = Field(default="Session 1")
     position: int = Field(default=0)       # tab ordering
     is_active: bool = Field(default=False) # which tab is currently selected
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+# ── SAST Run ──────────────────────────────────────────────────────────────────
+
+
+class SastRun(SQLModel, table=True):
+    """A static-analysis scan over a source archive in an ApiCollection."""
+
+    __tablename__ = "sast_run"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    document_id: Optional[int] = Field(default=None, index=True)  # the source_zip analysed
+    name: str
+    status: str = Field(default="pending")  # pending|scanning|completed|failed|cancelled
+    # What triggered this run: None=standalone, or the dynamic run that spawned it
+    triggered_by_run_type: Optional[str] = Field(default=None)   # "api" | "web"
+    triggered_by_run_id: Optional[int] = Field(default=None, index=True)
+    llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    leads_count: int = Field(default=0)
+    error_message: Optional[str] = Field(default=None)
+    token_usage_json: Optional[str] = Field(default=None)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanLead(SQLModel, table=True):
+    """An unproven investigation lead (from a SAST scan). Distinct from ScanFinding."""
+
+    __tablename__ = "scan_lead"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    collection_id: Optional[int] = Field(default=None, index=True)
+    producer_run_type: str = Field(default="sast", index=True)   # "sast" (future: "recon")
+    producer_run_id: int = Field(index=True)                     # SastRun.id that created it
+    source: str = Field(default="sast", index=True)
+    category: str = Field(default="")           # OWASP A0x / API0x (best-effort)
+    severity: str = Field(default="medium")     # high | medium | low
+    confidence: float = Field(default=0.0)      # 0..1 from the triage filter
+    title: str = Field(default="")
+    description: str = Field(default="")
+    location: str = Field(default="")           # file:line / endpoint hint
+    evidence: str = Field(default="")           # code snippet + data-flow note (from SAST)
+    note: str = Field(default="")               # agent investigation outcome note (update_lead)
+    status: str = Field(default="open", index=True)  # open|investigating|confirmed|dismissed|inconclusive
+    investigated_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
+    investigated_by_run_id: Optional[int] = Field(default=None)
+    linked_finding_id: Optional[int] = Field(default=None)  # set when promoted to a finding
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
