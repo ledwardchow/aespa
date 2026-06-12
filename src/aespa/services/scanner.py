@@ -5391,6 +5391,39 @@ async def _do_agentic_thinking_loop(
             run_id, action_for_task, step
         )
 
+        # ── update_lead ───────────────────────────────────────────────────────
+        if tool_name == "update_lead":
+            lead_id = tool_input.get("lead_id")
+            outcome = str(tool_input.get("outcome") or "")
+            lead_note = str(tool_input.get("note") or "")
+            finding_id = tool_input.get("finding_id")
+            try:
+                from aespa.services.scan_leads import update_lead as _update_lead
+                # Map outcome string to ScanLead.status
+                status_map = {
+                    "confirmed": "confirmed",
+                    "dismissed": "dismissed",
+                    "inconclusive": "inconclusive",
+                }
+                lead_status = status_map.get(outcome, "inconclusive")
+                updated = _update_lead(
+                    int(lead_id),
+                    status=lead_status,
+                    note=lead_note,
+                    investigated_by_run_type="api",
+                    investigated_by_run_id=run_id,
+                    linked_finding_id=int(finding_id) if finding_id else None,
+                )
+                if updated is None:
+                    return f"Lead #{lead_id} not found."
+                return (
+                    f"Lead #{lead_id} updated: outcome={outcome}, status={lead_status}."
+                    + (f" Linked to finding #{finding_id}." if finding_id else "")
+                )
+            except Exception as _ul_exc:
+                log.warning("update_lead error: %s", _ul_exc)
+                return f"Error updating lead #{lead_id}: {_ul_exc}"
+
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
             affected = str(tool_input.get("affected_url") or base_url)

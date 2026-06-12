@@ -610,6 +610,74 @@ def _migrate(engine: Engine) -> None:
             "ON alice_chat_message (session_id)"
         ))
         conn.commit()
+    # SAST: sast_run and scan_lead tables
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS sast_run (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                document_id INTEGER,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                triggered_by_run_type TEXT,
+                triggered_by_run_id INTEGER,
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                leads_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                token_usage_json TEXT,
+                started_at DATETIME,
+                completed_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_collection_id ON sast_run (collection_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_triggered_by_run_id ON sast_run (triggered_by_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scan_lead (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER,
+                producer_run_type TEXT NOT NULL DEFAULT 'sast',
+                producer_run_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'sast',
+                category TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT 'medium',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                investigated_by_run_type TEXT,
+                investigated_by_run_id INTEGER,
+                linked_finding_id INTEGER,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_collection_id ON scan_lead (collection_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_producer_run_id ON scan_lead (producer_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_status ON scan_lead (status)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_producer_run_type ON scan_lead (producer_run_type)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_source ON scan_lead (source)"
+        ))
+        conn.commit()
+    # SAST: back-reference on api_test_run
+    _ensure_column(engine, "api_test_run", "sast_run_id", "INTEGER")
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:
