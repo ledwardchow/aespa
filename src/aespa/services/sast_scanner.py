@@ -525,7 +525,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             "status": "complete",
             "message": (
                 f"SAST analysis complete. {leads_count} lead(s) recorded "
-                f"({len(candidates) - leads_count} discarded). {summary}"
+                f"({len(_candidates.get(sast_run_id, [])) - leads_count} discarded). {summary}"
             ),
         })
         events_svc.emit(sast_run_id, {
