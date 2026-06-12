@@ -104,6 +104,226 @@ class SiteDetail(BaseModel):
     scope_hosts: list[str] = Field(default_factory=list)
 
 
+# ── API Collection schemas ────────────────────────────────────────────────
+
+class ApiCollectionBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    base_url: HttpUrl
+    description: str | None = None
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionCreate(ApiCollectionBase):
+    pass
+
+
+class ApiCollectionUpdate(ApiCollectionBase):
+    """Same shape as create; PUT replaces the full record."""
+
+
+class ApiCollectionSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    endpoint_count: int = 0
+    document_count: int = 0
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+    readiness_json: str | None = None  # raw JSON; frontend parses it
+
+
+class ApiDocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    filename: str
+    doc_type: str
+    content_type: str | None
+    size_bytes: int
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+
+class ApiEndpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    source_doc_id: int | None
+    method: str
+    path: str
+    base_url: str | None
+    operation_id: str | None
+    summary: str | None
+    parameters_json: str
+    request_body_schema_json: str
+    security_json: str
+    auth_required: bool
+    tags_json: str
+    sample_request_json: str
+    in_scope: bool
+    created_at: datetime
+    # Slice 4 — readiness assessment
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str  # JSON list of gap strings
+
+
+class ApiCredentialOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    scheme: str
+    name: str
+    # value intentionally omitted from output schema
+    label: str | None
+    scope: str
+    endpoint_id: int | None
+    auth_endpoint: str | None  # set when scheme == "login"
+    created_at: datetime
+
+
+class ApiCredentialCreate(BaseModel):
+    scheme: str = "bearer"
+    name: str = "Authorization"
+    value: str
+    label: str | None = None
+    scope: str = "global"
+    endpoint_id: int | None = None
+    auth_endpoint: str | None = None  # set when scheme == "login"
+
+
+# ── API Test Run schemas ──────────────────────────────────────────────────────
+
+class ApiTestRunCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = None        # auto-generated if omitted
+    llm_config_id: int | None = None
+    coverage_mode: str = "track"   # track|enforce
+
+
+class ApiTestRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    name: str
+    status: str
+    coverage_mode: str
+    llm_config_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ── Slice 7 — Coverage matrix schemas ────────────────────────────────────────
+
+class ApiEndpointTestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    api_test_run_id: int
+    endpoint_id: int
+    owasp_api_category: str
+    status: str
+    skip_reason: str | None
+    finding_ids_json: str
+    last_updated: datetime
+
+
+class ApiCoverageEndpointRow(BaseModel):
+    """One endpoint row in the coverage matrix."""
+    endpoint_id: int
+    method: str
+    path: str
+    auth_required: bool
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str          # JSON list of gap strings
+    cells: dict[str, dict]     # owasp_api_category → {status, finding_ids}
+
+
+class ApiCoverageMatrixOut(BaseModel):
+    """Full coverage matrix for one ApiTestRun."""
+    run_id: int
+    coverage_mode: str
+    categories: list[str]      # ordered API1..API10
+    endpoints: list[ApiCoverageEndpointRow]
+    totals: dict[str, int]     # status → count across all cells
+
+
+# ── SAST schemas ──────────────────────────────────────────────────────────────
+
+class SastRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    document_id: int | None
+    name: str
+    status: str
+    triggered_by_run_type: str | None
+    triggered_by_run_id: int | None
+    llm_config_id: int | None
+    leads_count: int
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScanLeadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int | None
+    producer_run_type: str
+    producer_run_id: int
+    source: str
+    category: str
+    severity: str
+    confidence: float
+    title: str
+    description: str
+    location: str
+    evidence: str
+    note: str
+    status: str
+    investigated_by_run_type: str | None
+    investigated_by_run_id: int | None
+    linked_finding_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── LLM config schemas ────────────────────────────────────────────────────
 
 LLMProviderAPILiteral = Literal[
@@ -653,11 +873,14 @@ class TestRunSummary(BaseModel):
 
 class ActiveJobSummary(BaseModel):
     run_id: int
-    site_id: int
-    site_name: str
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
+    run_type: str = "web"              # "web" | "api"
+    collection_id: Optional[int] = None
+    collection_name: Optional[str] = None
     pages_done: int | None = None
     total_pages: int | None = None
     findings_count: int | None = None
@@ -887,6 +1110,8 @@ class ScanFindingOut(BaseModel):
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
+    api_test_run_id: int | None = None
+    owasp_api_category: str | None = None
     created_at: datetime
 
 

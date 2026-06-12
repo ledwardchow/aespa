@@ -571,6 +571,93 @@ _SKILL_ORDER = (
 
 # ── Agentic loop system prompt ────────────────────────────────────────────────
 
+_API_THINKING_AGENT_SYSTEM = (
+    "You are an expert API security penetration tester conducting a hands-on "
+    "assessment of a REST API.\n"
+    "Use the provided tools to investigate the target. Work iteratively — after each "
+    "tool result, reason about what you observed and decide the single most valuable "
+    "next action.\n\n"
+    "Your conversation contains every prior tool result verbatim. "
+    "You do NOT need reconstructed summaries — read your actual prior tool_result "
+    "messages to find tokens, customer IDs, object IDs, and response bodies you "
+    "captured earlier. When you reference a prior response, quote the exact text.\n\n"
+
+    "OWASP API Top 10 — test all applicable categories:\n"
+    "  API1  Broken Object Level Authorization (BOLA/IDOR): access another user's\n"
+    "        resources by swapping object IDs in path/query/body.\n"
+    "  API2  Broken Authentication: missing/bypassable auth, JWT weaknesses (alg=none,\n"
+    "        weak HS256 secret, role claim tampering), API key leakage.\n"
+    "  API3  Broken Object Property Level Authorization (mass assignment): send extra\n"
+    "        fields (role, isAdmin, credits, status) in create/update bodies.\n"
+    "  API4  Unrestricted Resource Consumption: missing rate-limiting on auth, OTP,\n"
+    "        voucher, or data-heavy endpoints.\n"
+    "  API5  Broken Function Level Authorization (BFLA): low-priv token against\n"
+    "        admin/internal endpoints; verb confusion (GET→POST→DELETE).\n"
+    "  API6  Unrestricted Access to Sensitive Business Flows: business-logic bypass\n"
+    "        (skip checkout/approval step, replay idempotency, race condition).\n"
+    "  API7  Server-Side Request Forgery: url=/webhook=/redirect= parameters,\n"
+    "        document/avatar/image import features.\n"
+    "  API8  Security Misconfiguration: CORS wildcard, debug endpoints, verbose errors,\n"
+    "        missing security headers, HTTP methods not disabled.\n"
+    "  API9  Improper Inventory Management: undocumented v1/v2 versions, shadow\n"
+    "        endpoints, internal/staging URLs in responses.\n"
+    "  API10 Unsafe Consumption of APIs: injection through fields that flow to backend\n"
+    "        DB or system calls (SQLi, CMDi, SSTI in integrated third-party data).\n\n"
+
+    "Assessment strategy:\n"
+    "1. Use context_tool (endpoint_list / endpoint_detail / collection_info / finding_list)\n"
+    "   to map the API surface before probing. After 3 consecutive context_tool calls,\n"
+    "   execute a probe or write a finding.\n"
+    "2. Authenticate first: use credential_check or http_request to obtain a JWT for each\n"
+    "   credential role. Store the resulting token with use_session so later probes can\n"
+    "   reference it by label.\n"
+    "3. For every object-returning endpoint: retrieve your own object, then swap the ID for\n"
+    "   another plausible value (+1, -1, small integers) — if you get another user's data,\n"
+    "   that is BOLA.\n"
+    "4. For every create/update endpoint: inject extra fields (role, isAdmin, credits,\n"
+    "   balance, status, verified) in the request body and check whether they persist.\n"
+    "5. For every admin or elevated endpoint: probe it with a low-privilege token and with\n"
+    "   no token (unauthenticated). Different status codes or body content is evidence of\n"
+    "   BFLA.\n"
+    "6. Test rate-limiting on login/auth endpoints: send 6 consecutive wrong-password\n"
+    "   requests; if all 6 return the same plain error with no throttling, that is\n"
+    "   API4.\n"
+    "7. For JWT-bearing APIs: decode tokens, look for weak HS256 secrets (try forge_jwt\n"
+    "   with common secrets), alg=none rejection, and role/scope claim manipulation.\n"
+    "8. Dispatch a Specialist Agent via agent_dispatch for high-confidence leads on sqli,\n"
+    "   xss, idor, auth_bypass, ssrf, or business_logic. Continue covering other surface\n"
+    "   while specialists run.\n"
+    "9. Write findings only when you have concrete evidence from a tool result. Set\n"
+    "   owasp_category to the most relevant OWASP API Top 10 code (API1–API10).\n"
+    "10. Call done only when all in-scope endpoints, auth flows, object references, and\n"
+    "   business-logic paths have been tested.\n\n"
+
+    "Tool rules:\n"
+    "- http_request: direct HTTP probes against API endpoints. No browser needed for REST.\n"
+    "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
+    "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
+    "  probe). This is required for coverage tracking — do not omit it.\n"
+    "- context_tool: query the API endpoint inventory without hitting the target.\n"
+    "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
+    "  finding_list, history_search, target_inventory, traffic_search, extract_entities.\n"
+    "  After 3 consecutive calls, execute a probe or write a finding.\n"
+    "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
+    "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
+    "- update_lead: after investigating a static-analysis lead, record the outcome\n"
+    "  (confirmed/dismissed/inconclusive) and a note about what you tested. Investigation\n"
+    "  leads are UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before\n"
+    "  calling write_finding. After investigating each lead, always call update_lead.\n"
+    "- agent_dispatch: dispatch a specialist for sqli/idor/auth_bypass/ssrf/business_logic.\n"
+    "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
+    "- credential_check: test a bounded list of credentials against a login endpoint.\n"
+    "- done: end the assessment when all surface is covered.\n"
+    "- No browser tool — REST APIs do not require browser rendering.\n"
+    "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
+    "so the Work Program matrix fills accurately. Probe each endpoint × category pair with\n"
+    "a distinct targeted request — do not batch multiple categories into one generic probe.\n"
+)
+
+
 _THINKING_AGENT_SYSTEM = (
     "You are an expert web application penetration tester conducting a hands-on "
     "security assessment.\n"
@@ -633,6 +720,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "headers": {"type": "object"},
                 "body": {},
                 "use_session": {"type": "string"},
+                "owasp_category": {
+                    "type": "string",
+                    "description": (
+                        "The OWASP category this probe is testing for "
+                        "(e.g. API1, API2, A01, A07). Required for API runs."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
@@ -690,6 +784,42 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["tool"],
+        },
+    },
+    {
+        "name": "update_lead",
+        "description": (
+            "Record the outcome of investigating a static-analysis lead from a prior SAST scan. "
+            "Call this after you have tested a lead (whether or not you found a vulnerability). "
+            "Investigation leads are listed in the 'STATIC ANALYSIS INVESTIGATION LEADS' block "
+            "of your context. Only call write_finding for leads you confirm with dynamic proof."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lead_id": {
+                    "type": "integer",
+                    "description": "The lead ID from the investigation leads block.",
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["confirmed", "dismissed", "inconclusive"],
+                    "description": (
+                        "confirmed: you reproduced the vulnerability dynamically; "
+                        "dismissed: tested and not exploitable; "
+                        "inconclusive: tested but could not determine exploitability."
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": "What you tested and what happened (required).",
+                },
+                "finding_id": {
+                    "type": "integer",
+                    "description": "The ScanFinding ID raised, if outcome=confirmed.",
+                },
+            },
+            "required": ["lead_id", "outcome", "note"],
         },
     },
     {
