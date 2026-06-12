@@ -643,6 +643,10 @@ _API_THINKING_AGENT_SYSTEM = (
     "  After 3 consecutive calls, execute a probe or write a finding.\n"
     "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
     "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
+    "- update_lead: after investigating a static-analysis lead, record the outcome\n"
+    "  (confirmed/dismissed/inconclusive) and a note about what you tested. Investigation\n"
+    "  leads are UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before\n"
+    "  calling write_finding. After investigating each lead, always call update_lead.\n"
     "- agent_dispatch: dispatch a specialist for sqli/idor/auth_bypass/ssrf/business_logic.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
@@ -780,6 +784,42 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["tool"],
+        },
+    },
+    {
+        "name": "update_lead",
+        "description": (
+            "Record the outcome of investigating a static-analysis lead from a prior SAST scan. "
+            "Call this after you have tested a lead (whether or not you found a vulnerability). "
+            "Investigation leads are listed in the 'STATIC ANALYSIS INVESTIGATION LEADS' block "
+            "of your context. Only call write_finding for leads you confirm with dynamic proof."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lead_id": {
+                    "type": "integer",
+                    "description": "The lead ID from the investigation leads block.",
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["confirmed", "dismissed", "inconclusive"],
+                    "description": (
+                        "confirmed: you reproduced the vulnerability dynamically; "
+                        "dismissed: tested and not exploitable; "
+                        "inconclusive: tested but could not determine exploitability."
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": "What you tested and what happened (required).",
+                },
+                "finding_id": {
+                    "type": "integer",
+                    "description": "The ScanFinding ID raised, if outcome=confirmed.",
+                },
+            },
+            "required": ["lead_id", "outcome", "note"],
         },
     },
     {
