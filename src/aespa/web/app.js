@@ -1135,7 +1135,7 @@ const renderAliceBlocks = (text, isThinking, stepData = {}) => {
               ${Object.entries(parsedArgs).map(([key, val]) => html`
                 <div key=${key} className="alice-tool-arg-row">
                   <span className="alice-tool-arg-key">${key}:</span>
-                  <span className="alice-tool-arg-val">${String(val)}</span>
+                  <span className="alice-tool-arg-val">${markdownText(val)}</span>
                 </div>
               `)}
             </div>
