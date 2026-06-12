@@ -41,6 +41,45 @@ def init_db() -> None:
     _migrate(engine)
 
 
+def _backfill_run_kind(engine: Engine) -> None:
+    """Tag historical agent_log / scan_log rows that unambiguously belong to an
+    API run.  A row whose test_run_id exists in api_test_run but NOT in test_run
+    can only have come from an API scan, so flip it to ``run_kind='api'``.
+    Rows whose id collides (present in both tables) are left as the default
+    ``'web'`` — they cannot be disambiguated after the fact, and new runs are
+    tagged correctly at write time.  Idempotent and best-effort.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            # Skip cleanly on fresh DBs where api_test_run may not exist yet.
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    _text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            if "api_test_run" not in tables:
+                return
+            api_only = (
+                "SELECT id FROM api_test_run "
+                "WHERE id NOT IN (SELECT id FROM test_run)"
+            )
+            for table in ("agent_log", "scan_log"):
+                if table not in tables:
+                    continue
+                conn.execute(
+                    _text(
+                        f"UPDATE {table} SET run_kind='api' "
+                        f"WHERE run_kind='web' AND test_run_id IN ({api_only})"
+                    )
+                )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort backfill
+
+
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
@@ -80,6 +119,9 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_finding", "poc_command", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(engine, "scan_finding", "poc_setup", "TEXT NOT NULL DEFAULT ''")
     _ensure_scan_finding_page_id_nullable(engine)
+    # Slice 6 — API test run attribution for findings
+    _ensure_column(engine, "scan_finding", "api_test_run_id", "INTEGER")
+    _ensure_column(engine, "scan_finding", "owasp_api_category", "TEXT")
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
@@ -87,9 +129,16 @@ def _migrate(engine: Engine) -> None:
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
+    _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    # agent_log / scan_log share the test_run_id column between web TestRuns and
+    # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
+    # row with the run kind so the two panels stop reading each other's rows.
+    _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _backfill_run_kind(engine)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS reporting_debug_config (
@@ -158,6 +207,149 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "burp_rest_api_config", "scan_ssrf", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "burp_rest_api_config", "scan_xxe", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "burp_rest_api_config", "scan_ssti", "INTEGER NOT NULL DEFAULT 1")
+    # api_collection — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_collection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                description TEXT,
+                servers TEXT,
+                scope_hosts TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_api_collection_name "
+            "ON api_collection (name)"
+        ))
+        conn.commit()
+    # api_document — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_document (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                filename TEXT NOT NULL,
+                doc_type TEXT NOT NULL DEFAULT 'unknown',
+                content_type TEXT,
+                stored_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'uploaded',
+                error_message TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_document_collection_id "
+            "ON api_document (collection_id)"
+        ))
+        conn.commit()
+    # api_endpoint — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_endpoint (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                source_doc_id INTEGER REFERENCES api_document(id),
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                base_url TEXT,
+                operation_id TEXT,
+                summary TEXT,
+                parameters_json TEXT NOT NULL DEFAULT '[]',
+                request_body_schema_json TEXT NOT NULL DEFAULT '{}',
+                response_schema_json TEXT NOT NULL DEFAULT '{}',
+                security_json TEXT NOT NULL DEFAULT '[]',
+                auth_required INTEGER NOT NULL DEFAULT 0,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                sample_request_json TEXT NOT NULL DEFAULT '{}',
+                in_scope INTEGER NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_collection_id "
+            "ON api_endpoint (collection_id)"
+        ))
+        conn.commit()
+    # api_credential — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_credential (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                scheme TEXT NOT NULL DEFAULT 'bearer',
+                name TEXT NOT NULL DEFAULT 'Authorization',
+                value TEXT NOT NULL,
+                label TEXT,
+                scope TEXT NOT NULL DEFAULT 'global',
+                endpoint_id INTEGER REFERENCES api_endpoint(id),
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_credential_collection_id "
+            "ON api_credential (collection_id)"
+        ))
+        conn.commit()
+    # Slice 4 — readiness assessment columns (idempotent via _ensure_column)
+    _ensure_column(engine, "api_collection", "auth_summary_json", "TEXT")
+    _ensure_column(engine, "api_collection", "readiness_json", "TEXT")
+    _ensure_column(engine, "api_endpoint", "prereq_can_test", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "api_endpoint", "prereq_can_test_auth", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "api_endpoint", "prereq_notes", "TEXT NOT NULL DEFAULT '[]'")
+    # login-flow credential support
+    _ensure_column(engine, "api_credential", "auth_endpoint", "TEXT")
+    # api_test_run — created as a full table (not an ALTER)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_test_run (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                coverage_mode TEXT NOT NULL DEFAULT 'track',
+                started_at DATETIME,
+                completed_at DATETIME,
+                error_message TEXT,
+                recon_summary_json TEXT,
+                token_usage_json TEXT,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_test_run_collection_id "
+            "ON api_test_run (collection_id)"
+        ))
+        conn.commit()
+    # Slice 7 — api_endpoint_test (coverage matrix cells)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS api_endpoint_test (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_test_run_id INTEGER NOT NULL REFERENCES api_test_run(id),
+                endpoint_id INTEGER NOT NULL REFERENCES api_endpoint(id),
+                owasp_api_category TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'not_started',
+                skip_reason TEXT,
+                finding_ids_json TEXT NOT NULL DEFAULT '[]',
+                last_updated DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_test_run_id "
+            "ON api_endpoint_test (api_test_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_api_endpoint_test_endpoint_id "
+            "ON api_endpoint_test (endpoint_id)"
+        ))
+        conn.commit()
     # page_credential_view — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
@@ -418,6 +610,74 @@ def _migrate(engine: Engine) -> None:
             "ON alice_chat_message (session_id)"
         ))
         conn.commit()
+    # SAST: sast_run and scan_lead tables
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS sast_run (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER NOT NULL REFERENCES api_collection(id),
+                document_id INTEGER,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                triggered_by_run_type TEXT,
+                triggered_by_run_id INTEGER,
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                leads_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                token_usage_json TEXT,
+                started_at DATETIME,
+                completed_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_collection_id ON sast_run (collection_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_triggered_by_run_id ON sast_run (triggered_by_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS scan_lead (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER,
+                producer_run_type TEXT NOT NULL DEFAULT 'sast',
+                producer_run_id INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'sast',
+                category TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT 'medium',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                investigated_by_run_type TEXT,
+                investigated_by_run_id INTEGER,
+                linked_finding_id INTEGER,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_collection_id ON scan_lead (collection_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_producer_run_id ON scan_lead (producer_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_status ON scan_lead (status)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_producer_run_type ON scan_lead (producer_run_type)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_source ON scan_lead (source)"
+        ))
+        conn.commit()
+    # SAST: back-reference on api_test_run
+    _ensure_column(engine, "api_test_run", "sast_run_id", "INTEGER")
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:

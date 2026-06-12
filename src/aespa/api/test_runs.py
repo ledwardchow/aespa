@@ -276,6 +276,78 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                 )
             )
 
+    # ── API test run jobs ─────────────────────────────────────────────────────
+    from aespa.models import ApiCollection, ApiTestRun
+    from aespa.services import alice_tasks as alice_tasks_svc
+    from aespa.services import api_scanner as api_scanner_svc
+
+    api_runs = session.exec(select(ApiTestRun).order_by(ApiTestRun.created_at.desc())).all()
+    for api_run in api_runs:
+        coll = session.get(ApiCollection, api_run.collection_id)
+        coll_name = coll.name if coll else f"Collection #{api_run.collection_id}"
+
+        if api_scanner_svc.is_api_scan_running(api_run.id):
+            findings_count = session.exec(
+                select(func.count()).select_from(ScanFinding).where(ScanFinding.api_test_run_id == api_run.id)
+            ).one()
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=api_run.id,
+                    run_name=api_run.name,
+                    job_type="Dynamic Scan",
+                    status="running",
+                    findings_count=findings_count,
+                    started_at=api_run.started_at,
+                    created_at=api_run.created_at,
+                    run_type="api",
+                    collection_id=api_run.collection_id,
+                    collection_name=coll_name,
+                )
+            )
+
+        api_alice_task = alice_tasks_svc.get(api_run.id)
+        if api_alice_task is not None and not api_alice_task.done:
+            findings_count = session.exec(
+                select(func.count()).select_from(ScanFinding).where(ScanFinding.api_test_run_id == api_run.id)
+            ).one()
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=api_run.id,
+                    run_name=api_run.name,
+                    job_type="A.L.I.C.E.",
+                    status="running",
+                    findings_count=findings_count,
+                    started_at=api_run.started_at,
+                    created_at=api_run.created_at,
+                    run_type="api",
+                    collection_id=api_run.collection_id,
+                    collection_name=coll_name,
+                )
+            )
+
+    # ── SAST run jobs ─────────────────────────────────────────────────────────
+    from aespa.models import SastRun
+    from aespa.services import sast_scanner as sast_scanner_svc
+
+    sast_runs = session.exec(select(SastRun).order_by(SastRun.created_at.desc())).all()
+    for sast_run in sast_runs:
+        if sast_scanner_svc.is_sast_scan_running(sast_run.id):
+            coll = session.get(ApiCollection, sast_run.collection_id)
+            coll_name = coll.name if coll else f"Collection #{sast_run.collection_id}"
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=sast_run.id,
+                    run_name=sast_run.name,
+                    job_type="SAST Scan",
+                    status="scanning",
+                    started_at=sast_run.started_at,
+                    created_at=sast_run.created_at,
+                    run_type="sast",
+                    collection_id=sast_run.collection_id,
+                    collection_name=coll_name,
+                )
+            )
+
     return jobs
 
 
@@ -310,7 +382,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(p)
     for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
         session.delete(finding)
-    for log_entry in session.exec(select(ScanLog).where(ScanLog.test_run_id == run_id)).all():
+    for log_entry in session.exec(
+        select(ScanLog).where(ScanLog.test_run_id == run_id).where(ScanLog.run_kind == "web")
+    ).all():
         session.delete(log_entry)
     for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
         session.delete(ckpt)
@@ -320,7 +394,9 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(hyp)
     for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
         session.delete(task)
-    for log_entry in session.exec(select(AgentLog).where(AgentLog.test_run_id == run_id)).all():
+    for log_entry in session.exec(
+        select(AgentLog).where(AgentLog.test_run_id == run_id).where(AgentLog.run_kind == "web")
+    ).all():
         session.delete(log_entry)
     session.delete(run)
     session.commit()

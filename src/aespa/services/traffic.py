@@ -26,6 +26,10 @@ def _utcnow() -> datetime:
 
 # ── Low-level writer ──────────────────────────────────────────────────────────
 
+# Sentinel test_run_id used when writing API-scan traffic (no real TestRun row).
+_API_SENTINEL_RUN_ID = 0
+
+
 def _write(
     run_id: int,
     source: str,
@@ -38,11 +42,13 @@ def _write(
     response_body: Optional[str],
     duration_ms: Optional[int],
     username: Optional[str] = None,
+    api_run_id: Optional[int] = None,
 ) -> None:
     from aespa.models import TrafficEntry
     with Session(get_engine()) as s:
         entry = TrafficEntry(
             test_run_id=run_id,
+            api_test_run_id=api_run_id,
             source=source,
             created_at=_utcnow(),
             method=method,
@@ -72,16 +78,15 @@ def clear_traffic(run_id: int) -> None:
         s.commit()
 
 
-def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
+def get_traffic(run_id: int, since_id: int = 0, *, api_run_id: Optional[int] = None) -> list[dict]:
     from aespa.models import TrafficEntry
     with Session(get_engine()) as s:
-        entries = s.exec(
-            select(TrafficEntry)
-            .where(TrafficEntry.test_run_id == run_id)
-            .where(TrafficEntry.id > since_id)
-            .order_by(TrafficEntry.id)
-            .limit(500)
-        ).all()
+        q = select(TrafficEntry).where(TrafficEntry.id > since_id).order_by(TrafficEntry.id).limit(500)
+        if api_run_id is not None:
+            q = q.where(TrafficEntry.api_test_run_id == api_run_id)
+        else:
+            q = q.where(TrafficEntry.test_run_id == run_id)
+        entries = s.exec(q).all()
         return [
             {
                 "id": e.id,
@@ -101,27 +106,42 @@ def get_traffic(run_id: int, since_id: int = 0) -> list[dict]:
         ]
 
 
-def count_traffic(run_id: int) -> int:
+def count_traffic(run_id: int, *, api_run_id: Optional[int] = None) -> int:
     from aespa.models import TrafficEntry
     with Session(get_engine()) as s:
-        return s.exec(
-            select(func.count(TrafficEntry.id))
-            .where(TrafficEntry.test_run_id == run_id)
-        ).one()
+        q = select(func.count(TrafficEntry.id))
+        if api_run_id is not None:
+            q = q.where(TrafficEntry.api_test_run_id == api_run_id)
+        else:
+            q = q.where(TrafficEntry.test_run_id == run_id)
+        return s.exec(q).one()
+
+
+# ── Per-api-run traffic callbacks ────────────────────────────────────────────
+
+# api_scanner.py registers a callable here when a scan starts so it can mark
+# coverage cells in_progress as HTTP requests are made.  The callable signature
+# is fn(api_run_id: int, method: str, url: str) -> None and is called from an
+# asyncio.to_thread context (so must be thread-safe / DB-only, no SSE emits).
+_api_traffic_hooks: dict[int, object] = {}  # api_run_id → callable
 
 
 # ── Custom client for automatic logging ───────────────────────────────────────
 
 class LoggingAsyncClient(httpx.AsyncClient):
-    def __init__(self, *args, run_id: Optional[int] = None, username: Optional[str] = None, **kwargs):
+    def __init__(self, *args, run_id: Optional[int] = None, username: Optional[str] = None, api_run_id: Optional[int] = None, **kwargs):
         self.run_id = run_id
+        self.api_run_id = api_run_id
         self.username = username
         kwargs.pop("event_hooks", None)
         super().__init__(*args, **kwargs)
 
     async def send(self, request: httpx.Request, *args, **kwargs) -> httpx.Response:
-        if self.run_id is None:
+        if self.run_id is None and self.api_run_id is None:
             return await super().send(request, *args, **kwargs)
+
+        # For API runs there is no real TestRun row; use sentinel 0.
+        effective_run_id = self.run_id if self.run_id is not None else _API_SENTINEL_RUN_ID
 
         t0 = time.monotonic()
         try:
@@ -145,7 +165,7 @@ class LoggingAsyncClient(httpx.AsyncClient):
 
             await asyncio.to_thread(
                 _write,
-                self.run_id,
+                effective_run_id,
                 "httpx",
                 request.method,
                 str(request.url),
@@ -156,7 +176,15 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 resp_body,
                 duration_ms,
                 self.username,
+                self.api_run_id,
             )
+            # Fire any registered coverage-tracking callback for API runs.
+            if self.api_run_id is not None:
+                hook = _api_traffic_hooks.get(self.api_run_id)
+                if hook is not None:
+                    await asyncio.to_thread(
+                        hook, self.api_run_id, request.method, str(request.url)
+                    )
             return response
         except Exception as exc:
             duration_ms = int((time.monotonic() - t0) * 1000)
@@ -167,7 +195,7 @@ class LoggingAsyncClient(httpx.AsyncClient):
 
             await asyncio.to_thread(
                 _write,
-                self.run_id,
+                effective_run_id,
                 "httpx",
                 request.method,
                 str(request.url),
@@ -178,6 +206,7 @@ class LoggingAsyncClient(httpx.AsyncClient):
                 f"[Request Failed: {type(exc).__name__} - {exc}]",
                 duration_ms,
                 self.username,
+                self.api_run_id,
             )
             raise exc
 

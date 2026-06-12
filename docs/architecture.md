@@ -1,6 +1,10 @@
 # AESPA — Architecture & Internal Workings
 
-AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web application security scanner. It discovers endpoints through an intelligent crawl, then probes them for vulnerabilities through an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads.
+AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers two distinct surfaces:
+
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads.
+- **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
+- **SAST assistance** — an agentic static-analysis pre-phase reads source code from an uploaded ZIP before each dynamic scan, identifying high-confidence vulnerability leads that are fed directly into the dynamic probe loop.
 
 ---
 
@@ -21,6 +25,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated web appl
 13. [Frontend & Real-time Events](#13-frontend--real-time-events)
 14. [Concurrency & State Management](#14-concurrency--state-management)
 15. [A.L.I.C.E. — Interactive Pentesting Chat](#15-alice--interactive-pentesting-chat)
+16. [API Collections & API Scanning](#16-api-collections--api-scanning)
+17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
 
 ---
 
@@ -40,7 +46,10 @@ src/aespa/
 │   ├── sites.py           # /api/sites/* — target website management
 │   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
-│   └── events.py          # WebSocket event stream
+│   ├── events.py          # WebSocket event stream
+│   ├── api_collections.py # /api/api-collections/* — collections, documents, endpoints
+│   ├── api_test_runs.py   # /api/api-collections/{id}/test-runs/* — API scan runs
+│   └── sast_runs.py       # /api/sast-runs/* and /api/api-collections/{id}/sast-runs
 └── services/
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Dynamic (agentic) scan + specialist agent dispatch
@@ -49,12 +58,21 @@ src/aespa/
     │   ├── reporting.py   # Reporting / post-scan review prompts
     │   ├── specialist.py  # Specialist agent prompts
     │   ├── test_lead.py   # Test Lead agent prompts
-    │   └── validator.py   # Adversarial validator prompts
+    │   ├── validator.py   # Adversarial validator prompts
+    │   ├── alice.py       # A.L.I.C.E. system prompt
+    │   └── sast.py        # SAST scanner system prompt and tool schemas
     ├── alice.py           # A.L.I.C.E. agentic loop & tool executor
     ├── alice_tasks.py     # Background task registry — survives client disconnects
+    ├── api_collections.py # CRUD service layer for ApiCollection
+    ├── api_docs.py        # Document parsing (OpenAPI, Postman, freetext, source ZIP)
+    ├── api_documents.py   # Document upload, storage, and doc_type sniffing
+    ├── api_readiness.py   # LLM-driven readiness gap analysis for collections
+    ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
     ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Deduplication, grouping, post-scan LLM pre-screen
+    ├── sast_scanner.py    # SAST agentic loop over uploaded source archives
+    ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
     ├── task_graph.py      # Recon summary, pentest hypothesis & task tracking
@@ -93,7 +111,8 @@ AESPA_PORT         = 8000
 ┌─────────────────▼───────────────────────────────────────────┐
 │  FastAPI application  (src/aespa/main.py)                   │
 │  Routers: sites · settings · test_runs · scan               │
-│           traffic · events                                  │
+│           traffic · events · api_collections                │
+│           api_test_runs · sast_runs                         │
 └──────┬───────────────────────┬──────────────────────────────┘
        │                       │
        ▼                       ▼
@@ -118,6 +137,9 @@ AESPA_PORT         = 8000
 │  TargetIntelItems · PentestHypotheses · PentestTasks        │
 │  ScanLogs · AliceChatSessions · AliceChatMessages           │
 │  BurpRestApiConfig · UpstreamProxyConfig                    │
+│  ApiCollections · ApiDocuments · ApiEndpoints               │
+│  ApiCredentials · ApiTestRuns · ApiEndpointTests            │
+│  SastRuns · ScanLeads                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -251,11 +273,11 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScannerPolicy` | Scan behaviour policy for a test run |
 | `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
-| `TestRun` | A single scan session; owns all scan artefacts |
+| `TestRun` | A single web scan session; owns all scan artefacts |
 | `CrawledPage` | A discovered page/endpoint with LLM-assigned flags |
 | `PageLink` | Directed edge between two `CrawledPage` nodes (site map graph) |
 | `TrafficEntry` | A captured HTTP request/response pair |
-| `ScanFinding` | A discovered vulnerability with evidence and CVSS score |
+| `ScanFinding` | A discovered vulnerability with evidence and CVSS score (shared by web and API scans) |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
@@ -263,6 +285,14 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
+| `ApiCollection` | A named REST API target (base URL, scope hosts, auth summary, readiness JSON) |
+| `ApiDocument` | Uploaded API spec or source file (`doc_type`: openapi, postman, credentials, freetext, source_zip) |
+| `ApiEndpoint` | A parsed endpoint row (method, path, parameters, request/response schema, scope flag) |
+| `ApiCredential` | A parsed credential row tied to a collection (scheme, label, auth endpoint) |
+| `ApiTestRun` | A single API scan session; linked to an `ApiCollection`; carries `coverage_mode` and `sast_run_id` |
+| `ApiEndpointTest` | One cell in the OWASP API Top-10 coverage matrix (endpoint × category, status, finding IDs) |
+| `SastRun` | A static analysis scan over a source ZIP; linked to a collection; tracks `leads_count` |
+| `ScanLead` | A high-confidence SAST finding candidate consumed by the dynamic API scan loop |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -669,6 +699,18 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/alice/sessions` | `alice.py` | `GET`/`PUT` chat session persistence |
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
 | `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
+| `/api/api-collections/` | `api_collections.py` | CRUD for API collections; document upload and parse; endpoint and credential management |
+| `/api/api-collections/{id}/readiness` | `api_collections.py` | `POST` run · `GET` retrieve LLM gap analysis |
+| `/api/api-collections/{id}/test-runs/` | `api_collections.py` | Create API test runs under a collection |
+| `/api/api-test-runs/{id}/scan/` | `api_test_runs.py` | Start/stop/status for API scans |
+| `/api/api-test-runs/{id}/coverage` | `api_test_runs.py` | OWASP API Top-10 coverage matrix |
+| `/api/api-test-runs/{id}/findings/` | `api_test_runs.py` | List, import, export API scan findings |
+| `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
+| `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
+| `/api/api-collections/{id}/sast-runs` | `sast_runs.py` | Create a SAST run under a collection |
+| `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
+| `/api/sast-runs/{id}/leads` | `sast_runs.py` | List `ScanLead` rows for a SAST run |
+| `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
 
 ---
 
@@ -694,7 +736,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 
 ### UI tabs
 
-The run view has seven top-level tabs:
+#### Web scan run view
 
 | Tab | Content |
 |---|---|
@@ -706,6 +748,34 @@ The run view has seven top-level tabs:
 | **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, and validation controls |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |
 | **A.L.I.C.E.** | Interactive chat panel; supports multiple named sessions (tabs); see §15 |
+
+#### API collection view
+
+| Panel | Content |
+|---|---|
+| **Documents** | Uploaded spec/source files with parse status and re-parse trigger |
+| **Endpoints** | Parsed `ApiEndpoint` rows with scope toggles and readiness indicators |
+| **Credentials** | `ApiCredential` rows discovered from documents or entered manually |
+| **Readiness** | LLM gap-analysis output (auth coverage, missing data, per-endpoint prereq status) |
+| **Test Runs** | List of `ApiTestRun` records with scan controls |
+| **SAST Runs** | List of `SastRun` records with scan controls and lead summary |
+
+#### API scan run view
+
+| Tab | Content |
+|---|---|
+| **Status / Log** | Agent activity log, scan controls, real-time phase events |
+| **Work Program** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
+| **Findings** | `ScanFinding` list for this API run |
+| **Traffic** | HTTP traffic captured during the API scan |
+| **A.L.I.C.E.** | Interactive ALICE chat tab (same surface as web scans) |
+
+#### SAST run view
+
+| Panel | Content |
+|---|---|
+| **Status / Log** | Agent activity log, scan controls |
+| **Leads** | `ScanLead` rows with severity, confidence score, location, and evidence |
 
 ---
 
@@ -866,3 +936,166 @@ A **Stop A.L.I.C.E.** button appears in the run topbar whenever `aliceGlobalRunn
 3. The cancelled task appends a `done` event with partial content before exiting
 4. All connected SSE clients receive the `done` event and close their streams
 
+---
+
+## 16. API Collections & API Scanning
+
+**Files**: `src/aespa/services/api_collections.py`, `src/aespa/services/api_docs.py`, `src/aespa/services/api_documents.py`, `src/aespa/services/api_readiness.py`, `src/aespa/services/api_scanner.py`, `src/aespa/api/api_collections.py`, `src/aespa/api/api_test_runs.py`
+
+The API scanning pipeline brings the same Test-Lead + Specialist + Validator agentic loop to REST APIs, replacing the Playwright-based browser with direct `httpx` calls.
+
+### API Collections
+
+An **`ApiCollection`** is the top-level resource for API scanning. It groups:
+- A `base_url` and `scope_hosts` list (used for out-of-scope request blocking)
+- Uploaded documents (specs, credentials, source code)
+- Parsed `ApiEndpoint` and `ApiCredential` rows
+- A `readiness_json` blob with the LLM gap analysis
+- All `ApiTestRun` and `SastRun` records
+
+### Document parsing (`services/api_docs.py`)
+
+`parse_document(session, collection_id, document_id)` dispatches by `ApiDocument.doc_type`:
+
+| `doc_type` | Parser |
+|---|---|
+| `openapi` / `swagger` | `prance` dereferences `$ref` chains; walker extracts paths, methods, parameters, request/response schemas |
+| `postman` | Postman Collection v2/v2.1 item-tree walker |
+| `credentials` | Line-by-line parser: bearer tokens, `key: value` pairs, curl `-H`/`-b` flag lines |
+| `freetext` | LLM extraction of endpoint list + auth notes (capped at 40,000 chars) |
+| `source_zip` | Safe ZIP extraction + framework-heuristic route scanner (Django urls.py, Flask `@app.route`, Express router, etc.); see §17 for the SAST pre-phase |
+
+Re-parse is idempotent — existing endpoints from the same document are deleted and replaced.
+
+### LLM readiness assessment (`services/api_readiness.py`)
+
+`assess_readiness(session, collection_id)` sends a structured gap-analysis prompt to the active LLM with up to 60 endpoints and all available credentials. It persists results to `ApiCollection.readiness_json` and per-endpoint `prereq_*` fields (missing auth, missing request body schema, etc.).
+
+### OWASP API Top-10 coverage matrix
+
+The coverage matrix maps every `(ApiEndpoint, OWASP_category)` pair to an `ApiEndpointTest` row. Categories are assigned by heuristic on scan start:
+
+| Heuristic | Categories assigned |
+|---|---|
+| Path contains `{param}` | API1 (BOLA) |
+| Method is PUT or PATCH | API3 (BOPLA) |
+| Method is DELETE | API5 (BFLA) |
+| All endpoints | API2 (Auth), API4 (Resource Consumption), API8 (Misconfiguration), API9 (Inventory) |
+| Method is POST | API6 (Business Flows) |
+| All endpoints | API10 (Unsafe Consumption) |
+
+Cell statuses: `uncovered` → `in_progress` → `covered` (finding attached) / `skipped` (with reason).
+
+**Track mode** — the agentic loop steers itself; cells are updated as probes are made.  
+**Enforce mode** — after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
+
+### API scan engine (`services/api_scanner.py`)
+
+The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a background `asyncio.Task`.
+
+```
+_api_scan_task(api_run_id)
+  └─ _do_api_thinking_scan(api_run_id)
+       1. Load ApiTestRun, LLM config, scanner policy, collection
+       2. SAST pre-phase — auto-create + await SastRun if source_zip present and no fresh run (see §17)
+       3. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
+       4. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
+       5. _build_api_crawl_context — build LLM opening context from collection metadata + SAST leads
+       6. _do_agentic_thinking_loop (shared with web scanner)
+            • _api_context_tool_fn routes endpoint_list / endpoint_detail / collection_info / finding_list
+              to API-specific handlers; all other context tool sub-commands go to the shared web handler
+            • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
+            • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
+       7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
+```
+
+### Scope enforcement
+
+`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request.
+
+### ALICE on API runs
+
+API test runs expose the same `/alice/*` endpoints as web test runs. `alice.py`'s `_run_thinking_context_tool` detects API-run context and routes `collection_info`, `endpoint_list`, and `endpoint_detail` to the API-specific handlers. The ALICE system prompt includes OWASP API Top-10 category descriptions and API context tool documentation.
+
+---
+
+## 17. SAST Scanner & Scan Leads
+
+**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`
+
+The SAST scanner is an agentic static-analysis pass over uploaded source archives. Its primary role is a **pre-phase** that runs before the dynamic API scan, identifying high-confidence vulnerability leads that the dynamic loop can then probe.
+
+### Architecture overview
+
+```
+start_sast_scan(sast_run_id)
+  └─ _sast_scan_task(sast_run_id)
+       1. Load SastRun; locate source_zip ApiDocument
+       2. _safe_unzip — extract archive into sandboxed temp directory
+          (path-jailed: entries that would escape the root are rejected)
+       3. _build_initial_message — construct LLM opening context from
+          extracted ApiEndpoint rows (route definitions already parsed
+          from the same zip by the document parser)
+       4. _make_tool_executor — build the tool executor with path-jailed file tools
+       5. llm.thinking_agentic_loop with read-only file tools + write_lead / filter_lead / done
+       6. _flush_unfiltered_candidates — persist any remaining candidates
+          at scan end regardless of filter score
+       7. Cleanup temp directory
+```
+
+### File tools (all path-jailed to the extraction root)
+
+| Tool | Description |
+|---|---|
+| `list_files` | Directory listing up to configurable depth |
+| `glob` | Pattern match across the file tree |
+| `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
+| `grep` | Regex or literal search across files; capped at 200 results |
+
+### Lead lifecycle
+
+```
+Agent calls write_lead(title, description, category, severity, confidence, location, evidence)
+  └─ Appended to _candidates[sast_run_id] in memory
+
+Agent calls filter_lead(candidate_id, confidence_override?)
+  └─ If confidence ≥ CONFIDENCE_THRESHOLD (0.7):
+       create_lead() → ScanLead row persisted, status="open"
+  └─ If below threshold: candidate discarded
+
+At scan end:
+  _flush_unfiltered_candidates() — any unfiltered candidate above threshold is persisted
+```
+
+### ScanLead entity (`services/scan_leads.py`)
+
+| Field | Notes |
+|---|---|
+| `producer_run_id` | ID of the `SastRun` that created this lead |
+| `producer_run_type` | `"sast"` |
+| `collection_id` | Owning `ApiCollection` |
+| `title` / `description` | Human-readable vulnerability description |
+| `category` | OWASP API Top-10 category slug (e.g. `"API1"`) |
+| `severity` | `critical` · `high` · `medium` · `low` |
+| `confidence` | 0.0–1.0; only leads ≥ 0.7 are persisted |
+| `location` | Source file path and line reference |
+| `evidence` | Code snippet or supporting text |
+| `status` | `open` (default) · `used` (consumed by dynamic scan) |
+
+`get_open_leads_for_collection(collection_id)` returns open leads sorted by severity then confidence. The API scanner calls this to inject leads into the dynamic loop's opening context, so the Test Lead agent knows which endpoints to prioritise.
+
+### Automatic SAST pre-phase
+
+When an API test run starts and the collection has a `source_zip` document, `api_scanner._do_api_thinking_scan` checks `needs_fresh_sast(collection_id)` (returns `True` if no completed SAST run exists within the last 24 hours). If needed:
+
+1. A `SastRun` is auto-created linked to the current `ApiTestRun`
+2. `ApiTestRun.sast_run_id` is written (back-reference)
+3. `run_sast_scan(sast_run_id)` is awaited to completion
+4. `scanner_phase` SSE events with `phase: sast_prephase` are emitted at start and complete
+5. The dynamic loop then reads open `ScanLead` rows via `get_open_leads_for_collection`
+
+SAST pre-phase failures are logged and do not block the dynamic scan.
+
+### Concurrency
+
+SAST scans use the same task-registry pattern as web and API scans: `_sast_tasks: dict[int, asyncio.Task]` and `_sast_stop_requested: set[int]`. A stop request causes the agentic loop to exit cleanly at the next step boundary.
