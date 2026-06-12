@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 _UTC = timezone.utc
 
 # Confidence threshold — only leads at or above this are kept.
-CONFIDENCE_THRESHOLD = 0.8
+CONFIDENCE_THRESHOLD = 0.7
 
 # How far back (in seconds) a SAST run is considered "fresh" enough to skip
 # auto-creation of a new one.
