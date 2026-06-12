@@ -57,6 +57,19 @@ const api = {
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
   getApiCoverageMatrix:(id)       => req(`/api/api-test-runs/${id}/coverage`),
+  getApiRunLeads:      (id)       => req(`/api/api-test-runs/${id}/leads`),
+  // SAST runs
+  listSastRuns:        (collId)   => req(`/api/api-collections/${collId}/sast-runs`),
+  listAllSastRuns:     ()         => req(`/api/sast-runs`),
+  getSastScanLog:      (id)       => req(`/api/sast-runs/${id}/scan-log`),
+  createSastRun:       (collId,b) => req(`/api/api-collections/${collId}/sast-runs`, { method:"POST", body:b }),
+  getSastRun:          (id)       => req(`/api/sast-runs/${id}`),
+  deleteSastRun:       (id)       => req(`/api/sast-runs/${id}`, { method:"DELETE" }),
+  startSastScan:       (id)       => req(`/api/sast-runs/${id}/scan/start`, { method:"POST" }),
+  stopSastScan:        (id)       => req(`/api/sast-runs/${id}/scan/stop`,  { method:"POST" }),
+  getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
+  getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
+  getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -202,6 +215,9 @@ function useRoute() {
   if (hash === "#/apis")                                 return { name: "api-list" };
   if ((m = hash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/api-runs\/(\d+)$/)))          return { name: "api-run-detail", id: +m[1] };
+  if (hash === "#/sast-runs")                                  return { name: "sast-list" };
+  if ((m = hash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/))) return { name: "sast-run-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/sast-runs\/(\d+)$/)))            return { name: "sast-run-detail", id: +m[1] };
   if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
   if (hash === "#/active-jobs")                          return { name: "active-jobs" };
@@ -1185,6 +1201,7 @@ function App() {
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const onExternalIntegrations = route.name === "external-integrations";
+  const onSast       = route.name === "sast-list" || route.name === "sast-run-detail";
   const onDebug      = route.name === "debug";
   const onReportingDebug = route.name === "reporting-debug";
   const [appVersion, setAppVersion] = useState("");
@@ -1243,6 +1260,9 @@ function App() {
           <a href="#/apis" className=${"nav-item"+(onApis?" active":"")} title="APIs">
             <span className="nav-icon"><${IconApis}/></span>${!collapsed && " APIs"}
           </a>
+          <a href="#/sast-runs" className=${"nav-item"+(onSast?" active":"")} title="SAST">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " SAST"}
+          </a>
           <a href="#/active-jobs" className=${"nav-item"+(onActiveJobs?" active":"")} title="Active Jobs">
             <span className="nav-icon"><${IconPlay}/></span>${!collapsed && " Active Jobs"}
           </a>
@@ -1280,6 +1300,8 @@ function App() {
         ${route.name==="api-files"   && html`<${ApiFilesManager} key=${route.id} collectionId=${route.id}/>`}
         ${route.name==="api-run-new"    && html`<${ApiTestRunForm} key=${route.id} collectionId=${route.id}/>`}
         ${route.name==="api-run-detail" && html`<${ApiTestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
+        ${route.name==="sast-list"       && html`<${SastRunsListPage}/>`}
+        ${route.name==="sast-run-detail" && html`<${SastRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
         ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
         ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
@@ -1769,16 +1791,19 @@ function ApiFilesManager({ collectionId }) {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
+  const [sastRuns, setSastRuns] = useState([]);
+  const [sastBusy, setSastBusy] = useState(false);
   const fileRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const [c, d, eps] = await Promise.all([
+      const [c, d, eps, sr] = await Promise.all([
         api.getApiCollection(collectionId),
         api.listApiDocuments(collectionId),
         api.listApiEndpoints(collectionId),
+        api.listSastRuns(collectionId).catch(() => []),
       ]);
-      setCollection(c); setDocs(d); setEndpoints(eps);
+      setCollection(c); setDocs(d); setEndpoints(eps); setSastRuns(sr);
     } catch(e) { setError(e.message); }
   }, [collectionId]);
   useEffect(() => { load(); }, [load]);
@@ -1904,6 +1929,43 @@ function ApiFilesManager({ collectionId }) {
             </tbody>
           </table>
         </div>`}
+
+      ${/* SAST runs section — only show when a source_zip is present */
+        docs && docs.some(d=>d.doc_type==="source_zip") && html`
+        <div style=${{marginTop:24}}>
+          <div style=${{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <h3 style=${{margin:0}}>SAST Scans</h3>
+            <button className="btn sm" disabled=${sastBusy} onClick=${async()=>{
+              setSastBusy(true); setError(null);
+              try {
+                const sr = await api.createSastRun(collectionId);
+                await api.startSastScan(sr.id);
+                nav(`#/sast-runs/${sr.id}/progress`);
+              } catch(e) { setError(e.message); }
+              finally { setSastBusy(false); }
+            }}>${sastBusy?"Starting…":"Run SAST Scan"}</button>
+          </div>
+          ${sastRuns.length===0
+            ? html`<div className="subtle">No SAST scans yet. Click "Run SAST Scan" to analyse the uploaded source code.</div>`
+            : html`<div className="table-wrap">
+              <table>
+                <colgroup><col style=${{width:"30%"}}/><col style=${{width:"12%"}}/><col style=${{width:"8%"}}/><col style=${{width:"18%"}}/><col style=${{width:"16%"}}/><col/></colgroup>
+                <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
+                <tbody>${sastRuns.map(sr=>html`
+                  <tr key=${sr.id}>
+                    <td>${sr.name}</td>
+                    <td><span className=${"badge "+(sr.status==="completed"?"ok":sr.status==="failed"?"danger":sr.status==="scanning"?"running":"neutral")}>${sr.status}</span></td>
+                    <td>${sr.leads_count}</td>
+                    <td>${sr.triggered_by_run_id
+                      ? html`<a href=${`#/api-runs/${sr.triggered_by_run_id}/status`}>API run #${sr.triggered_by_run_id}</a>`
+                      : html`<span className="subtle">—</span>`}</td>
+                    <td>${sr.started_at ? new Date(sr.started_at).toLocaleString() : "—"}</td>
+                    <td><a className="btn ghost sm" href=${`#/sast-runs/${sr.id}/progress`}>View →</a></td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>`}
     </div>
   `;
 }
@@ -1951,7 +2013,9 @@ function ActiveJobsPage() {
     const key = `${j.job_type}-${j.run_id}`;
     setStopping(prev => ({ ...prev, [key]: true }));
     try {
-      if (j.run_type === "api") {
+      if (j.run_type === "sast") {
+        await api.stopSastScan(j.run_id);
+      } else if (j.run_type === "api") {
         if (j.job_type === "A.L.I.C.E.") {
           await api.stopApiAliceRun(j.run_id);
         } else {
@@ -2010,10 +2074,10 @@ function ActiveJobsPage() {
               return html`
               <tr key=${key}>
                 <td>
-                  <a href=${j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  <a href=${j.run_type==="sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
                   ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
                 </td>
-                <td>${j.run_type==="api"
+                <td>${j.run_type==="sast"||j.run_type==="api"
                   ? html`<a href=${`#/apis/${j.collection_id}`}>${j.collection_name}</a>`
                   : html`<a href=${`#/sites/${j.site_id}`}>${j.site_name}</a>`
                 }</td>
@@ -2024,7 +2088,7 @@ function ActiveJobsPage() {
                 <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
-                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`)}>Open</button>
                     <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
                   </div>
                 </td>
@@ -2395,6 +2459,7 @@ function ApiTestRunForm({ collectionId }) {
 const API_RUN_TABS = [
   { key: "status",      label: "Status" },
   { key: "findings",    label: "Findings" },
+  { key: "leads",       label: "Scan Leads" },
   { key: "sessions",    label: "Sessions" },
   { key: "traffic",     label: "Traffic Log" },
   { key: "endpoints",   label: "Endpoints" },
@@ -2534,6 +2599,7 @@ function ApiTestRunDetail({ runId, initialTab }) {
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="status"      && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="findings"    && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+      ${tab==="leads"       && html`<${ApiRunLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="sessions"    && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="traffic"     && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
       ${tab==="endpoints"   && html`<${ApiRunEndpointsTab} runId=${runId} run=${run}/>`}
@@ -2542,7 +2608,315 @@ function ApiTestRunDetail({ runId, initialTab }) {
   `;
 }
 
+// ── ApiRunLeadsTab ─────────────────────────────────────────────────────────────
+
+const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
+  const [expanded, setExpanded] = useState(new Set());
+  const toggle = (id) => setExpanded(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  const sevCls  = (s) => ({high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
+  const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
+
+  if (loading) return html`<div className="subtle" style=${{padding:32,textAlign:"center"}}>Loading…</div>`;
+  if (!leads || leads.length === 0) return html`
+    <div className="subtle" style=${{padding:32,textAlign:"center"}}>
+      ${emptyMsg || (scanRunning ? "Scan in progress — leads will appear here as they are found." : "No leads yet.")}
+    </div>`;
+
+  return html`<div style=${{padding:"16px 24px"}}>
+    <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
+      ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+    </div>
+    ${leads.map(lead => html`
+      <div key=${lead.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
+        <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
+             onClick=${()=>toggle(lead.id)}>
+          <span className=${"sev-badge "+sevCls(lead.severity)}>${lead.severity||"medium"}</span>
+          <span style=${{fontWeight:600,flex:1}}>${lead.title}</span>
+          ${lead.category && html`<span className="badge neutral" style=${{fontSize:11}}>${lead.category}</span>`}
+          <span className=${"badge "+statCls(lead.status)} style=${{fontSize:11}}>${lead.status}</span>
+          <span className="badge neutral" style=${{fontSize:11}}>${Math.round((lead.confidence||0)*100)}% conf</span>
+          <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(lead.id)?"▲":"▼"}</span>
+        </div>
+        ${expanded.has(lead.id) && html`
+          <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
+            ${lead.location && html`<div style=${{marginBottom:8}}><b>Location:</b> <code style=${{fontSize:12}}>${lead.location}</code></div>`}
+            ${lead.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
+              <div style=${{marginTop:4}}>${lead.description}</div></div>`}
+            ${lead.evidence && html`<div style=${{marginBottom:8}}><b>Code evidence:</b>
+              <pre style=${{fontSize:11,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:8,borderRadius:4,overflow:"auto",maxHeight:220,whiteSpace:"pre-wrap",marginTop:4}}>${lead.evidence}</pre></div>`}
+            ${lead.note && html`<div style=${{marginBottom:8}}><b>Investigation note:</b> ${lead.note}</div>`}
+            ${lead.linked_finding_id && html`<div style=${{marginBottom:8,color:"var(--success,#4caf50)"}}>
+              ✔ Confirmed as <a href="#" onClick=${(e)=>{e.preventDefault();}} style=${{color:"inherit"}}>Finding #${lead.linked_finding_id}</a>
+            </div>`}
+            <div style=${{fontSize:11,color:"var(--muted)",marginTop:4}}>
+              Lead #${lead.id} · source: ${lead.source||"sast"}
+              ${lead.investigated_by_run_id ? ` · investigated by ${lead.investigated_by_run_type||"run"} #${lead.investigated_by_run_id}` : ""}
+            </div>
+          </div>`}
+      </div>`)}
+  </div>`;
+}
+
+function ApiRunLeadsTab({ runId, scanRunning }) {
+  const [leads, setLeads] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const load = () => { setLoading(true); api.getApiRunLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
+  useEffect(() => { load(); }, [runId]);
+  useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 6000); return () => clearInterval(t); }, [scanRunning, runId]);
+
+  return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    emptyMsg="No scan leads for this collection yet. Run a SAST scan first."/>`;
+}
+
 // ── ApiRunSessionsTab ──────────────────────────────────────────────────────────
+
+// ── SastRunDetail ─────────────────────────────────────────────────────────────
+
+const SAST_TABS = [
+  { key: "progress", label: "Progress" },
+  { key: "leads",    label: "Leads" },
+];
+
+// ── SastRunsListPage ──────────────────────────────────────────────────────────
+function SastRunsListPage() {
+  const [runs, setRuns]   = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try { setRuns(await api.listAllSastRuns()); } catch(e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"ok":s==="failed"?"danger":s==="scanning"?"running":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">SAST Scans</div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${runs===null && html`<div className="subtle">Loading…</div>`}
+      ${runs!==null&&runs.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">🔍</div>
+          <div className="empty-msg">No SAST scans yet</div>
+          <div className="empty-sub">Upload source code to an API collection and run a SAST scan from the Files tab.</div>
+        </div>`}
+      ${runs&&runs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"24%"}}/><col style=${{width:"12%"}}/><col style=${{width:"10%"}}/><col style=${{width:"18%"}}/><col style=${{width:"18%"}}/><col/>
+            </colgroup>
+            <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
+            <tbody>${runs.map(r=>html`
+              <tr key=${r.id}>
+                <td><a href=${`#/sast-runs/${r.id}/progress`} style=${{fontWeight:600}}>${r.name}</a></td>
+                <td>${statusBadge(r.status)}</td>
+                <td>${r.leads_count}</td>
+                <td>${r.triggered_by_run_id
+                  ? html`<a href=${`#/api-runs/${r.triggered_by_run_id}/status`}>API run #${r.triggered_by_run_id}</a>`
+                  : html`<span className="subtle">—</span>`}</td>
+                <td>${r.started_at ? new Date(r.started_at).toLocaleString() : html`<span className="subtle">—</span>`}</td>
+                <td><a className="btn ghost sm" href=${`#/sast-runs/${r.id}/progress`}>View →</a></td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+function SastRunDetail({ runId, initialTab }) {
+  const [run, setRun]           = useState(null);
+  const [tab, setTab]           = useState(initialTab || "progress");
+  const [error, setError]       = useState(null);
+  const [scanRunning, setScanRunning] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
+
+  const loadRun = useCallback(async () => {
+    try { const r = await api.getSastRun(runId); setRun(r); } catch(e) { setError(e.message); }
+  }, [runId]);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await api.getSastScanStatus(runId);
+      setScanRunning(st.running);
+      if (!st.running) loadRun();
+    } catch {}
+  }, [runId]);
+
+  useEffect(() => { loadRun(); }, [runId]);
+  useEffect(() => {
+    const t = setInterval(pollStatus, 3000);
+    return () => clearInterval(t);
+  }, [runId]);
+
+  const onStart = async () => {
+    setStartBusy(true); setError(null);
+    try { await api.startSastScan(runId); setScanRunning(true); loadRun(); }
+    catch(e) { setError(e.message); }
+    finally { setStartBusy(false); }
+  };
+  const onStop = async () => {
+    try { await api.stopSastScan(runId); } catch(e) { setError(e.message); }
+  };
+  const onDelete = async () => {
+    if (!confirm("Delete this SAST run and all its leads?")) return;
+    try {
+      const collId = run?.collection_id;
+      await api.deleteSastRun(runId);
+      nav(collId ? `#/apis/${collId}/files` : "#/sast-runs");
+    } catch(e) { setError(e.message); }
+  };
+
+  const statusLabel = run ? run.status : "…";
+  const canStart = run && !scanRunning && ["pending","completed","failed","cancelled"].includes(run.status);
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"success":s==="scanning"||s==="running"?"warning":s==="failed"||s==="cancelled"?"danger":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        ${run ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : ""}
+        ${run ? run.name : "…"}
+        ${run && html` ${statusBadge(scanRunning ? "scanning" : run.status)}`}
+        ${run?.triggered_by_run_id && html`
+          <span className="breadcrumb-sep"> · </span>
+          <a href=${`#/api-runs/${run.triggered_by_run_id}/status`} style=${{fontSize:12,color:"var(--muted)"}}>API Run #${run.triggered_by_run_id}</a>`}
+      </div>
+      <div className="topbar-actions">
+        ${canStart && html`<button className="btn" disabled=${startBusy} onClick=${onStart}>${startBusy?"Starting…":"Start SAST Scan"}</button>`}
+        ${scanRunning && html`<button className="btn danger-outline" onClick=${onStop}>Stop</button>`}
+        ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="tab-bar">
+      ${SAST_TABS.map(t=>html`
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>{setTab(t.key);nav(`#/sast-runs/${runId}/${t.key}`);}}>
+          ${t.label}
+        </button>`)}
+    </div>
+    <div className=${tab==="progress" ? "content no-padding flex-fill-noscroll" : "content scroll-content"}>
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${tab==="progress" && html`<${SastProgressTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+    </div>
+  `;
+}
+
+function SastProgressTab({ runId, scanRunning }) {
+  const [log, setLog]       = useState([]);
+  const [subTab, setSubTab] = useState("activity");
+  const bottomRef           = useRef(null);
+
+  const loadActivity = () => api.getSastScanLog(runId).then(setLog).catch(() => {});
+  const loadAgents   = () => api.getSastAgentLog(runId).then(setLog).catch(() => {});
+  const load = () => subTab === "activity" ? loadActivity() : loadAgents();
+
+  // Initial load + polling
+  useEffect(() => { load(); }, [runId, subTab]);
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId, subTab]);
+
+  // Auto-scroll to bottom while running
+  useEffect(() => {
+    if (scanRunning && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [log.length, scanRunning]);
+
+  // Phase → display helpers
+  const phaseIcon = (phase) => {
+    if (phase === "sast_extract")   return "📦";
+    if (phase === "sast_tool")      return "🔍";
+    if (phase === "sast_candidate") return "⚠️";
+    if (phase === "sast_filter")    return "🔬";
+    if (phase === "sast_complete")  return "✅";
+    if (phase === "sast_cancelled") return "🛑";
+    if (phase === "sast_failed")    return "❌";
+    return "▸";
+  };
+  const phaseCls = (phase, status) => {
+    if (phase === "sast_candidate") return "phase-warn";
+    if (phase === "sast_filter") return status==="running" ? "phase-ok" : "phase-other";
+    if (phase === "sast_complete") return "phase-ok";
+    if (phase === "sast_failed" || phase === "sast_cancelled") return "phase-danger";
+    return "phase-other";
+  };
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"?"phase-ok":"phase-other";
+
+  return html`<div className="activity-panel" style=${{margin:0,display:"flex",flexDirection:"column",height:"100%"}}>
+    <div className="activity-log-toolbar" style=${{flexShrink:0}}>
+      <div style=${{display:"flex",gap:4}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Activity</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agents</button>
+      </div>
+      <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+      ${scanRunning && html`<span className="activity-mode-badge running">● Scanning</span>`}
+      <a className="btn ghost sm" href=${`/api/sast-runs/${runId}/agent-log/export`} download>Export ↓</a>
+    </div>
+    <div style=${{flex:1,overflow:"auto",minHeight:0}}>
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning ? "SAST scan in progress — activity will appear here shortly." : "No activity yet. Start the scan to begin."}
+               </div>`
+        : subTab==="activity"
+          ? html`<div className="activity-feed">
+              ${log.map(r => {
+                const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+                const icon = phaseIcon(r.phase);
+                const cls  = phaseCls(r.phase, r.status);
+                return html`<div key=${r.id} className="activity-entry">
+                  <span className="activity-ts">${ts}</span>
+                  <span className=${"activity-badge "+cls}>${icon} ${r.phase||""}</span>
+                  <span className="activity-msg">${r.message||""}</span>
+                </div>`;
+              })}
+              <div ref=${bottomRef}/>
+            </div>`
+          : html`<div className="activity-feed">
+              ${log.map(r => {
+                const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+                return html`<div key=${r.id} className="activity-entry">
+                  <span className="activity-ts">${ts}</span>
+                  <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                  <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                  <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+                </div>`;
+              })}
+              <div ref=${bottomRef}/>
+            </div>`}
+    </div>
+  </div>`;
+}
+
+function SastLeadsTab({ runId, scanRunning }) {
+  const [leads, setLeads] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const load = () => { setLoading(true); api.getSastLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
+  useEffect(() => { load(); }, [runId]);
+  useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 5000); return () => clearInterval(t); }, [scanRunning, runId]);
+
+  return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    emptyMsg=${scanRunning ? "SAST scan in progress — leads will appear here as they are found." : "No leads yet. Start the SAST scan to analyse the source code."}/>`;
+}
 
 function ApiRunSessionsTab({ runId, scanRunning }) {
   const [data, setData] = useState(null);
