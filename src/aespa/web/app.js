@@ -3047,7 +3047,7 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
               <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
                 ${f.affected_url && html`<div style=${{marginBottom:8}}><b>URL:</b> <code style=${{fontSize:12}}>${f.affected_url}</code></div>`}
                 ${f.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
-                  <div style=${{marginTop:4}} dangerouslySetInnerHTML=${{__html:renderMarkdown(f.description)}}/></div>`}
+                  <div style=${{marginTop:4}}>${renderMarkdown(f.description)}</div></div>`}
                 ${f.impact && html`<div style=${{marginBottom:8}}><b>Impact:</b> ${f.impact}</div>`}
                 ${f.recommendation && html`<div style=${{marginBottom:8}}><b>Recommendation:</b> ${f.recommendation}</div>`}
                 ${f.evidence && html`<div style=${{marginBottom:8}}><b>Evidence:</b>
