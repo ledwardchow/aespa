@@ -4,6 +4,136 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #162] 12th June Update
+**Opened:** 2026-06-12 | Branch: `develop → main`
+
+Bundles two feature branches: a full API security scanning engine (PR #149) and a SAST-assisted pre-phase for API scans (PR #160), totalling 53 files and ~13,300 insertions.
+
+### Included: PR #149 — API Scanning Feature
+*Merged to develop: 2026-06-09*
+
+Introduces REST API security testing: collections, document parsing, OWASP API Top-10 coverage matrix, an agentic scan loop, ALICE integration for API runs, and a comprehensive test suite (36 files, ~10,600 insertions).
+
+#### API Collections & Documents
+
+- **`ApiCollection` entity** (`models.py`, `db.py`, `schemas.py`): New top-level resource grouping a base URL, server list, scope hosts, auth summary, and readiness assessment. CRUD endpoints under `/api/api-collections/`.
+- **Document ingestion** (`services/api_documents.py`, `services/api_docs.py`): Upload and parse API specification documents. Supports OpenAPI 3.x / Swagger 2.x (via `prance` for `$ref` resolution), Postman Collection v2/v2.1, credential files (bearer tokens, key-value pairs, curl `-H`/`-b` lines), free-text documents (LLM extraction), and source ZIP archives (framework-heuristic route scanning). Idempotent re-parse replaces existing endpoints from the same document.
+- **`ApiEndpoint` & `ApiCredential`** (`models.py`): Normalised rows for discovered endpoints (method, path, parameters, request/response schema) and credentials (scheme, label, auth endpoint). Endpoint scope toggle (`in_scope` flag) controllable via `PATCH /{collection_id}/endpoints/{endpoint_id}/scope`.
+- **Testing readiness assessment** (`services/api_readiness.py`): Tells you whether the scanner has enough information about the APIs to conduct a test. `assess_readiness()` loads endpoints and credentials, sends a gap-analysis prompt to the active LLM (capped at 60 endpoints), and persists structured results to `ApiCollection.readiness_json` and per-endpoint `prereq_*` fields.
+
+#### OWASP API Top-10 Coverage Matrix
+
+- **Coverage seeding** (`services/api_scanner.py`, `seed_coverage_matrix`): On scan start, creates `ApiEndpointTest` rows for each (endpoint, OWASP category) pair applicable by heuristic (BOLA for path parameters, BOPLA for PUT/PATCH, BFLA for DELETE, etc.). All endpoints receive API2, API4, API8, and API9.
+- **Track & Enforce modes** (`coverage_mode` field on `ApiTestRun`): In `track` mode the matrix is updated as the agent makes probes. In `enforce` mode (`_enforce_coverage_loop`) every still-uncovered cell is driven to a terminal state by an LLM classifier that decides per (endpoint, category) whether to probe or skip with a reason, up to a configurable budget.
+- **Coverage matrix API** (`GET /{run_id}/coverage`): Returns the full matrix as a structured dict grouped by endpoint.
+
+#### API Scan Engine
+
+- **`ApiTestRun` lifecycle** (`api/api_test_runs.py`): Create, start, stop, and query API scan runs. Mirrors the web scanner's task registry pattern (`_scan_tasks`, `_stop_requested`). SSE event stream at `GET /{run_id}/events` for real-time progress.
+- **`_do_api_thinking_scan`** (`services/api_scanner.py`): Full Test-Lead + Specialist + Validator agentic loop wired for REST APIs — no Playwright required. Uses `_api_context_tool_fn` to route `endpoint_list`, `endpoint_detail`, `collection_info`, and `finding_list` to API-specific handlers, with shared web-scanner context tool for `history_search`, `traffic_search`, etc. Findings are stamped with `api_test_run_id` and mapped to OWASP API Top-10 category.
+- **Session seeding from credentials** (`seed_sessions_from_credentials`): Loads all `ApiCredential` rows for the collection and registers them into the scanner session vault before the agentic loop begins.
+- **Scope enforcement** (`_api_check_scope`): Out-of-scope requests are blocked against the collection's `scope_hosts` list.
+- **Credential persistence** (`_make_persist_credential_fn`): Newly discovered credentials are saved back to the collection during a scan.
+- **Traffic logging**: API scan HTTP traffic captured via the shared `traffic.py` service; accessible at `GET /{run_id}/traffic`.
+- **Findings export / import** (`GET /{run_id}/findings`, `POST /{run_id}/findings/import`): Findings round-trip in the same markdown format as web scans.
+
+#### ALICE Integration for API Runs
+
+- **ALICE endpoints on `ApiTestRun`** (`api/api_test_runs.py`): Full ALICE agentic chat available under `/{run_id}/alice/*` — start, stream, stop, status, and session persistence — mirroring the web scan ALICE surface.
+- **API-specific ALICE context** (`services/alice.py`): `_run_thinking_context_tool` extended to handle `collection_info`, `endpoint_list`, and `endpoint_detail` commands when invoked from an API run context.
+- **API-focused ALICE system prompt** (`services/prompts/alice.py`): Updated to instruct ALICE on OWASP API Top-10 categories and available API context tools.
+
+#### UI
+
+- **API Collections screen** (`web/app.js`): List, create, and manage API collections. Document upload panel (drag-and-drop or file picker) with parse status. Endpoint table with scope toggles and readiness indicators.
+- **Endpoints / work-program screen**: Coverage matrix table showing per-endpoint × per-category status (`uncovered`, `in_progress`, `covered`, `skipped`). Status badges update in real time via the event stream.
+- **API test run detail**: Activity log panel, findings panel, traffic panel, and ALICE chat tab — all equivalent to the web scan run detail view.
+- **Log panel & findings export**: Agent log viewer with per-entry expand, bulk export to JSON.
+- **Credential display**: Credentials discovered or provided during document parsing surfaced in the collection detail panel.
+
+#### Test Coverage
+
+- `tests/test_api_alice_context.py` (391 lines)
+- `tests/test_api_collections_api.py` (322 lines)
+- `tests/test_api_coverage.py` (505 lines)
+- `tests/test_api_docs.py` (501 lines)
+- `tests/test_api_readiness.py` (355 lines)
+- `tests/test_api_scanner.py` (421 lines)
+- `tests/test_api_test_runs.py` (203 lines)
+
+#### Documentation
+
+- `docs/api-collection-testing-plan.md` (465 lines): design document for the API collection and testing pipeline.
+- `docs/api-test-files/`: sample auth credential file and Markdown API specification used for development testing.
+
+#### Database & Schema
+
+- New tables: `api_collection`, `api_document`, `api_endpoint`, `api_credential`, `api_test_run`, `api_endpoint_test`.
+- `api_test_run` carries `coverage_mode`, `sast_run_id` (back-reference populated in PR #160), and ALICE session state.
+
+---
+
+### Included: PR #160 — SAST Assistance for API Scans
+*Merged to develop: 2026-06-12*
+
+Introduces an agentic SAST scanner that analyses uploaded source archives and feeds high-confidence vulnerability leads into the dynamic API scan pipeline (17 files, ~2,700 insertions).
+
+#### SAST Scanner (`services/sast_scanner.py`, 761 lines)
+
+- **Safe archive extraction** (`_safe_unzip`): Extracts source ZIP uploads into a sandboxed temp directory, rejecting any entries that would escape via path traversal.
+- **Read-only file tools**: The agentic loop is equipped with `list_files`, `glob`, `read_file` (capped at 20,000 chars per response), and `grep` (capped at 200 results) — all path-jailed to the extraction root.
+- **`write_lead` / `filter_lead` / `done` tools**: The agent calls `write_lead` to propose a candidate finding (title, description, OWASP category, severity, confidence, location, evidence). `filter_lead` scores candidates against a confidence threshold (0.7) before persisting as `ScanLead` rows. Unfiltered candidates at scan end are flushed with their raw confidence.
+- **`SastRun` lifecycle** (`create_sast_run`, `start_sast_scan`, `stop_sast_scan`, `get_sast_status`): Task registry mirrors the web and API scanner patterns.
+- **SAST system prompt** (`services/prompts/sast.py`, 279 lines): OWASP API Top-10 focused static analysis instructions, with tool schemas for `list_files`, `glob`, `read_file`, `grep`, `write_lead`, `filter_lead`, and `done`.
+
+#### ScanLead Entity & Service (`models.py`, `services/scan_leads.py`, 167 lines)
+
+- **`ScanLead` model**: Stores producer run ID and type, collection ID, title, description, category, severity, confidence score, source file location, and evidence snippet. Status field (`open` / `used`) allows the dynamic scan to consume leads without re-scanning.
+- **`get_open_leads_for_collection`**: Returns open leads sorted by severity then confidence, consumed by the API scanner's agentic loop context to prioritise dynamic probes.
+- **`needs_fresh_sast`**: Returns `True` when no completed SAST run exists within the last 24 hours for the collection, used to gate automatic pre-phase creation.
+
+#### Automatic SAST Pre-Phase in API Scans
+
+- **Auto-trigger** (`services/api_scanner.py`, `_do_api_thinking_scan`): When an API scan starts and the collection has a `source_zip` document with no fresh completed SAST run, a `SastRun` is automatically created, awaited to completion, and its leads are made available to the dynamic scan context before the agentic loop begins.
+- **Back-reference**: `ApiTestRun.sast_run_id` is written once the auto-created SAST run is known, linking the two runs in the DB.
+- **Phase events**: `scanner_phase` SSE events with `phase: sast_prephase` emitted at start and complete so the UI can display SAST progress inline with the API scan activity log.
+- **Best-effort**: SAST pre-phase failures (e.g., no source ZIP, LLM error) are logged and the dynamic scan continues unaffected.
+
+#### SAST API (`api/sast_runs.py`, 322 lines)
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/api-collections/{id}/sast-runs` | Create a SAST run (auto-selects most recent source ZIP) |
+| `GET /api/sast-runs/{id}` | Run summary |
+| `POST /api/sast-runs/{id}/scan/start` | Start the SAST scan |
+| `POST /api/sast-runs/{id}/scan/stop` | Stop the SAST scan |
+| `GET /api/sast-runs/{id}/scan/status` | Scan status |
+| `GET /api/sast-runs/{id}/events` | SSE event stream |
+| `GET /api/sast-runs/{id}/leads` | List all `ScanLead` rows for the run |
+| `GET /api/sast-runs/{id}/agent-log` | Agent activity log |
+
+#### UI
+
+- **SAST run panel** (`web/app.js`, +390 lines): Launch and monitor SAST scans from the collection detail view. Lead list with severity, confidence score, location, and evidence columns.
+- **Agent log integration**: `AgentLog` and `ScanLog` entries persisted and surfaced in the SAST run detail panel.
+- **Finding description fix** (`fix display of finding description in api scans`): API scan finding descriptions were rendered as `[object Object]` in the frontend due to an incorrect field access path; fixed to read the string value correctly.
+- **Agent log collision fix** (`fix: agent logs were colliding between web and api runs`): `AgentLog` entries from concurrent web and API scan runs were being written to the wrong run's log due to a shared context variable; scoped correctly per run.
+
+#### Database & Schema
+
+- New tables: `sast_run`, `scan_lead`.
+- `api_test_run` table: `sast_run_id` column added.
+
+#### Documentation
+
+- `docs/sast-scan-leads-plan.md` (417 lines): design document for the SAST pre-phase and scan leads pipeline.
+
+### Version
+
+- `pyproject.toml`: bumped to `0.5.20260612.6`.
+
+---
+
 ## [PR #141] 7th June Update
 **Opened:** 2026-06-07 | Branch: `develop → main`
 
