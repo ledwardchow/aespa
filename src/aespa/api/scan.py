@@ -344,7 +344,9 @@ def clear_scan_log(
     """Delete all persisted activity log entries for this run."""
     _get_run_or_404(session, run_id)
     for entry in session.exec(
-        select(ScanLog).where(ScanLog.test_run_id == run_id)
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "web")
     ).all():
         session.delete(entry)
     session.commit()
@@ -359,6 +361,7 @@ def get_scan_log(
     entries = session.exec(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "web")
         .order_by(ScanLog.id)
     ).all()
     return [
@@ -383,7 +386,9 @@ def clear_agent_log(
     """Delete all persisted agent log entries for this run."""
     _get_run_or_404(session, run_id)
     for entry in session.exec(
-        select(AgentLog).where(AgentLog.test_run_id == run_id)
+        select(AgentLog)
+        .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "web")
     ).all():
         session.delete(entry)
     session.commit()
@@ -398,6 +403,7 @@ def get_agent_log(
     entries = session.exec(
         select(AgentLog)
         .where(AgentLog.test_run_id == run_id)
+        .where(AgentLog.run_kind == "web")
         .order_by(AgentLog.id)
     ).all()
     return [
@@ -531,6 +537,7 @@ def export_thinking_log(
     entries = session.exec(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "web")
         .where(ScanLog.phase == "thinking_step")
         .order_by(ScanLog.id)
     ).all()

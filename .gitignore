@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.db
+aespa_data/
 .env
 dist/
 build/
@@ -13,3 +14,4 @@ docs/images/.DS_Store
 .DS_Store
 /.vscode
 saml.b64
+aespa.db-journal

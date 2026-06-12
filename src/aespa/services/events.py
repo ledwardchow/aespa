@@ -11,6 +11,38 @@ from typing import AsyncGenerator
 # run_id → list of subscriber queues
 _queues: dict[int, list[asyncio.Queue]] = {}
 
+# Ids of runs that emit as API scans.  web TestRun ids and ApiTestRun ids come
+# from independent counters and collide, so the shared agent_log / scan_log
+# tables need a discriminator written at persist time.  An API run registers
+# its id here for the lifetime of the process; persisted rows are tagged "api"
+# when their run_id is registered (or the event carries ``_run_kind="api"``),
+# and "web" otherwise.
+_api_run_ids: set[int] = set()
+_sast_run_ids: set[int] = set()
+
+
+def register_api_run(run_id: int) -> None:
+    """Mark a run id as belonging to an API scan so its persisted log rows are
+    tagged ``run_kind='api'``.  Safe to call repeatedly."""
+    _api_run_ids.add(run_id)
+
+
+def register_sast_run(run_id: int) -> None:
+    """Mark a run id as belonging to a SAST scan so its persisted log rows are
+    tagged ``run_kind='sast'``.  Safe to call repeatedly."""
+    _sast_run_ids.add(run_id)
+
+
+def _run_kind_for(run_id: int, event: dict) -> str:
+    explicit = event.get("_run_kind")
+    if explicit:
+        return str(explicit)
+    if run_id in _sast_run_ids:
+        return "sast"
+    if run_id in _api_run_ids:
+        return "api"
+    return "web"
+
 
 def emit(run_id: int, event: dict) -> None:
     """Push an event to all active SSE subscribers for a run (non-blocking).
@@ -27,7 +59,7 @@ def emit(run_id: int, event: dict) -> None:
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)
 
-    if event.get("type") == "agent_status" and event.get("_persist"):
+    if event.get("type") == "agent_status":
         _persist_agent_status_event(run_id, event)
 
 
@@ -41,6 +73,7 @@ def _persist_phase_event(run_id: int, event: dict) -> None:
         data = event.get("data")
         entry = ScanLog(
             test_run_id=run_id,
+            run_kind=_run_kind_for(run_id, event),
             phase=str(event.get("phase") or ""),
             status=str(event.get("status") or ""),
             message=str(event.get("message") or ""),
@@ -63,6 +96,7 @@ def _persist_agent_status_event(run_id: int, event: dict) -> None:
 
         entry = AgentLog(
             test_run_id=run_id,
+            run_kind=_run_kind_for(run_id, event),
             agent_id=str(event.get("agent_id") or ""),
             role=str(event.get("role") or ""),
             status=str(event.get("status") or ""),

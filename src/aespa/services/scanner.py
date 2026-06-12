@@ -42,6 +42,7 @@ from aespa.services.prompts.specialist import (
 )
 from aespa.services.prompts.test_lead import (
     _THINKING_AGENT_SYSTEM,
+    _API_THINKING_AGENT_SYSTEM,
 )
 
 log = logging.getLogger("aespa.scanner")
@@ -60,9 +61,10 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     
     run_id = kwargs.pop("run_id", None)
     username = kwargs.pop("username", None)
+    api_run_id = kwargs.pop("api_run_id", None)
     
     from aespa.services.traffic import LoggingAsyncClient
-    return LoggingAsyncClient(run_id=run_id, username=username, **kwargs)
+    return LoggingAsyncClient(run_id=run_id, username=username, api_run_id=api_run_id, **kwargs)
 
 
 def _playwright_proxy() -> dict:
@@ -193,6 +195,35 @@ def _compact_log_value(value, limit: int = 180) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
+    """Return a human-readable description for an agentic step.
+
+    Uses the explicit ``note`` field when the LLM provides it; otherwise
+    derives a short description from the tool name and its key inputs so
+    the UI never shows the unhelpful fallback 'Step N: Step N'.
+    """
+    explicit = tool_input.get("note")
+    if explicit:
+        return str(explicit)
+    if tool_name == "http_request":
+        method = (tool_input.get("method") or "HTTP").upper()
+        url = tool_input.get("url") or ""
+        return f"{method} {url}" if url else f"{method} request"
+    if tool_name == "context_tool":
+        inner = tool_input.get("tool") or "context lookup"
+        return f"Query: {inner}"
+    if tool_name == "write_finding":
+        title = tool_input.get("title") or "untitled"
+        return f"Write finding: {title}"
+    if tool_name == "done":
+        return "Completing assessment"
+    if tool_name == "browser":
+        action = tool_input.get("action") or "navigate"
+        url = tool_input.get("url") or ""
+        return f"Browser {action}: {url}" if url else f"Browser {action}"
+    return tool_name
 
 
 def _context_budget_reason(action: dict[str, Any]) -> str:
@@ -1713,6 +1744,34 @@ def _http_evidence_items_json(
     return _evidence_items_json(*items)
 
 
+def _as_text(value: Any) -> str:
+    """Coerce an LLM-provided field to readable text.
+
+    LLMs occasionally return a structured object (a list of content blocks, or a
+    ``{"text": ...}`` wrapper) where a plain string is expected.  Assigning that
+    object straight to a string column yields a Python ``repr`` server-side and a
+    ``[object Object]`` once the value is rendered in the browser.  Flatten such
+    values to text instead.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(_as_text(v) for v in value if v is not None)
+    if isinstance(value, dict):
+        for key in ("text", "value", "content", "body", "description"):
+            inner = value.get(key)
+            if isinstance(inner, (str, list, dict)):
+                return _as_text(inner)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1728,7 +1787,7 @@ def _finding_from_llm(
     if llm_url and llm_url != page_url:
         affected_url = llm_url
     elif probe_urls:
-        desc = (raw.get("description", "") + " " + raw.get("title", "")).lower()
+        desc = (_as_text(raw.get("description")) + " " + _as_text(raw.get("title"))).lower()
         affected_url = next((u for u in probe_urls if u.lower() in desc), probe_urls[0])
     else:
         affected_url = page_url
@@ -1767,15 +1826,15 @@ def _finding_from_llm(
     return ScanFinding(
         test_run_id=run_id,
         page_id=page_id,
-        owasp_category=raw.get("owasp_category", "A00"),
+        owasp_category=_as_text(raw.get("owasp_category")) or "A00",
         severity=_severity_from_cvss(cvss_score),
-        title=raw.get("title", "Untitled finding"),
-        description=raw.get("description", ""),
-        impact=raw.get("impact", ""),
-        likelihood=raw.get("likelihood", ""),
-        recommendation=raw.get("recommendation", ""),
+        title=_as_text(raw.get("title")) or "Untitled finding",
+        description=_as_text(raw.get("description")),
+        impact=_as_text(raw.get("impact")),
+        likelihood=_as_text(raw.get("likelihood")),
+        recommendation=_as_text(raw.get("recommendation")),
         cvss_score=cvss_score,
-        cvss_vector=raw.get("cvss_vector", ""),
+        cvss_vector=_as_text(raw.get("cvss_vector")),
         affected_url=affected_url,
         evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
         request_evidence=_request_evidence(request_evidence),
@@ -2602,7 +2661,7 @@ async def _run_specialist_agent(
 
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         step_count[0] = step
-        note = str(tool_input.get("note") or f"Step {step}")
+        note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit specialist_step as scanner_phase so it persists to scan_log
         # (Log tab) and also as specialist_step for the Agents panel thread view.
@@ -3123,17 +3182,17 @@ async def _persist_dynamic_finding(
             with Session(get_engine()) as s2:
                 db_finding = s2.get(ScanFinding, finding_id)
                 if db_finding is not None:
-                    db_finding.owasp_category = str(rewritten.get("owasp_category") or db_finding.owasp_category)
-                    db_finding.title = str(rewritten.get("title") or db_finding.title)
-                    db_finding.description = str(rewritten.get("description") or db_finding.description)
-                    db_finding.impact = str(rewritten.get("impact") or db_finding.impact)
-                    db_finding.likelihood = str(rewritten.get("likelihood") or db_finding.likelihood)
-                    db_finding.recommendation = str(rewritten.get("recommendation") or db_finding.recommendation)
+                    db_finding.owasp_category = _as_text(rewritten.get("owasp_category")) or db_finding.owasp_category
+                    db_finding.title = _as_text(rewritten.get("title")) or db_finding.title
+                    db_finding.description = _as_text(rewritten.get("description")) or db_finding.description
+                    db_finding.impact = _as_text(rewritten.get("impact")) or db_finding.impact
+                    db_finding.likelihood = _as_text(rewritten.get("likelihood")) or db_finding.likelihood
+                    db_finding.recommendation = _as_text(rewritten.get("recommendation")) or db_finding.recommendation
                     db_finding.cvss_score = _cvss_score(rewritten.get("cvss_score"))
-                    db_finding.cvss_vector = str(rewritten.get("cvss_vector") or db_finding.cvss_vector)
+                    db_finding.cvss_vector = _as_text(rewritten.get("cvss_vector")) or db_finding.cvss_vector
                     db_finding.severity = _severity_from_cvss(db_finding.cvss_score)
-                    db_finding.evidence = str(rewritten.get("evidence") or db_finding.evidence)
-                    db_finding.affected_url = str(rewritten.get("affected_url") or db_finding.affected_url)
+                    db_finding.evidence = _as_text(rewritten.get("evidence")) or db_finding.evidence
+                    db_finding.affected_url = _as_text(rewritten.get("affected_url")) or db_finding.affected_url
                     s2.add(db_finding)
                     s2.commit()
                     s2.refresh(db_finding)
@@ -5067,6 +5126,12 @@ async def _do_agentic_thinking_loop(
     site_id: int = 0,
     creds: list | None = None,
     login_url: str = "",
+    # API-mode overrides — when provided these replace the web-scan defaults
+    system_message_override: str | None = None,
+    context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
+    post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
+    post_probe_fn=None,     # callable(url, method, owasp_category) -> None; called after every http_request
+    persist_credential_fn=None,  # callable(username, password, login_url) -> None; replaces site-credential persistence
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -5243,7 +5308,7 @@ async def _do_agentic_thinking_loop(
     # ── Tool executor closure ─────────────────────────────────────────────────
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
         nonlocal progressive_findings_count
-        note = str(tool_input.get("note") or f"Step {step}")
+        note = _infer_step_note(tool_name, tool_input, step)
 
         # Emit live agent_status update for every agentic step (SSE only, not persisted).
         events_svc.emit(run_id, {
@@ -5269,14 +5334,24 @@ async def _do_agentic_thinking_loop(
                     _consecutive_ctx_tools[0],
                 )
             else:
-                output = _run_thinking_context_tool(
-                    inner_tool, args,
-                    pages_snapshot=pages_snapshot,
-                    findings_snapshot=findings_snapshot,
-                    history=history,
-                    run_id=run_id,
-                    base_url=base_url,
-                )
+                if context_tool_fn is not None:
+                    output = context_tool_fn(
+                        inner_tool, args,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        history=history,
+                        run_id=run_id,
+                        base_url=base_url,
+                    )
+                else:
+                    output = _run_thinking_context_tool(
+                        inner_tool, args,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        history=history,
+                        run_id=run_id,
+                        base_url=base_url,
+                    )
                 if budget_reason:
                     output["context_budget_reason"] = budget_reason
                     output["context_budget_extended"] = True
@@ -5316,6 +5391,39 @@ async def _do_agentic_thinking_loop(
             run_id, action_for_task, step
         )
 
+        # ── update_lead ───────────────────────────────────────────────────────
+        if tool_name == "update_lead":
+            lead_id = tool_input.get("lead_id")
+            outcome = str(tool_input.get("outcome") or "")
+            lead_note = str(tool_input.get("note") or "")
+            finding_id = tool_input.get("finding_id")
+            try:
+                from aespa.services.scan_leads import update_lead as _update_lead
+                # Map outcome string to ScanLead.status
+                status_map = {
+                    "confirmed": "confirmed",
+                    "dismissed": "dismissed",
+                    "inconclusive": "inconclusive",
+                }
+                lead_status = status_map.get(outcome, "inconclusive")
+                updated = _update_lead(
+                    int(lead_id),
+                    status=lead_status,
+                    note=lead_note,
+                    investigated_by_run_type="api",
+                    investigated_by_run_id=run_id,
+                    linked_finding_id=int(finding_id) if finding_id else None,
+                )
+                if updated is None:
+                    return f"Lead #{lead_id} not found."
+                return (
+                    f"Lead #{lead_id} updated: outcome={outcome}, status={lead_status}."
+                    + (f" Linked to finding #{finding_id}." if finding_id else "")
+                )
+            except Exception as _ul_exc:
+                log.warning("update_lead error: %s", _ul_exc)
+                return f"Error updating lead #{lead_id}: {_ul_exc}"
+
         # ── write_finding ─────────────────────────────────────────────────────
         if tool_name == "write_finding":
             affected = str(tool_input.get("affected_url") or base_url)
@@ -5351,6 +5459,11 @@ async def _do_agentic_thinking_loop(
             )
             if saved is not None:
                 progressive_findings_count += 1
+                if post_finding_fn is not None:
+                    try:
+                        post_finding_fn(saved)
+                    except Exception as _pf_exc:
+                        log.warning("post_finding_fn error: %s", _pf_exc)
                 findings_snapshot.append({
                     "title": saved.title,
                     "severity": saved.severity,
@@ -5749,16 +5862,31 @@ async def _do_agentic_thinking_loop(
                         )
                         _mark_session_pending(cc_created_label)
                     if cc_success:
-                        _maybe_persist_discovered_credential(
-                            run_id,
-                            username=str(
-                                candidate.get("username")
-                                or candidate.get("email")
-                                or "discovered"
-                            ),
-                            password=str(candidate.get("password") or ""),
-                            login_url=cc_url or None,
+                        cc_disc_user = str(
+                            candidate.get("username")
+                            or candidate.get("email")
+                            or "discovered"
                         )
+                        cc_disc_pass = str(candidate.get("password") or "")
+                        if persist_credential_fn is not None:
+                            # API mode: route to the collection-aware persister.
+                            # run_id is an ApiTestRun id here, so the TestRun-based
+                            # site persister must not be used.
+                            try:
+                                persist_credential_fn(
+                                    username=cc_disc_user,
+                                    password=cc_disc_pass,
+                                    login_url=cc_url or None,
+                                )
+                            except Exception as _pc_exc:
+                                log.warning("persist_credential_fn error: %s", _pc_exc)
+                        else:
+                            _maybe_persist_discovered_credential(
+                                run_id,
+                                username=cc_disc_user,
+                                password=cc_disc_pass,
+                                login_url=cc_url or None,
+                            )
                 except Exception as exc:
                     cc_excerpt = f"Request failed: {exc}"
                     cc_success = False
@@ -6207,6 +6335,14 @@ async def _do_agentic_thinking_loop(
         })
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status)
+        # Notify coverage tracker with the declared OWASP category (API runs only).
+        if post_probe_fn is not None:
+            _hr_owasp = str(tool_input.get("owasp_category") or "").strip()
+            if _hr_owasp:
+                try:
+                    post_probe_fn(hr_url, hr_method, _hr_owasp)
+                except Exception as _pp_exc:
+                    log.debug("post_probe_fn error: %s", _pp_exc)
         # Evict expired/invalid named sessions from the vault on 401/403
         _hr_session_evicted = False
         if hr_resp_status in (401, 403) and hr_use_session and hr_use_session in session_vault:
@@ -6286,7 +6422,7 @@ async def _do_agentic_thinking_loop(
 
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
-        system_message=_THINKING_AGENT_SYSTEM,
+        system_message=system_message_override if system_message_override is not None else _THINKING_AGENT_SYSTEM,
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),

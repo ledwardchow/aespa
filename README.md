@@ -2,7 +2,20 @@
 
 ## What is this?
 
-An **exploration** into whether a fully LLM-driven, automated web application "penetration test" could work. 
+An **exploration** into whether a fully LLM-driven, automated web application/API "penetration tests" could work. 
+
+## Features
+
+Multi-agent (test lead + specialists, adversarial validator and reporting) web app and API testing.
+
+You will need to provide:
+* For web app testing - URL and (optionally) credentials
+* For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
+* (Optionally) ZIP of the source code for the API. It will perform a "SAST-lite" agentic examination of the code to identify leads to investigate during the DAST API testing
+* An API key for an OpenAPI or an Anthropic-format LLM provider
+
+
+## Performance
 
 Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
 * AESPA + Sonnet 4.6 (AWS Bedrock - account NOT in Cyber Verification Program)
@@ -112,9 +125,20 @@ Traffic log:
 Findings
 ![Screenshot](docs/images/findings.png)
 
+API Setup
+![Screenshot](docs/images/apisetup.png)
+
+Parsed API documentation
+![Screenshot](docs/images/apispecparsed.png)
+
+SAST Scan-based Lead Detection
+![Screenshot](docs/images/sastleads.png)
+
+Structured Workprogram for API Scanning
+![Screenshot](docs/images/apiworkprogram.png)
+
+API Scan Findings
+![Screenshot](docs/images/apifindings.png)
+
 ## Recommended models
 * Claude Sonnet 4.6 - set output token cap to 60000
-
-Local (~24GB VRAM GPU required)
-* Qwen3.6-35b-A3b (Q3) - set output token cap to 10000
-* Qwen3-coder-30b - set output token cap to 10000
