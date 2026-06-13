@@ -1,8 +1,151 @@
 import asyncio
+import sys
 from types import SimpleNamespace
+import pytest
 
 from aespa.models import LLMConfig
 from aespa.services import llm
+
+
+def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+    calls: list[list[dict]] = []
+    executed: list[tuple[str, dict, int]] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            block = {
+                "type": "text",
+                "id": None,
+                "name": None,
+                "input": None,
+                "text": "I should inspect the site map next.",
+            }
+            return [block], "end_turn", [block]
+        if len(calls) == 2:
+            block = {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "context_tool",
+                "input": {"tool": "site_map", "args": {"limit": 5}},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        block = {
+            "type": "tool_use",
+            "id": "call_2",
+            "name": "done",
+            "input": {"summary": "Complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input, step))
+        return "site map result"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(llm.thinking_agentic_loop(
+        config,
+        system_message="system",
+        initial_user_message="start",
+        tool_executor=fake_tool_executor,
+    ))
+
+    assert summary == "Complete."
+    assert executed == [("context_tool", {"tool": "site_map", "args": {"limit": 5}}, 1)]
+    correction_messages = [
+        msg for msg in calls[1]
+        if msg["role"] == "user"
+        and isinstance(msg["content"], list)
+        and msg["content"][0].get("type") == "text"
+    ]
+    assert "did not call a tool" in correction_messages[-1]["content"][0]["text"]
+
+
+def test_agentic_loop_can_reject_premature_done(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+    executed: list[tuple[str, dict, int]] = []
+    done_attempts = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal done_attempts
+        if done_attempts == 0:
+            done_attempts += 1
+            block = {
+                "type": "tool_use",
+                "id": "call_done_1",
+                "name": "done",
+                "input": {"summary": "Finished."},
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        if not executed:
+            assert "not complete" in messages[-1]["content"][0]["content"]
+            block = {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "http_request",
+                "input": {
+                    "method": "GET",
+                    "url": "https://target.local/api/profile",
+                    "use_session": "customer_1",
+                },
+                "text": None,
+            }
+            return [block], "tool_use", [block]
+        block = {
+            "type": "tool_use",
+            "id": "call_done_2",
+            "name": "done",
+            "input": {"summary": "Really complete."},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        executed.append((name, tool_input, step))
+        return "Status: 200"
+
+    def done_check(tool_input, step):
+        return (bool(executed), "" if executed else "Assessment is not complete.")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(llm.thinking_agentic_loop(
+        config,
+        system_message="system",
+        initial_user_message="start",
+        tool_executor=fake_tool_executor,
+        done_check=done_check,
+    ))
+
+    assert summary == "Really complete."
+    assert executed == [(
+        "http_request",
+        {
+            "method": "GET",
+            "url": "https://target.local/api/profile",
+            "use_session": "customer_1",
+        },
+        2,
+    )]
 
 
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
@@ -32,15 +175,132 @@ def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {
-        "api_key": "sk-or-v1-test",
-        "base_url": llm.OPENROUTER_BASE_URL,
-    }
+    assert {"api_key": "sk-or-v1-test", "base_url": llm.OPENROUTER_BASE_URL}.items() <= captured["client"].items()
     assert captured["completion"] == {
         "model": "openrouter/owl-alpha",
         "max_tokens": 2048,
         "temperature": 0.0,
         "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_azure_foundry_openai_call_uses_openai_v1_base_url(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="foundry-key",
+        base_url="https://myresource.services.ai.azure.com",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert {"api_key": "foundry-key", "base_url": "https://myresource.services.ai.azure.com/openai/v1"}.items() <= captured["client"].items()
+    assert captured["completion"] == {
+        "model": "gpt-4o",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_legacy_azure_foundry_call_uses_openai_mode(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="azure_foundry",
+        api_key="foundry-key",
+        base_url="https://models.inference.ai.azure.com",
+        model="Meta-Llama-3.3-70B-Instruct",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["client"]["base_url"] == "https://models.inference.ai.azure.com/v1"
+
+
+def test_azure_foundry_anthropic_call_uses_messages_api(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            captured["post"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="azure_foundry_anthropic",
+        api_key="foundry-key",
+        base_url="https://myresource.services.ai.azure.com",
+        model="claude-sonnet-4-5",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert {"timeout": 120}.items() <= captured["client"].items()
+    assert captured["url"] == "https://myresource.services.ai.azure.com/anthropic/v1/messages"
+    assert captured["post"]["headers"]["x-api-key"] == "foundry-key"
+    assert "api-key" not in captured["post"]["headers"]
+    assert captured["post"]["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["post"]["json"] == {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 2048,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
     }
 
 
@@ -166,6 +426,7 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert "/api/health" in captured["prompt"]
     assert "jwt_secret" in captured["prompt"]
     assert "CORS" in captured["prompt"]
+    assert "Rate CORS arbitrary Origin reflection" in captured["prompt"]
     assert "loan/account creation rules" in captured["prompt"]
     assert '"action": "browser"' in captured["prompt"]
     assert '"action": "jwt"' in captured["prompt"]
@@ -227,7 +488,54 @@ def test_thinking_next_action_history_includes_response_headers(monkeypatch):
     assert "x-frame-options" in captured["prompt"]
     assert "content-type" in captured["prompt"]
     assert "found_admin_1" in captured["prompt"]
-    assert "secrets are not shown" in captured["prompt"]
+    assert "found_admin_1" in captured["prompt"]  # session label present in sessions section
+
+
+def test_thinking_next_action_compacts_large_history(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "history_search",
+          "args": {"query": "password_hash", "limit": 3},
+          "observation": "Earlier responses were summarized.",
+          "hypothesis": "A previous response may contain evidence worth reviewing.",
+          "payload_purpose": "Retrieve targeted history instead of resending all bodies.",
+          "note": "Search history for the sensitive field before writing a finding."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    history = [
+        {
+            "step": i,
+            "method": "GET",
+            "url": f"https://target.local/api/{i}",
+            "note": "Large response",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": "x" * 5000,
+        }
+        for i in range(20)
+    ]
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Target: https://target.local",
+        history=history,
+        max_steps=120,
+        current_step=21,
+    ))
+
+    assert action["action"] == "tool"
+    assert len(captured["prompt"]) < 35_000
+    assert "Earlier history: 15 step(s) summarized" in captured["prompt"]
+    assert "Use history_search to retrieve details" in captured["prompt"]
 
 
 def test_thinking_next_action_accepts_browser_action(monkeypatch):
@@ -334,6 +642,119 @@ def test_thinking_next_action_accepts_credential_check_action(monkeypatch):
     assert action["candidates"][1]["password"] == "admin123"
 
 
+def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """{
+          "action": "tool",
+          "tool": "site_map",
+          "args": {"filter": "api takes-input", "limit": 10},
+          "observation": "Need endpoint inventory before probing.",
+          "hypothesis": "Input-taking APIs are likely high-value targets.",
+          "payload_purpose": "Fetch targeted crawl context.",
+          "note": "Fetch the API site map before choosing a probe."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: 20 pages. Use context tools for details.",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "tool"
+    assert action["tool"] == "site_map"
+    assert action["args"]["limit"] == 10
+    assert "Context tools:" in captured["prompt"]
+    assert "context_budget_reason" in captured["prompt"]
+    assert "adaptive checkpoint" in captured["prompt"]
+    assert "page_detail" in captured["prompt"]
+    assert "history_search" in captured["prompt"]
+
+
+def test_thinking_next_action_normalizes_context_tool_alias(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """
+Looking at the history, I need to search prior responses.
+
+```json
+{
+  "action": "history_search",
+  "query": "jwt secret signing key",
+  "limit": 5,
+  "observation": "The previous response was truncated.",
+  "hypothesis": "A JWT secret may have appeared in prior response history.",
+  "payload_purpose": "Search prior response history before making another request.",
+  "note": "Search history for a JWT secret."
+}
+```
+"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: compact.",
+        history=[],
+        max_steps=120,
+        current_step=1,
+    ))
+
+    assert action["action"] == "tool"
+    assert action["tool"] == "history_search"
+    assert action["args"] == {"query": "jwt secret signing key", "limit": 5}
+    assert action["note"] == "Search history for a JWT secret."
+
+
+def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):
+        return """{
+          "action": "finding_write",
+          "owasp_category": "A05",
+          "title": "Verbose debug configuration disclosure",
+          "description": "The health endpoint exposes debug configuration.",
+          "impact": "Attackers can use leaked implementation details.",
+          "likelihood": "Likely because the endpoint is public.",
+          "recommendation": "Remove debug fields from public responses.",
+          "cvss_score": 5.3,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "severity": "medium",
+          "affected_url": "https://target.local/api/health",
+          "evidence": "Step 2 returned debug=true.",
+          "request_evidence": "GET https://target.local/api/health",
+          "response_evidence": "Status: 200\\n{debug:true}",
+          "observation": "The response exposed debug mode.",
+          "hypothesis": "This is a confirmed info disclosure.",
+          "payload_purpose": "Persist the finding.",
+          "note": "Record the confirmed debug disclosure."
+        }"""
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    action = asyncio.run(llm.thinking_next_action(
+        config,
+        target_url="https://target.local",
+        crawl_context="Crawl summary: compact.",
+        history=[],
+        max_steps=120,
+        current_step=3,
+    ))
+
+    assert action["action"] == "finding_write"
+    assert action["title"] == "Verbose debug configuration disclosure"
+    assert action["affected_url"] == "https://target.local/api/health"
+
+
 def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):
         captured: dict[str, str] = {}
 
@@ -409,6 +830,108 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(m
         "model": "o3-mini",
         "max_completion_tokens": 2048,
         "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=800)
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 0,
+    }
+
+
+def test_openai_caching_tokens_extraction_missing_details(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            message = SimpleNamespace(content="ok")
+            usage = SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=200,
+                prompt_tokens_details=None
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai",
+        api_key="sk-test",
+        model="gpt-4o",
+        max_tokens=2048,
+        temperature=0.7,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "gpt-4o",
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
     }
 
 
@@ -498,7 +1021,7 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert captured["client"] == {"timeout": 120}
+    assert {"timeout": 120}.items() <= captured["client"].items()
     assert captured["url"] == (
         "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
         "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse"
@@ -511,6 +1034,238 @@ def test_bedrock_call_uses_converse_api_key(monkeypatch):
         },
         "json": {
             "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+            "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
+        },
+    }
+
+
+def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv("AWS_PROFILE", "bedrock-dev")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {"profile_name": "bedrock-dev"}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "us-east-1",
+        "endpoint_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+    }.items() <= captured["client"].items()
+    assert captured["converse"] == {
+        "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+        "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
+    }
+
+
+def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert captured["session"] == {}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "ap-southeast-2",
+        "endpoint_url": None,
+    }.items() <= captured["client"].items()
+    assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+
+
+@pytest.mark.anyio
+async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
+    captured = {}
+
+    class FakeBedrockClient:
+        def converse_stream(self, **kwargs):
+            captured["converse_stream"] = kwargs
+            return {
+                "stream": [
+                    {
+                        "contentBlockDelta": {
+                            "delta": {"text": "streaming "}
+                        }
+                    },
+                    {
+                        "contentBlockDelta": {
+                            "delta": {"text": "response"}
+                        }
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["session"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            captured["client"] = {"service_name": service_name, **kwargs}
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url=None,
+        model="global.anthropic.claude-sonnet-4-6",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    chunks = []
+    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "streaming response"
+    assert captured["session"] == {}
+    assert {
+        "service_name": "bedrock-runtime",
+        "region_name": "ap-southeast-2",
+        "endpoint_url": None,
+    }.items() <= captured["client"].items()
+    assert captured["converse_stream"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+    assert captured["converse_stream"]["messages"] == [{"role": "user", "content": [{"text": "hello"}]}]
+    assert captured["converse_stream"]["system"] == [{"text": "system prompt"}]
+
+
+@pytest.mark.anyio
+async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield 'data: {"contentBlockDelta": {"delta": {"text": "streaming "}}}'
+            yield '{"contentBlockDelta": {"delta": {"text": "response"}}}'
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            captured["request"] = kwargs
+            class StreamContext:
+                async def __aenter__(self):
+                    return FakeResponse()
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+            return StreamContext()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    chunks = []
+    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "streaming response"
+    assert {"timeout": 120}.items() <= captured["client"].items()
+    assert captured["method"] == "POST"
+    assert captured["url"] == (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
+        "anthropic.claude-3-7-sonnet-20250219-v1%3A0/converse-stream"
+    )
+    assert captured["request"] == {
+        "headers": {
+            "Authorization": "Bearer bedrock-test-key",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        "json": {
+            "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+            "system": [{"text": "system prompt"}],
             "inferenceConfig": {"maxTokens": 2048, "temperature": 0.0},
         },
     }
@@ -554,5 +1309,608 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     assert findings[0]["cvss_score"] == 6.1
     assert "description" in captured["prompt"]
     assert "CVSS v3.1" in captured["prompt"]
+    assert "Rate generic server or framework version disclosure as info" in captured["prompt"]
+    assert "Rate verbose stack traces" in captured["prompt"]
+    assert "Rate CORS arbitrary Origin reflection" in captured["prompt"]
     assert "GET /search" in captured["prompt"]
     assert "HTTP/1.1 200" in captured["prompt"]
+
+
+def test_analyse_probes_writes_reporting_replay_capture(monkeypatch):
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        return """
+        [{
+          "owasp_category": "A03",
+          "severity": "medium",
+          "title": "Reflected XSS in search",
+          "description": "The q parameter is reflected without encoding.",
+          "impact": "An attacker can execute script in another user's browser.",
+          "likelihood": "Likely if a victim opens an attacker-controlled URL.",
+          "recommendation": "Encode reflected output and validate the parameter.",
+          "cvss_score": 6.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          "affected_url": "https://target.local/search?q=<script>alert(1)</script>",
+          "evidence": "Payload is reflected in the response."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    captured: dict[str, object] = {}
+
+    from aespa.services import reporting_debug
+
+    monkeypatch.setattr(reporting_debug, "is_capture_enabled", lambda: True)
+    monkeypatch.setattr(
+        reporting_debug,
+        "capture_reporting_batch",
+        lambda **kwargs: captured.update(kwargs) or 1,
+    )
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
+        "desc": "XSS probe",
+        "url": "https://target.local/search?q=<script>alert(1)</script>",
+        "status": 200,
+        "headers": {"content-type": "text/html"},
+        "body": "<script>alert(1)</script>",
+        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+    }]))
+
+    assert captured["url"] == "https://target.local/search"
+    assert captured["result_texts"]
+    assert captured["prompt_sha256"]
+    assert captured["llm"]["model"] == "local"
+    assert captured["findings"] == findings
+
+
+def test_replay_reporting_capture_rebuilds_current_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        [{
+          "owasp_category": "A05",
+          "severity": "low",
+          "title": "Verbose error response",
+          "description": "A verbose framework error is returned.",
+          "impact": "Attackers can use implementation details to refine attacks.",
+          "likelihood": "Likely when the endpoint is reachable.",
+          "recommendation": "Return generic errors and log details server-side.",
+          "cvss_score": 3.1,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+          "affected_url": "https://target.local/error",
+          "evidence": "Stack trace was returned."
+        }]
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "capture_id": "cap-1",
+        "url": "https://target.local/error",
+        "result_texts": ["--- Probe: verbose error ---\nHTTP/1.1 500"],
+        "prompt": "old saved prompt",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_capture(config, capture))
+
+    assert prompts[0] != "old saved prompt"
+    assert "You are a web application penetration tester reviewing probe results" in prompts[0]
+    assert "HTTP/1.1 500" in prompts[0]
+    assert result["source_capture_id"] == "cap-1"
+    assert result["findings"][0]["title"] == "Verbose error response"
+
+
+def test_replay_reporting_capture_can_use_saved_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "url": "https://target.local",
+        "result_texts": ["result text"],
+        "prompt": "exact prompt from scan",
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    asyncio.run(llm.replay_reporting_capture(config, capture, use_saved_prompt=True))
+
+    assert prompts == ["exact prompt from scan"]
+
+
+def test_replay_reporting_writeup_capture_uses_writeup_prompt(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):  # noqa: ARG001
+        prompts.append(prompt)
+        return """
+        {
+          "owasp_category": "A01",
+          "severity": "high",
+          "title": "IDOR exposes account statement",
+          "description": "The statement endpoint returns another user's account data.",
+          "impact": "An attacker can read sensitive account statements.",
+          "likelihood": "Likely when account IDs are enumerable.",
+          "recommendation": "Enforce object ownership checks server-side.",
+          "cvss_score": 7.5,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+          "affected_url": "https://target.local/accounts/2/statement",
+          "evidence": "Captured response included another user's statement."
+        }
+        """
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    capture = {
+        "schema": llm.REPORTING_REPLAY_SCHEMA,
+        "kind": "writeup",
+        "capture_id": 7,
+        "source": "test_lead",
+        "base_url": "https://target.local",
+        "url": "https://target.local/accounts/2/statement",
+        "finding": {
+            "title": "Account statement IDOR",
+            "affected_url": "https://target.local/accounts/2/statement",
+            "evidence": "Other account returned.",
+        },
+        "evidence": {"response_evidence": "HTTP/1.1 200\nAlice Statement"},
+    }
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    result = asyncio.run(llm.replay_reporting_writeup_capture(config, capture))
+
+    assert "Original finding JSON" in prompts[0]
+    assert "Supporting evidence" in prompts[0]
+    assert result["source_capture_id"] == 7
+    assert result["findings"][0]["title"] == "IDOR exposes account statement"
+
+
+def test_analyse_probes_chunks_large_result_sets(monkeypatch):
+    prompts: list[str] = []
+
+    async def fake_call(config, prompt, screenshot_b64):
+        prompts.append(prompt)
+        if len(prompts) == 2:
+            return """
+            [{
+              "owasp_category": "A05",
+              "severity": "low",
+              "title": "Verbose error response",
+              "description": "A probe returned a verbose framework error.",
+              "impact": "Attackers can use implementation details to refine attacks.",
+              "likelihood": "Likely when the endpoint is reachable anonymously.",
+              "recommendation": "Return generic errors and log details server-side.",
+              "cvss_score": 3.1,
+              "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+              "affected_url": "https://target.local/error/2",
+              "evidence": "Stack trace was returned in the response."
+            }]
+            """
+        return "[]"
+
+    monkeypatch.setattr(llm, "_call", fake_call)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_TEXT_BUDGET", 100_000)
+    monkeypatch.setattr(llm, "ANALYSE_RESULTS_PER_BATCH", 2)
+
+    config = LLMConfig(provider="openai_compatible", model="local")
+    results = [
+        {
+            "desc": f"Verbose error probe {index}",
+            "url": f"https://target.local/error/{index}",
+            "status": 500,
+            "headers": {"content-type": "text/plain"},
+            "body": "Traceback " + ("x" * 600),
+            "request_evidence": f"GET /error/{index} HTTP/1.1",
+            "response_evidence": "HTTP/1.1 500\n" + ("stack trace " * 80),
+        }
+        for index in range(6)
+    ]
+
+    findings = asyncio.run(llm.analyse_probes(config, "https://target.local", results))
+
+    assert len(prompts) == 3
+    assert findings[0]["title"] == "Verbose error response"
+
+
+def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 100,
+                    "cacheReadInputTokens": 400,
+                    "cacheWriteInputTokens": 200,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 200,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 150,
+                    "cacheReadInputTokens": 500,
+                    "cacheWriteInputTokens": 300,
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key="bedrock-test-key",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 1200,
+        "output_tokens": 150,
+        "cache_read_tokens": 500,
+        "cache_write_tokens": 300,
+    }
+
+
+def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
+    recorded_usages = []
+
+    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
+        recorded_usages.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        })
+
+    monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content_ant = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert len(recorded_usages) == 1
+    assert recorded_usages[0] == {
+        "model": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "input_tokens": 2000,
+        "output_tokens": 250,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 400,
+    }
+
+
+def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-r1-reasoning-model",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert "tool_choice" not in captured["completion"]
+
+
+def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            captured[f"call_{self.calls}"] = kwargs
+            if self.calls == 1:
+                raise ValueError("Thinking mode does not support this tool_choice")
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="openai_compatible",
+        api_key=None,
+        base_url="http://localhost:1234",
+        model="deepseek-v4-pro-custom",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system message",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    ))
+
+    assert blocks[0]["text"] == "ok"
+    assert captured["call_1"]["tool_choice"] == "required"
+    assert "tool_choice" not in captured["call_2"]
+
+
+def test_anthropic_caching_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            captured["create_kwargs"] = kwargs
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="response text", id=None, name=None, input=None)],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=8, cache_creation_input_tokens=2)
+            )
+
+    class FakeAsyncAnthropic:
+        def __init__(self, **kwargs):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic", FakeAsyncAnthropic)
+
+    config = LLMConfig(
+        provider="anthropic",
+        api_key="sk-test",
+        model="claude-3-5-sonnet",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+    tools = [{"name": "get_weather", "description": "Get the weather", "input_schema": {"type": "object"}}]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="you are a helpful assistant",
+        messages=messages,
+        tools=tools,
+    ))
+
+    assert blocks[0]["text"] == "response text"
+    create_kwargs = captured["create_kwargs"]
+
+    # Verify messages have cache_control on the last message's last content block
+    cached_messages = create_kwargs["messages"]
+    assert len(cached_messages) == 3
+    assert cached_messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original messages list was NOT mutated in-place
+    assert "cache_control" not in messages[-1]
+    if isinstance(messages[-1]["content"], list):
+        assert "cache_control" not in messages[-1]["content"][-1]
+
+    # Verify tools have cache_control on the last tool
+    cached_tools = create_kwargs["tools"]
+    assert len(cached_tools) == 1
+    assert cached_tools[-1]["cache_control"] == {"type": "ephemeral"}
+    # Verify original tools list was NOT mutated
+    assert "cache_control" not in tools[-1]
+
+
+def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse_kwargs"] = kwargs
+            return {
+                "output": {
+                    "message": {
+                        "content": [{"text": "ok"}],
+                    },
+                },
+                "usage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "cacheReadInputTokens": 800,
+                    "cacheWriteInputTokens": 400,
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    fake_boto3 = SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-3-7-sonnet-20250219-v1:0",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+        {"role": "user", "content": "how are you?"},
+    ]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system prompt",
+        messages=messages,
+        tools=[],
+    ))
+
+    converse_kwargs = captured["converse_kwargs"]
+    converse_messages = converse_kwargs["messages"]
+
+    # Verify first user message has cachePoint
+    assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
+    # Verify last user message has cachePoint
+    assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+
