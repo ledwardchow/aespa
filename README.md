@@ -2,17 +2,46 @@
 
 ## What is this?
 
-An **exploration** into whether a fully LLM-driven, automated web application "penetration test" could work. 
+An **exploration** into whether a fully LLM-driven, automated web application/API "penetration tests" could work. 
 
-(so far, it doesn't look like it with the qwen3-coder-30b model, which is the only one which will run acceptably on my laptop. anyone got an API key they can lend me?)
+## Features
+
+Multi-agent (test lead + specialists, adversarial validator and reporting) web app and API testing.
+
+You will need to provide:
+* For web app testing - URL and (optionally) credentials
+* For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
+* (Optionally) ZIP of the source code for the API. It will perform a "SAST-lite" agentic examination of the code to identify leads to investigate during the DAST API testing
+* An API key for an OpenAPI or an Anthropic-format LLM provider
+
+
+## Performance
+
+Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
+* AESPA + Sonnet 4.6 (AWS Bedrock - account NOT in Cyber Verification Program)
+* Claude Code + Sonnet 4.6 (account in Cyber Verification Program)
+* Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
+* Claude Code + Qwen3.6-35b-A3b (Abliterated)
+
+And a [comparison](docs/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+
+## How does it work?
+
+See [Architecture](docs/architecture.md).
+
+Also, the [changelog](docs/CHANGELOG.md).
 
 ## Requirements
 
 - Python 3.12+
 - uv: https://docs.astral.sh/uv/getting-started/installation/
-- Anthropic/OpenAI/Google API key **OR**
-- A local model, you will need a GPU with 20GB+ VRAM or an ARM Macbook Pro with 32GB+ RAM. I recommend LM Studio + a non-thinking model that runs 30+ tok/sec. Thinking models will run too slowly for this app to offer a good experience.
+- Burp Suite Professional, if you want to use the active scan integration
+- Anthropic/OpenAI/Google/AWS Bedrock API key **OR**
+- A local model - some suggestions at the bottom
 
+Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
+
+If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts (inclusive of cached tokens). 
 
 ## Setup
 
@@ -32,6 +61,12 @@ uv run aespa
 
 The UI is available at `http://127.0.0.1:8000` by default.
 
+Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
+
+If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
+
+This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust as needed:
@@ -50,15 +85,11 @@ If you don't do this, it will use the values above as the default.
 
 ## LLM Configuration
 
-Open the app, go to **LLM Settings**, and configure one of:
+Open the app, go to **LLM Settings**, and configure:
 
-- **Anthropic** — requires an Anthropic API key
-- **OpenAI** — requires an OpenAI API key
-- **Google** - requires a Google API key
-- **OpenAI-compatible** — for local models via LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`); no API key required
-- **OpenRouter** — requires an OpenRouter API key (`sk-or-v1-...`) and an OpenRouter model id, such as a model marked free in their catalog
+- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and one or more model names. Built-in formats include Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Converse, Azure OpenAI, and Azure AI Foundry. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
+- **Profiles** — named runtime choices that select a provider and one model from that provider's configured model list. Runs can use the system default profile or a specific profile.
 
-OpenRouter can also be configured through **OpenAI-compatible** by setting the base URL to `https://openrouter.ai/api/v1`, entering your OpenRouter API key, and using an exact OpenRouter model id.
 
 ## Use
 Landing page:
@@ -70,30 +101,44 @@ Site test runs:
 Site setup:
 ![Screenshot](docs/images/sitesetup.png)
 
-Crawler:
-![Screenshot](docs/images/crawler.png)
+Site Map:
+![Screenshot](docs/images/sitemap.png)
 
-Scan in progress:
-![Screenshot](docs/images/scanprogress.png)
+Intelligence Log (populated by crawler and scanners):
+![Screenshot](docs/images/intelligence.png)
+
+A.L.I.C.E chat:
+![Screenshot](docs/images/alice.png)
+
+Dynamic scan in progress:
+![Screenshot](docs/images/agentstatus.png)
+
+Task Graph used by the dynamic scan:
+![Screenshot](docs/images/taskgraph.png)
+
+Attack Surface
+![Screenshot](docs/images/attacksurface.png)
 
 Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
 
 Findings
-![Screenshot](docs/images/finding.png)
+![Screenshot](docs/images/findings.png)
 
+API Setup
+![Screenshot](docs/images/apisetup.png)
 
-## Implementation details
+Parsed API documentation
+![Screenshot](docs/images/apispecparsed.png)
 
-**Crawler/Site Map**
-* The crawler works by submitting the contents of the page to an LLM and asking it where to visit next. 
-* Multi-user crawling works by having multiple headless Chromium browsers via Playwright crawl at once, and matching page URLs. (this is going to be an issue for SPA apps which don't update the URL)
+SAST Scan-based Lead Detection
+![Screenshot](docs/images/sastleads.png)
 
-**Scan** 
-* This works by grabbing auth tokens from each user via Playwright then the structure of pages from the site map, plus the information collected (i.e. uses authentication, has object references, takes user input etc) are sent to the LLM to determine what should be tested. The LLM generates HTTP probes in JSON format, which are then interpreted back to HTTP requests and sent by HTTPX. The responses are sent back to the LLM to determine whether there's a finding here.
+Structured Workprogram for API Scanning
+![Screenshot](docs/images/apiworkprogram.png)
+
+API Scan Findings
+![Screenshot](docs/images/apifindings.png)
 
 ## Recommended models
-* Qwen3.6-35b-A3b (Q3)
-* Qwen3.6-27b (q3_xxs)
-* Qwen3-coder-30b
-
+* Claude Sonnet 4.6 - set output token cap to 60000

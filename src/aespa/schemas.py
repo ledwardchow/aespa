@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -21,6 +21,9 @@ class CredentialIn(BaseModel):
     password: str = Field(min_length=1)
     label: str | None = None
     login_url: HttpUrl | None = None
+    # Advanced auth
+    auth_mode: str = "auto"
+    totp_seed: str | None = None          # base32 TOTP secret; stored write-only
 
 
 class CredentialOut(BaseModel):
@@ -31,6 +34,8 @@ class CredentialOut(BaseModel):
     password: str
     label: str | None = None
     login_url: str | None = None
+    auth_mode: str = "auto"
+    # totp_seed is intentionally excluded (write-only)
 
 
 class SiteBase(BaseModel):
@@ -41,6 +46,7 @@ class SiteBase(BaseModel):
     requires_auth: bool = False
     login_url: HttpUrl | None = None
     notes: str | None = None
+    scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
@@ -80,6 +86,7 @@ class SiteSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     credential_count: int
+    scope_hosts: list[str] = Field(default_factory=list)
 
 
 class SiteDetail(BaseModel):
@@ -94,11 +101,232 @@ class SiteDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+# ── API Collection schemas ────────────────────────────────────────────────
+
+class ApiCollectionBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    base_url: HttpUrl
+    description: str | None = None
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionCreate(ApiCollectionBase):
+    pass
+
+
+class ApiCollectionUpdate(ApiCollectionBase):
+    """Same shape as create; PUT replaces the full record."""
+
+
+class ApiCollectionSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    endpoint_count: int = 0
+    document_count: int = 0
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+
+
+class ApiCollectionDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    base_url: str
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+    servers: list[str] = Field(default_factory=list)
+    scope_hosts: list[str] = Field(default_factory=list)
+    readiness_json: str | None = None  # raw JSON; frontend parses it
+
+
+class ApiDocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    filename: str
+    doc_type: str
+    content_type: str | None
+    size_bytes: int
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+
+class ApiEndpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    source_doc_id: int | None
+    method: str
+    path: str
+    base_url: str | None
+    operation_id: str | None
+    summary: str | None
+    parameters_json: str
+    request_body_schema_json: str
+    security_json: str
+    auth_required: bool
+    tags_json: str
+    sample_request_json: str
+    in_scope: bool
+    created_at: datetime
+    # Slice 4 — readiness assessment
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str  # JSON list of gap strings
+
+
+class ApiCredentialOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    scheme: str
+    name: str
+    # value intentionally omitted from output schema
+    label: str | None
+    scope: str
+    endpoint_id: int | None
+    auth_endpoint: str | None  # set when scheme == "login"
+    created_at: datetime
+
+
+class ApiCredentialCreate(BaseModel):
+    scheme: str = "bearer"
+    name: str = "Authorization"
+    value: str
+    label: str | None = None
+    scope: str = "global"
+    endpoint_id: int | None = None
+    auth_endpoint: str | None = None  # set when scheme == "login"
+
+
+# ── API Test Run schemas ──────────────────────────────────────────────────────
+
+class ApiTestRunCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = None        # auto-generated if omitted
+    llm_config_id: int | None = None
+    coverage_mode: str = "track"   # track|enforce
+
+
+class ApiTestRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    name: str
+    status: str
+    coverage_mode: str
+    llm_config_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ── Slice 7 — Coverage matrix schemas ────────────────────────────────────────
+
+class ApiEndpointTestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    api_test_run_id: int
+    endpoint_id: int
+    owasp_api_category: str
+    status: str
+    skip_reason: str | None
+    finding_ids_json: str
+    last_updated: datetime
+
+
+class ApiCoverageEndpointRow(BaseModel):
+    """One endpoint row in the coverage matrix."""
+    endpoint_id: int
+    method: str
+    path: str
+    auth_required: bool
+    prereq_can_test: bool
+    prereq_can_test_auth: bool
+    prereq_notes: str          # JSON list of gap strings
+    cells: dict[str, dict]     # owasp_api_category → {status, finding_ids}
+
+
+class ApiCoverageMatrixOut(BaseModel):
+    """Full coverage matrix for one ApiTestRun."""
+    run_id: int
+    coverage_mode: str
+    categories: list[str]      # ordered API1..API10
+    endpoints: list[ApiCoverageEndpointRow]
+    totals: dict[str, int]     # status → count across all cells
+
+
+# ── SAST schemas ──────────────────────────────────────────────────────────────
+
+class SastRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int
+    document_id: int | None
+    name: str
+    status: str
+    triggered_by_run_type: str | None
+    triggered_by_run_id: int | None
+    llm_config_id: int | None
+    leads_count: int
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScanLeadOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    collection_id: int | None
+    producer_run_type: str
+    producer_run_id: int
+    source: str
+    category: str
+    severity: str
+    confidence: float
+    title: str
+    description: str
+    location: str
+    evidence: str
+    note: str
+    status: str
+    investigated_by_run_type: str | None
+    investigated_by_run_id: int | None
+    linked_finding_id: int | None
+    created_at: datetime
+    updated_at: datetime
 
 
 # ── LLM config schemas ────────────────────────────────────────────────────
 
-LLMProviderLiteral = Literal[
+LLMProviderAPILiteral = Literal[
     "anthropic",
     "openai",
     "openai_compatible",
@@ -107,6 +335,8 @@ LLMProviderLiteral = Literal[
     "bedrock",
     "azure_openai",
     "azure_foundry",
+    "azure_foundry_openai",
+    "azure_foundry_anthropic",
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
@@ -142,12 +372,8 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-flash",
     ],
     "bedrock": [
-        "anthropic.claude-3-7-sonnet-20250219-v1:0",
-        "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "anthropic.claude-3-5-haiku-20241022-v1:0",
-        "amazon.nova-pro-v1:0",
-        "amazon.nova-lite-v1:0",
-        "meta.llama3-3-70b-instruct-v1:0",
+        "global.anthropic.claude-sonnet-4-6",
+        "global.anthropic.claude-opus-4-7",
     ],
     "azure_openai": [
         "gpt-4o",
@@ -158,55 +384,107 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "o4-mini",
     ],
     "azure_foundry": [
+        "gpt-4o",
+        "gpt-4.1",
+        "o3-mini",
+        "DeepSeek-R1",
         "Meta-Llama-3.3-70B-Instruct",
         "Meta-Llama-3.1-70B-Instruct",
         "Mistral-large-2411",
         "Phi-4",
-        "DeepSeek-R1",
+    ],
+    "azure_foundry_openai": [
         "gpt-4o",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "o3",
         "o3-mini",
+        "o4-mini",
+        "DeepSeek-R1",
+        "Meta-Llama-3.3-70B-Instruct",
+        "Mistral-large-2411",
+        "Phi-4",
+    ],
+    "azure_foundry_anthropic": [
+        "claude-sonnet-4-5",
+        "claude-opus-4-1",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
     ],
 }
+
+
+class LLMProviderConfigIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(default="Default Provider", min_length=1, max_length=120)
+    api_format: LLMProviderAPILiteral = "anthropic"
+    base_url: str | None = None
+    models: list[str] = Field(default_factory=list, min_length=1)
+    api_key: str | None = None
+    max_tpm: int | None = Field(default=None, ge=1)
+    max_rpm: int | None = Field(default=None, ge=1)
+
+    @field_validator("models")
+    @classmethod
+    def _validate_models(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for model in v:
+            model = model.strip()
+            if not model:
+                continue
+            key = model.casefold()
+            if key not in seen:
+                cleaned.append(model)
+                seen.add(key)
+        if not cleaned:
+            raise ValueError("at least one model name is required")
+        return cleaned
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_provider_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v
+
+
+class LLMProviderConfigOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    api_format: str
+    base_url: str | None
+    models: list[str] = Field(default_factory=list)
+    api_key: str | None
+    max_tpm: int | None = None
+    max_rpm: int | None = None
+    updated_at: datetime
+
 
 
 class LLMConfigIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     name: str = Field(default="Default", min_length=1, max_length=120)
-    provider: LLMProviderLiteral = "anthropic"
-    api_key: str | None = None
-    base_url: str | None = None
+    provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=4096, ge=1, le=32768)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=70000, ge=1, le=256000)
+    temperature: Optional[float] = Field(default=None)
     use_vision: bool = False
+    force_tool_choice: bool = True
 
-    @model_validator(mode="after")
-    def _check_provider_fields(self) -> "LLMConfigIn":
-        _needs_key = (
-            "anthropic",
-            "openai",
-            "openrouter",
-            "google",
-            "bedrock",
-            "azure_openai",
-            "azure_foundry",
-        )
-        _needs_url = ("openai_compatible", "bedrock", "azure_openai", "azure_foundry")
-        if self.provider in _needs_key and not self.api_key:
-            raise ValueError(f"api_key is required for provider '{self.provider}'")
-        if self.provider in _needs_url and not self.base_url:
-            raise ValueError(f"base_url is required for provider '{self.provider}'")
-        return self
-
-    @field_validator("base_url")
+    @field_validator("temperature")
     @classmethod
-    def _validate_base_url(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        v = v.rstrip("/")
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("base_url must start with http:// or https://")
+    def _validate_temperature(cls, v: float | None) -> float | None:
+        if v is not None and not (0.0 <= v <= 2.0):
+            raise ValueError("temperature must be between 0.0 and 2.0")
         return v
 
 
@@ -216,13 +494,16 @@ class LLMConfigOut(BaseModel):
     id: int
     name: str
     is_active: bool
+    provider_id: int | None = None
+    provider_name: str | None = None
     provider: str
     api_key: str | None
     base_url: str | None
     model: str
     max_tokens: int
-    temperature: float
+    temperature: Optional[float] = None
     use_vision: bool
+    force_tool_choice: bool
     updated_at: datetime
 
 
@@ -245,8 +526,9 @@ class ScannerPolicyBase(BaseModel):
 
     scan_mode: ScanModeLiteral = "safe_active"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
+    thinking_max_steps: int = Field(default=120, ge=1, le=1000)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
-    min_delay_s: float = Field(default=0.2, ge=0.0, le=60.0)
+    min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
     response_body_read_limit_bytes: int = Field(default=512 * 1024, ge=1024, le=10 * 1024 * 1024)
     allowed_schemes: list[SchemeLiteral] = Field(default_factory=lambda: ["http", "https"], min_length=1)
@@ -315,6 +597,215 @@ class RunScannerPolicyOut(ScannerPolicyBase):
     updated_at: datetime | None = None
 
 
+class UpstreamProxyConfigBase(BaseModel):
+    proxy_url: str | None = Field(default=None, max_length=500)
+    proxy_scanner: bool = False
+    proxy_llm: bool = False
+
+    @field_validator("proxy_url")
+    @classmethod
+    def _normalize_proxy_url(cls, v):
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("proxy_url must start with http:// or https://")
+        return v
+
+
+class UpstreamProxyConfigIn(UpstreamProxyConfigBase):
+    pass
+
+
+class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
+    updated_at: datetime
+
+
+class BurpRestApiConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = False
+    api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
+    api_key: str | None = None
+    scan_configuration_name: str | None = Field(
+        default="Audit checks - all except time-based detection methods",
+        max_length=200,
+    )
+    scan_sqli: bool = True
+    scan_xss: bool = True
+    scan_command_injection: bool = True
+    scan_path_traversal: bool = True
+    scan_ssrf: bool = True
+    scan_xxe: bool = True
+    scan_ssti: bool = True
+
+    @field_validator("api_url")
+    @classmethod
+    def _normalize_api_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("api_url must start with http:// or https://")
+        return v
+
+    @field_validator("scan_configuration_name")
+    @classmethod
+    def _normalize_scan_configuration_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class BurpRestApiConfigIn(BurpRestApiConfigBase):
+    pass
+
+
+class BurpRestApiConfigOut(BurpRestApiConfigBase):
+    updated_at: datetime
+
+
+# ── Specialist agent config schemas ──────────────────────────────────────────
+
+class SpecialistAgentConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = True
+    max_concurrent: int = Field(default=5, ge=0, le=20)
+    max_steps: int = Field(default=30, ge=1, le=200)
+    min_priority: int = Field(default=7, ge=1, le=10)
+    dispatch_idor: bool = True
+    dispatch_auth_bypass: bool = True
+    dispatch_sqli: bool = True
+    dispatch_xss: bool = True
+    dispatch_business_logic: bool = True
+    dispatch_ssrf: bool = True
+    dispatch_path_traversal: bool = True
+    dispatch_cors: bool = False
+    dispatch_crypto: bool = True
+    dispatch_config: bool = False
+    dispatch_file_upload: bool = True
+    trigger_specialist_on_burp: bool = False
+
+
+class SpecialistAgentConfigIn(SpecialistAgentConfigBase):
+    pass
+
+
+class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
+    updated_at: datetime
+
+
+# ── Adversarial Validator config schemas ──────────────────────────────────────
+
+class ValidatorConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    enabled: bool = True
+    max_steps: int = Field(default=20, ge=1, le=50)
+    min_severity: str = Field(default="low", pattern=r"^(critical|high|medium|low|info)$")
+    auto_validate_inline: bool = True
+    require_concrete_disproof: bool = True
+
+
+class ValidatorConfigIn(ValidatorConfigBase):
+    pass
+
+
+class ValidatorConfigOut(ValidatorConfigBase):
+    updated_at: datetime
+
+
+# ── Global HTTP header config schemas ─────────────────────────────────────────
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    header_name: str | None = Field(default=None, max_length=200)
+    header_value: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("header_name")
+    @classmethod
+    def _normalize_header_name(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
+            raise ValueError(f"Invalid HTTP header name '{v}'")
+        return v
+
+    @field_validator("header_value")
+    @classmethod
+    def _normalize_header_value(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
+
+
+class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):
+    pass
+
+
+class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
+    updated_at: datetime
+
+
+# ── Reporting debug config schemas ───────────────────────────────────────────
+
+class ReportingDebugConfigBase(BaseModel):
+    capture_enabled: bool = False
+    panel_enabled: bool = False
+
+
+class ReportingDebugConfigIn(ReportingDebugConfigBase):
+    pass
+
+
+class ReportingDebugConfigOut(ReportingDebugConfigBase):
+    updated_at: datetime
+
+
+# ── LLM config export / import schemas ───────────────────────────────────────
+
+class LLMExportProviderItem(BaseModel):
+    name: str
+    api_format: str
+    base_url: str | None = None
+    models: list[str]
+    api_key: str | None = None
+    max_tpm: int | None = None
+    max_rpm: int | None = None
+
+
+
+class LLMExportProfileItem(BaseModel):
+    name: str
+    provider_name: str
+    model: str
+    max_tokens: int = 70000
+    temperature: Optional[float] = None
+    use_vision: bool = False
+    force_tool_choice: bool = True
+    is_active: bool = False
+
+
+class LLMConfigExport(BaseModel):
+    version: int = 1
+    exported_at: datetime
+    providers: list[LLMExportProviderItem]
+    profiles: list[LLMExportProfileItem]
+
+
+class LLMImportResult(BaseModel):
+    providers_created: int = 0
+    providers_updated: int = 0
+    profiles_created: int = 0
+    profiles_updated: int = 0
+
+
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 class TestRunCreate(BaseModel):
@@ -355,6 +846,7 @@ class TestRunSummary(BaseModel):
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
+    thinking_status: str = "idle"
     pages_discovered: int
     current_url: str | None
     created_at: datetime
@@ -366,6 +858,7 @@ class TestRunSummary(BaseModel):
     llm_config_id: int | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
+    scope_hosts: list[str] = Field(default_factory=list)
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
@@ -376,6 +869,24 @@ class TestRunSummary(BaseModel):
         if isinstance(v, str):
             return _json.loads(v)
         return v
+
+
+class ActiveJobSummary(BaseModel):
+    run_id: int
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
+    run_name: str
+    job_type: str
+    status: str
+    run_type: str = "web"              # "web" | "api"
+    collection_id: Optional[int] = None
+    collection_name: Optional[str] = None
+    pages_done: int | None = None
+    total_pages: int | None = None
+    findings_count: int | None = None
+    current_url: str | None = None
+    started_at: datetime | None = None
+    created_at: datetime
 
 
 class ScopeUpdate(BaseModel):
@@ -431,6 +942,129 @@ class GraphData(BaseModel):
     links: list[GraphLink]
 
 
+class TargetIntelItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    kind: str
+    key: str
+    value: str
+    url: str | None
+    method: str | None
+    source: str
+    confidence: float
+    evidence: str
+    item_metadata: dict = Field(default_factory=dict)
+    discovered_at: datetime
+
+    @field_validator("item_metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                return _json.loads(v)
+            except Exception:
+                return {}
+        return v
+
+
+class TargetIntelSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    items: list[TargetIntelItemOut] = Field(default_factory=list)
+
+
+class ScannerSessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    label: str
+    kind: str
+    username: str | None
+    credential_id: int | None
+    source: str
+    cookie_names: list[str] = Field(default_factory=list)
+    header_names: list[str] = Field(default_factory=list)
+    token_hint: str | None
+    session_metadata: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScannerSessionSummary(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    sessions: list[ScannerSessionOut] = Field(default_factory=list)
+
+
+class ScannerSessionUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    is_active: bool | None = None
+
+
+class PentestHypothesisOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    title: str
+    description: str
+    attack_area: str
+    owasp_category: str
+    status: str
+    priority: int
+    confidence: float
+    rationale: str
+    created_from: str
+    related_intel_ids: list[int] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("related_intel_ids", mode="before")
+    @classmethod
+    def _coerce_related_intel_ids(cls, v):
+        import json as _json
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                parsed = _json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return v
+
+
+class PentestTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    test_run_id: int
+    hypothesis_id: int | None
+    title: str
+    description: str
+    target_url: str
+    method: str
+    task_type: str
+    status: str
+    priority: int
+    evidence: str
+    result_summary: str
+    last_action_step: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PentestTaskGraphOut(BaseModel):
+    counts: dict[str, int] = Field(default_factory=dict)
+    hypotheses: list[PentestHypothesisOut] = Field(default_factory=list)
+    tasks: list[PentestTaskOut] = Field(default_factory=list)
+
+
 class TrafficEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -453,7 +1087,7 @@ class ScanFindingOut(BaseModel):
 
     id: int
     test_run_id: int
-    page_id: int
+    page_id: int | None
     owasp_category: str
     severity: str
     title: str
@@ -467,10 +1101,61 @@ class ScanFindingOut(BaseModel):
     evidence: str
     request_evidence: str = ""
     response_evidence: str = ""
+    evidence_json: str = "[]"
+    evidence_items: list[dict] = Field(default_factory=list)
     screenshot_b64: str | None
+    finding_source: str = "unknown"
     validation_status: str
     validation_note: str | None
+    merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
+    api_test_run_id: int | None = None
+    owasp_api_category: str | None = None
     created_at: datetime
+
+
+class ScanFindingImportIn(BaseModel):
+    owasp_category: str = "A00"
+    severity: str = "info"
+    title: str
+    description: str = ""
+    impact: str = ""
+    likelihood: str = ""
+    recommendation: str = ""
+    cvss_score: float = 0.0
+    cvss_vector: str = ""
+    affected_url: str = ""
+    evidence: str = ""
+    request_evidence: str = ""
+    response_evidence: str = ""
+    evidence_items: list[dict] = Field(default_factory=list)
+    finding_source: str = "manual_import"
+    validation_status: str = "unvalidated"
+    validation_note: str | None = None
+    merged_instances: str = "[]"
+    poc_command: str = ""
+    poc_setup: str = ""
+
+
+class ScanFindingImportResult(BaseModel):
+    imported: int
+    findings: list[ScanFindingOut]
+
+
+class ScanFindingDeduplicationGroup(BaseModel):
+    kept_id: int
+    removed_ids: list[int]
+    target: str
+    title: str
+
+
+class ScanFindingDeduplicationResult(BaseModel):
+    total_before: int
+    total_after: int
+    removed: int
+    llm_used: bool = False
+    groups: list[ScanFindingDeduplicationGroup]
 
 
 class ValidationStatusOut(BaseModel):
@@ -503,3 +1188,12 @@ class ScanStatusOut(BaseModel):
     pages_done: int
     findings_count: int
     status: str   # idle | running | complete | stopped | failed
+
+
+class ScanCheckpointStatusOut(BaseModel):
+    """Returned by GET /thinking-scan/checkpoint to tell the UI whether a
+    resumable checkpoint exists for this run."""
+
+    exists: bool
+    step_count: int | None = None
+    updated_at: datetime | None = None
