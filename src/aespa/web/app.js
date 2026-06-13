@@ -13,6 +13,63 @@ const api = {
   createSite:       (b)           => req("/api/sites",         { method:"POST",   body:b }),
   updateSite:       (id,b)        => req(`/api/sites/${id}`,   { method:"PUT",    body:b }),
   deleteSite:       (id)          => req(`/api/sites/${id}`,   { method:"DELETE" }),
+  importSite:       (text)        => fetch("/api/sites/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { const d = r.ok ? await r.json() : (() => { throw new Error(`Import failed: ${r.status}`); })(); return d; }),
+  listApiCollections:  ()         => req("/api/api-collections"),
+  getApiCollection:    (id)       => req(`/api/api-collections/${id}`),
+  createApiCollection: (b)        => req("/api/api-collections",       { method:"POST",   body:b }),
+  updateApiCollection: (id,b)     => req(`/api/api-collections/${id}`, { method:"PUT",    body:b }),
+  deleteApiCollection: (id)       => req(`/api/api-collections/${id}`, { method:"DELETE" }),
+  listApiDocuments:    (id)       => req(`/api/api-collections/${id}/documents`),
+  uploadApiDocuments:  (id,files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f);
+    return fetch(`/api/api-collections/${id}/documents`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  downloadApiDocument: (id,docId) => { window.location.href = `/api/api-collections/${id}/documents/${docId}/download`; },
+  deleteApiDocument:   (id,docId) => req(`/api/api-collections/${id}/documents/${docId}`, { method:"DELETE" }),
+  parseApiDocument:    (id,docId) => req(`/api/api-collections/${id}/documents/${docId}/parse`, { method:"POST" }),
+  listApiEndpoints:    (id)       => req(`/api/api-collections/${id}/endpoints`),
+  patchEndpointScope:  (id,eid,b) => req(`/api/api-collections/${id}/endpoints/${eid}/scope`, { method:"PATCH", body:b }),
+  listApiCredentials:  (id)       => req(`/api/api-collections/${id}/credentials`),
+  createApiCredential: (id,b)     => req(`/api/api-collections/${id}/credentials`, { method:"POST", body:b }),
+  deleteApiCredential: (id,cid)   => req(`/api/api-collections/${id}/credentials/${cid}`, { method:"DELETE" }),
+  getApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`),
+  runApiReadiness:     (id)       => req(`/api/api-collections/${id}/readiness`, { method:"POST" }),
+  purgeCollectionData: (id)       => req(`/api/api-collections/${id}/data`, { method:"DELETE" }),
+  listApiRuns:         (id)       => req(`/api/api-collections/${id}/test-runs`),
+  createApiRun:        (id,b)     => req(`/api/api-collections/${id}/test-runs`, { method:"POST", body:b }),
+  getApiRun:           (id)       => req(`/api/api-test-runs/${id}`),
+  deleteApiRun:        (id)       => req(`/api/api-test-runs/${id}`, { method:"DELETE" }),
+  getApiAliceSessions: (id)       => req(`/api/api-test-runs/${id}/alice/sessions`),
+  saveApiAliceSessions:(id,b)     => req(`/api/api-test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getApiAliceStatus:   (id)       => req(`/api/api-test-runs/${id}/alice/status`),
+  startApiAliceRun:    (id,b)     => req(`/api/api-test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopApiAliceRun:     (id)       => req(`/api/api-test-runs/${id}/alice/run`,      { method:"DELETE" }),
+  getApiAgentLog:      (id)       => req(`/api/api-test-runs/${id}/agent-log`),
+  clearApiAgentLog:    (id)       => req(`/api/api-test-runs/${id}/agent-log`,     { method:"DELETE" }),
+  startApiScan:        (id, coverageMode) => req(`/api/api-test-runs/${id}/scan/start`, { method:"POST", body: coverageMode ? { coverage_mode: coverageMode } : undefined }),
+  stopApiScan:         (id)       => req(`/api/api-test-runs/${id}/scan/stop`,     { method:"POST" }),
+  getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
+  getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
+  clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
+  getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
+  getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
+  getApiCoverageMatrix:(id)       => req(`/api/api-test-runs/${id}/coverage`),
+  getApiRunLeads:      (id)       => req(`/api/api-test-runs/${id}/leads`),
+  // SAST runs
+  listSastRuns:        (collId)   => req(`/api/api-collections/${collId}/sast-runs`),
+  listAllSastRuns:     ()         => req(`/api/sast-runs`),
+  getSastScanLog:      (id)       => req(`/api/sast-runs/${id}/scan-log`),
+  createSastRun:       (collId,b) => req(`/api/api-collections/${collId}/sast-runs`, { method:"POST", body:b }),
+  getSastRun:          (id)       => req(`/api/sast-runs/${id}`),
+  deleteSastRun:       (id)       => req(`/api/sast-runs/${id}`, { method:"DELETE" }),
+  startSastScan:       (id)       => req(`/api/sast-runs/${id}/scan/start`, { method:"POST" }),
+  stopSastScan:        (id)       => req(`/api/sast-runs/${id}/scan/stop`,  { method:"POST" }),
+  getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
+  getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
+  getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -20,9 +77,42 @@ const api = {
   updateLLMProfile: (id,b)        => req(`/api/settings/llm/profiles/${id}`, { method:"PUT", body:b }),
   activateLLMProfile: (id)        => req(`/api/settings/llm/profiles/${id}/activate`, { method:"POST" }),
   deleteLLMProfile: (id)          => req(`/api/settings/llm/profiles/${id}`, { method:"DELETE" }),
+  listLLMProviders: ()            => req("/api/settings/llm/providers"),
+  createLLMProvider: (b)          => req("/api/settings/llm/providers", { method:"POST", body:b }),
+  updateLLMProvider: (id,b)       => req(`/api/settings/llm/providers/${id}`, { method:"PUT", body:b }),
+  deleteLLMProvider: (id)         => req(`/api/settings/llm/providers/${id}`, { method:"DELETE" }),
+  exportLLMConfig:  ()            => req("/api/settings/llm/export"),
+  importLLMConfig:  (b)           => req("/api/settings/llm/import", { method:"POST", body:b }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
+  getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),
+  upsertBurpRestApiConfig: (b)    => req("/api/settings/burp-rest-api", { method:"PUT", body:b }),
+  testBurpConnection: ()          => req("/api/settings/burp-rest-api/test-connection", { method:"POST" }),
+  getUpstreamProxy: ()            => req("/api/settings/upstream-proxy"),
+  upsertUpstreamProxy: (b)        => req("/api/settings/upstream-proxy", { method:"PUT", body:b }),
+  getSpecialistAgentConfig: ()    => req("/api/settings/specialist-agent-config"),
+  upsertSpecialistAgentConfig:(b) => req("/api/settings/specialist-agent-config", { method:"PUT", body:b }),
+  getAdversarialValidatorConfig: ()    => req("/api/settings/adversarial-validator-config"),
+  upsertAdversarialValidatorConfig:(b) => req("/api/settings/adversarial-validator-config", { method:"PUT", body:b }),
+  getGlobalHttpHeader: ()         => req("/api/settings/global-http-header"),
+  upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
+  getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
+  upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),
+  listReportingDebugPrompts:()    => req("/api/reporting-debug/prompts"),
+  saveReportingDebugPrompt:(key,b)=> req(`/api/reporting-debug/prompt?key=${encodeURIComponent(key)}`, { method:"PUT", body:b }),
+  resetReportingDebugPrompt:(key) => req(`/api/reporting-debug/prompt/reset?key=${encodeURIComponent(key)}`, { method:"POST" }),
+  listReportingPromptVersions:(key)=> req(`/api/reporting-debug/prompt-versions?key=${encodeURIComponent(key)}`),
+  createReportingPromptVersion:(b)=> req("/api/reporting-debug/prompt-versions", { method:"POST", body:b }),
+  updateReportingPromptVersion:(id,b)=> req(`/api/reporting-debug/prompt-versions/${id}`, { method:"PUT", body:b }),
+  deleteReportingPromptVersion:(id)=> req(`/api/reporting-debug/prompt-versions/${id}`, { method:"DELETE" }),
+  listReportingCaptures: ()       => req("/api/reporting-debug/captures"),
+  getReportingCapture:(id)         => req(`/api/reporting-debug/captures/${id}`),
+  replayReportingCapture:(id,b={})=> req(`/api/reporting-debug/captures/${id}/replay`, { method:"POST", body:b }),
+  getReportingReplay:(id)         => req(`/api/reporting-debug/replays/${id}`),
+  listReportingReplays:()         => req("/api/reporting-debug/replays"),
+  listActiveJobs:    ()            => req("/api/test-runs/active"),
   listRuns:         (siteId)      => req(`/api/sites/${siteId}/test-runs`),
   createRun:        (siteId,b)    => req(`/api/sites/${siteId}/test-runs`, { method:"POST", body:b }),
   getRun:           (id)          => req(`/api/test-runs/${id}`),
@@ -30,30 +120,52 @@ const api = {
   startRun:         (id)          => req(`/api/test-runs/${id}/start`,   { method:"POST" }),
   stopRun:          (id)          => req(`/api/test-runs/${id}/stop`,    { method:"POST" }),
   restartRun:       (id)          => req(`/api/test-runs/${id}/restart`, { method:"POST" }),
+  clearCrawl:       (id)          => req(`/api/test-runs/${id}/crawl/clear`, { method:"POST" }),
   getGraph:         (id)          => req(`/api/test-runs/${id}/graph`),
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
   getPageViews:     (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}/views`),
+  getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
+  getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
+  updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
+  seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
+  getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
+  updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
-  startScan:        (id)          => req(`/api/test-runs/${id}/scan/start`,               { method:"POST" }),
   startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  resumeThinkingScan:(id)         => req(`/api/test-runs/${id}/thinking-scan/resume`,     { method:"POST" }),
   stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
-  stopScan:         (id)          => req(`/api/test-runs/${id}/scan/stop`,                { method:"POST" }),
-  getScanStatus:    (id)          => req(`/api/test-runs/${id}/scan/status`),
+  getCheckpointStatus:(id)        => req(`/api/test-runs/${id}/thinking-scan/checkpoint`),
   getScanLog:        (id)          => req(`/api/test-runs/${id}/scan-log`),
+  getAgentLog:       (id)          => req(`/api/test-runs/${id}/agent-log`),
+  getTokenUsage:     (id)          => req(`/api/test-runs/${id}/token-usage`),
+  getAliceSessions:  (id)          => req(`/api/test-runs/${id}/alice/sessions`),
+  saveAliceSessions: (id, b)       => req(`/api/test-runs/${id}/alice/sessions`, { method:"PUT", body:b }),
+  getAliceStatus:    (id)          => req(`/api/test-runs/${id}/alice/status`),
+  startAliceRun:     (id, b)       => req(`/api/test-runs/${id}/alice/run`,      { method:"POST", body:b }),
+  stopAliceRun:      (id)          => req(`/api/test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
+  importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
+  deduplicateFindings:   (id)       => req(`/api/test-runs/${id}/findings/deduplicate`, { method:"POST" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
   getValidateStatus:     (id)       => req(`/api/test-runs/${id}/validate/status`),
-  scanPage:              (id,pgId)  => req(`/api/test-runs/${id}/pages/${pgId}/scan`,       { method:"POST" }),
   getTraffic:       (id,since)    => req(`/api/test-runs/${id}/traffic?since_id=${since||0}`),
-  clearTraffic:     (id)          => req(`/api/test-runs/${id}/traffic`, { method:"DELETE" }),
+  getTrafficCount:  (id)          => req(`/api/test-runs/${id}/traffic/count`),
+  clearTraffic:         (id)       => req(`/api/test-runs/${id}/traffic`,               { method:"DELETE" }),
+  clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
+  clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
+  clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
+  clearTaskGraph:       (id)       => req(`/api/test-runs/${id}/task-graph`,            { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
 };
 
@@ -95,9 +207,25 @@ function useRoute() {
   if ((m = hash.match(/^#\/sites\/(\d+)\/edit$/)))       return { name: "site-edit",   id: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)\/runs\/new$/)))  return { name: "run-new",     siteId: +m[1] };
   if ((m = hash.match(/^#\/sites\/(\d+)$/)))             return { name: "site-detail", id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/new$/)))                return { name: "api-new" };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/edit$/)))        return { name: "api-edit",    id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/files$/)))       return { name: "api-files",   id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)\/runs\/new$/)))   return { name: "api-run-new", id: +m[1] };
+  if ((m = hash.match(/^#\/apis\/(\d+)$/)))              return { name: "api-detail",  id: +m[1] };
+  if (hash === "#/apis")                                 return { name: "api-list" };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/api-runs\/(\d+)$/)))          return { name: "api-run-detail", id: +m[1] };
+  if (hash === "#/sast-runs")                                  return { name: "sast-list" };
+  if ((m = hash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/))) return { name: "sast-run-detail", id: +m[1], tab: m[2] };
+  if ((m = hash.match(/^#\/sast-runs\/(\d+)$/)))            return { name: "sast-run-detail", id: +m[1] };
+  if ((m = hash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))   return { name: "run-detail",  id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/runs\/(\d+)$/)))              return { name: "run-detail",  id: +m[1] };
+  if (hash === "#/active-jobs")                          return { name: "active-jobs" };
   if (hash === "#/settings")                             return { name: "settings" };
   if (hash === "#/scan-policy")                          return { name: "scan-policy" };
+  if (hash === "#/external-integrations")                return { name: "external-integrations" };
+  if (hash === "#/debug")                                return { name: "debug" };
+  if (hash === "#/reporting-debug")                      return { name: "reporting-debug" };
 
   return { name: "list" };
 }
@@ -133,8 +261,9 @@ const csv = (value, transform=(x)=>x) => String(value||"")
 const defaultPolicyForm = () => ({
   scan_mode:"safe_active",
   max_probes_per_page:50,
+  thinking_max_steps:120,
   request_timeout_s:10,
-  min_delay_s:0.2,
+  min_delay_s:0.05,
   max_request_body_bytes:65536,
   response_body_read_limit_bytes:524288,
   allowed_schemes:"http, https",
@@ -155,6 +284,7 @@ const policyToForm = (p) => {
     ...f,
     scan_mode:p.scan_mode || f.scan_mode,
     max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
+    thinking_max_steps:p.thinking_max_steps ?? f.thinking_max_steps,
     request_timeout_s:p.request_timeout_s ?? f.request_timeout_s,
     min_delay_s:p.min_delay_s ?? f.min_delay_s,
     max_request_body_bytes:p.max_request_body_bytes ?? f.max_request_body_bytes,
@@ -173,6 +303,7 @@ const policyToForm = (p) => {
 const policyPayload = (form) => ({
   scan_mode:form.scan_mode,
   max_probes_per_page:Number(form.max_probes_per_page),
+  thinking_max_steps:Number(form.thinking_max_steps),
   request_timeout_s:Number(form.request_timeout_s),
   min_delay_s:Number(form.min_delay_s),
   max_request_body_bytes:Number(form.max_request_body_bytes),
@@ -197,6 +328,11 @@ const IconSites = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fil
   <rect x="9" y="1" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="1" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
   <rect x="9" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+</svg>`;
+
+const IconApis = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M5 2.5 1.5 8 5 13.5M11 2.5 14.5 8 11 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9 3 7 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
 </svg>`;
 
 const IconSettings = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -225,49 +361,955 @@ const IconShield = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fi
   <path d="M8 1.5L2 4v4c0 3 2.5 5.5 6 6 3.5-.5 6-3 6-6V4L8 1.5z"
     stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
 </svg>`;
+const IconChevronLeft = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M9 2L4 7l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+const IconChevronRight = () => html`<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+  <path d="M5 2l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+const IconBug = () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <circle cx="8" cy="9" r="4" stroke="currentColor" stroke-width="1.4"/>
+  <path d="M6 5.5C6 4.4 6.9 3.5 8 3.5s2 .9 2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M4 7H2M12 7h2M4 10H2M12 10h2M5 13l-1.5 1.5M11 13l1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+</svg>`;
+
+const IconMessageSquare = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+</svg>`;
+const IconSend = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="22" y1="2" x2="11" y2="13"></line>
+  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+</svg>`;
+const IconBrain = () => html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2Z"/>
+  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2Z"/>
+</svg>`;
+
+
+
+// ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
+// Module-level singleton: keeps the stream reader loop alive even when the
+// TestRunDetail component unmounts (user navigates away). Subscribers
+// (React setState callbacks) are registered/deregistered as the component
+// mounts and unmounts. On re-mount, the component can re-subscribe and
+// immediately get the current live state.
+const aliceSessionStore = {};
+
+function getAliceSession(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  if (!aliceSessionStore[key]) {
+    aliceSessionStore[key] = {
+      active: false,
+      abortController: null,
+      thinkMsgId: null,
+      replyMsgId: null,
+      accumulatedThought: "",
+      accumulatedMessage: "",
+      stepData: {},
+      subscribers: new Set(),
+    };
+  }
+  return aliceSessionStore[key];
+}
+
+function aliceSessionSubscribe(runId, tabId, handlers) {
+  const session = getAliceSession(runId, tabId);
+  session.subscribers.add(handlers);
+  return () => session.subscribers.delete(handlers);
+}
+
+function aliceSessionAbort(runId, tabId) {
+  const key = `${runId}:${tabId}`;
+  const session = aliceSessionStore[key];
+  if (session?.abortController) {
+    session.abortController.abort();
+  }
+}
+
+const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
+  try {
+    localStorage.setItem(
+      `alice_recover_${runId}:${tabId}`,
+      JSON.stringify({ thinkMsgId, replyMsgId, thought, message })
+    );
+  } catch (_) {}
+};
+
+// Connect to /alice/stream?cursor=N and pump events through the session.
+// Called both for fresh sessions (cursor=0) and reconnects after a page refresh.
+async function aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor = 0, onFinish, onFail }) {
+  const session = getAliceSession(runId, tabId);
+  if (session.active) return;
+  session.active = true;
+  session.thinkMsgId = thinkMsgId;
+  session.replyMsgId = replyMsgId;
+  // Re-accumulate from cursor 0 on every connect so the totals are always correct.
+  session.accumulatedThought = "";
+  session.accumulatedMessage = "";
+  session.stepData = {};
+
+  const controller = new AbortController();
+  session.abortController = controller;
+
+  try {
+    const response = await fetch(
+      `/api/test-runs/${runId}/alice/stream?cursor=${cursor}`,
+      { signal: controller.signal }
+    );
+    if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(trimmed.slice(6));
+          if (event.type === "thinking_chunk" && event.delta)
+            session.accumulatedThought += event.delta;
+          else if (event.type === "message_chunk" && event.delta)
+            session.accumulatedMessage += event.delta;
+          else if (event.type === "done") {
+            if (event.thought) session.accumulatedThought = event.thought;
+            if (event.message) session.accumulatedMessage = event.message;
+          } else if (event.type === "step_llm_call") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            session.stepData[event.step].llmMessages = event.messages || [];
+          } else if (event.type === "step_tool_call") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            session.stepData[event.step].tools.push({ tool: event.tool, input: event.input, result: null });
+          } else if (event.type === "step_tool_result") {
+            if (!session.stepData[event.step]) session.stepData[event.step] = { llmMessages: [], tools: [] };
+            const tools = session.stepData[event.step].tools;
+            if (tools.length > 0 && tools[tools.length - 1].result === null) {
+              tools[tools.length - 1].result = event.result;
+            }
+          }
+          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId,
+            session.accumulatedThought, session.accumulatedMessage);
+          session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
+        } catch (_) {}
+      }
+    }
+
+    session.subscribers.forEach(h => h.onDone && h.onDone());
+    if (onFinish) onFinish();
+  } catch (err) {
+    session.subscribers.forEach(h => h.onError && h.onError(err));
+    if (onFail) onFail(err);
+  } finally {
+    session.active = false;
+    session.abortController = null;
+  }
+}
+
+// Start a new ALICE turn: POST to /alice/run (starts background task on server),
+// then open the event stream so the client receives events in real time.
+async function aliceSessionStart(runId, tabId, { userText, historyPayload, thinkMsgId, replyMsgId, onFinish, onFail }) {
+  // Seed recovery immediately so a fast refresh can find the message IDs.
+  _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, "", "");
+
+  try {
+    const resp = await fetch(`/api/test-runs/${runId}/alice/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: userText,
+        history: historyPayload,
+        tab_id: tabId,
+        think_msg_id: thinkMsgId,
+        reply_msg_id: replyMsgId,
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
+  } catch (err) {
+    if (onFail) onFail(err);
+    return;
+  }
+
+  await aliceSessionConnect(runId, tabId, { thinkMsgId, replyMsgId, cursor: 0, onFinish, onFail });
+}
+
+const parseToolArgs = (text) => {
+
+  const args = {};
+  const jsonMatch = text.match(/\{.*\}/s);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (_) {}
+  }
+  
+  // Extract key-value parameter pairs (e.g. url='http://...')
+  const kvRegex = /([a-zA-Z0-9_]+)\s*=\s*(['"][^'"]*['"]|[^,)]+)/g;
+  let match;
+  while ((match = kvRegex.exec(text)) !== null) {
+    let key = match[1];
+    let val = match[2].trim();
+    if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+      val = val.slice(1, -1);
+    }
+    args[key] = val;
+  }
+  return Object.keys(args).length > 0 ? args : null;
+};
+
+
+const parseAliceThinking = (text) => {
+  if (!text) return [];
+  
+  const blocks = [];
+  const lines = text.split("\n");
+  let currentParagraph = [];
+  let inCodeBlock = false;
+  let codeLang = "";
+  const toolCntByStep = {};  // track how many Executing tool lines seen per step
+  let codeContent = [];
+  
+  let inToolCall = false;
+  let toolCallContent = [];
+  let inToolResponse = false;
+  let toolResponseContent = [];
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    
+    // Code block transition
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        // End of code block
+        blocks.push({
+          type: "code",
+          lang: codeLang,
+          text: codeContent.join("\n")
+        });
+        inCodeBlock = false;
+        codeContent = [];
+      } else {
+        // Start of code block
+        // Flush existing paragraph first
+        if (currentParagraph.length > 0) {
+          blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+          currentParagraph = [];
+        }
+        inCodeBlock = true;
+        codeLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeContent.push(line);
+      continue;
+    }
+
+    // Tool Call tag handling (multi-line)
+    if (inToolCall) {
+      if (trimmed.includes("</tool_call>")) {
+        const parts = line.split("</tool_call>");
+        if (parts[0]) toolCallContent.push(parts[0]);
+        inToolCall = false;
+        
+        const rawText = toolCallContent.join("\n");
+        let toolName = "unknown";
+        let toolArgsText = rawText;
+        try {
+          const parsed = JSON.parse(rawText.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = rawText.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+        toolCallContent = [];
+      } else {
+        toolCallContent.push(line);
+      }
+      continue;
+    }
+
+    // Tool Response tag handling (multi-line)
+    if (inToolResponse) {
+      if (trimmed.includes("</tool_response>")) {
+        const parts = line.split("</tool_response>");
+        if (parts[0]) toolResponseContent.push(parts[0]);
+        inToolResponse = false;
+        
+        blocks.push({
+          type: "tool_response",
+          text: toolResponseContent.join("\n")
+        });
+        toolResponseContent = [];
+      } else {
+        toolResponseContent.push(line);
+      }
+      continue;
+    }
+
+    // Start of Tool Call block
+    if (trimmed.includes("<tool_call>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_call>")) {
+        const startIndex = line.indexOf("<tool_call>");
+        const endIndex = line.indexOf("</tool_call>");
+        const content = line.substring(startIndex + 11, endIndex);
+        
+        let toolName = "unknown";
+        let toolArgsText = content;
+        try {
+          const parsed = JSON.parse(content.trim());
+          if (parsed && parsed.name) {
+            toolName = parsed.name;
+            if (parsed.arguments) {
+              toolArgsText = JSON.stringify(parsed.arguments);
+            }
+          }
+        } catch (_) {
+          const nameMatch = content.match(/"name"\s*:\s*"([^"]+)"/);
+          if (nameMatch) toolName = nameMatch[1];
+        }
+        
+        blocks.push({
+          type: "tool_call",
+          tool: toolName,
+          text: toolArgsText
+        });
+      } else {
+        inToolCall = true;
+        const parts = line.split("<tool_call>");
+        if (parts[1]) toolCallContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Start of Tool Response block
+    if (trimmed.includes("<tool_response>")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      
+      if (trimmed.includes("</tool_response>")) {
+        const startIndex = line.indexOf("<tool_response>");
+        const endIndex = line.indexOf("</tool_response>");
+        const content = line.substring(startIndex + 15, endIndex);
+        
+        blocks.push({
+          type: "tool_response",
+          text: content
+        });
+      } else {
+        inToolResponse = true;
+        const parts = line.split("<tool_response>");
+        if (parts[1]) toolResponseContent.push(parts[1]);
+      }
+      continue;
+    }
+
+    // Step/Status logs
+    if (trimmed.startsWith("[A.L.I.C.E. Initializing]") || trimmed.includes("Mapped target sitemap")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "initializing", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Evaluating prompt scope compliance:") || trimmed.includes("In-Scope verified")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Scope compliance verified") || trimmed.includes("Starting agentic assessment loop")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "scope_check", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("Routing directives to the LLM agent model:") || trimmed.includes("Routing directives")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed });
+      continue;
+    }
+
+    // [Step N] Calling LLM...
+    const stepLLMMatch = trimmed.match(/^\[Step (\d+)\] Calling LLM/);
+    if (stepLLMMatch) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum: parseInt(stepLLMMatch[1]), stepKind: "llm_call" });
+      continue;
+    }
+
+    // [Step N] Executing tool: name  (must come before generic toolCallRegex)
+    const stepExecMatch = trimmed.match(/^\[Step (\d+)\] Executing tool:\s*(\S+)/);
+    if (stepExecMatch) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const stepNum = parseInt(stepExecMatch[1]);
+      if (!toolCntByStep[stepNum]) toolCntByStep[stepNum] = 0;
+      const toolIdx = toolCntByStep[stepNum]++;
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum, stepKind: "tool_call", toolName: stepExecMatch[2], toolIdx });
+      continue;
+    }
+
+    // [Step N] Tool result (N chars)
+    const stepResultMatch = trimmed.match(/^\[Step (\d+)\] Tool result/);
+    if (stepResultMatch) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const stepNum = parseInt(stepResultMatch[1]);
+      const toolIdx = (toolCntByStep[stepNum] || 1) - 1;
+      blocks.push({ type: "status", status: "routing", text: trimmed, stepNum, stepKind: "tool_result", toolIdx });
+      continue;
+    }
+
+    if (trimmed.startsWith("[A.L.I.C.E. Boundary Violation Alert]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "danger", title: "Boundary Violation", text: trimmed });
+      continue;
+    }
+
+    if (trimmed.startsWith("[ALICE Error]")) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({ type: "alert", level: "error", title: "Error", text: trimmed });
+      continue;
+    }
+
+    // Generic tool execution detection (non-step-prefixed lines)
+    const toolCallRegex = /(?:Calling|Invoking|Executing)\s+tool:?\s+([a-zA-Z0-9_]+)|(?:tool_call|toolCall):\s*([a-zA-Z0-9_]+)/i;
+    const match = trimmed.match(toolCallRegex);
+    if (match) {
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      const toolName = match[1] || match[2];
+      blocks.push({ type: "tool_call", tool: toolName, text: trimmed });
+      continue;
+    }
+
+    // Standard text line
+    if (trimmed !== "") {
+      currentParagraph.push(line);
+    } else if (currentParagraph.length > 0) {
+      blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+      currentParagraph = [];
+    }
+  }
+
+  // Flush remaining paragraphs or code blocks
+  if (inCodeBlock && codeContent.length > 0) {
+    blocks.push({ type: "code", lang: codeLang, text: codeContent.join("\n") });
+  } else if (inToolCall && toolCallContent.length > 0) {
+    blocks.push({ type: "tool_call", tool: "unknown", text: toolCallContent.join("\n") });
+  } else if (inToolResponse && toolResponseContent.length > 0) {
+    blocks.push({ type: "tool_response", text: toolResponseContent.join("\n") });
+  } else if (currentParagraph.length > 0) {
+    blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+  }
+
+  return blocks;
+};
+
+
+const renderMarkdown = (text) => {
+  if (!text) return "";
+  if (typeof text !== "string") text = markdownText(text);
+  if (!text) return "";
+
+  const lines = text.split("\n");
+  const elements = [];
+  let inList = false;
+  let listItems = [];
+  let codeBlockContent = [];
+  let inCodeBlock = false;
+  let codeBlockLang = "";
+
+  const renderTextWithFormatting = (txt) => {
+    const inlineRegex = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+    const segments = txt.split(inlineRegex);
+    
+    return segments.map((seg, idx) => {
+      if (seg.startsWith("`") && seg.endsWith("`")) {
+        return html`<code className="alice-inline-code">${seg.slice(1, -1)}</code>`;
+      }
+      if (seg.startsWith("**") && seg.endsWith("**")) {
+        return html`<strong className="alice-bold-text">${seg.slice(2, -2)}</strong>`;
+      }
+      return seg;
+    });
+  };
+
+  const parseTableRow = (rowText) => {
+    const cells = rowText.split("|").map(c => c.trim());
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Code blocks
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        inCodeBlock = false;
+        elements.push(html`
+          <div className="alice-code-block-wrapper">
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+          </div>
+        `);
+        codeBlockContent = [];
+      } else {
+        if (inList) {
+          elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+          inList = false;
+          listItems = [];
+        }
+        inCodeBlock = true;
+        codeBlockLang = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeBlockContent.push(line);
+      continue;
+    }
+
+    // Tables
+    if (trimmed.startsWith("|")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+
+      const tableLines = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
+      i--; // Adjust loop counter
+
+      if (tableLines.length >= 2) {
+        const headers = parseTableRow(tableLines[0]);
+        const rows = [];
+        const bodyLines = tableLines.slice(2);
+        for (const rLine of bodyLines) {
+          if (rLine.includes("---")) continue;
+          rows.push(parseTableRow(rLine));
+        }
+
+        elements.push(html`
+          <div className="alice-table-wrapper">
+            <table className="alice-table">
+              <thead>
+                <tr>
+                  ${headers.map(h => html`<th>${renderTextWithFormatting(h)}</th>`)}
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map(row => html`
+                  <tr>
+                    ${row.map(cell => html`<td>${renderTextWithFormatting(cell)}</td>`)}
+                  </tr>
+                `)}
+              </tbody>
+            </table>
+          </div>
+        `);
+        continue;
+      }
+    }
+
+    // Headers
+    if (trimmed.startsWith("### ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h4 className="alice-md-h3">${renderTextWithFormatting(trimmed.slice(4))}</h4>`);
+      continue;
+    }
+    if (trimmed.startsWith("## ")) {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<h3 className="alice-md-h2">${renderTextWithFormatting(trimmed.slice(3))}</h3>`);
+      continue;
+    }
+
+    // Lists
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      inList = true;
+      listItems.push(trimmed.slice(2));
+      continue;
+    }
+
+    // Paragraph
+    if (trimmed === "") {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<div className="alice-md-space"></div>`);
+    } else {
+      if (inList) {
+        elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+        inList = false;
+        listItems = [];
+      }
+      elements.push(html`<p className="alice-md-p">${renderTextWithFormatting(line)}</p>`);
+    }
+  }
+
+  if (inList) {
+    elements.push(html`<ul className="alice-markdown-list">${listItems.map(item => html`<li>${renderTextWithFormatting(item)}</li>`)}</ul>`);
+  }
+  if (inCodeBlock && codeBlockContent.length > 0) {
+    elements.push(html`
+      <div className="alice-code-block-wrapper">
+        <div className="alice-code-block-header">
+          <span className="alice-code-block-lang">${codeBlockLang || "text"}</span>
+        </div>
+        <pre className="alice-code-block"><code>${codeBlockContent.join("\n")}</code></pre>
+      </div>
+    `);
+  }
+
+  return elements;
+};
+
+
+const renderAliceBlocks = (text, isThinking, stepData = {}) => {
+  const blocks = parseAliceThinking(text);
+  return blocks.map((block, idx) => {
+    if (block.type === "status") {
+      let icon = html`<span className="alice-status-dot"></span>`;
+      if (block.status === "initializing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--init">⚙️</span>`;
+      } else if (block.status === "scope_check") {
+        icon = html`<span className="alice-status-icon alice-status-icon--success">🛡️</span>`;
+      } else if (block.status === "routing") {
+        icon = html`<span className="alice-status-icon alice-status-icon--routing">⚡</span>`;
+      }
+
+      // Expandable step blocks
+      if (block.stepKind) {
+        const stepEntry = (stepData || {})[block.stepNum] || {};
+        let detailContent = null;
+
+        if (block.stepKind === "llm_call" && stepEntry.llmMessages && stepEntry.llmMessages.length > 0) {
+          detailContent = html`
+            <div className="alice-step-detail">
+              ${stepEntry.llmMessages.map((m, i) => html`
+                <div key=${i} className=${"alice-step-msg alice-step-msg--" + m.role}>
+                  <span className="alice-step-msg-role">${m.role}</span>
+                  <pre className="alice-step-msg-content">${m.content}</pre>
+                </div>
+              `)}
+            </div>
+          `;
+        } else if (block.stepKind === "tool_call") {
+          const toolEntry = stepEntry.tools && stepEntry.tools[block.toolIdx];
+          if (toolEntry && toolEntry.input !== null && toolEntry.input !== undefined) {
+            let inputStr;
+            try { inputStr = JSON.stringify(toolEntry.input, null, 2); } catch (_) { inputStr = String(toolEntry.input); }
+            detailContent = html`
+              <div className="alice-step-detail">
+                <pre className="alice-step-msg-content">${inputStr}</pre>
+              </div>
+            `;
+          }
+        } else if (block.stepKind === "tool_result") {
+          const toolEntry = stepEntry.tools && stepEntry.tools[block.toolIdx];
+          if (toolEntry && toolEntry.result !== null && toolEntry.result !== undefined) {
+            detailContent = html`
+              <div className="alice-step-detail">
+                <pre className="alice-step-msg-content">${toolEntry.result}</pre>
+              </div>
+            `;
+          }
+        }
+
+        if (detailContent) {
+          return html`
+            <details key=${idx} className=${"alice-step-details alice-step-details--" + block.stepKind} style=${isThinking ? {} : { margin: "6px 0" }}>
+              <summary className="alice-thinking-status-row alice-thinking-status-row--routing alice-step-summary">
+                ${icon}
+                <span className="alice-status-text">${block.text}</span>
+                <span className="alice-step-expand-caret">▶</span>
+              </summary>
+              ${detailContent}
+            </details>
+          `;
+        }
+      }
+
+      return html`
+        <div key=${idx} className=${"alice-thinking-status-row alice-thinking-status-row--" + block.status} style=${isThinking ? {} : { margin: "6px 0" }}>
+          ${icon}
+          <span className="alice-status-text">${block.text}</span>
+        </div>
+      `;
+    }
+    if (block.type === "alert") {
+      return html`
+        <div key=${idx} className=${"alice-thinking-alert alice-thinking-alert--" + block.level} style=${isThinking ? {} : { margin: "6px 0" }}>
+          <span className="alice-alert-icon">⚠️</span>
+          <div className="alice-alert-content">
+            <div className="alice-alert-title">${block.title}</div>
+            <div className="alice-alert-text">${block.text}</div>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "tool_call") {
+      const parsedArgs = parseToolArgs(block.text);
+      return html`
+        <div key=${idx} className="alice-thinking-tool-call" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row">
+            <span className="alice-tool-prompt">$</span>
+            <span className="alice-tool-badge">CALL TOOL</span>
+            <span className="alice-tool-name">${block.tool}</span>
+          </div>
+          ${parsedArgs ? html`
+            <div className="alice-tool-args-card">
+              ${Object.entries(parsedArgs).map(([key, val]) => html`
+                <div key=${key} className="alice-tool-arg-row">
+                  <span className="alice-tool-arg-key">${key}:</span>
+                  <span className="alice-tool-arg-val">${markdownText(val)}</span>
+                </div>
+              `)}
+            </div>
+          ` : html`
+            <div className="alice-tool-text">${block.text}</div>
+          `}
+        </div>
+      `;
+    }
+    if (block.type === "tool_response") {
+      let isJson = false;
+      let formattedResponse = block.text;
+      try {
+        const parsed = JSON.parse(block.text.trim());
+        formattedResponse = JSON.stringify(parsed, null, 2);
+        isJson = true;
+      } catch (_) {}
+      return html`
+        <div key=${idx} className="alice-thinking-tool-response" style=${{ width: "100%", margin: "6px 0" }}>
+          <div className="alice-tool-header-row" style=${{ borderLeft: "3px solid #10b981", paddingLeft: "10px" }}>
+            <span className="alice-tool-prompt" style=${{ color: "#10b981" }}>←</span>
+            <span className="alice-tool-badge" style=${{ background: "rgba(16, 185, 129, 0.15)", color: "#34d399" }}>RESPONSE</span>
+          </div>
+          <div className="alice-code-block-wrapper" style=${{ marginTop: "4px" }}>
+            <div className="alice-code-block-header">
+              <span className="alice-code-block-lang">${isJson ? "json" : "text"}</span>
+            </div>
+            <pre className="alice-code-block"><code style=${{ fontSize: "10.5px" }}>${formattedResponse}</code></pre>
+          </div>
+        </div>
+      `;
+    }
+    if (block.type === "code") {
+      return html`
+        <div key=${idx} className="alice-code-block-wrapper">
+          <div className="alice-code-block-header">
+            <span className="alice-code-block-lang">${block.lang || "json"}</span>
+          </div>
+          <pre className="alice-code-block"><code>${block.text}</code></pre>
+        </div>
+      `;
+    }
+    if (isThinking) {
+      return html`
+        <p key=${idx} className="alice-thinking-paragraph">${block.text}</p>
+      `;
+    } else {
+      return html`
+        <div key=${idx} className="alice-reply-paragraph-wrapper">${renderMarkdown(block.text)}</div>
+      `;
+    }
+  });
+};
+
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 function App() {
   const route = useRoute();
   const onSites      = ["list","site-new","site-edit","site-detail","run-new","run-detail"].includes(route.name);
+  const onApis       = ["api-list","api-new","api-edit","api-detail","api-files"].includes(route.name);
+  const onActiveJobs = route.name === "active-jobs";
   const onSettings   = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
+  const onExternalIntegrations = route.name === "external-integrations";
+  const onSast       = route.name === "sast-list" || route.name === "sast-run-detail";
+  const onDebug      = route.name === "debug";
+  const onReportingDebug = route.name === "reporting-debug";
   const [appVersion, setAppVersion] = useState("");
-  useEffect(() => { api.getVersion().then(d => setAppVersion(d.version)).catch(()=>{}); }, []);
+  const [username, setUsername] = useState("");
+  const [showUsername, setShowUsername] = useState(() => {
+    try {
+      const val = localStorage.getItem("aespa_show_username");
+      return val === null ? true : val === "true";
+    } catch (_) { return true; }
+  });
+  const [collapsed, setCollapsed] = useState(false);
+  const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
+  useEffect(() => {
+    api.getVersion()
+      .then(d => {
+        setAppVersion(d.version);
+        setUsername(d.username || "");
+      })
+      .catch(()=>{});
+    api.getReportingDebugConfig().then(setReportingDebugCfg).catch(()=>{});
+  }, []);
 
   return html`
-    <div className="shell">
-      <aside className="sidebar">
+    <div className=${"shell"+(collapsed?" sidebar-collapsed":"")}>
+      <aside className=${"sidebar"+(collapsed?" sidebar--collapsed":"")}>
         <div className="sidebar-brand">
-          <div className="logo"><div className="logo-icon">A</div><span className="logo-text">ESPA</span></div>
-          <div className="logo-sub">AI-Enabled Security Pentesting Agent</div>
+          <div className="logo">
+            ${!collapsed && html`<div className="logo-codename"><span>CODE</span><span>NAME</span></div>`}
+            <img src="/icon-sm.png" className="logo-icon" alt="AESPA" />
+            ${!collapsed && html`<span className="logo-text">ESPA</span>`}
+          </div>
+          ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
+        </div>
+        <div className="sidebar-meta">
+          <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
+            ${collapsed ? html`<${IconChevronRight}/>` : html`<${IconChevronLeft}/>`}
+          </button>
+          ${!collapsed && html`
+            <div style=${{display: "flex", flexDirection: "column", gap: "2px", overflow: "hidden", minWidth: 0, lineHeight: 1.2}}>
+              ${showUsername && username ? html`
+                <span className="sidebar-username" style=${{color: "var(--text-2)", fontWeight: "500", fontSize: "11px", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}} title=${username}>
+                  ${username}
+                </span>
+                ${appVersion && html`<span style=${{color: "var(--muted)", fontSize: "9.5px"}}>v${appVersion}</span>`}
+              ` : html`
+                ${appVersion && html`<span>v${appVersion}</span>`}
+              `}
+            </div>
+          `}
         </div>
         <nav className="sidebar-nav">
-          <div className="nav-section-label">Targets</div>
-          <a href="#/" className=${"nav-item"+(onSites?" active":"")}>
-            <span className="nav-icon"><${IconSites}/></span> Sites
+          ${!collapsed && html`<div className="nav-section-label">Targets</div>`}
+          <a href="#/" className=${"nav-item"+(onSites?" active":"")} title="Sites">
+            <span className="nav-icon"><${IconSites}/></span>${!collapsed && " Sites"}
           </a>
-          <div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>
-          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")}>
-            <span className="nav-icon"><${IconSettings}/></span> LLM Settings
+          <a href="#/apis" className=${"nav-item"+(onApis?" active":"")} title="APIs">
+            <span className="nav-icon"><${IconApis}/></span>${!collapsed && " APIs"}
           </a>
-          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")}>
-            <span className="nav-icon"><${IconShield}/></span> Scan Policy
+          <a href="#/sast-runs" className=${"nav-item"+(onSast?" active":"")} title="SAST">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " SAST"}
           </a>
+          <a href="#/active-jobs" className=${"nav-item"+(onActiveJobs?" active":"")} title="Active Jobs">
+            <span className="nav-icon"><${IconPlay}/></span>${!collapsed && " Active Jobs"}
+          </a>
+          ${!collapsed && html`<div className="nav-section-label" style=${{marginTop:8}}>Configuration</div>`}
+          <a href="#/settings" className=${"nav-item"+(onSettings?" active":"")} title="LLM Settings">
+            <span className="nav-icon"><${IconSettings}/></span>${!collapsed && " LLM Settings"}
+          </a>
+          <a href="#/scan-policy" className=${"nav-item"+(onScanPolicy?" active":"")} title="Agent Settings">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " Agent Settings"}
+          </a>
+          <a href="#/external-integrations" className=${"nav-item"+(onExternalIntegrations?" active":"")} title="External Integrations">
+            <span className="nav-icon"><${IconShield}/></span>${!collapsed && " External Integrations"}
+          </a>
+          <a href="#/debug" className=${"nav-item"+(onDebug?" active":"")} title="Debug">
+            <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Debug"}
+          </a>
+          ${reportingDebugCfg?.panel_enabled && html`
+            ${!collapsed && html`<div className="nav-section-label" style=${{marginTop:8}}>Testing Features</div>`}
+            <a href="#/reporting-debug" className=${"nav-item"+(onReportingDebug?" active":"")} title="Reporting Lab">
+              <span className="nav-icon"><${IconBug}/></span>${!collapsed && " Reporting Lab"}
+            </a>`}
         </nav>
-        <div className="sidebar-footer">${appVersion ? `v${appVersion}` : ""}</div>
       </aside>
+
 
       <div className="main">
         ${route.name==="list"        && html`<${SitesList}/>`}
         ${route.name==="site-new"    && html`<${SiteForm} key="new"/>`}
         ${route.name==="site-edit"   && html`<${SiteForm} key=${route.id} siteId=${route.id}/>`}
         ${route.name==="site-detail" && html`<${SiteDetail} key=${route.id} siteId=${route.id}/>`}
+        ${route.name==="api-list"    && html`<${ApiCollectionsList}/>`}
+        ${route.name==="api-new"     && html`<${ApiCollectionForm} key="api-new"/>`}
+        ${route.name==="api-edit"    && html`<${ApiCollectionForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-detail"  && html`<${ApiCollectionDetail} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-files"   && html`<${ApiFilesManager} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-new"    && html`<${ApiTestRunForm} key=${route.id} collectionId=${route.id}/>`}
+        ${route.name==="api-run-detail" && html`<${ApiTestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
+        ${route.name==="sast-list"       && html`<${SastRunsListPage}/>`}
+        ${route.name==="sast-run-detail" && html`<${SastRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
+        ${route.name==="active-jobs" && html`<${ActiveJobsPage}/>`}
         ${route.name==="run-new"     && html`<${TestRunForm} key=${route.siteId} siteId=${route.siteId}/>`}
-        ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id}/>`}
+        ${route.name==="run-detail"  && html`<${TestRunDetail} key=${route.id} runId=${route.id} initialTab=${route.tab}/>`}
         ${route.name==="settings"    && html`<${SettingsPage}/>`}
         ${route.name==="scan-policy" && html`<${ScanPolicyPage}/>`}
+        ${route.name==="external-integrations" && html`<${ExternalIntegrationsPage}/>`}
+        ${route.name==="debug"       && html`<${DebugPage} showUsername=${showUsername} setShowUsername=${setShowUsername} username=${username} reportingDebugCfg=${reportingDebugCfg} setReportingDebugCfg=${setReportingDebugCfg}/>`}
+        ${route.name==="reporting-debug" && html`<${ReportingDebugPage}/>`}
       </div>
     </div>
   `;
@@ -278,6 +1320,8 @@ function App() {
 function SitesList() {
   const [sites, setSites] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
   const load = useCallback(async () => {
     try { setSites(await api.listSites()); } catch(e) { setError(e.message); }
   }, []);
@@ -286,24 +1330,30 @@ function SitesList() {
     if (!confirm(`Delete "${s.name}"? This also removes all test runs and credentials.`)) return;
     try { await api.deleteSite(s.id); await load(); } catch(e) { setError(e.message); }
   };
-  const authCount = sites ? sites.filter(s=>s.requires_auth).length : 0;
-  const credCount = sites ? sites.reduce((n,s)=>n+s.credential_count,0) : 0;
-
+  const onExport = (s) => { window.location.href = `/api/sites/${s.id}/export`; };
+  const onImportFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setImporting(true); setError(null);
+    try {
+      const text = await file.text();
+      await api.importSite(text);
+      await load();
+    } catch(err) { setError(err.message); }
+    finally { setImporting(false); }
+  };
   return html`
     <div className="topbar">
       <div className="topbar-title">Sites</div>
       <div className="topbar-actions">
+        <input ref=${importRef} type="file" accept=".json" style=${{display:"none"}} onChange=${onImportFile}/>
+        <button className="btn secondary" onClick=${()=>importRef.current.click()} disabled=${importing}>${importing?"Importing…":"Import site"}</button>
         <button className="btn" onClick=${()=>nav("#/sites/new")}><${IconPlus}/> New site</button>
       </div>
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
-      ${sites&&sites.length>0 && html`
-        <div className="stat-strip">
-          <div className="stat"><span className="stat-value">${sites.length}</span><span className="stat-label">Sites</span></div>
-          <div className="stat"><span className="stat-value">${authCount}</span><span className="stat-label">Authenticated</span></div>
-          <div className="stat"><span className="stat-value">${credCount}</span><span className="stat-label">Credentials</span></div>
-        </div>`}
       ${sites===null && html`<div className="subtle">Loading…</div>`}
       ${sites!==null&&sites.length===0 && html`
         <div className="empty-state">
@@ -315,6 +1365,9 @@ function SitesList() {
       ${sites&&sites.length>0 && html`
         <div className="table-wrap">
           <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"42%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"20%"}}/>
+            </colgroup>
             <thead><tr><th>Name</th><th>Base URL</th><th>Auth</th><th>Credentials</th><th></th></tr></thead>
             <tbody>${sites.map(s=>html`
               <tr key=${s.id}>
@@ -325,10 +1378,722 @@ function SitesList() {
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/sites/${s.id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>onExport(s)}>Export</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(s)}>Delete</button>
                   </div>
                 </td>
               </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+// ── API collections ───────────────────────────────────────────────────────────
+
+function ApiCollectionsList() {
+  const [collections, setCollections] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try { setCollections(await api.listApiCollections()); } catch(e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const onDelete = async (c) => {
+    if (!confirm(`Delete "${c.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(c.id); await load(); } catch(e) { setError(e.message); }
+  };
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">APIs</div>
+      <div className="topbar-actions">
+        <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${collections===null && html`<div className="subtle">Loading…</div>`}
+      ${collections!==null&&collections.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">⬡</div>
+          <div className="empty-msg">No API collections yet</div>
+          <div className="empty-sub">Create a collection, upload API docs, and run structured API security tests.</div>
+          <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
+        </div>`}
+      ${collections&&collections.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"20%"}}/><col style=${{width:"38%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Name</th><th>Base URL</th><th>Endpoints</th><th>Files</th><th></th></tr></thead>
+            <tbody>${collections.map(c=>html`
+              <tr key=${c.id}>
+                <td><a href=${`#/apis/${c.id}`} style=${{fontWeight:600}}>${c.name}</a></td>
+                <td className="url">${c.base_url}</td>
+                <td>${c.endpoint_count>0?c.endpoint_count:html`<span className="subtle">—</span>`}</td>
+                <td>${c.document_count>0?c.document_count:html`<span className="subtle">—</span>`}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${c.id}`)}>Open</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(c)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+function ApiCollectionForm({ collectionId }) {
+  const isEdit = typeof collectionId === "number";
+  const [form, setForm]       = useState({ name:"", base_url:"", description:"" });
+  const [loading, setLoading] = useState(isEdit);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState(null);
+
+  useEffect(() => {
+    if (!isEdit) return;
+    (async () => {
+      try {
+        const d = await api.getApiCollection(collectionId);
+        setForm({ name:d.name, base_url:d.base_url, description:d.description||"" });
+      } catch(e) { setError(e.message); } finally { setLoading(false); }
+    })();
+  }, [isEdit, collectionId]);
+
+  const upd = p => setForm(f=>({...f,...p}));
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true);
+    const payload = {
+      name: form.name.trim(),
+      base_url: form.base_url.trim(),
+      description: form.description.trim() || null,
+    };
+    try {
+      if (isEdit) { await api.updateApiCollection(collectionId, payload); nav(`#/apis/${collectionId}`); }
+      else        { const c = await api.createApiCollection(payload); nav(`#/apis/${c.id}`); }
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const bc = isEdit
+    ? html`<a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${form.name||"API collection"}</a><span className="breadcrumb-sep"> / </span>Edit`
+    : html`<a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a><span className="breadcrumb-sep"> / </span>New API collection`;
+
+  return html`
+    <div className="topbar"><div className="topbar-title">${bc}</div></div>
+    <div className="content scroll-content">
+      ${loading && html`<div className="subtle">Loading…</div>`}
+      ${!loading && html`
+        <form className="card" onSubmit=${onSubmit}>
+          ${error && html`<div className="alert error">${error}</div>`}
+          <div className="form-section-title">API collection</div>
+          <div className="field"><label>Name</label>
+            <input type="text" required value=${form.name} placeholder="e.g. Payments API" onChange=${e=>upd({name:e.target.value})}/></div>
+          <div className="field"><label>Base URL</label>
+            <input type="url" required value=${form.base_url} placeholder="https://api.example.com" onChange=${e=>upd({base_url:e.target.value})}/></div>
+          <div className="field"><label>Description (optional)</label>
+            <textarea value=${form.description} placeholder="What these APIs do, scope, contacts…" onChange=${e=>upd({description:e.target.value})}/></div>
+          <div className="divider"/>
+          <div className="row spread">
+            <button type="button" className="btn ghost" onClick=${()=>isEdit?nav(`#/apis/${collectionId}`):nav("#/apis")}>Cancel</button>
+            <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":isEdit?"Save changes":"Create collection"}</button>
+          </div>
+        </form>`}
+    </div>`;
+}
+
+function ApiCollectionDetail({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [endpoints, setEndpoints] = useState(null);
+  const [readiness, setReadiness] = useState(null);
+  const [apiRuns, setApiRuns] = useState(null);
+  const [credentials, setCredentials] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [assessing, setAssessing] = useState(false);
+  const [purging, setPurging] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, eps, rd, runs, creds] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiEndpoints(collectionId),
+        api.getApiReadiness(collectionId),
+        api.listApiRuns(collectionId),
+        api.listApiCredentials(collectionId),
+      ]);
+      setCollection(c); setEndpoints(eps);
+      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
+      setApiRuns(runs);
+      setCredentials(creds);
+    }
+    catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  };
+
+  const onAssessReadiness = async () => {
+    setAssessing(true); setError(null);
+    try {
+      const rd = await api.runApiReadiness(collectionId);
+      setReadiness(rd);
+      // Reload endpoints so prereq columns update
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+    } catch(e) { setError(e.message); }
+    finally { setAssessing(false); }
+  };
+
+  const onPurgeData = async () => {
+    if (!confirm(
+      "Delete ALL endpoints and credentials for this collection?\n\n" +
+      "Documents are kept \u2014 you can re-parse them afterwards.\n\n" +
+      "Use this to clear duplicates from uploading the same file multiple times."
+    )) return;
+    setPurging(true); setError(null);
+    try {
+      const result = await api.purgeCollectionData(collectionId);
+      setEndpoints([]);
+      setReadiness(null);
+      setCredentials([]);
+      alert(`Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`);
+    } catch(e) { setError(e.message); }
+    finally { setPurging(false); }
+  };
+
+  const onDelete = async () => {
+    if (!collection) return;
+    if (!confirm(`Delete "${collection.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
+    try { await api.deleteApiCollection(collectionId); nav("#/apis"); } catch(e) { setError(e.message); }
+  };
+
+  const toggleScope = async (ep) => {
+    try {
+      const updated = await api.patchEndpointScope(collectionId, ep.id, { in_scope: !ep.in_scope });
+      setEndpoints(eps => eps.map(e => e.id === ep.id ? updated : e));
+    } catch(e) { setError(e.message); }
+  };
+
+  const methodBadge = (m) => {
+    const cls = {
+      GET:"badge method-get", POST:"badge method-post", PUT:"badge method-put",
+      PATCH:"badge method-patch", DELETE:"badge method-delete",
+    };
+    return html`<span className=${cls[m] || "badge neutral"}>${m}</span>`;
+  };
+
+  // Readiness helpers
+  const scoreColor = (score) => score >= 75 ? "var(--success,#22c55e)" : score >= 40 ? "var(--warning-text,#d97706)" : "var(--danger,#ef4444)";
+  const readinessLabel = (score) => score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready";
+  const prereqIcon = (ep) => {
+    if (!ep.prereq_can_test) return html`<span title="Cannot test — insufficient info" style=${{color:"var(--danger,#ef4444)",fontSize:14}}>✗</span>`;
+    if (!ep.prereq_can_test_auth) return html`<span title="Auth credentials missing" style=${{color:"var(--warning-text,#d97706)",fontSize:14}}>⚠</span>`;
+    return html`<span title="Ready to test" style=${{color:"var(--success,#22c55e)",fontSize:14}}>✓</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${collection ? collection.name : "…"}
+      </div>
+      <div className="topbar-actions">
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onPurgeData} disabled=${purging}>${purging?"Purging…":"Purge data"}</button>`}
+        ${collection && html`<button className="btn secondary" onClick=${()=>nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>`}
+        ${collection && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${collection && html`
+        <div className="card">
+          <div className="form-section-title">Overview</div>
+          <div className="field" style=${{margin:0}}><label>Base URL</label><div className="url">${collection.base_url}</div></div>
+          ${collection.description && html`<div className="field" style=${{marginTop:12,marginBottom:0}}><label>Description</label><div>${collection.description}</div></div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Readiness</span>
+            <button className="btn secondary sm" onClick=${onAssessReadiness} disabled=${assessing}>
+              ${assessing ? "Assessing…" : readiness ? "Re-assess" : "Assess Readiness"}
+            </button>
+          </div>
+          ${assessing && html`<div className="subtle" style=${{padding:"12px 0"}}>Running LLM readiness assessment…</div>`}
+          ${!assessing && !readiness && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              Click <strong>Assess Readiness</strong> to run an LLM-driven gap analysis — checks whether you have the
+              right credentials and enough spec detail to test each endpoint.
+            </div>`}
+          ${!assessing && readiness && html`
+            <div>
+              <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+                <span style=${{fontSize:22,fontWeight:700,color:scoreColor(readiness.overall.score)}}>${readiness.overall.score}/100</span>
+                <span className="badge" style=${{background:scoreColor(readiness.overall.score),color:"#fff",padding:"2px 10px"}}>${readinessLabel(readiness.overall.score)}</span>
+                <span style=${{fontSize:13,color:"var(--fg)"}}>${readiness.overall.summary}</span>
+              </div>
+              ${readiness.overall.blocking_gaps?.length > 0 && html`
+                <div style=${{marginBottom:8}}>
+                  <strong style=${{fontSize:12,color:"var(--danger,#ef4444)"}}>Blocking gaps</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--fg)"}}>
+                    ${readiness.overall.blocking_gaps.map((g,i) => html`<li key=${i}>${g}</li>`)}
+                  </ul>
+                </div>`}
+              ${readiness.overall.recommendations?.length > 0 && html`
+                <div>
+                  <strong style=${{fontSize:12,color:"var(--muted)"}}>Recommendations</strong>
+                  <ul style=${{margin:"4px 0 0 18px",padding:0,fontSize:12,color:"var(--muted)"}}>
+                    ${readiness.overall.recommendations.map((r,i) => html`<li key=${i}>${r}</li>`)}
+                  </ul>
+                </div>`}
+              <div style=${{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+                Assessed ${new Date(readiness.assessed_at).toLocaleString()}
+                ·
+                Auth understood: ${readiness.overall.auth_method_understood ? "✓" : "✗"}
+                · Credentials: ${readiness.overall.has_credentials ? "✓" : "✗"}
+                · Test data: ${readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
+              </div>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title">
+            <span>Credentials ${credentials!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${credentials.length}</span>`:""}</span>
+          </div>
+          ${credentials===null && html`<div className="subtle">Loading…</div>`}
+          ${credentials!==null && credentials.length===0 && html`
+            <div className="subtle" style=${{padding:"8px 0"}}>
+              No credentials. They are parsed from uploaded auth/credentials files, or discovered automatically during a scan.
+              Secret values are never displayed.
+            </div>`}
+          ${credentials!==null && credentials.length>0 && html`
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{width:"100%"}}>
+                <thead><tr>
+                  ${["Scheme","Name","Label","Scope","Auth endpoint","Added"].map(h=>html`<th key=${h}>${h}</th>`)}
+                </tr></thead>
+                <tbody>${credentials.map(c=>html`
+                  <tr key=${c.id}>
+                    <td><span className=${`badge ${c.scheme==="login"?"warning":"neutral"}`}>${c.scheme}</span></td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12}}>${c.name||"—"}</td>
+                    <td>${c.label||html`<span className="subtle">—</span>`}</td>
+                    <td style=${{fontSize:12}}>${c.scope}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${c.auth_endpoint||html`<span className="subtle">—</span>`}</td>
+                    <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(c.created_at).toLocaleString()}</td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>
+            <div className="subtle" style=${{marginTop:8,fontSize:11}}>
+              Secret values are stored but never shown. <strong>login</strong>-scheme entries are username/password test accounts used to obtain tokens during a scan.
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Endpoints ${endpoints!==null?html`<span className="badge neutral" style=${{marginLeft:6}}>${endpoints.length}</span>`:""}</span>
+            <div className="row" style=${{gap:8}}>
+              <button className="btn secondary sm" onClick=${onRefresh} disabled=${refreshing}>${refreshing?"…":"Refresh"}</button>
+              <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${collectionId}/files`)}>Manage files</button>
+            </div>
+          </div>
+          ${endpoints===null && html`<div className="subtle">Loading…</div>`}
+          ${endpoints!==null && endpoints.length===0 && html`
+            <div className="empty-state" style=${{padding:"32px 16px"}}>
+              <div className="empty-icon">⬡</div>
+              <div className="empty-msg">No endpoints yet</div>
+              <div className="empty-sub">
+                Upload an <strong>OpenAPI/Swagger</strong> or <strong>Postman</strong> file via <strong>Manage files</strong> — it parses automatically.<br/>
+                <span style=${{color:"var(--muted)",fontSize:11}}>Markdown/text files use LLM extraction and require an active LLM profile in Settings.</span>
+              </div>
+            </div>`}
+          ${endpoints!==null && endpoints.length>0 && html`
+            <div className="table-wrap" style=${{overflowX:"auto"}}>
+              <table style=${{tableLayout:"fixed",width:"100%",minWidth:760}}>
+                <colgroup>
+                  <col style=${{width:"8%"}}/><col style=${{width:"24%"}}/><col style=${{width:"28%"}}/><col style=${{width:"8%"}}/><col style=${{width:"16%"}}/><col style=${{width:"8%"}}/><col style=${{width:"8%"}}/>
+                </colgroup>
+                <thead><tr>
+                  ${["Method","Path","Summary","Auth","Tags","Ready","In scope"].map(h=>html`
+                    <th key=${h} style=${{overflow:"hidden",whiteSpace:"nowrap",resize:"horizontal",position:"relative"}}>${h}</th>`)}
+                </tr></thead>
+                <tbody>${endpoints.map(ep=>html`
+                  <tr key=${ep.id} style=${{opacity:ep.in_scope?1:0.5}}>
+                    <td>${methodBadge(ep.method)}</td>
+                    <td style=${{fontFamily:"var(--mono,monospace)",fontSize:12,overflowWrap:"break-word",wordBreak:"break-all"}}>${ep.path}</td>
+                    <td style=${{fontSize:12,overflowWrap:"break-word"}}>${ep.summary||"—"}</td>
+                    <td>${ep.auth_required?html`<span className="badge warning">yes</span>`:html`<span className="badge neutral">no</span>`}</td>
+                    <td style=${{fontSize:11,overflowWrap:"break-word"}}>${(JSON.parse(ep.tags_json||"[]")).join(", ")||"—"}</td>
+                    <td style=${{textAlign:"center"}} title=${(JSON.parse(ep.prereq_notes||"[]")).join("; ")||undefined}>
+                      ${prereqIcon(ep)}
+                    </td>
+                    <td style=${{textAlign:"center"}}>
+                      <input type="checkbox" checked=${ep.in_scope} onChange=${()=>toggleScope(ep)} style=${{cursor:"pointer"}}/>
+                    </td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>
+
+        <div className="card">
+          <div className="form-section-title" style=${{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>Test Runs</span>
+            <button className="btn sm" onClick=${()=>nav(`#/apis/${collectionId}/runs/new`)}>+ New test run</button>
+          </div>
+          ${apiRuns===null && html`<div className="subtle">Loading…</div>`}
+          ${apiRuns!==null && apiRuns.length===0 && html`
+            <div className="subtle" style=${{padding:"12px 0"}}>
+              No test runs yet. Click <strong>+ New test run</strong> to start one.
+            </div>`}
+          ${apiRuns!==null && apiRuns.length>0 && html`
+            <table style=${{width:"100%"}}>
+              <thead><tr>
+                <th>Name</th><th>Status</th><th>Coverage</th><th>Created</th><th></th>
+              </tr></thead>
+              <tbody>${apiRuns.map(r=>html`
+                <tr key=${r.id}>
+                  <td><a href=${`#/api-runs/${r.id}/status`} style=${{fontWeight:600}}>${r.name}</a></td>
+                  <td><span className=${`badge ${r.status==="completed"?"success":r.status==="running"?"warning":r.status==="failed"?"danger":"neutral"}`}>${r.status}</span></td>
+                  <td>${r.coverage_mode}</td>
+                  <td style=${{fontSize:12,color:"var(--muted)"}}>${new Date(r.created_at).toLocaleString()}</td>
+                  <td><a href=${`#/api-runs/${r.id}/status`} className="btn secondary sm">Open</a></td>
+                </tr>`)}
+              </tbody>
+            </table>`}
+        </div>`}
+    </div>
+  `;
+}
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ApiFilesManager({ collectionId }) {
+  const [collection, setCollection] = useState(null);
+  const [docs, setDocs] = useState(null);
+  const [endpoints, setEndpoints] = useState([]);
+  const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
+  const [sastRuns, setSastRuns] = useState([]);
+  const [sastBusy, setSastBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [c, d, eps, sr] = await Promise.all([
+        api.getApiCollection(collectionId),
+        api.listApiDocuments(collectionId),
+        api.listApiEndpoints(collectionId),
+        api.listSastRuns(collectionId).catch(() => []),
+      ]);
+      setCollection(c); setDocs(d); setEndpoints(eps); setSastRuns(sr);
+    } catch(e) { setError(e.message); }
+  }, [collectionId]);
+  useEffect(() => { load(); }, [load]);
+
+  // Endpoint count keyed by source_doc_id
+  const epCountByDoc = endpoints.reduce((acc, ep) => {
+    if (ep.source_doc_id != null) acc[ep.source_doc_id] = (acc[ep.source_doc_id] || 0) + 1;
+    return acc;
+  }, {});
+
+  const doUpload = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setUploading(true); setError(null);
+    try {
+      await api.uploadApiDocuments(collectionId, files);
+      await load();
+    } catch(e) { setError(e.message); }
+    finally { setUploading(false); }
+  };
+
+  const onPick = (e) => { doUpload(e.target.files); e.target.value = ""; };
+  const onDrop = (e) => { e.preventDefault(); setDragOver(false); doUpload(e.dataTransfer.files); };
+
+  const onDelete = async (doc) => {
+    if (!confirm(`Delete "${doc.filename}"?`)) return;
+    try { await api.deleteApiDocument(collectionId, doc.id); setDocs(ds=>ds.filter(d=>d.id!==doc.id)); }
+    catch(e) { setError(e.message); }
+  };
+
+  const onReparse = async (doc) => {
+    setReparseState(s => ({...s, [doc.id]: "running"}));
+    try {
+      const updated = await api.parseApiDocument(collectionId, doc.id);
+      setDocs(ds => ds.map(d => d.id === doc.id ? updated : d));
+      // Refresh endpoint counts too
+      const eps = await api.listApiEndpoints(collectionId);
+      setEndpoints(eps);
+      setReparseState(s => ({...s, [doc.id]: updated.status === "parsed" ? "done" : "failed"}));
+    } catch(e) {
+      setError(e.message);
+      setReparseState(s => ({...s, [doc.id]: "failed"}));
+    }
+  };
+
+  const statusCell = (d) => {
+    const count = epCountByDoc[d.id];
+    if (d.status === "failed") {
+      const tip = d.error_message || "";
+      return html`<span className="badge danger" title=${tip} style=${{cursor:"help"}}>failed</span>`;
+    }
+    if (d.status === "parsed") {
+      if (count != null && count > 0) {
+        return html`<span><span className="badge ok">parsed</span> <span style=${{fontSize:11,color:"var(--muted)",marginLeft:4}}>${count} endpoint${count===1?"":"s"}</span></span>`;
+      }
+      if (d.doc_type === "credentials") {
+        return html`<span className="badge ok" title="Credentials parsed — no endpoints from this type">parsed</span>`;
+      }
+      return html`<span className="badge ok">parsed</span>`;
+    }
+    return html`<span className="badge neutral">uploaded</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href="#/apis" style=${{color:"var(--muted)",fontWeight:400}}>APIs</a>
+        <span className="breadcrumb-sep"> / </span>
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>${collection ? collection.name : "…"}</a>
+        <span className="breadcrumb-sep"> / </span>
+        Files
+      </div>
+      <div className="topbar-actions">
+        <input ref=${fileRef} type="file" multiple style=${{display:"none"}} onChange=${onPick}/>
+        <button className="btn" onClick=${()=>fileRef.current.click()} disabled=${uploading}>${uploading?"Uploading…":"Upload files"}</button>
+      </div>
+    </div>
+    <div className="content scroll-content stack">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <div
+        className=${"upload-dropzone"+(dragOver?" dragover":"")}
+        onDragOver=${e=>{e.preventDefault(); setDragOver(true);}}
+        onDragLeave=${()=>setDragOver(false)}
+        onDrop=${onDrop}
+        onClick=${()=>fileRef.current.click()}
+        style=${{border:"2px dashed var(--border)", borderRadius:8, padding:"28px 16px", textAlign:"center", cursor:"pointer", color:dragOver?"var(--accent)":"var(--muted)", background:dragOver?"var(--surface-2,#222)":"transparent"}}>
+        <div style=${{fontSize:13}}>${uploading?"Uploading…":"Drag & drop files here, or click to choose"}</div>
+        <div className="subtle" style=${{marginTop:6, fontSize:11}}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip (max 25 MB each)</div>
+      </div>
+      ${endpoints.length > 0 && html`
+        <div className="alert" style=${{background:"var(--surface-2,#1a2a1a)",borderColor:"var(--ok,#4caf50)",color:"var(--ok,#4caf50)",padding:"10px 14px",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>${endpoints.length} endpoint${endpoints.length===1?"":"s"} extracted</span>
+          <a href=${`#/apis/${collectionId}`} style=${{color:"var(--ok,#4caf50)",fontWeight:600,textDecoration:"none"}}>View endpoints →</a>
+        </div>`}
+      ${docs===null && html`<div className="subtle">Loading…</div>`}
+      ${docs!==null&&docs.length===0 && html`
+        <div className="empty-state" style=${{padding:"24px 16px"}}>
+          <div className="empty-icon">📄</div>
+          <div className="empty-msg">No files uploaded yet</div>
+          <div className="empty-sub">Upload API documentation to attach it to this collection.</div>
+        </div>`}
+      ${docs&&docs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"32%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"22%"}}/><col style=${{width:"22%"}}/>
+            </colgroup>
+            <thead><tr><th>Filename</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr></thead>
+            <tbody>${docs.map(d=>html`
+              <tr key=${d.id}>
+                <td style=${{fontWeight:600}}>${d.filename}</td>
+                <td><span className="badge neutral">${d.doc_type}</span></td>
+                <td>${fmtBytes(d.size_bytes)}</td>
+                <td>${statusCell(d)}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end"}}>
+                    <button className="btn secondary sm" onClick=${()=>onReparse(d)} disabled=${reparseState[d.id]==="running"}>${reparseState[d.id]==="running"?"Parsing…":d.status==="uploaded"?"Parse":"Reparse"}</button>
+                    <button className="btn secondary sm" onClick=${()=>api.downloadApiDocument(collectionId, d.id)}>Download</button>
+                    <button className="btn danger-outline sm" onClick=${()=>onDelete(d)}>Delete</button>
+                  </div>
+                </td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+
+      ${/* SAST runs section — only show when a source_zip is present */
+        docs && docs.some(d=>d.doc_type==="source_zip") && html`
+        <div style=${{marginTop:24}}>
+          <div style=${{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <h3 style=${{margin:0}}>SAST Scans</h3>
+            <button className="btn sm" disabled=${sastBusy} onClick=${async()=>{
+              setSastBusy(true); setError(null);
+              try {
+                const sr = await api.createSastRun(collectionId);
+                await api.startSastScan(sr.id);
+                nav(`#/sast-runs/${sr.id}/progress`);
+              } catch(e) { setError(e.message); }
+              finally { setSastBusy(false); }
+            }}>${sastBusy?"Starting…":"Run SAST Scan"}</button>
+          </div>
+          ${sastRuns.length===0
+            ? html`<div className="subtle">No SAST scans yet. Click "Run SAST Scan" to analyse the uploaded source code.</div>`
+            : html`<div className="table-wrap">
+              <table>
+                <colgroup><col style=${{width:"30%"}}/><col style=${{width:"12%"}}/><col style=${{width:"8%"}}/><col style=${{width:"18%"}}/><col style=${{width:"16%"}}/><col/></colgroup>
+                <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
+                <tbody>${sastRuns.map(sr=>html`
+                  <tr key=${sr.id}>
+                    <td>${sr.name}</td>
+                    <td><span className=${"badge "+(sr.status==="completed"?"ok":sr.status==="failed"?"danger":sr.status==="scanning"?"running":"neutral")}>${sr.status}</span></td>
+                    <td>${sr.leads_count}</td>
+                    <td>${sr.triggered_by_run_id
+                      ? html`<a href=${`#/api-runs/${sr.triggered_by_run_id}/status`}>API run #${sr.triggered_by_run_id}</a>`
+                      : html`<span className="subtle">—</span>`}</td>
+                    <td>${sr.started_at ? new Date(sr.started_at).toLocaleString() : "—"}</td>
+                    <td><a className="btn ghost sm" href=${`#/sast-runs/${sr.id}/progress`}>View →</a></td>
+                  </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── Active jobs ───────────────────────────────────────────────────────────────
+
+function activeJobBadge(job) {
+  const status = job.status || "running";
+  const key = status === "failed" ? "danger"
+    : status === "stopping" ? "stopping"
+    : status === "complete" ? "ok"
+    : ["running", "analysing"].includes(status) ? "running"
+    : "neutral";
+  return html`<span className=${"badge " + key}>${status}</span>`;
+}
+
+function activeJobProgress(job) {
+  if (job.total_pages !== null && job.total_pages !== undefined) {
+    return `${job.pages_done || 0} / ${job.total_pages}`;
+  }
+  if (job.pages_done !== null && job.pages_done !== undefined) return job.pages_done;
+  return "—";
+}
+
+function ActiveJobsPage() {
+  const [jobs, setJobs] = useState(null);
+  const [error, setError] = useState(null);
+  const [stopping, setStopping] = useState({});  // keyed by `${job_type}-${run_id}`
+
+  const load = useCallback(async () => {
+    try {
+      setError(null);
+      setJobs(await api.listActiveJobs());
+    } catch(e) {
+      setError(e.message);
+    }
+  }, []);
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  const stopJob = async (j) => {
+    const key = `${j.job_type}-${j.run_id}`;
+    setStopping(prev => ({ ...prev, [key]: true }));
+    try {
+      if (j.run_type === "sast") {
+        await api.stopSastScan(j.run_id);
+      } else if (j.run_type === "api") {
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopApiAliceRun(j.run_id);
+        } else {
+          await api.stopApiScan(j.run_id);
+        }
+      } else {
+        if (j.job_type === "A.L.I.C.E.") {
+          await api.stopAliceRun(j.run_id);
+        } else {
+          await api.stopRun(j.run_id);
+        }
+      }
+      await load();
+    } catch(e) {
+      setError(e.message);
+    } finally {
+      setStopping(prev => { const n = {...prev}; delete n[key]; return n; });
+    }
+  };
+
+  const stopAll = async () => {
+    if (!jobs || jobs.length === 0) return;
+    const promises = jobs.map(j => stopJob(j));
+    await Promise.allSettled(promises);
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Active Jobs</div>
+      <div className="topbar-actions">
+        <button className="btn secondary" onClick=${load}>Refresh</button>
+        ${jobs && jobs.length > 0 && html`
+          <button className="btn danger" onClick=${stopAll}>Stop All</button>
+        `}
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${jobs===null && html`<div className="subtle">Loading…</div>`}
+      ${jobs!==null&&jobs.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">▶</div>
+          <div className="empty-msg">No active jobs</div>
+          <div className="empty-sub">Running crawls and scans will appear here.</div>
+        </div>`}
+      ${jobs&&jobs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"18%"}}/><col style=${{width:"14%"}}/><col style=${{width:"14%"}}/><col style=${{width:"10%"}}/><col style=${{width:"10%"}}/><col style=${{width:"7%"}}/><col style=${{width:"13%"}}/><col style=${{width:"14%"}}/>
+            </colgroup>
+            <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
+            <tbody>${jobs.map(j=>{
+              const key = `${j.job_type}-${j.run_id}`;
+              const isStopping = !!stopping[key];
+              return html`
+              <tr key=${key}>
+                <td>
+                  <a href=${j.run_type==="sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`} style=${{fontWeight:600}}>${j.run_name}</a>
+                  ${j.current_url && html`<div className="url" style=${{marginTop:3}}>${truncUrl(j.current_url, 54)}</div>`}
+                </td>
+                <td>${j.run_type==="sast"||j.run_type==="api"
+                  ? html`<a href=${`#/apis/${j.collection_id}`}>${j.collection_name}</a>`
+                  : html`<a href=${`#/sites/${j.site_id}`}>${j.site_name}</a>`
+                }</td>
+                <td>${j.job_type}</td>
+                <td>${activeJobBadge(j)}</td>
+                <td>${activeJobProgress(j)}</td>
+                <td>${j.findings_count ?? html`<span className="subtle">—</span>`}</td>
+                <td className="subtle">${fmtDate(j.started_at || j.created_at)}</td>
+                <td>
+                  <div className="row" style=${{justifyContent:"flex-end", gap:"6px"}}>
+                    <button className="btn secondary sm" onClick=${()=>nav(j.run_type==="sast" ? `#/sast-runs/${j.run_id}/progress` : j.run_type==="api" ? `#/api-runs/${j.run_id}/status` : `#/runs/${j.run_id}`)}>Open</button>
+                    <button className="btn danger sm" onClick=${()=>stopJob(j)} disabled=${isStopping}>${isStopping ? "Stopping…" : "Stop"}</button>
+                  </div>
+                </td>
+              </tr>`;
+            })}
             </tbody>
           </table>
         </div>`}
@@ -448,7 +2213,11 @@ function SiteDetail({ siteId }) {
                     ${c.login_url || site.login_url || "No login URL"}
                   </div>
                 </div>`)}
-            </div>`}
+            </div>
+            ${site.credentials.some(c => c.auth_mode === "guided") && html`
+              <div style=${{marginTop:8,padding:"8px 12px",background:"var(--surface-2,#2a2a2a)",border:"1px solid var(--warn,#f59e0b)",borderRadius:5,fontSize:12,color:"var(--warn,#f59e0b)"}}>
+                ⚠️ This site is configured with interactive browser login credentials, which only works if you're running this scanner on your local machine with a GUI. It will not function if the scanner is installed on a headless host (i.e. server).
+              </div>`}`}
         </div>`}
 
       <div>
@@ -465,6 +2234,9 @@ function SiteDetail({ siteId }) {
         ${runs&&runs.length>0 && html`
           <div className="table-wrap">
             <table>
+              <colgroup>
+                <col style=${{width:"35%"}}/><col style=${{width:"18%"}}/><col style=${{width:"10%"}}/><col style=${{width:"16%"}}/><col style=${{width:"21%"}}/>
+              </colgroup>
               <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
               <tbody>${runs.map(r=>html`
                 <tr key=${r.id}>
@@ -507,26 +2279,31 @@ function SiteForm({ siteId }) {
         const d = await api.getSite(siteId);
         setForm({ name:d.name, base_url:d.base_url, requires_auth:d.requires_auth,
           login_url:d.login_url||"", notes:d.notes||"",
-          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||""})) });
+          credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||"",auth_mode:c.auth_mode||"auto",totp_seed:""})) });
       } catch(e) { setError(e.message); } finally { setLoading(false); }
     })();
   }, [isEdit, siteId]);
 
   const upd = p => { setForm(f=>({...f,...p})); };
   const updC = (i,p) => setForm(f=>({...f,credentials:f.credentials.map((c,j)=>j===i?{...c,...p}:c)}));
-  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:""}] });
+  const addC = () => upd({ credentials:[...form.credentials,{username:"",password:"",label:"",login_url:"",auth_mode:"auto",totp_seed:""}] });
   const rmC  = i  => upd({ credentials:form.credentials.filter((_,j)=>j!==i) });
 
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true);
     const payload = { name:form.name.trim(), base_url:form.base_url.trim(), requires_auth:form.requires_auth,
       login_url:form.requires_auth?(form.login_url.trim()||null):null, notes:form.notes.trim()||null,
-      credentials:form.requires_auth?form.credentials.map(c=>({
-        username:c.username,
-        password:c.password,
-        label:c.label||null,
-        login_url:c.login_url?.trim()||null,
-      })):[] };
+      credentials:form.requires_auth?form.credentials.map(c=>{
+        const base = {
+          username:c.username,
+          password:c.password,
+          label:c.label||null,
+          login_url:c.login_url?.trim()||null,
+          auth_mode:c.auth_mode||"auto",
+        };
+        if (c.totp_seed?.trim()) base.totp_seed = c.totp_seed.trim();
+        return base;
+      }):[] };
     try {
       if (isEdit) { await api.updateSite(siteId,payload); nav(`#/sites/${siteId}`); }
       else        { const s = await api.createSite(payload); nav(`#/sites/${s.id}`); }
@@ -562,14 +2339,45 @@ function SiteForm({ siteId }) {
               <input type="url" value=${form.login_url} placeholder="https://target.example.com/login" onChange=${e=>upd({login_url:e.target.value})}/></div>
             <fieldset><legend>Credentials</legend>
               ${form.credentials.length===0&&html`<div className="subtle">No credentials yet.</div>`}
-              ${form.credentials.map((c,i)=>html`
+              ${form.credentials.map((c,i)=>{
+                const parseCurl = (text) => {
+                  const cookies = {}; const headers = {};
+                  try {
+                    [...text.matchAll(/-H\s+['"]([^'"]+)['"]/g)].forEach(m => {
+                      const [n,...rest] = m[1].split(":"); const v = rest.join(":").trim();
+                      if (n.trim().toLowerCase()==="cookie") { v.split(";").forEach(p=>{ const [k,...vs]=p.trim().split("="); if(k) cookies[k.trim()]=vs.join("=").trim(); }); }
+                      else { headers[n.trim()]=v; }
+                    });
+                    const bMatch = text.match(/-b\s+['"]([^'"]+)['"]/) || text.match(/--cookie\s+['"]([^'"]+)['"]/);
+                    if (bMatch) bMatch[1].split(";").forEach(p=>{ const [k,...vs]=p.trim().split("="); if(k) cookies[k.trim()]=vs.join("=").trim(); });
+                  } catch(_){}
+                  return {
+                    cookies: Object.keys(cookies).length ? JSON.stringify(Object.entries(cookies).map(([name,value])=>({name,value})),null,2) : c.seed_cookies_json,
+                    headers: Object.keys(headers).length ? JSON.stringify(headers,null,2) : c.seed_headers_json,
+                  };
+                };
+                return html`
                 <div className="cred-row" key=${i}>
                   <div className="field"><label>Username</label><input type="text" required value=${c.username} onChange=${e=>updC(i,{username:e.target.value})}/></div>
                   <div className="field"><label>Password</label><input type="text" required value=${c.password} onChange=${e=>updC(i,{password:e.target.value})}/></div>
                   <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value=${c.login_url||""} placeholder=${form.login_url?`Uses default: ${form.login_url}`:"Required if no default login URL"} onChange=${e=>updC(i,{login_url:e.target.value})}/></div>
                   <div className="field"><label>Label</label><input type="text" value=${c.label} placeholder="admin" onChange=${e=>updC(i,{label:e.target.value})}/></div>
+                  <div className="field"><label>Auth Mode</label>
+                    <select value=${c.auth_mode||"auto"} onChange=${e=>updC(i,{auth_mode:e.target.value})}>
+                      <option value="auto">auto — single-page form fill</option>
+                      <option value="totp">totp — form fill + TOTP 2FA</option>
+                      <option value="guided">guided — interactive browser login</option>
+                    </select></div>
+                  ${(c.auth_mode||"auto")==="totp" && html`
+                    <div className="field"><label>TOTP Seed <span className="field-optional">(base32 secret from authenticator app)</span></label>
+                      <input type="text" value=${c.totp_seed||""} placeholder="JBSWY3DPEHPK3PXP…" onChange=${e=>updC(i,{totp_seed:e.target.value})}/></div>`}
+                  ${(c.auth_mode||"auto")==="guided" && html`
+                    <div className="field"><div style=${{background:"var(--surface-2,#2a2a2a)",border:"1px solid var(--border)",borderRadius:4,padding:"8px 10px",fontSize:12,color:"var(--text-2)"}}>
+                      🖥️ A browser window will open when a crawl or dynamic scan starts. Complete the login (including any SSO / MFA / push notifications), then click <strong>I'm Done</strong> in the run detail view. ALICE reuses the session captured by whichever phase runs first.
+                    </div></div>`}
                   <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick=${()=>rmC(i)}>Remove</button></div>
-                </div>`)}
+                </div>`;
+              })}
               <button type="button" className="btn secondary sm" onClick=${addC}><${IconPlus}/> Add credential</button>
             </fieldset>`}
           <div className="divider"/>
@@ -582,6 +2390,1595 @@ function SiteForm({ siteId }) {
 }
 
 // ── Test run form ─────────────────────────────────────────────────────────────
+
+// ── API test run form ─────────────────────────────────────────────────────────
+
+function ApiTestRunForm({ collectionId }) {
+  const [form, setForm] = useState({ name:"", llm_config_id:"", coverage_mode:"track" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [profiles, setProfiles] = useState([]);
+  const upd = p => setForm(f=>({...f,...p}));
+
+  useEffect(() => {
+    api.listLLMProfiles().then(p => setProfiles(p||[])).catch(e => setError(e.message));
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setSaving(true); setError(null);
+    try {
+      const payload = {
+        name: form.name.trim()||null,
+        llm_config_id: form.llm_config_id ? +form.llm_config_id : null,
+        coverage_mode: form.coverage_mode,
+      };
+      const run = await api.createApiRun(collectionId, payload);
+      nav(`#/api-runs/${run.id}/status`);
+    } catch(e) { setError(e.message); setSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${`#/apis/${collectionId}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>New test run
+      </div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error">${error}</div>`}
+      <form className="card" style=${{maxWidth:560}} onSubmit=${onSubmit}>
+        <div className="form-section-title">New API test run</div>
+        <div className="field">
+          <label>Name <span className="subtle">(optional — auto-generated if blank)</span></label>
+          <input type="text" value=${form.name} onInput=${e=>upd({name:e.target.value})} placeholder="e.g. Sprint 12 auth test"/>
+        </div>
+        <div className="field">
+          <label>LLM profile</label>
+          <select value=${form.llm_config_id} onChange=${e=>upd({llm_config_id:e.target.value})}>
+            <option value="">— Use global active profile —</option>
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Coverage mode</label>
+          <select value=${form.coverage_mode} onChange=${e=>upd({coverage_mode:e.target.value})}>
+            <option value="track">Track — record coverage but don't enforce it</option>
+            <option value="enforce">Enforce — block completion until all endpoints covered</option>
+          </select>
+        </div>
+        <div className="row spread" style=${{marginTop:16}}>
+          <button type="button" className="btn ghost" onClick=${()=>nav(`#/apis/${collectionId}`)}>Cancel</button>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Creating…":"Create run"}</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+// ── API test run detail ────────────────────────────────────────────────────────
+
+const API_RUN_TABS = [
+  { key: "status",      label: "Status" },
+  { key: "findings",    label: "Findings" },
+  { key: "leads",       label: "Scan Leads" },
+  { key: "sessions",    label: "Sessions" },
+  { key: "traffic",     label: "Traffic Log" },
+  { key: "endpoints",   label: "Endpoints" },
+  { key: "workprogram", label: "Workprogram" },
+];
+
+// Reuse the same alice session management infrastructure as TestRunDetail but
+// bound to the /api/api-test-runs/{id}/* alias routes.
+function useApiAliceSession(runId) {
+  const [aliceSessions, setAliceSessions] = useState(null);
+  const [aliceLoaded, setAliceLoaded] = useState(false);
+  const [activeTabId, setActiveTabId] = useState("tab-default");
+  const [aliceStatus, setAliceStatus] = useState(null);
+  const streamRef = useRef(null);
+  const cursorRef = useRef(0);
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const data = await api.getApiAliceSessions(runId);
+      setAliceSessions(data.chats || []);
+      setActiveTabId(data.active_tab_id || "tab-default");
+      setAliceLoaded(true);
+    } catch(e) { console.error("alice sessions load error", e); setAliceLoaded(true); }
+  }, [runId]);
+
+  const saveSessions = useCallback(async (chats, activeId) => {
+    try { await api.saveApiAliceSessions(runId, { chats, active_tab_id: activeId }); }
+    catch(e) { console.error("alice sessions save error", e); }
+  }, [runId]);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await api.getApiAliceStatus(runId);
+      setAliceStatus(st);
+    } catch {}
+  }, [runId]);
+
+  return { aliceSessions, setAliceSessions, aliceLoaded, activeTabId, setActiveTabId, aliceStatus, setAliceStatus, loadSessions, saveSessions, pollStatus, streamRef, cursorRef };
+}
+
+function ApiTestRunDetail({ runId, initialTab }) {
+  const [run, setRun] = useState(null);
+  const [error, setError] = useState(null);
+  const [scanStatus, setScanStatus] = useState(null);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [coverageMode, setCoverageMode] = useState("track");
+  const tab = initialTab || "status";
+
+  useEffect(() => {
+    api.getApiRun(runId).then(r => { setRun(r); setCoverageMode(r.coverage_mode || "track"); }).catch(e => setError(e.message));
+    api.getApiScanStatus(runId).then(setScanStatus).catch(()=>{});
+  }, [runId]);
+
+  // Poll scan status while scanning.
+  useEffect(() => {
+    if (!scanStatus?.running) return;
+    const t = setInterval(() => {
+      api.getApiScanStatus(runId).then(st => {
+        setScanStatus(st);
+        if (!st.running) api.getApiRun(runId).then(setRun).catch(()=>{});
+      }).catch(()=>{});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [scanStatus?.running, runId]);
+
+  const onStartScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.startApiScan(runId, coverageMode);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(r => { setRun(r); setCoverageMode(r.coverage_mode || "track"); }).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
+
+  const onStopScan = async () => {
+    setScanBusy(true);
+    try {
+      await api.stopApiScan(runId);
+      const st = await api.getApiScanStatus(runId);
+      setScanStatus(st);
+      api.getApiRun(runId).then(setRun).catch(()=>{});
+    } catch(e) { setError(e.message); }
+    finally { setScanBusy(false); }
+  };
+
+  const onDelete = async () => {
+    if (!run) return;
+    if (!confirm(`Delete test run "${run.name}"?`)) return;
+    try { await api.deleteApiRun(runId); nav(`#/apis/${run.collection_id}`); }
+    catch(e) { setError(e.message); }
+  };
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"success":s==="running"||s==="scanning"?"warning":s==="failed"||s==="cancelled"?"danger":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  const scanRunning = scanStatus?.running === true;
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        <a href=${run?`#/apis/${run.collection_id}`:"#/apis"} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a>
+        <span className="breadcrumb-sep"> / </span>
+        ${run ? run.name : "…"}
+        ${run && html` ${statusBadge(run.status)}`}
+      </div>
+      <div className="topbar-actions">
+        ${scanRunning
+          ? html`<button className="btn danger-outline" disabled=${scanBusy} onClick=${onStopScan}>
+                   ${scanBusy?"Stopping…":"Stop Scan"}
+                 </button>`
+          : html`
+            <label className="subtle" style=${{display:"flex",alignItems:"center",gap:6,fontSize:12}} title="Track: observe coverage as the scan runs. Enforce: drive every applicable endpoint × category to covered or skipped-with-reason.">
+              Coverage:
+              <select value=${coverageMode} disabled=${scanBusy} onChange=${e=>setCoverageMode(e.target.value)}>
+                <option value="track">Track</option>
+                <option value="enforce">Enforce</option>
+              </select>
+            </label>
+            <button className="btn" disabled=${scanBusy} onClick=${onStartScan}>
+              ${scanBusy?"Starting…":"Start Scan"}
+            </button>`}
+        ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="tab-bar">
+      ${API_RUN_TABS.map(t=>html`
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>nav(`#/api-runs/${runId}/${t.key}`)}
+        >${t.label}</button>`)}
+    </div>
+    <div className=${"content no-padding"+(tab==="status"?" flex-fill-noscroll":" scroll-content")}>
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${tab==="status"      && html`<${ApiRunStatusTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="findings"    && html`<${ApiRunFindingsTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+      ${tab==="leads"       && html`<${ApiRunLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="sessions"    && html`<${ApiRunSessionsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="traffic"     && html`<${ApiRunTrafficTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="endpoints"   && html`<${ApiRunEndpointsTab} runId=${runId} run=${run}/>`}
+      ${tab==="workprogram" && html`<${ApiRunWorkProgramTab} runId=${runId} scanRunning=${scanRunning} run=${run}/>`}
+    </div>
+  `;
+}
+
+// ── ApiRunLeadsTab ─────────────────────────────────────────────────────────────
+
+const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
+  const [expanded, setExpanded] = useState(new Set());
+  const toggle = (id) => setExpanded(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  const sevCls  = (s) => ({high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
+  const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
+
+  if (loading) return html`<div className="subtle" style=${{padding:32,textAlign:"center"}}>Loading…</div>`;
+  if (!leads || leads.length === 0) return html`
+    <div className="subtle" style=${{padding:32,textAlign:"center"}}>
+      ${emptyMsg || (scanRunning ? "Scan in progress — leads will appear here as they are found." : "No leads yet.")}
+    </div>`;
+
+  return html`<div style=${{padding:"16px 24px"}}>
+    <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+      <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
+      ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+    </div>
+    ${leads.map(lead => html`
+      <div key=${lead.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
+        <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
+             onClick=${()=>toggle(lead.id)}>
+          <span className=${"sev-badge "+sevCls(lead.severity)}>${lead.severity||"medium"}</span>
+          <span style=${{fontWeight:600,flex:1}}>${lead.title}</span>
+          ${lead.category && html`<span className="badge neutral" style=${{fontSize:11}}>${lead.category}</span>`}
+          <span className=${"badge "+statCls(lead.status)} style=${{fontSize:11}}>${lead.status}</span>
+          <span className="badge neutral" style=${{fontSize:11}}>${Math.round((lead.confidence||0)*100)}% conf</span>
+          <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(lead.id)?"▲":"▼"}</span>
+        </div>
+        ${expanded.has(lead.id) && html`
+          <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
+            ${lead.location && html`<div style=${{marginBottom:8}}><b>Location:</b> <code style=${{fontSize:12}}>${lead.location}</code></div>`}
+            ${lead.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
+              <div style=${{marginTop:4}}>${lead.description}</div></div>`}
+            ${lead.evidence && html`<div style=${{marginBottom:8}}><b>Code evidence:</b>
+              <pre style=${{fontSize:11,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:8,borderRadius:4,overflow:"auto",maxHeight:220,whiteSpace:"pre-wrap",marginTop:4}}>${lead.evidence}</pre></div>`}
+            ${lead.note && html`<div style=${{marginBottom:8}}><b>Investigation note:</b> ${lead.note}</div>`}
+            ${lead.linked_finding_id && html`<div style=${{marginBottom:8,color:"var(--success,#4caf50)"}}>
+              ✔ Confirmed as <a href="#" onClick=${(e)=>{e.preventDefault();}} style=${{color:"inherit"}}>Finding #${lead.linked_finding_id}</a>
+            </div>`}
+            <div style=${{fontSize:11,color:"var(--muted)",marginTop:4}}>
+              Lead #${lead.id} · source: ${lead.source||"sast"}
+              ${lead.investigated_by_run_id ? ` · investigated by ${lead.investigated_by_run_type||"run"} #${lead.investigated_by_run_id}` : ""}
+            </div>
+          </div>`}
+      </div>`)}
+  </div>`;
+}
+
+function ApiRunLeadsTab({ runId, scanRunning }) {
+  const [leads, setLeads] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const load = () => { setLoading(true); api.getApiRunLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
+  useEffect(() => { load(); }, [runId]);
+  useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 6000); return () => clearInterval(t); }, [scanRunning, runId]);
+
+  return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    emptyMsg="No scan leads for this collection yet. Run a SAST scan first."/>`;
+}
+
+// ── ApiRunSessionsTab ──────────────────────────────────────────────────────────
+
+// ── SastRunDetail ─────────────────────────────────────────────────────────────
+
+const SAST_TABS = [
+  { key: "progress", label: "Progress" },
+  { key: "leads",    label: "Leads" },
+];
+
+// ── SastRunsListPage ──────────────────────────────────────────────────────────
+function SastRunsListPage() {
+  const [runs, setRuns]   = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(async () => {
+    try { setRuns(await api.listAllSastRuns()); } catch(e) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"ok":s==="failed"?"danger":s==="scanning"?"running":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">SAST Scans</div>
+    </div>
+    <div className="content scroll-content">
+      ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
+      ${runs===null && html`<div className="subtle">Loading…</div>`}
+      ${runs!==null&&runs.length===0 && html`
+        <div className="empty-state">
+          <div className="empty-icon">🔍</div>
+          <div className="empty-msg">No SAST scans yet</div>
+          <div className="empty-sub">Upload source code to an API collection and run a SAST scan from the Files tab.</div>
+        </div>`}
+      ${runs&&runs.length>0 && html`
+        <div className="table-wrap">
+          <table>
+            <colgroup>
+              <col style=${{width:"24%"}}/><col style=${{width:"12%"}}/><col style=${{width:"10%"}}/><col style=${{width:"18%"}}/><col style=${{width:"18%"}}/><col/>
+            </colgroup>
+            <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
+            <tbody>${runs.map(r=>html`
+              <tr key=${r.id}>
+                <td><a href=${`#/sast-runs/${r.id}/progress`} style=${{fontWeight:600}}>${r.name}</a></td>
+                <td>${statusBadge(r.status)}</td>
+                <td>${r.leads_count}</td>
+                <td>${r.triggered_by_run_id
+                  ? html`<a href=${`#/api-runs/${r.triggered_by_run_id}/status`}>API run #${r.triggered_by_run_id}</a>`
+                  : html`<span className="subtle">—</span>`}</td>
+                <td>${r.started_at ? new Date(r.started_at).toLocaleString() : html`<span className="subtle">—</span>`}</td>
+                <td><a className="btn ghost sm" href=${`#/sast-runs/${r.id}/progress`}>View →</a></td>
+              </tr>`)}
+            </tbody>
+          </table>
+        </div>`}
+    </div>
+  `;
+}
+
+function SastRunDetail({ runId, initialTab }) {
+  const [run, setRun]           = useState(null);
+  const [tab, setTab]           = useState(initialTab || "progress");
+  const [error, setError]       = useState(null);
+  const [scanRunning, setScanRunning] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
+
+  const loadRun = useCallback(async () => {
+    try { const r = await api.getSastRun(runId); setRun(r); } catch(e) { setError(e.message); }
+  }, [runId]);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await api.getSastScanStatus(runId);
+      setScanRunning(st.running);
+      if (!st.running) loadRun();
+    } catch {}
+  }, [runId]);
+
+  useEffect(() => { loadRun(); }, [runId]);
+  useEffect(() => {
+    const t = setInterval(pollStatus, 3000);
+    return () => clearInterval(t);
+  }, [runId]);
+
+  const onStart = async () => {
+    setStartBusy(true); setError(null);
+    try { await api.startSastScan(runId); setScanRunning(true); loadRun(); }
+    catch(e) { setError(e.message); }
+    finally { setStartBusy(false); }
+  };
+  const onStop = async () => {
+    try { await api.stopSastScan(runId); } catch(e) { setError(e.message); }
+  };
+  const onDelete = async () => {
+    if (!confirm("Delete this SAST run and all its leads?")) return;
+    try {
+      const collId = run?.collection_id;
+      await api.deleteSastRun(runId);
+      nav(collId ? `#/apis/${collId}/files` : "#/sast-runs");
+    } catch(e) { setError(e.message); }
+  };
+
+  const statusLabel = run ? run.status : "…";
+  const canStart = run && !scanRunning && ["pending","completed","failed","cancelled"].includes(run.status);
+
+  const statusBadge = (s) => {
+    const cls = s==="completed"?"success":s==="scanning"||s==="running"?"warning":s==="failed"||s==="cancelled"?"danger":"neutral";
+    return html`<span className=${"badge "+cls}>${s}</span>`;
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">
+        ${run ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : ""}
+        ${run ? run.name : "…"}
+        ${run && html` ${statusBadge(scanRunning ? "scanning" : run.status)}`}
+        ${run?.triggered_by_run_id && html`
+          <span className="breadcrumb-sep"> · </span>
+          <a href=${`#/api-runs/${run.triggered_by_run_id}/status`} style=${{fontSize:12,color:"var(--muted)"}}>API Run #${run.triggered_by_run_id}</a>`}
+      </div>
+      <div className="topbar-actions">
+        ${canStart && html`<button className="btn" disabled=${startBusy} onClick=${onStart}>${startBusy?"Starting…":"Start SAST Scan"}</button>`}
+        ${scanRunning && html`<button className="btn danger-outline" onClick=${onStop}>Stop</button>`}
+        ${run && html`<button className="btn danger-outline" onClick=${onDelete}>Delete</button>`}
+      </div>
+    </div>
+    <div className="tab-bar">
+      ${SAST_TABS.map(t=>html`
+        <button key=${t.key}
+          className=${"tab-btn"+(tab===t.key?" active":"")}
+          onClick=${()=>{setTab(t.key);nav(`#/sast-runs/${runId}/${t.key}`);}}>
+          ${t.label}
+        </button>`)}
+    </div>
+    <div className=${tab==="progress" ? "content no-padding flex-fill-noscroll" : "content scroll-content"}>
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${tab==="progress" && html`<${SastProgressTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+    </div>
+  `;
+}
+
+function SastProgressTab({ runId, scanRunning }) {
+  const [log, setLog]       = useState([]);
+  const [subTab, setSubTab] = useState("activity");
+  const bottomRef           = useRef(null);
+
+  const loadActivity = () => api.getSastScanLog(runId).then(setLog).catch(() => {});
+  const loadAgents   = () => api.getSastAgentLog(runId).then(setLog).catch(() => {});
+  const load = () => subTab === "activity" ? loadActivity() : loadAgents();
+
+  // Initial load + polling
+  useEffect(() => { load(); }, [runId, subTab]);
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId, subTab]);
+
+  // Auto-scroll to bottom while running
+  useEffect(() => {
+    if (scanRunning && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [log.length, scanRunning]);
+
+  // Phase → display helpers
+  const phaseIcon = (phase) => {
+    if (phase === "sast_extract")   return "📦";
+    if (phase === "sast_tool")      return "🔍";
+    if (phase === "sast_candidate") return "⚠️";
+    if (phase === "sast_filter")    return "🔬";
+    if (phase === "sast_complete")  return "✅";
+    if (phase === "sast_cancelled") return "🛑";
+    if (phase === "sast_failed")    return "❌";
+    return "▸";
+  };
+  const phaseCls = (phase, status) => {
+    if (phase === "sast_candidate") return "phase-warn";
+    if (phase === "sast_filter") return status==="running" ? "phase-ok" : "phase-other";
+    if (phase === "sast_complete") return "phase-ok";
+    if (phase === "sast_failed" || phase === "sast_cancelled") return "phase-danger";
+    return "phase-other";
+  };
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"?"phase-ok":"phase-other";
+
+  return html`<div className="activity-panel" style=${{margin:0,display:"flex",flexDirection:"column",height:"100%"}}>
+    <div className="activity-log-toolbar" style=${{flexShrink:0}}>
+      <div style=${{display:"flex",gap:4}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Activity</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agents</button>
+      </div>
+      <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+      ${scanRunning && html`<span className="activity-mode-badge running">● Scanning</span>`}
+      <a className="btn ghost sm" href=${`/api/sast-runs/${runId}/agent-log/export`} download>Export ↓</a>
+    </div>
+    <div style=${{flex:1,overflow:"auto",minHeight:0}}>
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning ? "SAST scan in progress — activity will appear here shortly." : "No activity yet. Start the scan to begin."}
+               </div>`
+        : subTab==="activity"
+          ? html`<div className="activity-feed">
+              ${log.map(r => {
+                const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+                const icon = phaseIcon(r.phase);
+                const cls  = phaseCls(r.phase, r.status);
+                return html`<div key=${r.id} className="activity-entry">
+                  <span className="activity-ts">${ts}</span>
+                  <span className=${"activity-badge "+cls}>${icon} ${r.phase||""}</span>
+                  <span className="activity-msg">${r.message||""}</span>
+                </div>`;
+              })}
+              <div ref=${bottomRef}/>
+            </div>`
+          : html`<div className="activity-feed">
+              ${log.map(r => {
+                const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+                return html`<div key=${r.id} className="activity-entry">
+                  <span className="activity-ts">${ts}</span>
+                  <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                  <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                  <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+                </div>`;
+              })}
+              <div ref=${bottomRef}/>
+            </div>`}
+    </div>
+  </div>`;
+}
+
+function SastLeadsTab({ runId, scanRunning }) {
+  const [leads, setLeads] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const load = () => { setLoading(true); api.getSastLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
+  useEffect(() => { load(); }, [runId]);
+  useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 5000); return () => clearInterval(t); }, [scanRunning, runId]);
+
+  return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    emptyMsg=${scanRunning ? "SAST scan in progress — leads will appear here as they are found." : "No leads yet. Start the SAST scan to analyse the source code."}/>`;
+}
+
+function ApiRunSessionsTab({ runId, scanRunning }) {
+  const [data, setData] = useState(null);
+
+  const load = () => api.getApiScannerSessions(runId).then(setData).catch(() => {});
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  return html`<${ScannerSessionsPanel}
+    runId=${runId}
+    data=${data}
+    refresh=${load}
+    updateSession=${(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)}
+  />`;
+}
+
+// ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
+
+function ApiRunFindingsTab({ runId, scanRunning, run }) {
+  const [findings, setFindings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+  const [clearBusy, setClearBusy] = useState(false);
+  const issueImportInputRef = useRef(null);
+
+  const load = async () => {
+    try {
+      const data = await api.getApiFindings(runId);
+      setFindings(data);
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [runId]);
+
+  // Poll while scan is running.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const toggle = (id) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, null), md, "text/markdown;charset=utf-8");
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportFindingsClick = () => { issueImportInputRef.current?.click(); };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importApiFindings(runId, imported);
+      setFindings(await api.getApiFindings(runId));
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onClearFindings = async () => {
+    if (!confirm("Clear all findings for this API test run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiFindings(runId); setFindings([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
+
+  if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
+
+  return html`
+    <div style=${{padding:"16px 24px"}}>
+      ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
+      <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0,marginRight:4}}>Security Findings</h3>
+        ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+        <span className="badge neutral" style=${{fontSize:12}}>${findings.length} finding${findings.length!==1?"s":""}</span>
+        <div style=${{flex:1}}></div>
+        <button className="btn sm" onClick=${load}>Refresh</button>
+        ${findings.length>0 && html`<button className="btn sm" onClick=${onExportFindingsMarkdown}>Export Issues</button>`}
+        <button className="btn sm" onClick=${onImportFindingsClick}>Import Issues</button>
+        <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+          style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+        ${findings.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClearFindings}>${clearBusy?"Clearing…":"Clear all"}</button>`}
+      </div>
+      ${findings.length === 0
+        ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — findings will appear here as they are discovered."
+                              :"No findings yet. Start a scan to test this API collection."}
+               </div>`
+        : findings.map(f => html`
+          <div key=${f.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
+            <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
+                 onClick=${()=>toggle(f.id)}>
+              <span className=${"sev-badge "+sevCls(f.severity)}>${f.severity}</span>
+              <span style=${{fontWeight:600,flex:1}}>${f.title}</span>
+              ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
+              ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
+              <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+            </div>
+            ${expanded.has(f.id) && html`
+              <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
+                ${f.affected_url && html`<div style=${{marginBottom:8}}><b>URL:</b> <code style=${{fontSize:12}}>${f.affected_url}</code></div>`}
+                ${f.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
+                  <div style=${{marginTop:4}}>${renderMarkdown(f.description)}</div></div>`}
+                ${f.impact && html`<div style=${{marginBottom:8}}><b>Impact:</b> ${f.impact}</div>`}
+                ${f.recommendation && html`<div style=${{marginBottom:8}}><b>Recommendation:</b> ${f.recommendation}</div>`}
+                ${f.evidence && html`<div style=${{marginBottom:8}}><b>Evidence:</b>
+                  <pre style=${{fontSize:11,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:8,borderRadius:4,overflow:"auto",maxHeight:200,whiteSpace:"pre-wrap"}}>${f.evidence}</pre></div>`}
+                <div style=${{fontSize:11,color:"var(--muted)"}}>${f.validation_status} · ${f.finding_source}</div>
+              </div>`}
+          </div>`)
+      }
+    </div>
+  `;
+}
+
+// ── ApiRunEndpointsTab — per-endpoint prerequisites display ───────────────────
+
+function ApiRunEndpointsTab({ runId, run }) {
+  const [endpoints, setEndpoints] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!run) return;
+    api.listApiEndpoints(run.collection_id)
+      .then(data => { setEndpoints(data || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [run]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading endpoints…</div>`;
+  if (!endpoints.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No endpoints found. Upload and parse API documentation first.
+    </div>`;
+
+  const parsedNotes = (ep) => {
+    try { return JSON.parse(ep.prereq_notes || "[]"); } catch { return []; }
+  };
+
+  const readinessIcon = (ok) => ok
+    ? html`<span style=${{color:"var(--success,#4caf50)"}}>✔</span>`
+    : html`<span style=${{color:"var(--danger,#f44336)"}}>✘</span>`;
+
+  return html`
+    <div style=${{padding:"16px"}}>
+      <h3 style=${{marginBottom:12}}>Endpoint Prerequisites</h3>
+      <table className="data-table" style=${{width:"100%",borderCollapse:"collapse"}}>
+        <thead>
+          <tr>
+            <th>Method</th><th>Path</th><th>Auth Req.</th>
+            <th title="Enough info to probe this endpoint">Testable?</th>
+            <th title="Have credentials for auth-required paths">Auth Testable?</th>
+            <th>Notes / Gaps</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${endpoints.map(ep => {
+            const notes = parsedNotes(ep);
+            return html`
+              <tr key=${ep.id}>
+                <td><span className=${"method-badge method-"+ep.method.toLowerCase()}>${ep.method}</span></td>
+                <td className="mono" style=${{fontSize:12}}>${ep.path}</td>
+                <td style=${{textAlign:"center"}}>${ep.auth_required ? html`<span className="badge warning">Auth</span>` : html`<span className="badge neutral">Open</span>`}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test)}</td>
+                <td style=${{textAlign:"center"}}>${readinessIcon(ep.prereq_can_test_auth)}</td>
+                <td style=${{fontSize:11,color:notes.length?"var(--danger,#f44336)":"var(--muted)"}}>
+                  ${notes.length ? notes.join(" · ") : "—"}
+                </td>
+              </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ── ApiRunWorkProgramTab — coverage matrix + live updates ─────────────────────
+
+const OWASP_LABELS = {
+  API1:"BOLA", API2:"Broken Auth", API3:"BOPLA", API4:"Consumption",
+  API5:"BFLA", API6:"Bus. Flows", API7:"SSRF",  API8:"Misconfig",
+  API9:"Inventory", API10:"Ext. APIs",
+};
+const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","API8","API9","API10"];
+
+function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
+  const [matrix, setMatrix] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const [enforce, setEnforce] = useState(null);   // latest enforce_progress event
+  const esRef = useRef(null);
+
+  const loadMatrix = () =>
+    api.getApiCoverageMatrix(runId)
+      .then(m => { setMatrix(m); setLoading(false); })
+      .catch(() => setLoading(false));
+
+  useEffect(() => { loadMatrix(); }, [runId]);
+
+  // Poll during scan.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMatrix, 5000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  // SSE live updates.
+  useEffect(() => {
+    if (!scanRunning) return;
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.type === "coverage_update") {
+          setMatrix(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              endpoints: prev.endpoints.map(ep => {
+                if (ep.endpoint_id !== d.endpoint_id) return ep;
+                const cells = { ...ep.cells };
+                const existing = cells[d.owasp_api_category] || { status:"not_started", finding_ids:[] };
+                const fids = [...existing.finding_ids];
+                if (d.finding_id && !fids.includes(d.finding_id)) fids.push(d.finding_id);
+                cells[d.owasp_api_category] = { status: d.status, finding_ids: fids };
+                return { ...ep, cells };
+              }),
+            };
+          });
+        } else if (d.type === "enforce_progress") {
+          setEnforce(d);
+          if (d.phase === "complete") loadMatrix();
+        }
+      } catch {}
+    };
+    return () => { es.close(); esRef.current = null; };
+  }, [scanRunning, runId]);
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading coverage matrix…</div>`;
+
+  if (!matrix || !matrix.endpoints?.length) return html`
+    <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+      No coverage data yet.${" "}
+      ${run?.status === "pending"
+        ? "Start a scan to populate the Work Program matrix."
+        : "The matrix will appear once a scan has started."}
+    </div>`;
+
+  const cats = matrix.categories || COVERAGE_CATEGORIES;
+  const totals = matrix.totals || {};
+  const totalCells = Object.values(totals).reduce((a,b)=>a+b,0);
+  const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
+  const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
+
+  return html`
+    <div style=${{padding:16}}>
+      <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <span className=${"badge "+(run?.coverage_mode==="enforce"?"warning":"neutral")}>
+          ${run?.coverage_mode||"track"} mode
+        </span>
+        <span className="badge neutral">${pct}% coverage (${coveredCount}/${totalCells} cells)</span>
+        ${scanRunning && html`<span className="badge warning">● Live</span>`}
+        ${enforce && enforce.phase !== "complete" && html`
+          <span className="badge warning" title="Enforce mode is resolving remaining coverage cells">
+            Enforcing… ${enforce.resolved!=null?`${enforce.resolved}/${enforce.total}`:`${enforce.remaining} left`}
+          </span>`}
+        ${enforce && enforce.phase === "complete" && html`
+          <span className="badge success" title=${enforce.message||""}>
+            Enforce done · ${enforce.covered||0} covered, ${enforce.skipped||0} skipped${enforce.budget_exhausted?" (budget hit)":""}
+          </span>`}
+      </div>
+
+      <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
+        ${[["not_started","cov-not-started","Not started"],["in_progress","cov-in-progress","In progress"],
+           ["covered","cov-covered","Covered"],["finding","cov-finding","Finding"],
+           ["skipped","cov-skipped","Skipped"]].map(([s,cls,label])=>html`
+          <span key=${s} style=${{display:"flex",alignItems:"center",gap:4}}>
+            <span className=${"cov-cell "+cls} style=${{display:"inline-block",width:14,height:14,borderRadius:3}}></span>
+            ${label} (${totals[s]||0})
+          </span>`)}
+      </div>
+
+      <div style=${{overflowX:"auto"}}>
+        <table className="coverage-matrix" style=${{borderCollapse:"collapse",fontSize:11,minWidth:600}}>
+          <thead>
+            <tr>
+              <th style=${{textAlign:"left",padding:"4px 8px",minWidth:280,width:"30%"}}>Endpoint</th>
+              <th style=${{padding:"4px 6px",textAlign:"center",minWidth:50}}>Ready</th>
+              ${cats.map(cat=>html`
+                <th key=${cat} style=${{padding:"4px 4px",textAlign:"center",minWidth:60}}
+                  title=${cat+": "+(OWASP_LABELS[cat]||cat)}>
+                  <div style=${{fontWeight:600}}>${cat}</div>
+                  <div style=${{color:"var(--muted)",fontWeight:400,fontSize:10}}>${OWASP_LABELS[cat]||""}</div>
+                </th>`)}
+            </tr>
+          </thead>
+          <tbody>
+            ${matrix.endpoints.map(ep => {
+              const readyOk = ep.prereq_can_test && ep.prereq_can_test_auth;
+              return html`
+                <tr key=${ep.endpoint_id} style=${{borderBottom:"1px solid var(--border)"}}>
+                  <td style=${{padding:"4px 8px"}}>
+                    <span className=${"method-badge method-"+ep.method.toLowerCase()} style=${{marginRight:4}}>${ep.method}</span>
+                    <span className="mono" style=${{fontSize:11}}>${ep.path}</span>
+                  </td>
+                  <td style=${{textAlign:"center",padding:"4px 6px"}}>
+                    ${ep.auth_required
+                      ? html`<span title="Auth required" style=${{color:readyOk?"var(--success,#4caf50)":"var(--danger,#f44336)"}}>${readyOk?"✔":"✘"}</span>`
+                      : html`<span title="No auth" style=${{color:"var(--success,#4caf50)"}}>✔</span>`}
+                  </td>
+                  ${cats.map(cat => {
+                    const cell = ep.cells?.[cat];
+                    if (!cell) return html`<td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}><span className="cov-cell cov-na" title="N/A">—</span></td>`;
+                    const fids = cell.finding_ids || [];
+                    const findings = cell.findings || [];
+                    const isSelected = selectedCell?.endpoint_id===ep.endpoint_id && selectedCell?.cat===cat;
+                    return html`
+                      <td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}>
+                        <span
+                          className=${"cov-cell cov-"+cell.status.replace("_","-")+(isSelected?" selected":"")+(fids.length?" has-findings":"")}
+                          title=${cat+": "+cell.status+(fids.length?" ("+fids.length+" finding"+(fids.length>1?"s":"")+"":"")}
+                          style=${{cursor:fids.length?"pointer":"default"}}
+                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{endpoint_id:ep.endpoint_id,cat,path:ep.path,method:ep.method,fids,findings})}
+                        >${fids.length>0?fids.length:""}</span>
+                      </td>`;
+                  })}
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      ${selectedCell && html`
+        <div style=${{marginTop:12,padding:12,background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <b style=${{fontSize:13}}>${selectedCell.method} ${selectedCell.path} — ${selectedCell.cat} ${OWASP_LABELS[selectedCell.cat]||""}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelectedCell(null)}>✕</button>
+          </div>
+          ${(selectedCell.findings && selectedCell.findings.length)
+            ? selectedCell.findings.map(f => html`
+                <div key=${f.id} style=${{padding:"6px 0",borderTop:"1px solid var(--border)"}}>
+                  <div style=${{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span className=${"sev-badge sev-"+(f.severity||"info")}>${f.severity||"info"}</span>
+                    <b style=${{fontSize:12}}>${f.title}</b>
+                    ${f.validation_status && f.validation_status!=="unvalidated"
+                      ? html`<span style=${{fontSize:11,color:"var(--muted)"}}>(${f.validation_status})</span>` : ""}
+                  </div>
+                  ${f.description ? html`<div style=${{fontSize:12,color:"var(--muted)",whiteSpace:"pre-wrap"}}>${f.description}</div>` : ""}
+                  <div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>Finding #${f.id} — view in the Findings tab.</div>
+                </div>`)
+            : html`<div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunTrafficTab ───────────────────────────────────────────────────────────
+
+function ApiRunTrafficTab({ runId, scanRunning }) {
+  const [traffic, setTraffic] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const lastIdRef = useRef(0);
+  const tableRef = useRef(null);
+
+  const loadMore = async () => {
+    try {
+      const items = await api.getApiTraffic(runId, lastIdRef.current);
+      if (items.length) {
+        setTraffic(prev => {
+          const next = [...prev, ...items];
+          lastIdRef.current = Math.max(...next.map(e=>e.id));
+          return next;
+        });
+      }
+      const ct = await api.getApiTrafficCount(runId);
+      setTotal(ct.count || 0);
+    } catch {}
+  };
+
+  useEffect(() => { loadMore(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMore, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  useEffect(() => {
+    if (autoScroll && tableRef.current) {
+      tableRef.current.scrollTop = tableRef.current.scrollHeight;
+    }
+  }, [traffic.length, autoScroll]);
+
+  const fmtTs = (ts) => {
+    if (!ts) return "-";
+    try { return new Date(ts).toLocaleTimeString(); } catch { return ts; }
+  };
+
+  const statusCls = (s) => !s?"":s<300?"status-2xx":s<400?"status-3xx":s<500?"status-4xx":"status-5xx";
+
+  const filtered = filter
+    ? traffic.filter(e=>(e.url+e.method+(e.status??"")+e.source).toLowerCase().includes(filter.toLowerCase()))
+    : traffic;
+
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",height:"calc(100vh - 130px)"}}>
+      <div style=${{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:"1px solid var(--border)",flexShrink:0}}>
+        <input className="traffic-filter" type="text" placeholder="Filter…"
+          value=${filter} onInput=${e=>setFilter(e.target.value)} style=${{flex:1}}/>
+        <span className="traffic-count-label">${filtered.length} shown${total>filtered.length?` of ${total}`:""}</span>
+        <label style=${{fontSize:12,display:"flex",alignItems:"center",gap:4}}>
+          <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
+          Auto-scroll
+        </label>
+        <button className="btn ghost sm" onClick=${()=>{setTraffic([]);lastIdRef.current=0;setSelected(null);}}>Clear</button>
+      </div>
+      <div style=${{flex:1,overflow:"auto"}} ref=${tableRef}>
+        <table className="traffic-table" style=${{width:"100%",tableLayout:"fixed"}}>
+          <colgroup>
+            <col style=${{width:"32px"}}/>
+            <col style=${{width:"82px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"90px"}}/>
+            <col style=${{width:"68px"}}/>
+            <col style=${{width:"56px"}}/>
+            <col/>
+            <col style=${{width:"72px"}}/>
+          </colgroup>
+          <thead>
+            <tr>
+              <th>#</th><th>Time</th><th>Source</th><th>User</th>
+              <th>Method</th><th>Status</th><th>URL</th><th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((e,i)=>html`
+              <tr key=${e.id}
+                className=${"traffic-row"+(selected?.id===e.id?" selected":"")}
+                onClick=${()=>setSelected(selected?.id===e.id?null:e)}>
+                <td className="tr-num">${i+1}</td>
+                <td className="tr-ts">${fmtTs(e.created_at)}</td>
+                <td><span className=${"src-badge src-"+e.source}>${e.source}</span></td>
+                <td className="tr-user">${e.username||"-"}</td>
+                <td className="tr-method">${e.method}</td>
+                <td><span className=${"status-pill "+statusCls(e.status)}>${e.status??"-"}</span></td>
+                <td className="tr-url" title=${e.url}>${e.url}</td>
+                <td className="tr-dur">${e.duration_ms!=null?e.duration_ms+"ms":"-"}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${filtered.length===0 && html`
+          <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+            ${scanRunning?"Capturing traffic…":"No traffic recorded yet. Start a scan to generate traffic."}
+          </div>`}
+      </div>
+      ${selected && html`
+        <div style=${{flexShrink:0,borderTop:"2px solid var(--accent)",padding:"10px 16px",maxHeight:220,overflow:"auto",background:"var(--surface)"}}>
+          <div style=${{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <b style=${{fontSize:13}}>${selected.method} ${selected.url}</b>
+            <button className="btn ghost sm" onClick=${()=>setSelected(null)}>✕</button>
+          </div>
+          ${selected.request_body && html`<div style=${{marginBottom:6}}><b style=${{fontSize:11}}>Request Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.request_body}</pre></div>`}
+          ${selected.response_body && html`<div><b style=${{fontSize:11}}>Response Body:</b>
+            <pre style=${{fontSize:10,background:"var(--code-bg,#1e1e2e)",color:"var(--code-fg,#cdd6f4)",padding:6,borderRadius:4,overflow:"auto",maxHeight:80,margin:"2px 0",whiteSpace:"pre-wrap"}}>${selected.response_body?.slice(0,2000)}</pre></div>`}
+        </div>`}
+    </div>
+  `;
+}
+
+// Build the agent list from a raw agent-log API response, preserving task history.
+function _buildAgentsFromLog(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const id = r.agent_id;
+    const ts = r.created_at
+      ? new Date(r.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : "--:--:--";
+    const existing = map.get(id) || { id, name: r.role || id, status: r.status || "idle", task: r.current_task || "", taskHistory: [] };
+    existing.name = r.role || existing.name;
+    existing.status = r.status || existing.status;
+    existing.task = r.current_task || existing.task;
+    existing.taskHistory.push({ ts, task: r.current_task || "", outcome: r.outcome || "" });
+    map.set(id, existing);
+  }
+  return [...map.values()];
+}
+
+// ── ApiRunStatusTab ────────────────────────────────────────────────────────────
+
+function ApiRunStatusTab({ runId, scanRunning }) {
+  const [subTab, setSubTab] = useState("agents");
+  return html`
+    <div style=${{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div className="activity-sub-tab-bar" style=${{padding:"8px 16px 0",flexShrink:0,position:"sticky",top:0,background:"var(--bg)",zIndex:2,borderBottom:"1px solid var(--border)"}}>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?" active":"")}
+          onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="log"?" active":"")}
+          onClick=${()=>setSubTab("log")}>Log</button>
+      </div>
+      <div style=${{flex:1,overflow:"auto",minHeight:0}}>
+        ${subTab==="agents" && html`<${ApiRunAgentsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+        ${subTab==="log"    && html`<${ApiRunLogTab}    runId=${runId} scanRunning=${scanRunning}/>`}
+      </div>
+    </div>
+  `;
+}
+
+// ── ApiRunLogTab ───────────────────────────────────────────────────────────────
+
+function ApiRunLogTab({ runId, scanRunning }) {
+  const [log, setLog] = useState([]);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = () => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message));
+
+  useEffect(() => { load(); }, [runId]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  const onClear = async () => {
+    if (!confirm("Clear all agent log entries for this run?")) return;
+    setClearBusy(true); setError(null);
+    try { await api.clearApiAgentLog(runId); setLog([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const statusCls = (s) => s==="active"?"phase-probes":s==="complete"||s==="completed"||s==="done"?"phase-ok":"phase-other";
+
+  return html`
+    <div className="activity-panel" style=${{margin:0}}>
+      <div className="activity-log-toolbar">
+        <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
+        ${scanRunning && html`<span className="activity-mode-badge">Scan running</span>`}
+        <a className="btn ghost sm" href=${`/api/api-test-runs/${runId}/agent-log/export`} download>Export log ↓</a>
+        ${log.length>0 && html`
+          <button className="btn danger-outline sm" disabled=${clearBusy}
+            onClick=${onClear}>${clearBusy?"Clearing…":"Clear"}</button>`}
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"0 16px 8px"}}>${error}</div>`}
+      ${log.length===0
+        ? html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
+                 ${scanRunning?"Scan in progress — agent activity will appear here.":"No agent log entries yet."}
+               </div>`
+        : html`<div className="activity-feed">
+          ${log.map(r => {
+            const ts = r.created_at ? new Date(r.created_at).toLocaleTimeString("en-US",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "";
+            return html`
+              <div key=${r.id} className="activity-entry">
+                <span className="activity-ts">${ts}</span>
+                <span className=${"activity-badge "+statusCls(r.status)}>${(r.status||"").toUpperCase()||"—"}</span>
+                <span className="activity-url mono">${r.role} (${r.agent_id})</span>
+                <span className="activity-msg">${r.current_task||""}${r.outcome?" → "+r.outcome:""}</span>
+              </div>`;
+          })}
+        </div>`}
+    </div>
+  `;
+}
+
+// ── ApiRunAgentsTab ────────────────────────────────────────────────────────────
+
+function ApiRunAgentsTab({ runId, scanRunning }) {
+  // ── Agent list state ──────────────────────────────────────────────────────
+  const [agents, setAgents] = useState([]);
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const toggleAgentId = (id) => setCollapsedAgentIds(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  // ── ALICE chat state ──────────────────────────────────────────────────────
+  const [aliceChats, setAliceChats] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`api_alice_chats_${runId}`) || "null");
+      return saved && saved.length ? saved : [{ id: "tab-default", title: "Session 1", messages: [] }];
+    } catch { return [{ id: "tab-default", title: "Session 1", messages: [] }]; }
+  });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try { return localStorage.getItem(`api_alice_active_tab_${runId}`) || "tab-default"; } catch { return "tab-default"; }
+  });
+  const [aliceRunning, setAliceRunning] = useState(false);
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const streamRef = useRef(null);
+  const activeAliceTabIdRef = useRef(activeAliceTabId);
+  activeAliceTabIdRef.current = activeAliceTabId;
+  const sessionsRef = useRef(aliceChats);
+  sessionsRef.current = aliceChats;
+
+  // ── On mount: load sessions, agent log, check alice status ────────────────
+  useEffect(() => {
+    api.getApiAliceSessions(runId).then(data => {
+      const chats = data.chats || [];
+      if (chats.length) {
+        setAliceChats(chats);
+        const aid = data.active_tab_id || "tab-default";
+        setActiveAliceTabId(aid);
+        activeAliceTabIdRef.current = aid;
+      }
+    }).catch(() => {});
+    api.getApiAgentLog(runId).then(rows => {
+      setAgents(_buildAgentsFromLog(rows));
+    }).catch(() => {});
+    api.getApiAliceStatus(runId).then(st => {
+      if (st?.running) { setAliceRunning(true); connectAliceStream(0); }
+    }).catch(() => {});
+  }, [runId]);
+
+  // ── SSE: real-time agent_status events ───────────────────────────────────
+  useEffect(() => {
+    const es = new EventSource(`/api/api-test-runs/${runId}/events`);
+    es.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.type !== "agent_status") return;
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const idx = prev.findIndex(a => a.id === evt.agent_id);
+          const histEntry = { ts, task: evt.current_task || "", outcome: evt.outcome || "" };
+          const existing = idx >= 0 ? prev[idx] : { id: evt.agent_id, name: evt.role || evt.agent_id, status: evt.status, task: evt.current_task || "", taskHistory: [] };
+          const updated = { ...existing, name: evt.role || existing.name, status: evt.status, task: evt.current_task || "", taskHistory: [...(existing.taskHistory || []), histEntry] };
+          if (idx >= 0) { const next = [...prev]; next[idx] = updated; return next; }
+          return [...prev, updated];
+        });
+      } catch {}
+    };
+    return () => es.close();
+  }, [runId]);
+
+  // ── Poll agent log while scanning or alice is running ────────────────────
+  // Merge with existing state so SSE-only (non-persisted) step history is
+  // not wiped on every poll cycle.
+  useEffect(() => {
+    if (!aliceRunning && !scanRunning) return;
+    const t = setInterval(() => {
+      api.getApiAgentLog(runId).then(rows => {
+        const fromLog = _buildAgentsFromLog(rows);
+        setAgents(prev => {
+          const prevMap = new Map(prev.map(a => [a.id, a]));
+          const merged = fromLog.map(a => {
+            const existing = prevMap.get(a.id);
+            if (!existing) return a;
+            // Prefer the longer history — SSE may have more non-persisted entries
+            const history = existing.taskHistory.length >= a.taskHistory.length
+              ? existing.taskHistory
+              : a.taskHistory;
+            return { ...a, taskHistory: history };
+          });
+          // Keep SSE-only agents not yet written to the DB
+          for (const a of prev) {
+            if (!merged.find(m => m.id === a.id)) merged.push(a);
+          }
+          return merged;
+        });
+      }).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [aliceRunning, scanRunning, runId]);
+
+  // ── Persist alice chats ───────────────────────────────────────────────────
+  useEffect(() => {
+    try {
+      localStorage.setItem(`api_alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`api_alice_active_tab_${runId}`, activeAliceTabId);
+    } catch {}
+    api.saveApiAliceSessions(runId, { chats: aliceChats, active_tab_id: activeAliceTabId }).catch(() => {});
+  }, [aliceChats, activeAliceTabId]);
+
+  // ── Cleanup stream on unmount ─────────────────────────────────────────────
+  useEffect(() => {
+    return () => { if (streamRef.current) { streamRef.current.close(); streamRef.current = null; } };
+  }, []);
+
+  // ── ALICE stream connection ───────────────────────────────────────────────
+  const connectAliceStream = useCallback((cursor = 0) => {
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
+    streamRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const event = JSON.parse(ev.data);
+        if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
+        } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+            )}
+          ));
+        } else if (event.type === "done") {
+          setAliceRunning(false);
+          es.close(); streamRef.current = null;
+        }
+      } catch {}
+    };
+    es.onerror = () => { es.close(); streamRef.current = null; setAliceRunning(false); };
+  }, [runId]);
+
+  // ── ALICE send / stop ─────────────────────────────────────────────────────
+  const handleAliceSend = async () => {
+    if (!aliceInputText.trim() || aliceRunning) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+    const tabId = activeAliceTabIdRef.current;
+    const thinkId = `think-${Date.now()}`;
+    const replyId = `reply-${Date.now() + 1}`;
+    const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    const userMsg  = { id: `u-${Date.now()}`,  sender: "user",  type: "message",  text: userText, ts };
+    const thinkMsg = { id: thinkId,             sender: "alice", type: "thinking", text: "",       ts };
+    const replyMsg = { id: replyId,             sender: "alice", type: "message",  text: "",       ts };
+    setAliceChats(prev => prev.map(s =>
+      s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
+    ));
+    setAliceRunning(true);
+    setAliceExpandedThinkIds(prev => { const n = new Set(prev); n.add(thinkId); return n; });
+    const activeSession = sessionsRef.current.find(s => s.id === tabId) || { messages: [] };
+    const history = activeSession.messages.map(m => ({ sender: m.sender, text: m.text }));
+    try {
+      await api.startApiAliceRun(runId, { message: userText, history, tab_id: tabId, think_msg_id: thinkId, reply_msg_id: replyId });
+      connectAliceStream(0);
+    } catch { setAliceRunning(false); }
+  };
+
+  const handleAliceStop = () => {
+    api.stopApiAliceRun(runId).catch(() => {});
+    if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
+    setAliceRunning(false);
+  };
+
+  // ── ALICE tab management ──────────────────────────────────────────────────
+  const createAliceTab = () => {
+    const id = "tab-" + Date.now();
+    setAliceChats(prev => [...prev, { id, title: `Session ${prev.length + 1}`, messages: [] }]);
+    setActiveAliceTabId(id);
+  };
+
+  const deleteAliceTab = (tabId, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    if (aliceChats.length <= 1) {
+      setAliceChats([{ id: "tab-default", title: "Session 1", messages: [] }]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+    const idx = aliceChats.findIndex(t => t.id === tabId);
+    const remaining = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remaining);
+    if (activeAliceTabId === tabId) setActiveAliceTabId(remaining[Math.max(0, idx - 1)].id);
+  };
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault(); e.stopPropagation();
+    const startY = e.clientY; const startH = aliceChatHeight;
+    const onMove = ev => setAliceChatHeight(Math.max(150, Math.min(800, startH + (ev.clientY - startY))));
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  // ── Build agent roster ────────────────────────────────────────────────────
+  // API scan roster: A.L.I.C.E. → Test Lead → Specialist → Validator → Reporting
+  const buildRoster = () => {
+    const byId = Object.fromEntries(agents.map(a => [a.id, a]));
+    const specialistChildren = agents.filter(a => a.id.startsWith("specialist-"));
+    const validatorChildren  = agents.filter(a => a.id.startsWith("validator-"));
+    return [
+      {
+        id: "alice",
+        name: "A.L.I.C.E.",
+        status: aliceRunning ? "active" : (byId["alice"]?.status || "idle"),
+        task: aliceRunning ? "Processing directive…" : (byId["alice"]?.task || "Waiting for instruction"),
+        taskHistory: byId["alice"]?.taskHistory || [],
+      },
+      {
+        id: "scanner",
+        name: "Test Lead",
+        status: scanRunning && !byId["scanner"] ? "active" : (byId["scanner"]?.status || "idle"),
+        task: (scanRunning && !byId["scanner"]) ? "Coordinating API pentest" : (byId["scanner"]?.task || "Standing by"),
+        taskHistory: byId["scanner"]?.taskHistory || [],
+      },
+      { id: "specialist", name: "Specialist", children: specialistChildren },
+      { id: "validator",  name: "Validator",  children: validatorChildren  },
+      {
+        id: "reporting",
+        name: "Reporting",
+        status: byId["reporting"]?.status || "idle",
+        task: byId["reporting"]?.task || "Standing by",
+        taskHistory: byId["reporting"]?.taskHistory || [],
+      },
+    ];
+  };
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages  = activeAliceTab?.messages || [];
+  const roster = buildRoster();
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return html`
+    <div className="agents-panel" style=${{ padding: "8px 0" }}>
+      ${roster.map(agent => {
+
+        // ── A.L.I.C.E. row with embedded chat ─────────────────────────────
+        if (agent.id === "alice") {
+          const isActive  = agent.status === "active";
+          const isExpanded = !collapsedAgentIds.has("alice");
+          return html`
+            <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                 onClick=${() => toggleAgentId("alice")}>
+              <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E.</span>
+              <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                ${isActive ? "ACTIVE" : "STANDBY"}
+              </span>
+              <span className="agent-current-task">${agent.task}</span>
+              <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+              ${isExpanded && html`
+                <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                  <div className="alice-chat-tabs-bar">
+                    ${aliceChats.map(tab => {
+                      const isActiveTab = tab.id === activeAliceTabId;
+                      return html`
+                        <div key=${tab.id}
+                             className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                             onClick=${() => setActiveAliceTabId(tab.id)}>
+                          <span>${tab.title || "Session"}</span>
+                          <span className="alice-chat-tab-close"
+                                onClick=${e => deleteAliceTab(tab.id, e)}
+                                title="Close">×</span>
+                        </div>`;
+                    })}
+                    <button className="alice-chat-add-tab-btn" onClick=${createAliceTab} title="New Session">+</button>
+                  </div>
+                  <div className="alice-chat-history"
+                       style=${{ height: `${aliceChatHeight}px` }}
+                       ref=${el => { if (el) el.scrollTop = el.scrollHeight; }}>
+                    ${aliceMessages.length === 0 && html`
+                      <div style=${{ padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                        Send A.L.I.C.E. an instruction to begin interactive API testing.
+                      </div>`}
+                    ${aliceMessages.map(msg => {
+                      if (msg.type === "thinking") {
+                        const isThinkExp = aliceExpandedThinkIds.has(msg.id);
+                        return html`
+                          <div key=${msg.id} className="alice-msg-row">
+                            <div className="alice-msg-bubble--thinking">
+                              <div className="alice-thinking-header" onClick=${() => {
+                                setAliceExpandedThinkIds(prev => {
+                                  const n = new Set(prev); n.has(msg.id) ? n.delete(msg.id) : n.add(msg.id); return n;
+                                });
+                              }}>
+                                <${IconBrain}/>
+                                <span>Thought Process ${isThinkExp ? "▲" : "▼"}</span>
+                                <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                              </div>
+                              ${isThinkExp && html`
+                                <div className="alice-thinking-body">${renderMarkdown(msg.text)}</div>`}
+                            </div>
+                          </div>`;
+                      }
+                      const isUser = msg.sender === "user";
+                      return html`
+                        <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                          <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                            ${renderMarkdown(msg.text)}
+                            <div className="alice-msg-meta"><span>${msg.ts}</span></div>
+                          </div>
+                        </div>`;
+                    })}
+                    ${aliceRunning && html`
+                      <div className="alice-msg-row alice-msg-row--alice">
+                        <div className="alice-typing-bubble">
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                          <div className="alice-typing-dot"></div>
+                        </div>
+                      </div>`}
+                  </div>
+                  <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                  <div className="alice-chat-input-bar">
+                    <input className="alice-chat-input"
+                           placeholder="Direct A.L.I.C.E. on what to test…"
+                           value=${aliceInputText}
+                           disabled=${aliceRunning}
+                           onInput=${e => setAliceInputText(e.target.value)}
+                           onKeyDown=${e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAliceSend(); } }}/>
+                    ${aliceRunning
+                      ? html`<button className="alice-chat-stop-btn" onClick=${handleAliceStop} title="Stop">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                          </svg>
+                        </button>`
+                      : html`<button className="alice-chat-input-btn" disabled=${!aliceInputText.trim()} onClick=${handleAliceSend} title="Send">
+                          <${IconSend}/>
+                        </button>`}
+                  </div>
+                </div>`}
+            </div>`;
+        }
+
+        // ── Specialist container row ───────────────────────────────────────
+        if (agent.id === "specialist") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No specialist dispatched"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} running, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+            : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+          return html`
+            <div key="specialist"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("specialist") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Specialist</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(c => {
+                    const cActive = c.status === "active";
+                    const cTask = c.task || (c.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    return html`
+                      <div key=${c.id} className=${"agent-thread-row" + (cActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (cActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">${c.id.replace("specialist-", "").replace(/-([0-9]+)$/, " #$1")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (cActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${cActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${cTask}>${cTask.length > 90 ? cTask.slice(0, 89) + "…" : cTask}</span>
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Validator container row ────────────────────────────────────────
+        if (agent.id === "validator") {
+          const children   = agent.children || [];
+          const anyActive  = children.some(c => c.status === "active");
+          const activeCount = children.filter(c => c.status === "active").length;
+          const doneCount   = children.length - activeCount;
+          const summaryTask = children.length === 0
+            ? "No validation running"
+            : activeCount > 0 && doneCount > 0 ? `${activeCount} validating, ${doneCount} complete`
+            : activeCount > 0 ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+            : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+          const canExpand  = children.length > 0;
+          const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+          return html`
+            <div key="validator"
+                 className=${"agent-row" + (anyActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+                 onClick=${canExpand ? () => toggleAgentId("validator") : undefined}>
+              <span className=${"agent-dot" + (anyActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+              <span className=${"agent-role-name" + (anyActive ? " agent-role-name--pulse" : "")}>Validator</span>
+              <span className=${"agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")}>
+                ${anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+              </span>
+              <span className="agent-current-task">${summaryTask}</span>
+              ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+              ${canExpand && isExpanded && html`
+                <div className="agent-task-history">
+                  ${children.map(va => {
+                    const vaActive  = va.status === "active";
+                    const vaTask    = va.task || (va.taskHistory || []).slice(-1)[0]?.task || "Initializing…";
+                    const vaOutcome = (va.taskHistory || []).slice(-1)[0]?.outcome;
+                    return html`
+                      <div key=${va.id} className=${"agent-thread-row" + (vaActive ? " agent-thread-row--active" : "")}>
+                        <span className=${"agent-dot agent-dot--sm" + (vaActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                        <span className="agent-thread-id">Finding #${va.id.replace("validator-", "")}</span>
+                        <span className=${"agent-badge agent-badge--sm" + (vaActive ? " agent-badge-active" : " agent-badge-complete")}>
+                          ${vaActive ? "ACTIVE" : "DONE"}
+                        </span>
+                        <span className="agent-current-task" title=${vaTask}>${vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}</span>
+                        ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                      </div>`;
+                  })}
+                </div>`}
+            </div>`;
+        }
+
+        // ── Standard agent row (Test Lead, Reporting, etc.) ────────────────
+        const isActive   = agent.status === "active";
+        const isComplete = ["complete", "completed", "done"].includes(agent.status);
+        const taskHistory = agent.taskHistory || [];
+        const canExpand  = taskHistory.length > 1 || taskHistory.some(h => h.outcome);
+        const isExpanded = canExpand && !collapsedAgentIds.has(agent.id);
+        const task = agent.task || taskHistory.slice(-1)[0]?.task || "";
+        return html`
+          <div key=${agent.id}
+               className=${"agent-row" + (isActive ? " agent-row--active" : " agent-row--complete") + (canExpand ? " agent-row--expandable" : "")}
+               onClick=${canExpand ? () => toggleAgentId(agent.id) : undefined}>
+            <span className=${"agent-dot" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+            <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>${agent.name}</span>
+            <span className=${"agent-badge" + (isActive ? " agent-badge-active" : " agent-badge-complete")}>
+              ${isActive ? "ACTIVE" : isComplete ? "DONE" : (agent.status || "IDLE").toUpperCase()}
+            </span>
+            ${task && html`<span className="agent-current-task" title=${task}>${task.length > 90 ? task.slice(0, 89) + "…" : task}</span>`}
+            ${canExpand && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
+            ${canExpand && isExpanded && html`
+              <div className="agent-task-history">
+                ${taskHistory.slice().reverse().map((h, i) => html`
+                  <div key=${i} className="agent-history-entry">
+                    <span className="activity-ts">${h.ts || ""}</span>
+                    <span className="agent-history-task">${h.task || ""}</span>
+                    ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                  </div>`)}
+              </div>`}
+          </div>`;
+      })}
+    </div>
+  `;
+}
 
 function TestRunForm({ siteId }) {
   const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
@@ -663,8 +4060,8 @@ const SCOPE_IN_COLOR  = "#3b82f6";
 const SCOPE_OUT_COLOR = "#ef4444";
 const scopeColor = (d) => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLOR;
 
-const SCAN_COLORS = { pending: "#ef4444", running: "#eab308", complete: "#3b82f6" };
-const scanColor = (d) => SCAN_COLORS[d.scan_status] || SCAN_COLORS.pending;
+const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
+const isDynamicScanActive = (status) => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
 
 // Per-user palette (index into credentials array)
 const USER_PALETTE = ["#f97316","#06b6d4","#a855f7","#f59e0b","#10b981","#ec4899"];
@@ -680,24 +4077,18 @@ const userColor = (d, credentials) => {
 
 function runWorkflowStatus(run, opts = {}) {
   if (!run) return { key:"pending", label:"pending" };
-  const scanStatus = opts.scanStatus || run.scan_status || "idle";
-  const thinkingStatus = opts.thinkingStatus || "idle";
+  const thinkingStatus = opts.thinkingStatus || run.thinking_status || "idle";
   if (opts.crawlStopping) return { key:"stopping", label:"stopping crawl" };
-  if (opts.scanStopping) return { key:"stopping", label:"stopping scan" };
-  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping thinking scan" };
+  if (opts.thinkingStopping || thinkingStatus === "stopping") return { key:"stopping", label:"stopping Dynamic Scan" };
   if (run.status === "running") return { key:"running", label:"crawling" };
   if (run.status === "failed") return { key:"danger", label:"crawl failed" };
-  if (thinkingStatus === "running") return { key:"running", label:"thinking scan" };
-  if (thinkingStatus === "analysing") return { key:"running", label:"analysing thinking scan" };
-  if (thinkingStatus === "failed") return { key:"danger", label:"thinking scan failed" };
-  if (scanStatus === "running") return { key:"running", label:"scanning" };
-  if (scanStatus === "failed") return { key:"danger", label:"scan failed" };
+  if (thinkingStatus === "running") return { key:"running", label:"Dynamic Scan" };
+  if (thinkingStatus === "analysing") return { key:"running", label:"analysing Dynamic Scan" };
+  if (thinkingStatus === "failed") return { key:"danger", label:"Dynamic Scan failed" };
   if (run.status === "stopped") return { key:"neutral", label:"crawl stopped" };
-  if (thinkingStatus === "stopped") return { key:"neutral", label:"thinking scan stopped" };
-  if (scanStatus === "stopped") return { key:"neutral", label:"scan stopped" };
-  if (thinkingStatus === "complete") return { key:"ok", label:"thinking scan complete" };
-  if (run.status === "complete" && scanStatus === "complete") return { key:"ok", label:"complete" };
-  if (run.status === "complete") return { key:"partial", label:"crawl complete" };
+  if (thinkingStatus === "stopped") return { key:"neutral", label:"Dynamic Scan stopped" };
+  if (thinkingStatus === "complete") return { key:"ok", label:"Dynamic Scan complete" };
+  if (run.status === "complete") return { key:"ok", label:"complete" };
   return { key:"neutral", label:run.status || "pending" };
 }
 
@@ -706,7 +4097,88 @@ const workflowBadge = (run, opts = {}) => {
   return html`<span className=${"badge " + st.key}>${st.label}</span>`;
 };
 
-function TestRunDetail({ runId }) {
+// ── Column resize hook ────────────────────────────────────────────────────────
+function useColResize(storageKey, defaults) {
+  const [widths, setWidths] = useState(() => {
+    try { const s = localStorage.getItem(storageKey); if (s) return JSON.parse(s); } catch (_) {}
+    return defaults;
+  });
+  const startResize = useCallback((idx, e) => {
+    e.preventDefault(); e.stopPropagation();
+    const startX = e.clientX;
+    const th = e.currentTarget.closest("th");
+    const startW = widths[idx] ?? (th ? th.offsetWidth : 100);
+    const onMove = ev => {
+      const newW = Math.max(36, startW + ev.clientX - startX);
+      setWidths(prev => { const n = [...prev]; n[idx] = newW; return n; });
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      setWidths(prev => { try { localStorage.setItem(storageKey, JSON.stringify(prev)); } catch (_) {} return prev; });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [storageKey, widths]);
+  return [widths, startResize];
+}
+
+function GuidedLoginItem({ item, runId, onConfirmed }) {
+  const [browserOpen, setBrowserOpen] = useState(item.browserOpen || false);
+  const [launching, setLaunching]     = useState(false);
+  const [confirming, setConfirming]   = useState(false);
+  const [err, setErr]                 = useState(null);
+  const [copied, setCopied]           = useState(false);
+
+  // Keep in sync if parent state flips (e.g. SSE fires guided_login_browser_open)
+  useEffect(() => { if (item.browserOpen) setBrowserOpen(true); }, [item.browserOpen]);
+
+  const copyUsername = async () => {
+    try {
+      await navigator.clipboard.writeText(item.username);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch(_) {
+      setErr("Clipboard unavailable \u2014 copy manually: " + item.username);
+    }
+  };
+
+  const launch = async () => {
+    setLaunching(true); setErr(null);
+    try {
+      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/ready`, {method:"POST"});
+      setBrowserOpen(true);
+    } catch(e) { setErr(e.message); }
+    setLaunching(false);
+  };
+
+  const confirm = async () => {
+    setConfirming(true); setErr(null);
+    try {
+      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/confirm`, {method:"POST"});
+      onConfirmed();
+    } catch(e) { setErr(e.message); setConfirming(false); }
+  };
+
+  if (!browserOpen) {
+    return html`
+      <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+        <span style=${{fontSize:13}}>Login required for <strong>${item.username}</strong>. Click <strong>I'm Ready</strong> to open a browser window, then log in and come back here.</span>
+        <button className="btn sm" style=${{background:"transparent",border:"1px solid var(--accent)",color:"var(--accent)"}} onClick=${copyUsername}>${copied ? "Copied!" : "Copy username"}</button>
+        ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+        <button className="btn sm" disabled=${launching} onClick=${launch}>${launching ? "Opening browser\u2026" : "I'm Ready"}</button>
+      </div>`;
+  }
+
+  return html`
+    <div style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <span style=${{fontSize:13}}>Browser is open for <strong>${item.username}</strong>. Complete login (including any SSO, MFA, or push approval), then click <strong>I'm Done</strong>. Leave the browser window open, it will automatically close after credentials are captured.</span>
+      ${err && html`<span style=${{color:"var(--danger)",fontSize:12}}>${err}</span>`}
+      <button className="btn sm" disabled=${confirming} onClick=${confirm}>${confirming ? "Confirming\u2026" : "I'm Done"}</button>
+    </div>`;
+}
+
+function TestRunDetail({ runId, initialTab }) {
   const [run, setRun]           = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph]       = useState(null);
@@ -715,9 +4187,18 @@ function TestRunDetail({ runId }) {
   const [pageViews, setPageViews]   = useState([]);
   const [cascade, setCascade]     = useState(false);
   const [scopeBusy, setScopeBusy] = useState(false);
-  const [activeTab, setActiveTab] = useState("sitemap");
+  const [activeTab, setActiveTab] = useState(initialTab || "activity");
+  const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView]           = useState("scope");  // "scope" | "user"
+  const [targetIntel, setTargetIntel]       = useState(null);
+  const [targetIntelKind, setTargetIntelKind] = useState("");
+  const [taskGraph, setTaskGraph]           = useState(null);
+  const [reconSummary, setReconSummary]     = useState(null);
+  const [tasksSubTab, setTasksSubTab]       = useState("attack-surface"); // "attack-surface" | "task-queue"
+  const [scannerSessions, setScannerSessions] = useState(null);
   const [crawlUsername, setCrawlUsername]   = useState(null);
+  const [clearBusy, setClearBusy]           = useState(""); // which section is clearing
+  const [clearError, setClearError]         = useState(null);
   // per-user crawl progress is read directly from run.per_user_progress (kept in sync
   // by the periodic poll + SSE run_update events) — no separate state needed.
   const [editingSettings, setEditingSettings] = useState(false);
@@ -726,25 +4207,504 @@ function TestRunDetail({ runId }) {
   const [editLlmProfileId, setEditLlmProfileId] = useState(null);
   const [runProfiles, setRunProfiles] = useState([]);
 
+  // Guided login: list of {credential_id, username} waiting for "I'm Done" confirmation
+  const [guidedLoginPending, setGuidedLoginPending] = useState([]);
+  const [guidedLoginErrors, setGuidedLoginErrors]   = useState([]);
+
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => { api.listLLMProfiles().then(setRunProfiles).catch(()=>{}); }, []);
-  const [scanStatus, setScanStatus]         = useState(null);
   const [activityLog, setActivityLog]       = useState([]);
   const [expandedLogIds, setExpandedLogIds]  = useState(new Set());
   const toggleLogId = (id) => setExpandedLogIds(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
   });
+  const [activitySubTab, setActivitySubTab] = useState("agents");
+  const [agents, setAgents]                = useState([]);
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
+  const toggleAgentId = (aid) => setCollapsedAgentIds(prev => {
+    const next = new Set(prev); next.has(aid) ? next.delete(aid) : next.add(aid); return next;
+  });
+
+  const ALICE_WELCOME_MESSAGE = "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start Pentest at the top right, or you can tell me to work on something specific!";
+
+  const _aliceDefaultChats = () => [{
+    id: "tab-default",
+    title: "Session 1",
+    messages: [{
+      id: "welcome",
+      sender: "alice",
+      type: "message",
+      text: ALICE_WELCOME_MESSAGE,
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    }]
+  }];
+
+  const [aliceChats, setAliceChats] = useState(() => {
+    // Seed from localStorage for instant display; server load will overwrite below.
+    try {
+      const saved = localStorage.getItem(`alice_chats_${runId}`);
+      if (saved) return JSON.parse(saved);
+    } catch (_) {}
+    return _aliceDefaultChats();
+  });
+  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`alice_active_tab_${runId}`);
+      if (saved) return saved;
+    } catch (_) {}
+    return "tab-default";
+  });
+
+  // Load sessions from the server on mount.
+  // The server (DB rows scoped by test_run_id) is the source of truth for run
+  // *identity*. localStorage is only an instant-paint cache; because SQLite
+  // reuses run ids after the highest run is deleted, a cached chat under
+  // alice_chats_<id> may actually belong to a different, deleted run. We compare
+  // the server's stable run token against the one stored with the cache and
+  // discard the cache when they disagree (or when the run has no chats yet),
+  // which prevents one run from showing another run's chat.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAliceSessions(runId).then(data => {
+      if (cancelled) return;
+
+      const serverToken = data.run_created_at || "";
+      const localToken = localStorage.getItem(`alice_chats_${runId}_runToken`) || "";
+      const localIsForThisRun = !!serverToken && localToken === serverToken;
+
+      // Helper: patch messages with the latest recovery-key text.
+      const applyRecovery = (chats, tabId) => {
+        try {
+          const rec = JSON.parse(
+            localStorage.getItem(`alice_recover_${runId}:${tabId}`) || "null"
+          );
+          if (!rec || !rec.thinkMsgId) return chats;
+          return chats.map(tab => {
+            if (tab.id !== tabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === rec.thinkMsgId && rec.thought) return { ...m, text: rec.thought };
+                if (m.id === rec.replyMsgId && rec.message) return { ...m, text: rec.message };
+                return m;
+              }),
+            };
+          });
+        } catch (_) { return chats; }
+      };
+
+      if (!data.chats || data.chats.length === 0) {
+        // The run has no persisted chat. If our cache is from a *different*
+        // (reused-id) run, it would wrongly display that run's chat — reset to
+        // a fresh default and overwrite the stale cache. Only keep the cache
+        // when it provably belongs to this run (genuine not-yet-saved content).
+        if (!localIsForThisRun) {
+          const defaults = _aliceDefaultChats();
+          setAliceChats(defaults);
+          setActiveAliceTabId("tab-default");
+          try {
+            localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(defaults));
+            localStorage.setItem(`alice_active_tab_${runId}`, "tab-default");
+            localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+            localStorage.removeItem(`alice_chats_${runId}_savedAt`);
+          } catch (_) {}
+        }
+        _aliceServerLoaded.current = true;
+        return;
+      }
+
+      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localSavedAt = parseInt(
+        localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10
+      );
+      const activeTabId = data.active_tab_id || "tab-default";
+
+      // Prefer local only when it provably belongs to THIS run and is newer
+      // (a page refresh mid-stream that hasn't flushed to the server yet).
+      // Otherwise the server wins — this also covers the reused-id case, where
+      // the local cache belongs to a deleted run and must be discarded.
+      const preferLocal = localIsForThisRun && localSavedAt > serverUpdatedAt;
+
+      if (!preferLocal) {
+        const merged = applyRecovery(data.chats, activeTabId);
+        _aliceServerLoaded.current = true;
+        setAliceChats(merged);
+        setActiveAliceTabId(activeTabId);
+        try {
+          localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
+          localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+          localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
+        } catch (_) {}
+      } else {
+        // Local is fresher and belongs to this run — keep it, but record the
+        // run token so future loads recognise it.
+        try {
+          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
+        } catch (_) {}
+        _aliceServerLoaded.current = true;
+      }
+    }).catch(() => {
+      _aliceServerLoaded.current = true; // unblock saves even if the API fails
+    });
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  const [aliceInputText, setAliceInputText] = useState("");
+  const [aliceChatHeight, setAliceChatHeight] = useState(300);
+  const [aliceThinkingTabId, setAliceThinkingTabId] = useState(null);
+  const aliceIsThinking = aliceThinkingTabId !== null;
+  const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
+  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
+
+  // On mount: check whether a background ALICE task is already running (e.g.
+  // after a page refresh) and reconnect to its event stream if so.
+  useEffect(() => {
+    let cancelled = false;
+    api.getAliceStatus(runId).then(st => {
+      if (cancelled || !st.running) return;
+      const { tab_id, think_msg_id, reply_msg_id } = st;
+      setAliceGlobalRunning(true);
+      setAliceThinkingTabId(tab_id);
+      setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(think_msg_id); return s; });
+      // Pre-populate session so the subscriber can find the right messages.
+      const sess = getAliceSession(runId, tab_id);
+      sess.thinkMsgId = think_msg_id;
+      sess.replyMsgId = reply_msg_id;
+      const done = () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); };
+      aliceSessionConnect(runId, tab_id, {
+        thinkMsgId: think_msg_id,
+        replyMsgId: reply_msg_id,
+        cursor: 0,
+        onFinish: done,
+        onFail: done,
+      });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [runId]);
+  // Subscribe to in-flight stream on mount/tab-switch so navigating back
+  // shows the spinner and receives live chunks from the singleton reader loop.
+  useEffect(() => {
+    const session = getAliceSession(runId, activeAliceTabId);
+    if (session.active) {
+      setAliceThinkingTabId(activeAliceTabId);
+    }
+
+    // Resolve the best available accumulated text: prefer the in-memory session
+    // (same page load), fall back to the localStorage recovery key written
+    // directly by aliceSessionStart (survives navigation + module resets).
+    let recThinkId = session.thinkMsgId;
+    let recReplyId = session.replyMsgId;
+    let recThought = session.accumulatedThought;
+    let recMessage = session.accumulatedMessage;
+
+    if (!recThinkId || (!recThought && !recMessage)) {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null"
+        );
+        if (saved && saved.thinkMsgId) {
+          recThinkId  = recThinkId  || saved.thinkMsgId;
+          recReplyId  = recReplyId  || saved.replyMsgId;
+          recThought  = recThought  || saved.thought;
+          recMessage  = recMessage  || saved.message;
+        }
+      } catch (_) {}
+    }
+
+    if (recThinkId && (recThought || recMessage)) {
+      setAliceChats(prev => prev.map(tab => {
+        if (tab.id !== activeAliceTabId) return tab;
+        return {
+          ...tab,
+          messages: tab.messages.map(m => {
+            if (m.id === recThinkId && recThought) return { ...m, text: recThought };
+            if (m.id === recReplyId && recMessage)  return { ...m, text: recMessage };
+            return m;
+          })
+        };
+      }));
+      // Auto-expand the thinking bubble so recovered progress is visible
+      if (recThinkId) {
+        setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(recThinkId); return s; });
+      }
+    }
+
+    const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
+      onChunk: (event) => {
+        const { thinkMsgId, replyMsgId } = session;
+        // Use session's running totals (not m.text + delta) so every render
+        // sees the complete accumulated text — identical to the catch-up sync
+        // on navigation-back, which ensures blocks parse and render graphically
+        // rather than as an in-progress incremental string.
+        setAliceChats(prev => prev.map(tab => {
+          if (tab.id !== activeAliceTabId) return tab;
+          return {
+            ...tab,
+            messages: tab.messages.map(m => {
+              if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+                return { ...m, text: session.accumulatedThought, stepData: session.stepData };
+              if (event.type === "message_chunk" && m.id === replyMsgId)
+                return { ...m, text: session.accumulatedMessage };
+              if (event.type === "warning" && m.id === replyMsgId)
+                return { ...m, text: event.message };
+              if (["step_llm_call", "step_tool_call", "step_tool_result"].includes(event.type) && m.id === thinkMsgId)
+                return { ...m, stepData: { ...session.stepData } };
+              if (event.type === "done") {
+                if (m.id === thinkMsgId) {
+                  const upd = { stepData: session.stepData };
+                  if (event.thought) upd.text = event.thought;
+                  return { ...m, ...upd };
+                }
+                if (m.id === replyMsgId && event.message) return { ...m, text: event.message };
+              }
+              return m;
+            })
+          };
+        }));
+      },
+      onDone: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+      onError: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+    });
+    return unsub;
+  }, [runId, activeAliceTabId]);
+
+  const _aliceSaveTimer = useRef(null);
+  const _aliceServerLoaded = useRef(false);
+  useEffect(() => {
+    // Keep localStorage in sync for fast initial render on next mount.
+    // savedAt lets the server-load effect decide which source is fresher.
+    // Guard: skip until the initial server load has resolved so we don't
+    // stamp a fresh localSavedAt timestamp before the comparison happens.
+    if (!_aliceServerLoaded.current) return;
+    const now = Date.now();
+    try {
+      localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`alice_active_tab_${runId}`, activeAliceTabId);
+      localStorage.setItem(`alice_chats_${runId}_savedAt`, now.toString());
+    } catch (_) {}
+    // Debounce server save so rapid streaming chunks don't hammer the API.
+    if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
+    const capturedRunId = runId;
+    const capturedChats = aliceChats;
+    const capturedTabId = activeAliceTabId;
+    _aliceSaveTimer.current = setTimeout(() => {
+      api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
+        .catch(() => {});
+    }, 800);
+    // Flush any pending save immediately on unmount so navigation away within the
+    // debounce window doesn't silently drop the last change.
+    return () => {
+      if (_aliceSaveTimer.current) {
+        clearTimeout(_aliceSaveTimer.current);
+        _aliceSaveTimer.current = null;
+        api.saveAliceSessions(capturedRunId, { chats: capturedChats, active_tab_id: capturedTabId })
+          .catch(() => {});
+      }
+    };
+  }, [aliceChats, activeAliceTabId, runId]);
+
+  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
+  const aliceMessages = activeAliceTab ? activeAliceTab.messages : [];
+
+  const createAliceTab = () => {
+    const newTabId = "tab-" + Date.now().toString();
+    const newTab = {
+      id: newTabId,
+      title: `Session ${aliceChats.length + 1}`,
+      messages: [
+        {
+          id: "welcome-" + newTabId,
+          sender: "alice",
+          type: "message",
+          text: ALICE_WELCOME_MESSAGE,
+          ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+        }
+      ]
+    };
+    setAliceChats(prev => [...prev, newTab]);
+    setActiveAliceTabId(newTabId);
+  };
+
+  const deleteAliceTab = (tabId, e) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    if (aliceChats.length <= 1) {
+      const resetTab = {
+        id: "tab-default",
+        title: "Session 1",
+        messages: [
+          {
+            id: "welcome-reset",
+            sender: "alice",
+            type: "message",
+            text: ALICE_WELCOME_MESSAGE,
+            ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+          }
+        ]
+      };
+      setAliceChats([resetTab]);
+      setActiveAliceTabId("tab-default");
+      return;
+    }
+
+    const index = aliceChats.findIndex(t => t.id === tabId);
+    if (index === -1) return;
+
+    const remainingChats = aliceChats.filter(t => t.id !== tabId);
+    setAliceChats(remainingChats);
+
+    if (activeAliceTabId === tabId) {
+      const nextActiveIndex = Math.max(0, index - 1);
+      setActiveAliceTabId(remainingChats[nextActiveIndex].id);
+    }
+  };
+
+  const startAliceResize = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+    const startH = aliceChatHeight;
+    const onMove = ev => {
+      const newH = Math.max(150, Math.min(800, startH + (ev.clientY - startY)));
+      setAliceChatHeight(newH);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [aliceChatHeight]);
+
+  const handleAliceStop = () => {
+    aliceSessionAbort(runId, activeAliceTabId);
+    api.stopAliceRun(runId).catch(() => {});
+    setAliceThinkingTabId(null);
+    setAliceGlobalRunning(false);
+  };
+
+  const handleAliceSend = async () => {
+    if (!aliceInputText.trim() || aliceIsThinking) return;
+    const userText = aliceInputText;
+    setAliceInputText("");
+    const currentTabId = activeAliceTabId;
+
+    const userMsg = {
+      id: Date.now().toString(),
+      sender: "user",
+      type: "message",
+      text: userText,
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    const thinkMsgId = (Date.now() + 1).toString();
+    const replyMsgId = (Date.now() + 2).toString();
+
+    const thinkMsg = {
+      id: thinkMsgId,
+      sender: "alice",
+      type: "thinking",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    const replyMsg = {
+      id: replyMsgId,
+      sender: "alice",
+      type: "message",
+      text: "",
+      ts: new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setAliceChats(prev => prev.map(tab => {
+      if (tab.id === activeAliceTabId) {
+        const isFirstPrompt = tab.messages.length <= 1;
+        let newTitle = tab.title;
+        if (isFirstPrompt) {
+          const truncated = userText.trim().slice(0, 16);
+          newTitle = truncated + (userText.trim().length > 16 ? "..." : "");
+        }
+        return {
+          ...tab,
+          title: newTitle,
+          messages: [...tab.messages, userMsg, thinkMsg, replyMsg]
+        };
+      }
+      return tab;
+    }));
+    setAliceThinkingTabId(currentTabId);
+    setAliceGlobalRunning(true);
+
+    setAliceExpandedThinkIds(prev => {
+      const next = new Set(prev);
+      next.add(thinkMsgId);
+      return next;
+    });
+
+    const historyPayload = aliceMessages.map(m => ({
+      sender: m.sender,
+      text: m.text
+    }));
+
+    // Delegate all I/O to the module-level singleton so the stream survives
+    // component unmounts caused by hash navigation.
+    // State updates are handled by the useEffect subscriber above.
+    aliceSessionStart(runId, currentTabId, {
+      userText,
+      historyPayload,
+      thinkMsgId,
+      replyMsgId,
+      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+      onFail: (err) => {
+        if (err.name === "AbortError") {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m => {
+                if (m.id === thinkMsgId && !m.text) return { ...m, text: "[Generation Aborted]" };
+                if (m.id === replyMsgId && !m.text) return { ...m, text: "Generation stopped by user." };
+                return m;
+              })
+            };
+          }));
+        } else {
+          setAliceChats(prev => prev.map(tab => {
+            if (tab.id !== currentTabId) return tab;
+            return {
+              ...tab,
+              messages: tab.messages.map(m =>
+                m.id === replyMsgId
+                  ? { ...m, text: `I encountered an error connecting to the agent: ${err.message}` }
+                  : m
+              )
+            };
+          }));
+        }
+        setAliceThinkingTabId(null);
+        setAliceGlobalRunning(false);
+      },
+    });
+  };
+
+
+  const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const [sitePlanData, setSitePlanData]     = useState(null);
   const activityFeedRef                     = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
-  const [scanStopRequested, setScanStopRequested]   = useState(false);
   const [thinkingStatus, setThinkingStatus]         = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
+  const [checkpointStatus, setCheckpointStatus]     = useState(null);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
+  const [dedupeBusy, setDedupeBusy]         = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
-  const [expandedGroups, setExpandedGroups]   = useState(new Set());
+  const [expandedGroups, setExpandedGroups]   = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = (title) => setExpandedGroups(prev => {
     const next = new Set(prev);
     next.has(title) ? next.delete(title) : next.add(title);
@@ -754,25 +4714,238 @@ function TestRunDetail({ runId }) {
   const [selectedTraffic, setSelectedTraffic] = useState(null);
   const [trafficFilter, setTrafficFilter]   = useState("");
   const [autoScroll, setAutoScroll]         = useState(true);
+  const [trafficTotal, setTrafficTotal]     = useState(0);
   const [trafficSort, setTrafficSort]       = useState({ field: "_seq", dir: "asc" });
   const lastTrafficIdRef                    = useRef(0);
   const trafficTableRef                     = useRef(null);
+  const issueImportInputRef                 = useRef(null);
   const [error, setError]       = useState(null);
   const svgRef                  = useRef(null);
   const simRef                  = useRef(null);
   const prevGraphKeyRef                     = useRef("");
+  const lastRunPollOkRef                    = useRef(Date.now());
+
+  const [findColW,    startFindResize]    = useColResize("colw:findings", [80, 52, null, 28, 60]);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
 
   // Initial load
   const loadAll = useCallback(async () => {
     try {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
-      api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
+      if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
+      api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
       api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
     } catch(e) { setError(e.message); }
   }, [runId]);
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  const agentRoleLabel = (agent) => {
+    if (agent?.id === "crawler") return "Crawler";
+    if (agent?.id === "scanner") return "Test Lead";
+    if (agent?.id === "alice") return "A.L.I.C.E";
+    return agent?.role || "Agent";
+  };
+  const normalizeAgentForRun = (agent) => {
+    if (agent?.id !== "crawler") return agent;
+    if (run?.status === "running") return { ...agent, status: "active" };
+    if (Date.now() - lastRunPollOkRef.current > 10000) {
+      return { ...agent, status: "idle", currentTask: "Crawler connection stale" };
+    }
+    return {
+      ...agent,
+      status: agent.status === "failed" ? "failed" : "idle",
+      currentTask: agent.currentTask || "Crawl is not running",
+    };
+  };
+  const defaultAgentRoster = () => [
+    {
+      id: "alice",
+      role: "A.L.I.C.E",
+      status: aliceIsThinking ? "active" : "idle",
+      currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
+    },
+    {
+      id: "crawler",
+      role: "Crawler",
+      status: run?.status === "running" ? "active" : "idle",
+      currentTask: run?.status === "running" ? "" : "Waiting for crawl",
+    },
+    {
+      id: "scanner",
+      role: "Test Lead",
+      status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
+      currentTask: isDynamicScanActive(thinkingStatus?.status) ? "Coordinating pentest" : "Standing by",
+    },
+    { id: "specialist", role: "Specialist", status: "idle", currentTask: "No specialist dispatched" },
+    { id: "burp", role: "Burp", status: "idle", currentTask: "No active scan dispatched" },
+    { id: "validator", role: "Validator", status: "idle", currentTask: "No validation running" },
+    {
+      id: "reporting",
+      role: "Reporting",
+      status: thinkingStatus?.status === "analysing" ? "active" : "idle",
+      currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by",
+    },
+  ];
+
+  const representsAgent = (agent, placeholder) => {
+    if (agent.id === placeholder.id) return true;
+    if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
+    if (placeholder.id === "validator") return agent.role === "Validator" || agent.id?.startsWith("validator-");
+    if (placeholder.id === "specialist") return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "reporting") return agent.role === "Reporting" || agent.id === "reporting";
+    return false;
+  };
+  const fmtEventTime = (value) => {
+    if (!value) return "--:--:--";
+    try {
+      return parseDate(value).toLocaleTimeString("en-US", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return "--:--:--";
+    }
+  };
+  const crawlEventsFromRun = () => {
+    const progress = run?.per_user_progress || {};
+    const labelByUsername = new Map((run?.credentials || []).map(c => [c.username, c.label || c.username]));
+    return Object.entries(progress)
+      .filter(([, p]) => p && (p.current_url || p.done || p.pages_visited))
+      .map(([username, p]) => ({
+        ts: fmtEventTime(p.updated_at),
+        username: labelByUsername.get(username) || username || "anonymous",
+        url: p.current_url || "",
+        pagesVisited: p.pages_visited || 0,
+        done: !!p.done,
+      }));
+  };
+  const mergeCrawlEvents = (liveEvents, threadEvents) => {
+    const seen = new Set();
+    return [...(liveEvents || []), ...threadEvents]
+      .filter((event) => {
+        const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.done ? 1 : 0}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+  const agentCrawlEvents = (agent) => (
+    agent?.id === "crawler"
+      ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun())
+      : []
+  );
+  const compactAgentText = (value, max=180) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  };
+  const thinkingStepTitle = (entry) => {
+    const step = entry.data?.step;
+    const prefix = step ? `Step ${step}` : "Step";
+    const message = String(entry.message || "").replace(/^Step\s+\d+:\s*/i, "").trim();
+    const isDuplicateStep = (value) => (
+      !value || /^Step\s+\d+$/i.test(String(value).trim())
+    );
+    let detail = (
+      entry.data?.payload_purpose ||
+      entry.data?.hypothesis ||
+      entry.data?.observation ||
+      entry.data?.payload_summary ||
+      message
+    );
+    if (isDuplicateStep(detail)) {
+      if (entry.data?.tool) {
+        detail = `Context tool: ${entry.data.tool}`;
+      } else if (entry.data?.method && entry.data?.url) {
+        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
+      } else if (message && !isDuplicateStep(message)) {
+        detail = message;
+      } else if (entry.status === "deciding") {
+        detail = "LLM deciding next action";
+      } else {
+        detail = "Reviewing scan state";
+      }
+    }
+    const cleaned = compactAgentText(detail || "Reviewing next action");
+    return `${prefix}: ${cleaned}`;
+  };
+  const thinkingStepOutcome = (entry) => {
+    const parts = [];
+    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
+    if (entry.data?.method && entry.data?.url) parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
+    if (entry.data?.observation) parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
+    if (entry.data?.hypothesis) parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
+    if (entry.data?.payload_purpose) parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
+    if (entry.data?.payload_summary) parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
+    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
+    return parts.join(" · ");
+  };
+  const testLeadHistory = () => activityLog
+    .filter(entry => entry.phase === "thinking_step")
+    .map(entry => ({
+      ts: entry._ts || "--:--:--",
+      task: thinkingStepTitle(entry),
+      outcome: thinkingStepOutcome(entry),
+    }));
+  const agentTaskHistory = (agent) => (
+    agent?.id === "scanner" && testLeadHistory().length
+      ? testLeadHistory()
+      : (agent?.taskHistory || [])
+  );
+  const agentCurrentTask = (agent) => {
+    agent = normalizeAgentForRun(agent);
+    const crawlEvents = agentCrawlEvents(agent);
+    if (agent?.id === "crawler" && crawlEvents.length) {
+      if (agent.status !== "active") {
+        const label = run?.status === "failed" ? "Crawl failed" :
+          run?.status === "stopped" ? "Crawl stopped" :
+          run?.status === "complete" ? "Crawl complete" :
+          "Crawl is not running";
+        return agent.outcome ? `${label} · ${agent.outcome}` : label;
+      }
+      const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
+      const latest = active || crawlEvents[crawlEvents.length - 1];
+      if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
+      return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
+    }
+    if (agent?.id === "scanner" && testLeadHistory().length) {
+      if (agent.status !== "active") return "Standing by";
+      return testLeadHistory()[testLeadHistory().length - 1].task;
+    }
+    return agent?.currentTask || "Waiting for work";
+  };
+  const agentStatusLabel = (agent) => {
+    if (agent?.status === "active") return "ACTIVE";
+    if (agent?.status === "idle") return "IDLE";
+    if (agent?.status === "failed") return "FAILED";
+    return "COMPLETE";
+  };
+  const upsertAgent = (items, patch, histEntry = null) => {
+    const normalized = {
+      ...patch,
+      role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role,
+    };
+    const idx = items.findIndex(a => a.id === normalized.id);
+    if (idx === -1) {
+      return [...items, {
+        ...normalized,
+        taskHistory: histEntry ? [histEntry] : [],
+        crawlEvents: normalized.crawlEvents || [],
+      }];
+    }
+    const updated = [...items];
+    const prev = updated[idx];
+    updated[idx] = {
+      ...prev,
+      ...normalized,
+      taskHistory: histEntry ? [...(prev.taskHistory || []), histEntry].slice(-200) : (prev.taskHistory || []),
+      crawlEvents: normalized.crawlEvents || prev.crawlEvents || [],
+    };
+    return updated;
+  };
 
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {
@@ -781,7 +4954,7 @@ function TestRunDetail({ runId }) {
       setActivityLog(
         entries.map(e => {
           const ts = e._persisted_at
-            ? new Date(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            ? parseDate(e._persisted_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
             : "--:--:--";
           return { ...e, _ts: ts, _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status };
         })
@@ -790,6 +4963,44 @@ function TestRunDetail({ runId }) {
       const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
       if (planComplete) setSitePlanData(planComplete.data);
     }).catch(() => {});
+  }, [runId]);
+
+  // Seed agents panel from persisted DB entries on mount.
+  // Also fetches the live scan status so stale "active" agents left by a
+  // force-killed process are reconciled back to "idle" immediately.
+  useEffect(() => {
+    Promise.all([api.getAgentLog(runId), api.getThinkingStatus(runId)])
+      .then(([entries, scanStatus]) => {
+        if (!entries || entries.length === 0) return;
+        const scanRunning = isDynamicScanActive(scanStatus?.status);
+        const agentsMap = new Map();
+        for (const e of entries) {
+          const entryTs = e.created_at
+            ? parseDate(e.created_at).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--";
+          const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
+          const existing = agentsMap.get(e.agent_id) || { id: e.agent_id, role, status: e.status, currentTask: e.current_task, taskHistory: [], crawlEvents: [] };
+          existing.status = e.status;
+          existing.role = role;
+          existing.currentTask = e.current_task;
+          existing.taskHistory.push({ ts: entryTs, task: e.current_task, outcome: e.outcome });
+          agentsMap.set(e.agent_id, existing);
+        }
+        // If no scan is running, reset any stale "active" agents to "idle".
+        if (!scanRunning) {
+          for (const [id, agent] of agentsMap) {
+            if (agent.status === "active" && id !== "crawler") {
+              agentsMap.set(id, { ...agent, status: "idle" });
+            }
+          }
+        }
+        setAgents([...agentsMap.values()]);
+      }).catch(() => {});
+  }, [runId]);
+
+  // Load token usage from the API on mount (in-process memory, best effort).
+  useEffect(() => {
+    api.getTokenUsage(runId).then(d => { if (d) setTokenUsage(d); }).catch(() => {});
   }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
@@ -817,6 +5028,30 @@ function TestRunDetail({ runId }) {
         if (evt.status && evt.status !== "running") setCrawlStopRequested(false);
         if (evt.username !== undefined) setCrawlUsername(evt.username || null);
       } else if (evt.type === "crawl_progress") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const username = evt.username || "anonymous";
+          const crawlEvent = {
+            ts,
+            username,
+            url: evt.current_url || "",
+            pagesVisited: evt.pages_visited || 0,
+            done: !!evt.done,
+          };
+          const idx = prev.findIndex(a => a.id === "crawler");
+          const existingEvents = idx >= 0 ? (prev[idx].crawlEvents || []) : [];
+          const crawlEvents = [...existingEvents, crawlEvent].slice(-200);
+          const currentTask = evt.done
+            ? `Completed crawl as ${username} (${evt.pages_visited || 0} pg)`
+            : `Crawling ${truncUrl(evt.current_url || "", 88)} as ${username}`;
+          return upsertAgent(prev, {
+            id: "crawler",
+            role: "Crawler",
+            status: "active",
+            currentTask,
+            crawlEvents,
+          });
+        });
         // crawl_progress is still used for the done flag
         if (evt.username && evt.done) {
           setRun(prev => {
@@ -836,12 +5071,9 @@ function TestRunDetail({ runId }) {
             ),
           };
         });
-      } else if (evt.type === "scan_update") {
-        setScanStatus(evt);
-        if (evt.status && evt.status !== "running") setScanStopRequested(false);
       } else if (evt.type === "thinking_scan_update") {
         setThinkingStatus(evt);
-        if (evt.status && evt.status !== "running") setThinkingStopReq(false);
+        if (evt.status && !isDynamicScanActive(evt.status)) setThinkingStopReq(false);
       } else if (evt.type === "scanner_phase") {
         setActivityLog(prev => {
           const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -852,14 +5084,74 @@ function TestRunDetail({ runId }) {
         if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
           setSitePlanData(evt.data);
         }
+      } else if (evt.type === "task_graph_update") {
+        api.getTaskGraph(runId).then(setTaskGraph).catch(() => {});
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f =>
           f.id === evt.finding_id
-            ? { ...f, validation_status: evt.validation_status, validation_note: evt.validation_note ?? f.validation_note }
+            ? {
+                ...f,
+                validation_status: evt.validation_status ?? f.validation_status,
+                validation_note: evt.validation_note ?? f.validation_note,
+                evidence_json: evt.evidence_json ?? f.evidence_json,
+                evidence_items: evt.evidence_items ?? f.evidence_items,
+                poc_command: evt.poc_command ?? f.poc_command,
+                poc_setup: evt.poc_setup ?? f.poc_setup,
+              }
             : f
         ));
         // Refresh validation status summary when an individual finding resolves.
         api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
+      } else if (evt.type === "agent_status") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAgents(prev => {
+          const histEntry = { ts, task: evt.current_task, outcome: evt.outcome };
+          return upsertAgent(prev, {
+            id: evt.agent_id,
+            role: evt.role,
+            status: evt.status,
+            currentTask: evt.current_task,
+            outcome: evt.outcome,
+          }, histEntry);
+        });
+      } else if (evt.type === "specialist_step") {
+        const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const agentId = evt.agent_id;
+        if (agentId) {
+          setAgents(prev => {
+            const idx = prev.findIndex(a => a.id === agentId);
+            const stepEntry = { ts, step: evt.step, action_type: evt.action_type, method: evt.method, url: evt.url, status: evt.status, observation: evt.observation };
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            const prev_agent = updated[idx];
+            updated[idx] = {
+              ...prev_agent,
+              stepHistory: [...(prev_agent.stepHistory || []), stepEntry].slice(-200),
+            };
+            return updated;
+          });
+        }
+      } else if (evt.type === "token_usage_update") {
+        setTokenUsage(evt.totals);
+      } else if (evt.type === "scope_hosts_updated") {
+        setScopeHosts(evt.scope_hosts || []);
+      } else if (evt.type === "guided_login_required") {
+        setGuidedLoginPending(prev => {
+          if (prev.some(p => p.credential_id === evt.credential_id)) return prev;
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, browserOpen: false }];
+        });
+      } else if (evt.type === "guided_login_browser_open") {
+        setGuidedLoginPending(prev =>
+          prev.map(p => p.credential_id === evt.credential_id ? { ...p, browserOpen: true } : p)
+        );
+      } else if (evt.type === "guided_login_failed") {
+        setGuidedLoginErrors(prev => {
+          if (prev.some(e => e.credential_id === evt.credential_id)) return prev;
+          return [...prev, { credential_id: evt.credential_id, username: evt.username, message: evt.message }];
+        });
+        setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
+      } else if (evt.type === "guided_login_confirmed") {
+        setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
       }
     };
     es.onerror = () => { /* auto-reconnects */ };
@@ -872,41 +5164,49 @@ function TestRunDetail({ runId }) {
     if (run?.status !== "running" && !crawlStopRequested) return;
     const iv = setInterval(() => {
       api.getRun(runId).then(r => {
+        lastRunPollOkRef.current = Date.now();
         setRun(r);
+        if (r.status !== "running") {
+          setAgents(prev => prev.map(a => (
+            a.id === "crawler" && a.status === "active"
+              ? { ...a, status: "idle", currentTask: "Crawl is not running" }
+              : a
+          )));
+        }
         if (crawlStopRequested && r.completed_at) setCrawlStopRequested(false);
-      }).catch(() => {});
+      }).catch(() => {
+        setAgents(prev => prev.map(a => (
+          a.id === "crawler" && a.status === "active"
+            ? { ...a, status: "idle", currentTask: "Crawler connection stale" }
+            : a
+        )));
+      });
     }, 2000);
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
 
-  // Poll findings/status while scan is running, stopping, or on findings tab.
+  // Poll findings when on findings tab.
   useEffect(() => {
-    const scanActive = scanStatus?.status === "running" || scanStopRequested;
-    const needsFindings = scanActive || activeTab === "findings";
-    if (!needsFindings) return;
-    const poll = () => {
-      api.getFindings(runId).then(setFindings).catch(() => {});
-      if (scanActive || !scanStatus) {
-        api.getScanStatus(runId).then(s => {
-          setScanStatus(s);
-          if (scanStopRequested && s.status !== "running") setScanStopRequested(false);
-        }).catch(() => {});
-      }
-    };
-    poll();
-    const iv = setInterval(poll, 4000);
+    if (activeTab !== "findings") return;
+    api.getFindings(runId).then(setFindings).catch(() => {});
+    const iv = setInterval(() => { api.getFindings(runId).then(setFindings).catch(() => {}); }, 4000);
     return () => clearInterval(iv);
-  }, [runId, scanStatus?.status, activeTab, scanStopRequested]);
+  }, [runId, activeTab]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
-    const active = ["running", "analysing", "stopping"].includes(thinkingStatus?.status) || thinkingStopRequested;
+    const active = isDynamicScanActive(thinkingStatus?.status) || thinkingStopRequested;
     if (!active) return;
     const iv = setInterval(() => {
       api.getThinkingStatus(runId).then(s => {
         setThinkingStatus(s);
-        if (thinkingStopRequested && !["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
-        if (!["running", "analysing", "stopping"].includes(s.status)) api.getFindings(runId).then(setFindings).catch(() => {});
+        if (thinkingStopRequested && !isDynamicScanActive(s.status)) setThinkingStopReq(false);
+        if (!isDynamicScanActive(s.status)) {
+          api.getFindings(runId).then(setFindings).catch(() => {});
+          // Refresh checkpoint status once the scan finishes so the Resume button
+          // appears/disappears correctly without a page reload.
+          api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(() => {});
+        }
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
@@ -928,15 +5228,45 @@ function TestRunDetail({ runId }) {
   useEffect(() => {
     if (activeTab !== "findings") return;
     api.getFindings(runId).then(setFindings).catch(()=>{});
-    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
     api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
   }, [activeTab, runId]);
 
   useEffect(() => {
-    if (activeTab !== "scan") return;
-    api.getScanStatus(runId).then(setScanStatus).catch(()=>{});
-    api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
-  }, [activeTab, runId]);
+    if (activeTab !== "intelligence" && run?.status !== "running") return;
+    const loadIntel = () => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{});
+    loadIntel();
+    if (run?.status !== "running") return;
+    const iv = setInterval(loadIntel, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, targetIntelKind, run?.status]);
+
+  useEffect(() => {
+    const active = activeTab === "tasks" || isDynamicScanActive(thinkingStatus?.status);
+    if (!active) return;
+    const loadTasks = () => api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{});
+    loadTasks();
+    api.getReconSummary(runId).then(setReconSummary).catch(()=>{});
+    if (!isDynamicScanActive(thinkingStatus?.status)) return;
+    const iv = setInterval(loadTasks, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status]);
+
+  useEffect(() => {
+    const active = activeTab === "sessions" || isDynamicScanActive(thinkingStatus?.status);
+    if (!active) return;
+    const loadSessions = () => api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{});
+    loadSessions();
+    if (activeTab === "sessions" && !isDynamicScanActive(thinkingStatus?.status)) return;
+    const iv = setInterval(loadSessions, 4000);
+    return () => clearInterval(iv);
+  }, [activeTab, runId, thinkingStatus?.status]);
+
+  useEffect(() => {
+    setTraffic([]);
+    lastTrafficIdRef.current = 0;
+    setSelectedTraffic(null);
+    api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
+  }, [runId]);
 
   // Traffic log polling — always active while crawling or scanning; also when on the tab
   useEffect(() => {
@@ -952,22 +5282,23 @@ function TestRunDetail({ runId }) {
             return next.length > 2000 ? next.slice(-2000) : next;
           });
         }
+        if (activeTab === "traffic" || entries.length > 0) {
+          api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(()=>{});
+        }
       } catch(_) {}
     };
     const isActive = (
       activeTab === "traffic" ||
       run?.status === "running" ||
-      scanStatus?.status === "running" ||
-      ["running", "analysing", "stopping"].includes(thinkingStatus?.status) ||
+      isDynamicScanActive(thinkingStatus?.status) ||
       crawlStopRequested ||
-      scanStopRequested ||
       thinkingStopRequested
     );
     if (!isActive) return;
     poll();
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
-  }, [activeTab, run?.status, scanStatus?.status, thinkingStatus?.status, runId, crawlStopRequested, scanStopRequested, thinkingStopRequested]);
+  }, [activeTab, run?.status, thinkingStatus?.status, runId, crawlStopRequested, thinkingStopRequested]);
 
   // Auto-scroll traffic table to bottom when new entries arrive
   useEffect(() => {
@@ -1005,9 +5336,7 @@ function TestRunDetail({ runId }) {
   useEffect(() => {
     if (!graph || !svgRef.current) return;
 
-    const isScan = activeTab === "scan";
-    const visibleNodes = isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes;
-    const structureKey = `${activeTab}:${graphView}:${visibleNodes.length}:${graph.links.length}`;
+    const structureKey = `${activeTab}:${graphView}:${graph.nodes.length}:${graph.links.length}`;
 
     // Status-only change (same nodes/links, just colour updates) — update in-place.
     if (structureKey === prevGraphKeyRef.current && simRef.current) {
@@ -1029,16 +5358,8 @@ function TestRunDetail({ runId }) {
     const W = svgRef.current.clientWidth || 800;
     const H = svgRef.current.clientHeight || 500;
 
-    const inScopeIds = isScan
-      ? new Set(graph.nodes.filter(n => n.in_scope !== false).map(n => n.id))
-      : null;
-
-    const nodes = (isScan ? graph.nodes.filter(n => n.in_scope !== false) : graph.nodes)
-      .map(n => ({...n}));
-    const links = (isScan
-      ? graph.links.filter(l => inScopeIds.has(l.source) && inScopeIds.has(l.target))
-      : graph.links
-    ).map(l => ({...l}));
+    const nodes = graph.nodes.map(n => ({...n}));
+    const links = graph.links.map(l => ({...l}));
 
     const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => g.attr("transform", e.transform));
     svg.call(zoom);
@@ -1132,23 +5453,8 @@ function TestRunDetail({ runId }) {
   }, [run?.current_url, graph]);
 
   // Pulse graph nodes that are actively being scanned.
-  useEffect(() => {
-    if (!svgRef.current || !graph) return;
-    const svg = d3.select(svgRef.current);
-    svg.selectAll(".node-scan-pulse").remove();
-    const runningIds = new Set(graph.nodes.filter(n => n.scan_status === "running").map(n => n.id));
-    if (runningIds.size === 0) return;
-    svg.select("g").selectAll("g")
-      .filter(d => d && runningIds.has(d.id))
-      .insert("circle", ":first-child")
-        .attr("class", "node-scan-pulse")
-        .attr("r", 11);
-  }, [graph, activeTab, graphView]);
-
   // Compute the fill colour for a graph node based on current view mode.
   const nodeColorFn = (d) => {
-    const isScan = activeTab === "scan";
-    if (isScan) return scanColor(d);
     if (graphView === "user") return userColor(d, run?.credentials);
     return scopeColor(d);
   };
@@ -1195,51 +5501,8 @@ function TestRunDetail({ runId }) {
   );
   const sortArrow = (field) => trafficSort.field === field
     ? html`<span className="sort-arrow">${trafficSort.dir === "asc" ? "▲" : "▼"}</span>` : "";
-  const fmtTs = (iso) => { try { const d = new Date(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
+  const fmtTs = (iso) => { try { const d = parseDate(iso); return d.toTimeString().slice(0,8)+"."+String(d.getMilliseconds()).padStart(3,"0"); } catch { return iso||""; } };
 
-  const onStartScan = async () => {
-    try {
-      setScanStopRequested(false);
-      const policy = await api.getScannerPolicy();
-      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
-        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
-        const ok = confirm(
-          `Start ${scanModeLabel(policy.scan_mode)} scan?\n\n` +
-          `Methods: ${methods}\n` +
-          `Max probes/page: ${policy.max_probes_per_page}\n` +
-          `Delay: ${policy.min_delay_s}s\n` +
-          `Timeout: ${policy.request_timeout_s}s`
-        );
-        if (!ok) return;
-      }
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.startScan(runId);
-      setScanStatus(s);
-    } catch(e) { setScanStopRequested(false); setError(e.message); }
-  };
-
-  const onScanPage = async () => {
-    if (!selectedNode || scopeBusy) return;
-    setScopeBusy(true);
-    try {
-      setScanStopRequested(false);
-      const policy = await api.getScannerPolicy();
-      if (["aggressive", "destructive"].includes(policy.scan_mode)) {
-        const methods = (policy.methods_by_mode?.[policy.scan_mode] || []).join(", ");
-        const ok = confirm(
-          `Scan this page with ${scanModeLabel(policy.scan_mode)} mode?\n\n` +
-          `Methods: ${methods}\n` +
-          `Max probes/page: ${policy.max_probes_per_page}\n` +
-          `Delay: ${policy.min_delay_s}s\n` +
-          `Timeout: ${policy.request_timeout_s}s`
-        );
-        if (!ok) return;
-      }
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.scanPage(runId, selectedNode.id);
-      setScanStatus(s);
-    } catch(e) { setError(e.message); } finally { setScopeBusy(false); }
-  };
   const onDeleteFinding = async (e, findingId) => {
     e.stopPropagation();
     try {
@@ -1268,6 +5531,54 @@ function TestRunDetail({ runId }) {
     } catch(err) { setError(err.message); setValidateBusy(false); }
   };
 
+  const onDeduplicateFindings = async () => {
+    if (dedupeBusy) return;
+    setDedupeBusy(true);
+    try {
+      const result = await api.deduplicateFindings(runId);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      if (result.removed > 0) {
+        setExpandedFinding(null);
+        setExpandedGroups(new Set());
+      }
+      const mode = result.llm_used ? " with LLM review" : "";
+      alert(`Removed ${result.removed} duplicate issue${result.removed === 1 ? "" : "s"}${mode}.`);
+    } catch(err) { setError(err.message); }
+    finally { setDedupeBusy(false); }
+  };
+
+  const onExportFindingsMarkdown = () => {
+    try {
+      const md = findingsToMarkdown(findings, {
+        runName: run?.name,
+        siteName,
+        generatedAt: new Date(),
+      });
+      downloadTextFile(markdownExportFilename(run, siteName), md, "text/markdown;charset=utf-8");
+    } catch(err) { setError(err.message); }
+  };
+
+  const onImportFindingsClick = () => {
+    issueImportInputRef.current?.click();
+  };
+
+  const onImportFindingsFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const imported = parseFindingsMarkdown(await file.text());
+      if (!imported.length) throw new Error("No issues found in the selected file.");
+      const result = await api.importFindings(runId, imported);
+      setFindings(await api.getFindings(runId));
+      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
+      const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
+      setRun(r); setGraph(g);
+      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+    } catch(err) { setError(err.message); }
+  };
+
   const onValidateFinding = async (e, findingId) => {
     e.stopPropagation();
     try {
@@ -1287,22 +5598,12 @@ function TestRunDetail({ runId }) {
     } catch(err) { setError(err.message); }
   };
 
-  const onStopScan = async () => {
-    try {
-      setScanStopRequested(true);
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
-      const s = await api.stopScan(runId);
-      setScanStatus(prev => s.status === "running" ? { ...prev, ...s, status: "running" } : s);
-      if (s.status !== "running") setScanStopRequested(false);
-    } catch(e) { setScanStopRequested(false); setError(e.message); }
-  };
-
   const onStopThinkingScan = async () => {
     try {
       setThinkingStopReq(true);
       const s = await api.stopThinkingScan(runId);
       setThinkingStatus(s);
-      if (!["running", "analysing", "stopping"].includes(s.status)) setThinkingStopReq(false);
+      if (!isDynamicScanActive(s.status)) setThinkingStopReq(false);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -1310,8 +5611,17 @@ function TestRunDetail({ runId }) {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({ status: "running" });
-      setScanStatus(s => ({ ...(s || {}), status: "running" }));
+      setCheckpointStatus(null);
       const s = await api.startThinkingScan(runId);
+      setThinkingStatus(s);
+    } catch(e) { setThinkingStopReq(false); setError(e.message); }
+  };
+
+  const onResumeThinkingScan = async () => {
+    try {
+      setThinkingStopReq(false);
+      setThinkingStatus({ status: "running" });
+      const s = await api.resumeThinkingScan(runId);
       setThinkingStatus(s);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
@@ -1377,24 +5687,21 @@ function TestRunDetail({ runId }) {
       setError(e.message);
     }
   };
-  const onRestart = async () => {
-    if (!confirm("Delete all crawled pages for this run and start fresh?")) return;
+  const onClearCrawl = async () => {
+    if (!confirm("Clear all crawled pages for this run?")) return;
     try {
       setCrawlStopRequested(false);
-      setScanStopRequested(false);
       setGraph({nodes:[], links:[]});
-      const r = await api.restartRun(runId);
-      setRun({...r, status: "running", per_user_progress: {}});
+      const r = await api.clearCrawl(runId);
+      setRun({...r, status: "pending", per_user_progress: null});
     } catch(e) { setError(e.message); }
   };
 
-  const effectiveScanStatus     = scanStatus?.status     || run?.scan_status || "idle";
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
+  const dynamicScanActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
   const headerStatus = runWorkflowStatus(run, {
-    scanStatus: effectiveScanStatus,
     thinkingStatus: effectiveThinkingStatus,
     crawlStopping: crawlStopRequested,
-    scanStopping: scanStopRequested,
     thinkingStopping: thinkingStopRequested,
   });
   const STATUS_COLOR = {
@@ -1407,12 +5714,11 @@ function TestRunDetail({ runId }) {
     danger:"var(--danger)",
   };
   const canStart   = run && !crawlStopRequested && ["pending","stopped","failed","complete"].includes(run.status);
-  const canRestart = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
+  const canClearCrawl = run && !crawlStopRequested && ["stopped","failed","complete"].includes(run.status);
   const canStop    = run?.status === "running" && !crawlStopRequested;
-  const thinkingActiveStatuses = ["running", "analysing", "stopping"];
-  const canStopScan = effectiveScanStatus === "running";
-  const canStopThinking = thinkingActiveStatuses.includes(effectiveThinkingStatus);
-  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && effectiveScanStatus !== "running" && !thinkingActiveStatuses.includes(effectiveThinkingStatus);
+  const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
+  const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
+  const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
 
   return html`
     <div className="topbar">
@@ -1424,63 +5730,88 @@ function TestRunDetail({ runId }) {
           ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
         </div>
         ${run && run.llm_config_id && runProfiles.length > 0 && html`
-          <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
+        <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
             LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
           </div>`}
       </div>
       <div className="topbar-actions">
+        ${canStart && html`<button className="btn sm" onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
+        ${!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==="failed"||effectiveThinkingStatus==null) && html`
+          <button className="btn sm" title="Run the adaptive Pentest" onClick=${onStartThinkingScan}><${IconPlay}/> Start Pentest</button>`}
+        ${hasCheckpoint && html`
+          <button className="btn sm" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} title=${`Resume scan from step ${checkpointStatus.step_count}`} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest</button>`}
         ${canStop && html`<button className="btn danger-outline" onClick=${onStop}><${IconStop}/> Stop crawl</button>`}
         ${crawlStopRequested && html`<button className="btn danger-outline" disabled><${IconStop}/> Stopping…</button>`}
-        ${!canStop && !crawlStopRequested && canStopScan && html`<button className="btn danger-outline" onClick=${onStopScan} disabled=${scanStopRequested}><${IconStop}/> ${scanStopRequested ? "Stopping…" : "Stop scan"}</button>`}
-        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop thinking scan"}</button>`}
+        ${!canStop && !crawlStopRequested && canStopThinking && html`<button className="btn danger-outline" onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}><${IconStop}/> ${thinkingStopRequested ? "Stopping…" : "Stop Dynamic Scan"}</button>`}
+        ${aliceGlobalRunning && html`
+          <button
+            className="btn danger-outline"
+            style=${{ borderColor: "var(--danger)", color: "var(--danger)", background: "rgba(239,68,68,.08)" }}
+            onClick=${handleAliceStop}
+            title="Stop the running A.L.I.C.E. agent"
+          ><${IconStop}/> Stop A.L.I.C.E.</button>
+        `}
       </div>
     </div>
 
     <div className="content" style=${{paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
       ${error && html`<div className="alert error" style=${{marginBottom:12}}>${error}</div>`}
 
+      ${guidedLoginErrors.length > 0 && html`
+        <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--danger)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:6}}>
+          <div style=${{fontWeight:600,fontSize:13,color:"var(--danger)"}}>⚠️ Guided Browser Login Failed</div>
+          ${guidedLoginErrors.map(e => html`
+            <div key=${e.credential_id} style=${{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <span style=${{fontSize:13}}>${e.message}</span>
+              <button className="btn sm ghost" onClick=${()=>setGuidedLoginErrors(prev=>prev.filter(x=>x.credential_id!==e.credential_id))}>Dismiss</button>
+            </div>`)}
+        </div>`}
+
+      ${guidedLoginPending.length > 0 && html`
+        <div style=${{background:"var(--surface-2,#2a2a2a)",border:"2px solid var(--warn,#f59e0b)",borderRadius:6,padding:"12px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:8}}>
+          <div style=${{fontWeight:600,fontSize:13,color:"var(--warn,#f59e0b)"}}>🖥️ Guided Login Required</div>
+          ${guidedLoginPending.map(p => html`<${GuidedLoginItem} key=${p.credential_id} item=${p} runId=${runId} onConfirmed=${() => setGuidedLoginPending(prev => prev.filter(x => x.credential_id !== p.credential_id))}/>`)}
+        </div>`}
+
       <div className="tab-bar">
-        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
-          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); }}>Site Map</button>
-        <button className=${"tab-btn"+(activeTab==="scan"?" active":"")} 
-          onClick=${()=>{ setActiveTab("scan"); setSelNode(null); }}>Scan Status</button>
         <button className=${"tab-btn"+(activeTab==="activity"?" active":"")}
-          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); }}>
-          Activity${(scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+          onClick=${()=>{ setActiveTab("activity"); setSelNode(null); nav(`#/runs/${runId}/activity`); }}>
+          Status${isDynamicScanActive(thinkingStatus?.status) && activityLog.length>0 ? html`<span className="activity-live-dot">●</span>` : ""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="sitemap"?" active":"")}
+          onClick=${()=>{ setActiveTab("sitemap"); setSelNode(null); nav(`#/runs/${runId}/sitemap`); }}>Site Map</button>
+        <button className=${"tab-btn"+(activeTab==="intelligence"?" active":"")}
+          onClick=${()=>{ setActiveTab("intelligence"); setSelNode(null); nav(`#/runs/${runId}/intelligence`); }}>
+          Intelligence${targetIntel && Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)>0 ? html` <span className="traffic-count">${Object.values(targetIntel.counts||{}).reduce((a,b)=>a+b,0)}</span>` : ""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="tasks"?" active":"")}
+          onClick=${()=>{ setActiveTab("tasks"); setSelNode(null); nav(`#/runs/${runId}/tasks`); }}>
+          Task Graph${taskGraph?.counts?.tasks>0 ? html` <span className="traffic-count">${taskGraph.counts.tasks}</span>` : ""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="sessions"?" active":"")}
+          onClick=${()=>{ setActiveTab("sessions"); setSelNode(null); nav(`#/runs/${runId}/sessions`); }}>
+          Sessions${scannerSessions?.counts?.total>0 ? html` <span className="traffic-count">${scannerSessions.counts.total}</span>` : ""}
         </button>
         <button className=${"tab-btn"+(activeTab==="findings"?" active":"")}
-          onClick=${()=>{ setActiveTab("findings"); setSelNode(null); }}>
+          onClick=${()=>{ setActiveTab("findings"); setSelNode(null); nav(`#/runs/${runId}/findings`); }}>
           Findings${findings.length>0?html` <span className="findings-badge">${findings.length}</span>`:""}
         </button>
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
-          onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); }}>
-          Traffic Log${traffic.length>0?html` <span className="traffic-count">${traffic.length}</span>`:""}
+          onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
+          Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
         </button>
         <div style=${{flex:1}}></div>
-        ${(activeTab==="sitemap"||activeTab==="scan") && run?.credentials?.length > 1 && html`
+        ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
+        ${activeTab==="sitemap" && run?.credentials?.length > 1 && html`
           <div className="view-toggle" style=${{margin:"auto 8px auto 0"}}>
             <button className=${"btn ghost sm"+(graphView==="scope"?" active":"")}
               onClick=${()=>setGraphView("scope")}>By Scope</button>
             <button className=${"btn ghost sm"+(graphView==="user"?" active":"")}
               onClick=${()=>setGraphView("user")}>By User</button>
           </div>`}
-        ${activeTab==="sitemap" && canStart   && html`<button className="btn sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
-        ${activeTab==="sitemap" && canRestart && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onRestart}>↺ Clear & restart</button>`}
-        ${activeTab==="scan" && effectiveScanStatus==="running" && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopScan} disabled=${scanStopRequested}>
-            ${scanStopRequested ? "◼ Stopping…" : "◼ Stop scan"}
-          </button>`}
-        ${activeTab==="scan" && canStopThinking && html`
-          <button className="btn danger-outline sm" style=${{margin:"auto 4px auto 0"}} onClick=${onStopThinkingScan} disabled=${thinkingStopRequested}>
-            ${thinkingStopRequested ? "◼ Stopping…" : "◼ Stop thinking scan"}
-          </button>`}
-        ${activeTab==="scan" && !scanStopRequested && canStartAnyScan && (effectiveScanStatus==="idle"||effectiveScanStatus==="complete"||effectiveScanStatus==="stopped"||effectiveScanStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the page-by-page scanner" onClick=${onStartScan}><${IconPlay}/> Start normal scan</button>`}
-        ${activeTab==="scan" && !thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==null) && html`
-          <button className="btn sm" style=${{margin:"auto 4px auto 0"}} title="Run the autonomous Thinking scan" onClick=${onStartThinkingScan}><${IconPlay}/> Start Thinking scan</button>`}
       </div>
 
-      ${(activeTab==="sitemap"||activeTab==="scan") && run && html`
+      ${activeTab==="sitemap" && run && html`
         <div className="run-meta">
           <div className="run-stat"><span className="run-stat-val">${run.pages_discovered}</span><span className="run-stat-lbl">Pages found</span></div>
           ${editingSettings ? html`
@@ -1529,63 +5860,13 @@ function TestRunDetail({ runId }) {
           })()}
           ${run.error_message&&html`<div style=${{color:"var(--danger)",fontSize:12,flex:1}}>${run.error_message}</div>`}
         </div>
+        ${activeTab==="sitemap" && run && html`
+          <${ScopeHostsPanel}
+            siteId=${run.site_id}
+            hosts=${scopeHosts}
+            onChange=${setScopeHosts}
+          />`}
         ${(()=>{
-          if (activeTab === "scan") {
-            const thinkingActive = ["running", "analysing", "stopping"].includes(thinkingStatus?.status);
-            const showNormalScan = scanStatus &&
-              !thinkingActive &&
-              !(scanStatus.status === "idle" && scanStatus.pages_done === 0) &&
-              !(thinkingStatus?.status === "complete" && scanStatus.status === "complete");
-            const showThinkingScan = thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle";
-            if (!showNormalScan && !showThinkingScan) return null;
-            const total   = scanStatus?.total_pages || 0;
-            const done    = scanStatus?.pages_done  || 0;
-            const scanPct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
-            const currentPage = graph?.nodes.find(n => n.scan_status === "running");
-            const normalScanStrip = showNormalScan ? html`
-              <div className="scan-progress-strip">
-                <div className="scan-progress-bar">
-                  <div className="scan-progress-fill" style=${{width: scanPct + "%"}}></div>
-                </div>
-                <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">
-                    Normal scan: ${scanStopRequested ? "stop requested. Finishing current page…" : `${done} / ${total} pages scanned`}
-                  </span>
-                  ${(scanStatus?.findings_count || 0) > 0 && html`
-                    <span className="scan-progress-findings">
-                      ${scanStatus.findings_count} finding${scanStatus.findings_count !== 1 ? "s" : ""}
-                    </span>`}
-                  ${currentPage && html`
-                    <span className="scan-progress-url mono" title=${currentPage.url}>
-                      ${truncUrl(currentPage.url, 48)}
-                    </span>`}
-                </div>
-              </div>` : null;
-            const thinkingLabel = thinkingStopRequested ? "stop requested" : (
-              thinkingStatus?.status === "running" ? "running" :
-              thinkingStatus?.status === "analysing" ? "analysing probe results" :
-              thinkingStatus?.status === "stopping" ? "stopping after current step, then analysing findings" :
-              thinkingStatus?.status === "complete" ? "complete" :
-              thinkingStatus?.status === "stopped" ? "stopped, findings processed" :
-              thinkingStatus?.status === "failed" ? "failed" : thinkingStatus?.status
-            );
-            const thinkingStrip = showThinkingScan ? html`
-              <div className="scan-progress-strip">
-                <div className="scan-progress-strip-row">
-                  <span className="scan-progress-counts">Thinking scan: ${thinkingLabel}</span>
-                  ${(thinkingStatus?.findings_count || 0) > 0 && html`
-                    <span className="scan-progress-findings">
-                      ${thinkingStatus.findings_count} finding${thinkingStatus.findings_count !== 1 ? "s" : ""}
-                    </span>`}
-                  <span className="scan-progress-url">Autonomous request-by-request assessment</span>
-                </div>
-              </div>` : null;
-            return html`
-              <div className="scan-progress-stack">
-                ${normalScanStrip}
-                ${thinkingStrip}
-              </div>`;
-          }
           const credList = run.credentials || [];
           const multiUser = credList.length > 1;
           // Overall progress reaches the cap while crawling, then fills once discovery is complete.
@@ -1620,7 +5901,7 @@ function TestRunDetail({ runId }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -1628,17 +5909,17 @@ function TestRunDetail({ runId }) {
                 ? html`<div style=${{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
                     <span>Ready to crawl.</span>
                     <button className="btn" onClick=${onStart}><${IconPlay}/> Start crawl</button>
+                    <span className="subtle" style=${{fontSize:12}}>or</span>
+                    <button className="btn" onClick=${onStartThinkingScan}><${IconPlay}/> Start Dynamic Scan</button>
+                    ${hasCheckpoint && html`
+                      <button className="btn" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest (step ${checkpointStatus.step_count})</button>`}
                   </div>`
                 : html`<span>No pages discovered yet.</span>`}
             </div>`}
-          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%"></svg>
+          <svg ref=${svgRef} className="graph-svg" width="100%" height="100%" style=${{pointerEvents: (!graph || graph.nodes.length === 0) ? "none" : "all"}}></svg>
           ${graph&&graph.nodes.length>0 && html`
             <div className="graph-legend">
-              ${activeTab === "scan" ? html`
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.pending}}></span>Not scanned</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.running}}></span>Scanning…</div>
-                <div className="legend-item"><span className="legend-dot" style=${{background:SCAN_COLORS.complete}}></span>Complete</div>
-              ` : graphView === "user" && run?.credentials?.length > 1 ? html`
+              ${graphView === "user" && run?.credentials?.length > 1 ? html`
                 ${(run.credentials||[]).map((c,i) => html`
                   <div key=${c.id} className="legend-item">
                     <span className="legend-dot" style=${{background:USER_PALETTE[i%USER_PALETTE.length]}}></span>
@@ -1674,16 +5955,6 @@ function TestRunDetail({ runId }) {
                   <button className="btn danger-outline sm" onClick=${onDeleteNode} disabled=${scopeBusy}
                     title="Delete this node (and children if checkbox is ticked)">🗑</button>
                 </div>
-                ${activeTab==="scan" && selectedNode.in_scope !== false && html`
-                  <div style=${{marginTop:10}}>
-                    <button className="btn sm" onClick=${onScanPage} disabled=${scopeBusy||scanStatus?.status==="running"}>
-                      ${scopeBusy ? "Starting…" : scanStatus?.status==="running" ? "Scan running…" : "▶ Scan this page"}
-                    </button>
-                    ${selectedNode.scan_status && html`
-                      <span className=${"scan-node-status scan-node-"+selectedNode.scan_status}>
-                        ${selectedNode.scan_status}
-                      </span>`}
-                  </div>`}
                 <label className="scope-cascade-label">
                   <input type="checkbox" checked=${cascade} onChange=${e=>setCascade(e.target.checked)}/>
                   Also apply to all children
@@ -1747,27 +6018,15 @@ function TestRunDetail({ runId }) {
       ${activeTab==="findings" && html`
         <div className="findings-panel">
           <div className="findings-status-bar">
-            ${scanStatus && html`
-              <span className=${"scan-status-badge scan-status-"+(scanStopRequested ? "stopping" : scanStatus.status)}>
-                ${scanStopRequested ? "Stopping scan…" :
-                  scanStatus.status==="running" ? "Scanning…" :
-                  scanStatus.status==="complete" ? "Scan complete" :
-                  scanStatus.status==="stopped"  ? "Scan stopped" :
-                  scanStatus.status==="failed"   ? "Scan failed"  : "Not scanned"}
-              </span>`}
-            ${scanStatus?.status==="running" && html`
-              <span className="subtle" style=${{fontSize:12}}>
-                ${scanStatus.pages_done} / ${scanStatus.total_pages} pages
-              </span>`}
             ${thinkingStatus && thinkingStatus.status && thinkingStatus.status !== "idle" && html`
               <span className=${"scan-status-badge scan-status-"+(thinkingStopRequested ? "stopping" : thinkingStatus.status)}>
-                ${thinkingStopRequested ? "Stopping thinking scan…" :
-                  thinkingStatus.status==="running"   ? "Thinking scan running…" :
-                  thinkingStatus.status==="analysing" ? "Thinking scan analysing…" :
-                  thinkingStatus.status==="stopping"  ? "Thinking scan stopping…" :
-                  thinkingStatus.status==="complete"  ? "Thinking scan complete" :
-                  thinkingStatus.status==="stopped"   ? "Thinking scan stopped" :
-                  thinkingStatus.status==="failed"    ? "Thinking scan failed" : "Thinking scan"}
+                ${thinkingStopRequested ? "Stopping Dynamic Scan…" :
+                  thinkingStatus.status==="running"   ? "Dynamic Scan running…" :
+                  thinkingStatus.status==="analysing" ? "Dynamic Scan analysing…" :
+                  thinkingStatus.status==="stopping"  ? "Dynamic Scan stopping…" :
+                  thinkingStatus.status==="complete"  ? "Dynamic Scan complete" :
+                  thinkingStatus.status==="stopped"   ? "Dynamic Scan stopped" :
+                  thinkingStatus.status==="failed"    ? "Dynamic Scan failed" : "Dynamic Scan"}
               </span>`}
             <div style=${{flex:1}}></div>
             ${validateStatus?.status==="running"
@@ -1780,32 +6039,69 @@ function TestRunDetail({ runId }) {
             ${validateStatus?.status==="running" && html`
               <button className="btn danger-outline sm" style=${{marginLeft:8}}
                 onClick=${onStopValidation}>Stop validation</button>`}
-            ${findings.length>0 && html`
-              <button className="btn sm" style=${{marginLeft:8}}
-                disabled=${validateBusy||validateStatus?.status==="running"}
-                onClick=${onValidateAll}>✓ Validate Issues</button>`}
+            ${dedupeBusy && html`
+              <span className="val-status-badge val-running dedupe-status">
+                <span className="inline-spinner"></span>
+                De-duplicating with LLM…
+              </span>`}
+            <div className="row" style=${{gap:8,marginLeft:8}}>
+              ${findings.length>0 && html`
+                <button className="btn sm" onClick=${onExportFindingsMarkdown}>
+                  Export Issues
+                </button>`}
+              <button className="btn sm" onClick=${onImportFindingsClick}>
+                Import Issues
+              </button>
+              <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
+                style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${validateBusy||validateStatus?.status==="running"}
+                  onClick=${onValidateAll}>✓ Validate Issues</button>`}
+              ${findings.length>0 && html`
+                <button className="btn sm"
+                  disabled=${dedupeBusy||validateBusy||validateStatus?.status==="running"}
+                  onClick=${onDeduplicateFindings}>
+                  ${dedupeBusy && html`<span className="inline-spinner"></span>`}
+                  ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
+                </button>`}
+              ${findings.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="findings"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all findings and reset page scan status?\nThis lets you re-run the scanner on the same crawl.")) return;
+                    setClearBusy("findings"); setClearError(null);
+                    try { await api.clearFindings(runId); setFindings([]); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="findings"?"Clearing…":"Clear all"}</button>`}
+            </div>
           </div>
           ${findings.length === 0
             ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
-                ${scanStatus?.status==="running" || ["running","analysing","stopping"].includes(thinkingStatus?.status)
-                  ? "Scanning… findings will appear here."
-                  : "No findings yet. Start a scan from the Scan Status tab."}
+                ${isDynamicScanActive(thinkingStatus?.status)
+                  ? "Scan running… findings will appear here."
+                  : "No findings yet. Start a Dynamic Scan to begin."}
               </div>`
             : html`
               <div className="findings-table-wrap">${(()=>{
                 const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
-                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4};
+                const VAL_ORDER = {confirmed:0, validating:1, unvalidated:2, unconfirmed:3, false_positive:4, low_confidence:4};
+                const DETERMINISTIC_GROUP_KEY = "__deterministic__";
                 const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
                 const FP_GROUP_KEY = "__low_confidence__";
                 const activeMap = {};
                 const unconfirmedMap = {};
                 const fpMap = {};
+                const deterministicMap = {};
                 for (const f of findings) {
-                  const target = f.validation_status === "false_positive"
-                    ? fpMap
-                    : f.validation_status === "unconfirmed"
-                      ? unconfirmedMap
-                      : activeMap;
+                  const target = (f.finding_source === "deterministic_probe")
+                    ? deterministicMap
+                    : (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
+                      ? fpMap
+                      : f.validation_status === "unconfirmed"
+                        ? unconfirmedMap
+                        : activeMap;
                   (target[f.title] = target[f.title]||[]).push(f);
                 }
                 const makeGroups = (map) => Object.entries(map).map(([title, items]) => {
@@ -1817,22 +6113,34 @@ function TestRunDetail({ runId }) {
                   });
                   const topSev = items.reduce((b,f)=>
                     (SEV_ORDER[f.severity]??99)<(SEV_ORDER[b]??99)?f.severity:b, items[0].severity);
-                  return { title, items:sortedItems, topSev, count:items.length, owasp:items[0].owasp_category };
+                  return { title, items:sortedItems, topSev, count:items.length, source:items[0].finding_source || "unknown" };
                 }).sort((a,b)=>{
                   return (SEV_ORDER[a.topSev]??99)-(SEV_ORDER[b.topSev]??99);
                 });
                 const groups = makeGroups(activeMap);
                 const unconfirmedGroups = makeGroups(unconfirmedMap);
                 const fpGroups = makeGroups(fpMap);
+                const deterministicGroups = makeGroups(deterministicMap);
                 const unconfirmedCount = unconfirmedGroups.reduce((total,g)=>total+g.count,0);
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
+                const deterministicCount = deterministicGroups.reduce((total,g)=>total+g.count,0);
+                const evidenceItemsFor = (f) => {
+                  if (Array.isArray(f.evidence_items)) return f.evidence_items;
+                  try {
+                    const parsed = JSON.parse(f.evidence_json || "[]");
+                    return Array.isArray(parsed) ? parsed : [];
+                  } catch (_) {
+                    return [];
+                  }
+                };
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
                     onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
                     <td>
-                      ${f.validation_status==="confirmed"     && html`<span className="val-badge val-confirmed">confirmed</span>`}
+                      ${f.validation_status==="confirmed"      && html`<span className="val-badge val-confirmed">confirmed</span>`}
                       ${f.validation_status==="unconfirmed"   && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
                       ${f.validation_status==="false_positive" && html`<span className="val-badge val-fp">low conf</span>`}
+                      ${f.validation_status==="low_confidence" && html`<span className="val-badge val-fp">low conf</span>`}
                       ${f.validation_status==="validating"    && html`<span className="val-badge val-validating">…</span>`}
                     </td>
                     <td></td>
@@ -1843,7 +6151,7 @@ function TestRunDetail({ runId }) {
                     </td>
                     <td>
                       <div className="row" style=${{gap:4,justifyContent:"flex-end"}}>
-                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive") && html`
+                        ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive"||f.validation_status==="low_confidence") && html`
                           <button className="btn ghost sm finding-del-btn" title="Validate"
                             onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
                         <button className="btn ghost sm finding-del-btn" title="Delete"
@@ -1856,13 +6164,13 @@ function TestRunDetail({ runId }) {
                       <td colSpan="5">
                         <div className="finding-description">
                           <div><strong>Description</strong></div>
-                          <div>${f.description || "—"}</div>
+                          <div>${markdownText(f.description) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Impact</strong></div>
-                          <div>${f.impact || "—"}</div>
+                          <div>${markdownText(f.impact) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
-                          <div>${f.likelihood || "—"}</div>
+                          <div>${markdownText(f.likelihood) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
-                          <div>${f.recommendation || "—"}</div>
+                          <div>${markdownText(f.recommendation) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                           <div>
                             ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
@@ -1872,6 +6180,31 @@ function TestRunDetail({ runId }) {
                         ${f.validation_note && html`
                           <div className=${"finding-validation-note val-note-"+f.validation_status}>
                             <strong>Validation (${f.validation_status}):</strong> ${f.validation_note}
+                          </div>`}
+                        ${f.poc_command && html`
+                          <div className="finding-poc" style=${{marginTop:12}}>
+                            <div className="row" style=${{justifyContent:"space-between",alignItems:"center"}}>
+                              <strong>Validation Command (verified)</strong>
+                              <button className="btn ghost sm" title="Copy command"
+                                onClick=${e=>{e.stopPropagation(); navigator.clipboard?.writeText(f.poc_command);}}>Copy</button>
+                            </div>
+                            <pre className="finding-evidence">${f.poc_command}</pre>
+                            ${f.poc_setup && html`
+                              <details style=${{marginTop:4}}>
+                                <summary className="finding-affected-label" style=${{cursor:"pointer"}}>Setup (capture an authenticated session)</summary>
+                                <pre className="finding-evidence" style=${{whiteSpace:"pre-wrap"}}>${f.poc_setup}</pre>
+                              </details>`}
+                          </div>`}
+                        ${evidenceItemsFor(f).length > 0 && html`
+                          <div className="structured-evidence">
+                            ${evidenceItemsFor(f).map((item,idx)=>html`
+                              <div key=${idx} className=${"structured-evidence-item evidence-type-"+(item.type||"note")}>
+                                <div className="structured-evidence-label">
+                                  <span>${item.label || item.type || "Evidence"}</span>
+                                  ${item.confidence && html`<span className="structured-evidence-confidence">${item.confidence}</span>`}
+                                </div>
+                                <pre className="structured-evidence-value">${item.value}</pre>
+                              </div>`)}
                           </div>`}
                         ${f.request_evidence && html`
                           <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
@@ -1885,6 +6218,22 @@ function TestRunDetail({ runId }) {
                             <img src=${"data:image/png;base64,"+f.screenshot_b64}
                               className="finding-screenshot" alt="proof screenshot"/>
                           </div>`}
+                        ${(()=>{
+                          const instances = (()=>{ try { return JSON.parse(f.merged_instances||"[]"); } catch(_){return [];} })();
+                          if (!instances.length) return null;
+                          return html`
+                            <div style=${{marginTop:12}}>
+                              <strong>Additional Affected Instances (${instances.length})</strong>
+                              ${instances.map((inst,idx)=>html`
+                                <div key=${idx} style=${{marginTop:8,paddingLeft:12,borderLeft:"2px solid var(--border,#ccc)"}}>
+                                  <div className="finding-affected-label">Instance ${idx+2}</div>
+                                  <span className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${inst.url||"\u2014"}</span>
+                                  ${inst.request_evidence && html`<pre className="finding-evidence" style=${{marginTop:4}}>REQUEST:\n${inst.request_evidence}</pre>`}
+                                  ${inst.response_evidence && html`<pre className="finding-evidence">RESPONSE:\n${inst.response_evidence}</pre>`}
+                                  ${!inst.request_evidence && !inst.response_evidence && inst.evidence && html`<pre className="finding-evidence">${inst.evidence}</pre>`}
+                                </div>`)}
+                            </div>`;
+                        })()}
                       </td>
                     </tr>`}
                 `;
@@ -1894,7 +6243,7 @@ function TestRunDetail({ runId }) {
                     <tr key=${groupKey} className="finding-group-row"
                       onClick=${()=>toggleGroup(groupKey)}>
                       <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
-                      <td><span className="owasp-badge">${g.owasp}</span></td>
+                      <td><span className="source-badge">${sourceLabel(g.source)}</span></td>
                       <td className="finding-title">
                         <span className="group-chevron">${expandedGroups.has(groupKey)?"▾":"▸"}</span>
                         ${g.title}
@@ -1907,15 +6256,17 @@ function TestRunDetail({ runId }) {
                 });
                 const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
                 const fpRows = renderStatusRows(fpGroups, "fp");
+                const deterministicRows = renderStatusRows(deterministicGroups, "deterministic");
                 return html`
                 <table className="findings-table">
+                  <colgroup>${findColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
                   <thead>
                     <tr>
-                      <th style=${{width:80}}>Severity</th>
-                      <th style=${{width:52}}>OWASP</th>
-                      <th>Title</th>
-                      <th style=${{width:28}}>#</th>
-                      <th style=${{width:60}}></th>
+                      <th>Severity <div className="col-rh" onMouseDown=${e=>startFindResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th>Source <div className="col-rh" onMouseDown=${e=>startFindResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th>Title <div className="col-rh" onMouseDown=${e=>startFindResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th># <div className="col-rh" onMouseDown=${e=>startFindResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1923,7 +6274,7 @@ function TestRunDetail({ runId }) {
                       <tr key=${g.title} className="finding-group-row"
                         onClick=${()=>toggleGroup(g.title)}>
                         <td><span className=${"sev-badge sev-"+g.topSev}>${g.topSev}</span></td>
-                        <td><span className="owasp-badge">${g.owasp}</span></td>
+                        <td><span className="source-badge">${sourceLabel(g.source)}</span></td>
                         <td className="finding-title">
                           <span className="group-chevron">${expandedGroups.has(g.title)?"▾":"▸"}</span>
                           ${g.title}
@@ -1964,15 +6315,128 @@ function TestRunDetail({ runId }) {
                       </tr>
                       ${expandedGroups.has(FP_GROUP_KEY) && fpRows}
                     `}
+                    ${deterministicCount > 0 && html`
+                      <tr key=${DETERMINISTIC_GROUP_KEY} className="finding-group-row"
+                        onClick=${()=>toggleGroup(DETERMINISTIC_GROUP_KEY)}>
+                        <td><span className="val-badge val-fp">deterministic</span></td>
+                        <td></td>
+                        <td className="finding-title">
+                          <span className="group-chevron">${expandedGroups.has(DETERMINISTIC_GROUP_KEY)?"▾":"▸"}</span>
+                          Deterministic Findings
+                        </td>
+                        <td><span className="finding-count-badge">${deterministicCount}</span></td>
+                        <td></td>
+                      </tr>
+                      ${expandedGroups.has(DETERMINISTIC_GROUP_KEY) && deterministicRows}
+                    `}
                   </tbody>
                 </table>`;
               })()}
               </div>`}
         </div>`}
 
+      ${activeTab==="intelligence" && html`
+        <${TargetIntelligencePanel}
+          data=${targetIntel}
+          selectedKind=${targetIntelKind}
+          onKind=${setTargetIntelKind}
+          refresh=${()=>api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(()=>{})}
+          onClear=${async()=>{
+            if (!confirm("Clear all target intelligence for this run?")) return;
+            setClearBusy("intel"); setClearError(null);
+            try { await api.clearTargetIntel(runId); setTargetIntel(null); setTargetIntelKind(""); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="intel"}
+        />`}
+
+      ${activeTab==="tasks" && html`
+        <${TaskGraphPanel}
+          data=${taskGraph}
+          reconSummary=${reconSummary}
+          subTab=${tasksSubTab}
+          onSubTab=${setTasksSubTab}
+          refresh=${()=>api.getTaskGraph(runId).then(setTaskGraph).catch(()=>{})}
+          seed=${()=>api.seedTaskGraph(runId).then(setTaskGraph).catch(e=>setError(e.message))}
+          onClear=${async()=>{
+            if (!confirm("Clear all hypotheses and tasks for this run?")) return;
+            setClearBusy("tasks"); setClearError(null);
+            try { await api.clearTaskGraph(runId); setTaskGraph(null); }
+            catch(e) { setClearError(e.message); }
+            finally { setClearBusy(""); }
+          }}
+          clearing=${clearBusy==="tasks"}
+        />`}
+
+      ${activeTab==="sessions" && html`
+        <${ScannerSessionsPanel}
+          runId=${runId}
+          data=${scannerSessions}
+          refresh=${()=>api.getScannerSessions(runId).then(setScannerSessions).catch(()=>{})}
+        />`}
+
       ${activeTab==="activity" && html`
         <div className="activity-panel">
+          ${(() => {
+            const isAgentic = activityLog.some(e => e.data?.mode === "agentic");
+            const fmtTok = (n) => n >= 1_000_000 ? (n/1_000_000).toFixed(1)+"M" : n >= 1_000 ? (n/1_000).toFixed(1)+"K" : String(n||0);
+            const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
+            return html`
+              <div className="activity-token-bar" onClick=${hasTokens ? ()=>setTokenExpanded(p=>!p) : undefined}
+                   style=${{cursor: hasTokens ? "pointer" : "default"}}>
+                ${hasTokens ? html`
+                  <span className="token-bar-label">Tokens</span>
+                  <span className="token-bar-in" title="Input tokens">↑${fmtTok(tokenUsage.total_input)} in</span>
+                  <span className="token-bar-sep">·</span>
+                  <span className="token-bar-out" title="Output tokens">↓${fmtTok(tokenUsage.total_output)} out</span>
+                  ${(tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0) ? html`
+                    <span className="token-bar-sep">·</span>
+                    ${tokenUsage.total_cache_read > 0 ? html`<span className="token-bar-cache-read" title="Cache read tokens">⚡${fmtTok(tokenUsage.total_cache_read)} cached</span>` : null}
+                    ${tokenUsage.total_cache_write > 0 ? html`<span className="token-bar-cache-write" title="Cache write tokens">✎${fmtTok(tokenUsage.total_cache_write)} written</span>` : null}
+                  ` : null}
+                  <span className="activity-expand-chevron" style=${{marginLeft:4}}>${tokenExpanded?"▲":"▼"}</span>
+                ` : html`<span className="token-bar-empty">No token data yet</span>`}
+              </div>
+              ${tokenExpanded && hasTokens && html`
+                <div className="token-breakdown">
+                  ${Object.entries(tokenUsage.by_model||{}).map(([model, v]) => html`
+                    <div key=${model} className="token-breakdown-row">
+                      <span className="token-model-name">${model}</span>
+                      <span className="token-in">↑${fmtTok(v.input)}</span>
+                      <span className="token-out">↓${fmtTok(v.output)}</span>
+                      ${(v.cache_read > 0 || v.cache_write > 0) ? html`
+                        ${v.cache_read > 0 ? html`<span className="token-cache-read" title="Cache read">⚡${fmtTok(v.cache_read)}</span>` : null}
+                        ${v.cache_write > 0 ? html`<span className="token-cache-write" title="Cache write">✎${fmtTok(v.cache_write)}</span>` : null}
+                      ` : null}
+                    </div>`)}
+                </div>`}
+              <div className="activity-sub-tab-bar">
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="agents"?" active":"")}
+                  onClick=${()=>setActivitySubTab("agents")}>Agents${agents.map(normalizeAgentForRun).some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="specialists"?" active":"")}
+                  onClick=${()=>setActivitySubTab("specialists")}>Specialist${agents.filter(a=>a.id.startsWith("specialist-")).some(a=>a.status==="active")?" ●":""}</button>
+                <button className=${"activity-sub-tab-btn"+(activitySubTab==="log"?" active":"")}
+                  onClick=${()=>setActivitySubTab("log")}>Log</button>
+              </div>`;
+          })()}
+          ${activitySubTab==="log" && html`
           <div className="activity-feed" ref=${activityFeedRef}>
+            <div className="activity-log-toolbar">
+              <span className="activity-count-label">${activityLog.length} event${activityLog.length!==1?"s":""}</span>
+              ${activityLog.some(e => e.data?.mode === "agentic") && html`<span className="activity-mode-badge">Continuous session</span>`}
+              <a className="btn ghost sm" href=${`/api/test-runs/${runId}/thinking-log/export`} download>Export log ↓</a>
+              ${activityLog.length>0 && html`
+                <button className="btn danger-outline sm"
+                  disabled=${clearBusy==="activity"}
+                  onClick=${async()=>{
+                    if (!confirm("Clear all activity log entries for this run?")) return;
+                    setClearBusy("activity"); setClearError(null);
+                    try { await api.clearScanLog(runId); setActivityLog([]); setSitePlanData(null); setTokenUsage(null); }
+                    catch(e) { setClearError(e.message); }
+                    finally { setClearBusy(""); }
+                  }}>${clearBusy==="activity"?"Clearing…":"Clear"}</button>`}
+            </div>
             ${sitePlanData && html`
               <div className="site-plan-card">
                 <div className="site-plan-header">
@@ -2009,21 +6473,42 @@ function TestRunDetail({ runId }) {
               </div>`}
             ${activityLog.length === 0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${scanStatus?.status==="running" ? "Scanner starting\u2026" : "No scanner activity yet. Start a scan from the Scan Status tab."}
+                No scanner activity yet. Start a Dynamic Scan to begin.
               </div>`}
             ${activityLog.map(entry => {
               const PHASE_META = {
-                site_plan:     { label: "Plan",      cls: "phase-plan" },
-                page_plan:     { label: "Probes",    cls: "phase-probes" },
-                page_followup: { label: "Follow-up", cls: "phase-followup" },
-                page_analysis: { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
-                sweep:         { label: "Sweep",     cls: "phase-sweep" },
-                llm_request:   { label: "LLM ►",     cls: "phase-llm-req" },
-                llm_response:  { label: "LLM ◄",     cls: "phase-llm-resp" },
+                site_plan:          { label: "Plan",      cls: "phase-plan" },
+                page_plan:          { label: "Probes",    cls: "phase-probes" },
+                page_followup:      { label: "Follow-up", cls: "phase-followup" },
+                page_analysis:      { label: "Finding",   cls: entry.data?.finding_count > 0 ? "phase-finding" : "phase-ok" },
+                sweep:              { label: "Sweep",     cls: "phase-sweep" },
+                llm_request:        { label: "LLM ►",     cls: "phase-llm-req" },
+                llm_response:       { label: "LLM ◄",     cls: "phase-llm-resp" },
+                llm_heartbeat:      { label: "LLM ⟳",     cls: "phase-llm-wait" },
+                credential_warning: { label: "⚠ Auth",   cls: "phase-warning" },
+                thinking_step:      { label: entry.status === "deciding" ? "···" : "Step", cls: "phase-thinking" },
+                thinking_analysis:  { label: "Report",    cls: "phase-reporting" },
+                reporting_turn:     { label: "Turn",      cls: entry.data?.findings_this_turn > 0 ? "phase-finding" : "phase-ok" },
+                post_scan_review:   { label: "Review",    cls: "phase-reporting" },
+                post_review_turn:   { label: "Review",    cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok" },
               };
-              const meta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
-              const suffix = entry.status === "complete" ? " \u2713" : entry.status === "start" ? " \u2026" : "";
-              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response);
+              const _baseMeta = PHASE_META[entry.phase] || { label: entry.phase, cls: "phase-other" };
+              const meta = entry.status === "error"
+                ? { label: _baseMeta.label, cls: "phase-finding" }
+                : _baseMeta;
+              const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : entry.status === "error" ? " ✗" : "";
+              // Augment llm_request message to surface agentic context count
+              const displayMessage = (
+                entry.phase === "llm_request" && entry.data?.message_count != null
+                  ? entry.message.replace(/\(.*messages in context\)/, `(${entry.data.message_count} msgs in context)`)
+                  : entry.message
+              );
+              const hasThinkingDetail = entry.phase === "thinking_step" && !!(
+                entry.data?.observation || entry.data?.hypothesis ||
+                entry.data?.payload_purpose || entry.data?.payload_summary
+              );
+              const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
+              const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
               const isExpanded = expandedLogIds.has(entry._id);
               return html`
                 <div key=${entry._id}>
@@ -2032,8 +6517,8 @@ function TestRunDetail({ runId }) {
                     <span className="activity-ts">${entry._ts}</span>
                     <span className=${"activity-badge "+meta.cls}>${meta.label}${suffix}</span>
                     ${entry.page_url && html`<span className="activity-url mono" title=${entry.page_url}>${truncUrl(entry.page_url, 42)}</span>`}
-                    <span className="activity-msg">${entry.message}</span>
-                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "\u25b2" : "\u25bc"}</span>`}
+                    <span className="activity-msg">${displayMessage}</span>
+                    ${hasPayload && html`<span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>`}
                   </div>
                   ${isExpanded && html`
                     <div className="activity-payload">
@@ -2043,10 +6528,397 @@ function TestRunDetail({ runId }) {
                       ${entry.data?.raw_response && html`
                         <div className="activity-payload-label" style=${{marginTop: entry.data?.prompt ? 8 : 0}}>Response</div>
                         <pre>${entry.data.raw_response}</pre>`}
+                      ${hasThinkingDetail && html`
+                        ${entry.data?.observation && html`
+                          <div className="activity-payload-label">Observation</div>
+                          <pre>${entry.data.observation}</pre>`}
+                        ${entry.data?.hypothesis && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Hypothesis</div>
+                          <pre>${entry.data.hypothesis}</pre>`}
+                        ${entry.data?.payload_purpose && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload purpose</div>
+                          <pre>${entry.data.payload_purpose}</pre>`}
+                        ${entry.data?.payload_summary && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
+                          <pre>${entry.data.payload_summary}</pre>`}`}
+                      ${(entry.phase === "reporting_turn" && entry.data?.titles?.length > 0) && html`
+                        <div className="activity-payload-label">Issues identified this turn</div>
+                        <ul style=${{margin:"4px 0 0 0",paddingLeft:18}}>
+                          ${entry.data.titles.map((t,i) => html`<li key=${i}>${t}</li>`)}
+                        </ul>`}
                     </div>`}
                 </div>`;
             })}
-          </div>
+          </div>`}
+          ${activitySubTab==="specialists" && html`
+          <div className="agents-panel">
+            ${(()=>{
+              const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+              if (specialistAgents.length === 0) return html`<div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No specialist agents dispatched yet.</div>`;
+              return specialistAgents.map(sa => {
+                const saActive = sa.status === "active";
+                const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                const saSteps = sa.stepHistory || [];
+                const saExpanded = saSteps.length > 0 && !collapsedAgentIds.has(sa.id);
+                const threadLabel = sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1");
+                return html`
+                  <div key=${sa.id} className=${"agent-row"+(saActive?" agent-row--active":" agent-row--complete")+(saSteps.length>0?" agent-row--expandable":"")}
+                       onClick=${saSteps.length>0 ? ()=>toggleAgentId(sa.id) : undefined}>
+                    <span className=${"agent-dot"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                    <span className=${"agent-role-name"+(saActive?" agent-role-name--pulse":"")} style=${{textTransform:"capitalize"}}>${threadLabel}</span>
+                    <span className=${"agent-badge"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${saActive?"ACTIVE":"DONE"}
+                    </span>
+                    <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                    ${saSteps.length>0 && html`<span className="activity-expand-chevron">${saExpanded?"▲":"▼"}</span>`}
+                    ${saSteps.length>0 && saExpanded && html`
+                      <div className="agent-task-history">
+                        ${saSteps.slice().reverse().map((s,i) => html`
+                          <div key=${i} className="agent-history-entry">
+                            <span className="activity-ts">${s.ts}</span>
+                            <span className="agent-step-method">
+                              ${s.method ? html`${s.method} ${s.url ? html`<span title=${s.url}>${truncUrl(s.url,80)}</span>` : ""}` : s.action_type || "tool"}
+                            </span>
+                            ${s.observation && html`<span className="agent-history-outcome" title=${s.observation}>${String(s.observation).slice(0,80)}</span>`}
+                          </div>`)}
+                      </div>`}
+                  </div>`;
+              });
+            })()}
+          </div>`}
+          ${activitySubTab==="agents" && html`
+          <div className="agents-panel">
+            ${(()=>{
+              const roster = defaultAgentRoster();
+              // Container slots (specialist/burp/validator) must always render as
+              // their placeholder so the multi-agent container row fires correctly.
+              const CONTAINER_IDS = new Set(["specialist", "burp", "validator"]);
+              const rosterAgents = roster.map(p =>
+                CONTAINER_IDS.has(p.id) ? p : (agents.find(a => representsAgent(a, p)) || p)
+              );
+              const extras = agents.filter(a => !roster.some(p => representsAgent(a, p)));
+              const shownAgents = [...rosterAgents, ...extras].map(normalizeAgentForRun);
+              const renderRow = (a) => {
+                // ── Specialist container row ────────────────────────────────
+                if (a.id === "specialist") {
+                  const specialistAgents = agents.filter(ag => ag.id.startsWith("specialist-")).map(normalizeAgentForRun);
+                  const anyActive = specialistAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (specialistAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = specialistAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = specialistAgents.length - activeCount;
+                  const summaryTask = specialistAgents.length === 0
+                    ? "No specialist dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} running, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} thread${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} thread${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = specialistAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("specialist");
+                  return html`
+                    <div key="specialist" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("specialist") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Specialist</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (specialistAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${specialistAgents.map(sa => {
+                            const saActive = sa.status === "active";
+                            const saTask = sa.currentTask || sa.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${sa.id} className=${"agent-thread-row"+(saActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(saActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${sa.id.replace("specialist-","").replace(/-([0-9]+)$/," #$1")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(saActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${saActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${saTask}>${saTask.length>90?saTask.slice(0,89)+"…":saTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
+                // ── Validator container row ────────────────────────────────
+                if (a.id === "validator") {
+                  const validatorAgents = agents.filter(ag => ag.id.startsWith("validator-")).map(normalizeAgentForRun);
+                  const anyActive = validatorAgents.some(ag => ag.status === "active");
+                  const activeCount = validatorAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = validatorAgents.length - activeCount;
+                  const summaryTask = validatorAgents.length === 0
+                    ? "No validation running"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} validating, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} finding${activeCount !== 1 ? "s" : ""} validating`
+                        : `${doneCount} finding${doneCount !== 1 ? "s" : ""} validated`;
+                  const canExpand = validatorAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("validator");
+                  return html`
+                    <div key="validator" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("validator") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Validator</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (validatorAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${validatorAgents.map(va => {
+                            const vaActive = va.status === "active";
+                            const vaTask = va.currentTask || va.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            const vaOutcome = va.outcome || va.taskHistory?.slice(-1)[0]?.outcome;
+                            const findingNum = va.id.replace("validator-", "");
+                            return html`
+                              <div key=${va.id} className=${"agent-thread-row"+(vaActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(vaActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">Finding #${findingNum}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(vaActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${vaActive?"ACTIVE":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${vaTask}>${vaTask.length>90?vaTask.slice(0,89)+"…":vaTask}</span>
+                                ${vaOutcome && !vaActive && html`<span className="agent-history-outcome">${vaOutcome}</span>`}
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
+                // ── Burp container row ──────────────────────────────────────
+                if (a.id === "burp") {
+                  const burpAgents = agents.filter(ag => ag.id.startsWith("burp-")).map(normalizeAgentForRun);
+                  const anyActive = burpAgents.some(ag => ag.status === "active");
+                  const containerStatus = anyActive ? "active" : (burpAgents.length > 0 ? "complete" : "idle");
+                  const activeCount = burpAgents.filter(ag => ag.status === "active").length;
+                  const doneCount = burpAgents.length - activeCount;
+                  const summaryTask = burpAgents.length === 0
+                    ? "No active scan dispatched"
+                    : activeCount > 0 && doneCount > 0
+                      ? `${activeCount} scanning, ${doneCount} complete`
+                      : activeCount > 0
+                        ? `${activeCount} scan${activeCount !== 1 ? "s" : ""} running`
+                        : `${doneCount} scan${doneCount !== 1 ? "s" : ""} complete`;
+                  const canExpand = burpAgents.length > 0;
+                  const isExpanded = canExpand && !collapsedAgentIds.has("burp");
+                  return html`
+                    <div key="burp" className=${"agent-row"+(anyActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                         onClick=${canExpand ? ()=>toggleAgentId("burp") : undefined}>
+                      <span className=${"agent-dot"+(anyActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name"+(anyActive?" agent-role-name--pulse":"")}>Burp</span>
+                      <span className=${"agent-badge"+(anyActive?" agent-badge-active":" agent-badge-complete")}>
+                        ${anyActive ? "ACTIVE" : (burpAgents.length > 0 ? "COMPLETE" : "IDLE")}
+                      </span>
+                      <span className="agent-current-task">${summaryTask}</span>
+                      ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                      ${canExpand && isExpanded && html`
+                        <div className="agent-task-history">
+                          ${burpAgents.map(ba => {
+                            const baActive = ba.status === "active";
+                            const baTask = ba.currentTask || ba.taskHistory?.slice(-1)[0]?.task || "Initializing…";
+                            return html`
+                              <div key=${ba.id} className=${"agent-thread-row"+(baActive?" agent-thread-row--active":"")}>
+                                <span className=${"agent-dot agent-dot--sm"+(baActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                                <span className="agent-thread-id">${ba.id.replace("burp-","")}</span>
+                                <span className=${"agent-badge agent-badge--sm"+(baActive?" agent-badge-active":" agent-badge-complete")}>
+                                  ${baActive?"ACTIVE":ba.status==="failed"?"FAILED":"DONE"}
+                                </span>
+                                <span className="agent-current-task" title=${baTask}>${baTask.length>90?baTask.slice(0,89)+"…":baTask}</span>
+                              </div>`;
+                          })}
+                        </div>`}
+                    </div>`;
+                }
+                // ── A.L.I.C.E custom row ────────────────────────────────────
+                if (a.id === "alice") {
+                  const isExpanded = !collapsedAgentIds.has("alice");
+                  const isActive = a.status === "active";
+                  const currentTask = a.currentTask;
+                  return html`
+                    <div key="alice" className="agent-row agent-row--alice-chat agent-row--expandable"
+                         onClick=${() => toggleAgentId("alice")}>
+                      <span className=${"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")} aria-hidden="true"></span>
+                      <span className=${"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>A.L.I.C.E</span>
+                      <span className=${"agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")}>
+                        ${isActive ? "ACTIVE" : "STANDBY"}
+                      </span>
+                      <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                      <span className="activity-expand-chevron">${isExpanded ? "▲" : "▼"}</span>
+                      ${isExpanded && html`
+                        <div className="alice-chat-container" onClick=${e => e.stopPropagation()}>
+                          <div className="alice-chat-tabs-bar">
+                            ${aliceChats.map(tab => {
+                              const isActiveTab = tab.id === activeAliceTabId;
+                              return html`
+                                <div
+                                  key=${tab.id}
+                                  className=${"alice-chat-tab-pill" + (isActiveTab ? " alice-chat-tab-pill--active" : "")}
+                                  onClick=${() => setActiveAliceTabId(tab.id)}
+                                >
+                                  <span>${tab.title}</span>
+                                  <span
+                                    className="alice-chat-tab-close"
+                                    onClick=${(e) => deleteAliceTab(tab.id, e)}
+                                    title="Close Session"
+                                  >
+                                    ×
+                                  </span>
+                                </div>
+                              `;
+                            })}
+                            <button
+                              className="alice-chat-add-tab-btn"
+                              onClick=${createAliceTab}
+                              title="New Session"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <div className="alice-chat-history" style=${{ height: `${aliceChatHeight}px` }} ref=${(el) => { if (el) { el.scrollTop = el.scrollHeight; } }}>
+                            ${aliceMessages.map((msg) => {
+                              if (msg.type === "thinking") {
+                                const isThinkExpanded = aliceExpandedThinkIds.has(msg.id);
+                                return html`
+                                  <div key=${msg.id} className="alice-msg-row">
+                                    <div className="alice-msg-bubble--thinking">
+                                      <div className="alice-thinking-header" onClick=${() => {
+                                        setAliceExpandedThinkIds(prev => {
+                                          const next = new Set(prev);
+                                          next.has(msg.id) ? next.delete(msg.id) : next.add(msg.id);
+                                          return next;
+                                        });
+                                      }}>
+                                        <${IconBrain}/>
+                                        <span>Thought Process ${isThinkExpanded ? "▲" : "▼"}</span>
+                                        <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
+                                      </div>
+                                      ${isThinkExpanded && html`
+                                        <div className="alice-thinking-body">
+                                          ${renderAliceBlocks(msg.text, true, msg.stepData || {})}
+                                        </div>
+                                      `}
+                                    </div>
+                                  </div>
+                                `;
+                              }
+                              const isUser = msg.sender === "user";
+                              return html`
+                                <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
+                                  <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
+                                    <div>
+                                      ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false, msg.stepData || {})}
+                                    </div>
+                                    <div className="alice-msg-meta">
+                                      <span>${msg.ts}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              `;
+                            })}
+                            ${(aliceThinkingTabId === activeAliceTabId) && html`
+                              <div className="alice-msg-row alice-msg-row--alice">
+                                <div className="alice-typing-bubble">
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                  <div className="alice-typing-dot"></div>
+                                </div>
+                              </div>
+                            `}
+                          </div>
+                          
+                          <div className="alice-chat-resizer" onMouseDown=${startAliceResize}></div>
+                          
+                          <div className="alice-chat-input-bar">
+                            <input
+                              className="alice-chat-input"
+                              placeholder="Direct A.L.I.C.E. on what to test..."
+                              value=${aliceInputText}
+                              disabled=${aliceIsThinking}
+                              onKeyDown=${(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleAliceSend();
+                                }
+                              }}
+                              onInput=${e => setAliceInputText(e.target.value)}
+                            />
+                            ${aliceIsThinking ? html`
+                              <button
+                                className="alice-chat-stop-btn"
+                                onClick=${handleAliceStop}
+                                title="Stop Generation"
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                  <rect x="4" y="4" width="16" height="16" rx="1" ry="1"></rect>
+                                </svg>
+                              </button>
+                            ` : html`
+                              <button
+                                className="alice-chat-input-btn"
+                                disabled=${!aliceInputText.trim()}
+                                onClick=${handleAliceSend}
+                                title="Send Instruction"
+                              >
+                                <${IconSend}/>
+                              </button>
+                            `}
+                          </div>
+                        </div>
+                      `}
+                    </div>
+                  `;
+                }
+                const isActive = a.status==="active";
+                const roleLabel = agentRoleLabel(a);
+                const currentTask = agentCurrentTask(a);
+                const crawlEvents = agentCrawlEvents(a);
+                const taskHistory = agentTaskHistory(a);
+                const canExpand = (a.id === "crawler" && crawlEvents.length > 0) ||
+                  taskHistory.length > 1 ||
+                  taskHistory.some(h => h.outcome);
+                const isExpanded = canExpand && !collapsedAgentIds.has(a.id);
+                return html`
+                  <div key=${a.id} className=${"agent-row"+(isActive?" agent-row--active":" agent-row--complete")+(canExpand?" agent-row--expandable":"")}
+                       onClick=${canExpand ? ()=>toggleAgentId(a.id) : undefined}>
+                    <span className=${"agent-dot"+(isActive?" agent-dot--active":"")} aria-hidden="true"></span>
+                    <span className=${"agent-role-name"+(isActive?" agent-role-name--pulse":"")}>
+                      ${roleLabel}${a.id.includes("-")&&!["scanner","crawler"].includes(a.id)&&!a.id.startsWith("burp-")?html`<br/><span className="agent-role-sub">${a.id.replace(/^[a-z]+-/,"").replace(/-/g," ")}</span>`:""}
+                    </span>
+                    <span className=${"agent-badge"+(isActive?" agent-badge-active":" agent-badge-complete")}>
+                      ${agentStatusLabel(a)}
+                    </span>
+                    <span className="agent-current-task" title=${currentTask}>${currentTask}</span>
+                    ${canExpand && html`<span className="activity-expand-chevron">${isExpanded?"▲":"▼"}</span>`}
+                    ${canExpand && isExpanded && html`
+                      <div className="agent-task-history">
+                        ${a.id === "crawler" && crawlEvents.length > 0 ? html`
+                          ${crawlEvents.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry agent-history-entry--crawl">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-user">${h.username || "anonymous"}</span>
+                              <span className="agent-history-task mono" title=${h.url || ""}>
+                                ${h.done ? `Finished (${h.pagesVisited || 0} pg)` : truncUrl(h.url || "", 112)}
+                              </span>
+                            </div>`)}
+                        ` : html`
+                          ${taskHistory.slice().reverse().map((h,i)=>html`
+                            <div key=${i} className="agent-history-entry">
+                              <span className="activity-ts">${h.ts}</span>
+                              <span className="agent-history-task">${h.task}</span>
+                              ${h.outcome && html`<span className="agent-history-outcome">${h.outcome}</span>`}
+                            </div>`)}
+                        `}
+                      </div>`}
+                  </div>`;
+              };
+              return html`
+                ${shownAgents.map(renderRow)}`;
+            })()}
+          </div>`}
         </div>`}
 
       ${activeTab==="traffic" && html`
@@ -2054,7 +6926,7 @@ function TestRunDetail({ runId }) {
           <div className="traffic-toolbar">
             <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…"
               value=${trafficFilter} onInput=${e=>setTrafficFilter(e.target.value)}/>
-            <span className="traffic-count-label">${filteredTraffic.length} request${filteredTraffic.length!==1?"s":""}</span>
+            <span className="traffic-count-label">${filteredTraffic.length} shown${trafficTotal>filteredTraffic.length ? ` of ${trafficTotal}` : ""}</span>
             <label className="traffic-autoscroll">
               <input type="checkbox" checked=${autoScroll} onChange=${e=>setAutoScroll(e.target.checked)}/>
               Auto-scroll
@@ -2064,16 +6936,17 @@ function TestRunDetail({ runId }) {
 
           <div className="traffic-table-wrap" ref=${trafficTableRef}>
             <table className="traffic-table">
+              <colgroup>${trafficColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
               <thead>
                 <tr>
-                  <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}</th>
-                  <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}</th>
-                  <th className="sortable" style=${{width:80}} onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}</th>
-                  <th className="sortable" style=${{width:90}} onClick=${()=>onTrafficSort("username")}>User${sortArrow("username")}</th>
-                  <th className="sortable" style=${{width:60}} onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}</th>
-                  <th className="sortable" style=${{width:54}} onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}</th>
-                  <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}</th>
-                  <th className="sortable tr-dur" onClick=${()=>onTrafficSort("duration_ms")}>Duration${sortArrow("duration_ms")}</th>
+                  <th className="sortable tr-num" onClick=${()=>onTrafficSort("_seq")}>#${sortArrow("_seq")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable tr-ts"  onClick=${()=>onTrafficSort("created_at")}>Time${sortArrow("created_at")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("source")}>Source${sortArrow("source")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("username")}>User${sortArrow("username")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("method")}>Method${sortArrow("method")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("status")}>Status${sortArrow("status")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable" onClick=${()=>onTrafficSort("url")}>URL${sortArrow("url")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(6,e)} onClick=${e=>e.stopPropagation()}/></th>
+                  <th className="sortable tr-dur" onClick=${()=>onTrafficSort("duration_ms")}>Duration${sortArrow("duration_ms")}<div className="col-rh" onMouseDown=${e=>startTrafficResize(7,e)} onClick=${e=>e.stopPropagation()}/></th>
                 </tr>
               </thead>
               <tbody>
@@ -2094,7 +6967,7 @@ function TestRunDetail({ runId }) {
             </table>
             ${filteredTraffic.length===0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                ${run?.status==="running"||scanStatus?.status==="running"||["running","analysing","stopping"].includes(thinkingStatus?.status)
+                ${run?.status==="running"||isDynamicScanActive(thinkingStatus?.status)
                   ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>`}
           </div>
@@ -2111,6 +6984,420 @@ function TestRunDetail({ runId }) {
               </div>
             </div>`}
         </div>`}
+    </div>`;
+}
+
+function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear, clearing }) {
+  const [intelColW, startIntelResize] = useColResize("colw:intel", [116, 86, 120, null, 130, 82]);
+  const counts = data?.counts || {};
+  const items = data?.items || [];
+  const kinds = ["", ...Object.keys(counts).sort()];
+  const total = Object.values(counts).reduce((a,b)=>a+b,0);
+  const KIND_LABELS = {
+    endpoint:"Endpoints",
+    form:"Forms",
+    input:"Inputs",
+    script:"Scripts",
+    storage_key:"Storage Keys",
+    id:"IDs",
+    response_field:"Response Fields",
+  };
+  const kindLabel = (k) => k ? (KIND_LABELS[k] || k.replace(/_/g, " ")) : "All";
+  const compactMeta = (meta) => {
+    if (!meta || Object.keys(meta).length === 0) return "";
+    const shown = Object.entries(meta)
+      .filter(([k]) => !["fields"].includes(k))
+      .slice(0, 5)
+      .map(([k,v]) => `${k}: ${Array.isArray(v) ? v.length+" item(s)" : String(v).slice(0,80)}`);
+    return shown.join(" · ");
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Target Intelligence</span>
+          <span className="subtle">${total} item${total===1?"":"s"} discovered during crawl</span>
+        </div>
+        <div className="intel-filter">
+          <label>Kind</label>
+          <select className="select" value=${selectedKind} onChange=${e=>onKind(e.target.value)}>
+            ${kinds.map(k => html`<option key=${k||"all"} value=${k}>${kindLabel(k)}${k ? ` (${counts[k]||0})` : ""}</option>`)}
+          </select>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${total>0 && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        ${Object.entries(counts).sort(([a],[b])=>a.localeCompare(b)).map(([kind,count]) => html`
+          <button key=${kind} className=${"intel-count-card"+(selectedKind===kind?" active":"")} onClick=${()=>onKind(selectedKind===kind?"":kind)}>
+            <span className="intel-count-value">${count}</span>
+            <span className="intel-count-label">${kindLabel(kind)}</span>
+          </button>`)}
+        ${total===0 && html`<div className="subtle">No target intelligence has been collected yet. Start or restart a crawl to populate the inventory.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table">
+          <colgroup>${intelColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
+          <thead>
+            <tr>
+              <th>Kind <div className="col-rh" onMouseDown=${e=>startIntelResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Method <div className="col-rh" onMouseDown=${e=>startIntelResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Key <div className="col-rh" onMouseDown=${e=>startIntelResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Value <div className="col-rh" onMouseDown=${e=>startIntelResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Source <div className="col-rh" onMouseDown=${e=>startIntelResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Conf. <div className="col-rh" onMouseDown=${e=>startIntelResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(item => html`
+              <tr key=${item.id}>
+                <td><span className="intel-kind">${kindLabel(item.kind)}</span></td>
+                <td><span className="mono">${item.method || "-"}</span></td>
+                <td>
+                  <div className="intel-primary" title=${item.key}>${item.key || "—"}</div>
+                  ${item.url && html`<div className="intel-url mono" title=${item.url}>${truncUrl(item.url, 72)}</div>`}
+                </td>
+                <td>
+                  <div className="intel-value" title=${item.value}>${item.value || "—"}</div>
+                  ${item.evidence && html`<div className="intel-evidence">${item.evidence}</div>`}
+                  ${compactMeta(item.item_metadata) && html`<div className="intel-meta">${compactMeta(item.item_metadata)}</div>`}
+                </td>
+                <td>${item.source}</td>
+                <td>${Math.round((item.confidence ?? 0) * 100)}%</td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${items.length===0 && total>0 && html`
+          <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>No items match this filter.</div>`}
+      </div>
+    </div>`;
+}
+
+function ScannerSessionsPanel({ runId, data, refresh, onUpdate }) {
+  const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
+  const sessions = data?.sessions || [];
+  const counts = data?.counts || {};
+  const kinds = Object.entries(counts)
+    .filter(([kind]) => !["total", "active", "inactive"].includes(kind))
+    .sort(([a],[b]) => a.localeCompare(b));
+  const fmtAge = (iso) => {
+    if (!iso) return "—";
+    try { return parseDate(iso).toLocaleString(); } catch { return iso; }
+  };
+  const doUpdate = onUpdate
+    ? (sessionId, b) => onUpdate(sessionId, b)
+    : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
+  const renameSession = async (session) => {
+    const next = prompt("Session label", session.label);
+    if (next === null) return;
+    try {
+      await doUpdate(session.id, { label: next });
+      await refresh();
+    } catch(e) { alert(e.message); }
+  };
+  const setSessionActive = async (session, isActive) => {
+    const verb = isActive ? "Reactivate" : "Deactivate";
+    if (!confirm(`${verb} session "${session.label}"?`)) return;
+    try {
+      await doUpdate(session.id, { is_active: isActive });
+      await refresh();
+    } catch(e) { alert(e.message); }
+  };
+  return html`
+    <div className="intel-panel">
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Scanner Sessions</span>
+          <span className="subtle">${counts.total || 0} durable label${(counts.total || 0)===1?"":"s"}; auth material is redacted</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+        </div>
+      </div>
+
+      <div className="intel-counts">
+        <div className="task-summary-card"><span className="task-summary-value">${counts.total || 0}</span><span className="task-summary-label">Total</span></div>
+        <div className="task-summary-card"><span className="task-summary-value">${counts.active || 0}</span><span className="task-summary-label">Active</span></div>
+        ${kinds.map(([kind,count]) => html`
+          <div key=${kind} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${kind.replace(/_/g," ")}</span>
+          </div>`)}
+        ${sessions.length===0 && html`<div className="subtle">No scanner sessions have been recorded yet. Start a Structured or Dynamic Scan to populate durable session labels.</div>`}
+      </div>
+
+      <div className="intel-table-wrap">
+        <table className="intel-table scanner-session-table">
+          <colgroup>${sessColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
+          <thead>
+            <tr>
+              <th>Label <div className="col-rh" onMouseDown=${e=>startSessResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Kind <div className="col-rh" onMouseDown=${e=>startSessResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>User <div className="col-rh" onMouseDown=${e=>startSessResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Auth material <div className="col-rh" onMouseDown=${e=>startSessResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Source <div className="col-rh" onMouseDown=${e=>startSessResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th>Updated <div className="col-rh" onMouseDown=${e=>startSessResize(5,e)} onClick=${e=>e.stopPropagation()}/></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sessions.map(s => html`
+              <tr key=${s.id}>
+                <td><div className="intel-primary mono">${s.label}</div>${!s.is_active && html`<span className="task-status status-skipped">inactive</span>`}</td>
+                <td><span className=${"task-status status-"+(s.kind === "anonymous" ? "skipped" : "confirmed")}>${s.kind}</span></td>
+                <td>${s.username || "—"}${s.credential_id ? html`<div className="intel-meta">credential #${s.credential_id}</div>` : ""}</td>
+                <td>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Cookies</span>
+                    <span>${(s.cookie_names||[]).length ? s.cookie_names.join(", ") : "none"}</span>
+                  </div>
+                  <div className="session-material-row">
+                    <span className="intel-kind">Headers</span>
+                    <span>${(s.header_names||[]).length ? s.header_names.join(", ") : "none"}</span>
+                  </div>
+                  ${s.token_hint && html`<div className="intel-meta">token: ${s.token_hint}</div>`}
+                </td>
+                <td>${s.source || "scanner"}</td>
+                <td>${fmtAge(s.updated_at)}</td>
+                <td>
+                  <div className="row session-actions">
+                    <button className="btn secondary sm" onClick=${()=>renameSession(s)}>Rename</button>
+                    ${s.is_active
+                      ? html`<button className="btn danger-outline sm" onClick=${()=>setSessionActive(s, false)}>Deactivate</button>`
+                      : html`<button className="btn secondary sm" onClick=${()=>setSessionActive(s, true)}>Reactivate</button>`}
+                  </div>
+                </td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function TaskGraphPanel({ data, reconSummary, subTab, onSubTab, refresh, seed, onClear, clearing }) {
+  const [taskColW, startTaskResize] = useColResize("colw:tasks", [88, 84, null, 86, 200]);
+  const hypotheses = data?.hypotheses || [];
+  const tasks = data?.tasks || [];
+  const counts = data?.counts || {};
+  const tasksByHypothesis = tasks.reduce((acc, task) => {
+    const key = task.hypothesis_id || "none";
+    (acc[key] = acc[key] || []).push(task);
+    return acc;
+  }, {});
+  const statusLabel = (status) => (status || "queued").replace(/_/g, " ");
+  const taskStatusCounts = ["queued", "running", "blocked", "done", "skipped"]
+    .map(status => [status, counts["task_"+status] || 0])
+    .filter(([, count]) => count > 0);
+  const orphanTasks = tasksByHypothesis.none || [];
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+  const activeSubTab = subTab || "attack-surface";
+  return html`
+    <div className="task-panel">
+      <div className="tasks-subtab-bar">
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="attack-surface"?" active":"")}
+          onClick=${()=>onSubTab("attack-surface")}>
+          Attack Surface${reconSummary?.attack_classes?.length>0 ? html` <span className="traffic-count">${reconSummary.attack_classes.length}</span>` : ""}
+        </button>
+        <button className=${"tasks-subtab-btn"+(activeSubTab==="task-queue"?" active":"")}
+          onClick=${()=>onSubTab("task-queue")}>
+          Task Queue${counts.tasks>0 ? html` <span className="traffic-count">${counts.tasks}</span>` : ""}
+        </button>
+      </div>
+
+      ${activeSubTab==="attack-surface" && html`<${AttackSurfacePanel} summary=${reconSummary}/>`}
+
+      ${activeSubTab==="task-queue" && html`
+      <div className="intel-toolbar">
+        <div className="intel-title">
+          <span>Hypothesis & Task Graph</span>
+          <span className="subtle">${hypotheses.length} hypotheses · ${tasks.length} tasks</span>
+        </div>
+        <div className="intel-filter">
+          <button className="btn ghost sm" onClick=${seed}>Seed from intelligence</button>
+          <button className="btn ghost sm" onClick=${refresh}>Refresh</button>
+          ${(hypotheses.length>0||tasks.length>0) && html`<button className="btn danger-outline sm" disabled=${clearing} onClick=${onClear}>${clearing?"Clearing…":"Clear"}</button>`}
+        </div>
+      </div>
+
+      <div className="task-summary">
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.hypotheses || 0}</span>
+          <span className="task-summary-label">Hypotheses</span>
+        </div>
+        <div className="task-summary-card">
+          <span className="task-summary-value">${counts.tasks || 0}</span>
+          <span className="task-summary-label">Tasks</span>
+        </div>
+        ${taskStatusCounts.map(([status, count]) => html`
+          <div key=${status} className="task-summary-card">
+            <span className="task-summary-value">${count}</span>
+            <span className="task-summary-label">${statusLabel(status)}</span>
+          </div>`)}
+        ${tasks.length===0 && html`<div className="subtle">No task graph yet. Seed it from collected target intelligence, or start a Dynamic Scan.</div>`}
+      </div>
+
+      <div className="task-list">
+        ${hypotheses.map(h => {
+          const groupedTasks = tasksByHypothesis[h.id] || [];
+          return html`
+            <div key=${h.id} className="hypothesis-card">
+              <div className="hypothesis-card-head">
+                <div>
+                  <div className="hypothesis-card-title">${h.title}</div>
+                  <div className="hypothesis-card-meta">
+                    <span className=${"task-priority "+priorityTone(h.priority)}>P${h.priority}</span>
+                    <span className=${"task-status status-"+h.status}>${statusLabel(h.status)}</span>
+                    ${h.owasp_category && html`<span className="owasp-badge">${h.owasp_category}</span>`}
+                    ${h.attack_area && html`<span>${h.attack_area}</span>`}
+                    <span>${Math.round((h.confidence || 0) * 100)}% confidence</span>
+                  </div>
+                </div>
+                <span className="task-count-pill">${groupedTasks.length} task${groupedTasks.length===1?"":"s"}</span>
+              </div>
+              <div className="hypothesis-rationale">${h.rationale || h.description}</div>
+              ${groupedTasks.length > 0 && html`
+                <div className="task-table-wrap">
+                  <table className="task-table" style=${{tableLayout:"fixed"}}>
+                    <colgroup>${taskColW.map((w,i)=>html`<col key=${i} style=${{width:w!=null?w+"px":undefined}}/>`)}</colgroup>
+                    <thead>
+                      <tr>
+                        <th>Status <div className="col-rh" onMouseDown=${e=>startTaskResize(0,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Type <div className="col-rh" onMouseDown=${e=>startTaskResize(1,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Task <div className="col-rh" onMouseDown=${e=>startTaskResize(2,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Method <div className="col-rh" onMouseDown=${e=>startTaskResize(3,e)} onClick=${e=>e.stopPropagation()}/></th>
+                        <th>Target <div className="col-rh" onMouseDown=${e=>startTaskResize(4,e)} onClick=${e=>e.stopPropagation()}/></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${groupedTasks.map(task => html`
+                        <tr key=${task.id}>
+                          <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                          <td><span className="intel-kind">${task.task_type}</span></td>
+                          <td>
+                            <div className="intel-primary">${task.title}</div>
+                            <div className="intel-evidence">${task.result_summary || task.description}</div>
+                            ${task.evidence && html`<div className="task-evidence">${task.evidence}</div>`}
+                          </td>
+                          <td><span className="mono">${task.method || "-"}</span></td>
+                          <td><span className="mono task-target" title=${task.target_url}>${task.target_url ? truncUrl(task.target_url, 86) : "—"}</span></td>
+                        </tr>`)}
+                    </tbody>
+                  </table>
+                </div>`}
+            </div>`;
+        })}
+        ${orphanTasks.length > 0 && html`
+          <div className="hypothesis-card">
+            <div className="hypothesis-card-title">Unlinked Tasks</div>
+            <div className="task-table-wrap">
+              <table className="task-table">
+                <tbody>
+                  ${orphanTasks.map(task => html`
+                    <tr key=${task.id}>
+                      <td><span className=${"task-status status-"+task.status}>${statusLabel(task.status)}</span></td>
+                      <td>${task.title}</td>
+                      <td><span className="mono">${task.target_url}</span></td>
+                    </tr>`)}
+                </tbody>
+              </table>
+            </div>
+          </div>`}
+      </div>`}
+    </div>`;
+}
+
+function AttackSurfacePanel({ summary }) {
+  const [expanded, setExpanded] = useState({ trust_zones: true, attack_classes: true, meta: false });
+  const toggle = (key) => setExpanded(prev => ({...prev, [key]: !prev[key]}));
+  const priorityTone = (p) => p >= 88 ? "high" : p >= 78 ? "medium" : "low";
+
+  if (!summary) {
+    return html`
+      <div className="attack-surface-empty">
+        <span className="subtle">No attack surface summary yet. Run a Dynamic Scan to generate one.</span>
+      </div>`;
+  }
+
+  const { trust_zones = {}, attack_classes = [], tech_stack = [], credential_roles = [], entry_points = [] } = summary;
+  const zoneEntries = Object.entries(trust_zones).filter(([,urls]) => urls?.length > 0);
+
+  return html`
+    <div className="attack-surface-panel">
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("trust_zones")}>
+            <span className="attack-surface-toggle">${expanded.trust_zones ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Trust Zones</span>
+            ${zoneEntries.map(([zone, urls]) => html`
+              <span key=${zone} className=${"zone-badge zone-"+zone}>${zone.toUpperCase()} (${urls.length})</span>`)}
+          </div>
+          ${expanded.trust_zones && html`
+            <div className="attack-surface-body">
+              ${zoneEntries.map(([zone, urls]) => html`
+                <div key=${zone} className="trust-zone-group">
+                  <div className=${"trust-zone-label zone-"+zone}>${zone.toUpperCase()}</div>
+                  <div className="trust-zone-urls">
+                    ${urls.slice(0,8).map(url => html`<div key=${url} className="mono trust-zone-url" title=${url}>${truncUrl(url,90)}</div>`)}
+                    ${urls.length > 8 && html`<div className="subtle">+${urls.length - 8} more</div>`}
+                  </div>
+                </div>`)}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("attack_classes")}>
+            <span className="attack-surface-toggle">${expanded.attack_classes ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Attack Classes</span>
+            <span className="subtle">${attack_classes.length} identified</span>
+          </div>
+          ${expanded.attack_classes && html`
+            <div className="attack-surface-body">
+              ${attack_classes.map(cls => {
+                const urls = cls.entry_point_urls || [];
+                return html`
+                  <div key=${cls.id} className="attack-class-card">
+                    <div className="attack-class-head">
+                      <span className=${"task-priority "+priorityTone(cls.priority)}>P${cls.priority}</span>
+                      <span className="owasp-badge">${cls.owasp}</span>
+                      <span className="attack-class-id">${cls.id?.replace(/_/g," ")}</span>
+                    </div>
+                    <div className="attack-class-rationale">${cls.rationale}</div>
+                    ${urls.length > 0 && html`
+                      <div className="attack-class-urls">
+                        ${urls.slice(0,4).map(url => html`<span key=${url} className="mono attack-class-url" title=${url}>${truncUrl(url,70)}</span>`)}
+                        ${urls.length > 4 && html`<span className="subtle">+${urls.length-4} more</span>`}
+                      </div>`}
+                  </div>`;
+              })}
+            </div>`}
+        </div>
+
+        <div className="attack-surface-section">
+          <div className="attack-surface-section-head" onClick=${()=>toggle("meta")}>
+            <span className="attack-surface-toggle">${expanded.meta ? "▾" : "▸"}</span>
+            <span className="attack-surface-section-title">Tech Stack & Credentials</span>
+          </div>
+          ${expanded.meta && html`
+            <div className="attack-surface-body">
+              ${tech_stack.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Tech stack:</span>
+                  ${tech_stack.map(t => html`<span key=${t} className="intel-kind">${t}</span>`)}
+                </div>`}
+              ${credential_roles.length > 0 && html`
+                <div className="meta-row">
+                  <span className="meta-label">Credential roles:</span>
+                  ${credential_roles.map(r => html`<span key=${r} className="intel-kind">${r}</span>`)}
+                </div>`}
+              <div className="meta-row">
+                <span className="meta-label">Entry points:</span>
+                <span>${entry_points.length} total</span>
+              </div>
+            </div>`}
+        </div>
+
     </div>`;
 }
 
@@ -2155,10 +7442,6 @@ function ScannerPolicyFields({ form, upd, disabled=false }) {
     <label className="toggle-row">
       <input type="checkbox" disabled=${disabled} checked=${form.allow_subdomains} onChange=${e=>upd({allow_subdomains:e.target.checked})}/>
       <span>Allow subdomains of the crawled host</span>
-    </label>
-    <label className="toggle-row">
-      <input type="checkbox" disabled=${disabled} checked=${form.require_approval_for_destructive} onChange=${e=>upd({require_approval_for_destructive:e.target.checked})}/>
-      <span>Require approval for destructive mode</span>
     </label>
     <div className="divider"/>
     <div className="form-section-title">Methods</div>
@@ -2211,79 +7494,586 @@ function ScannerPolicySettings() {
       </form>`}`;
 }
 
-const PROVIDER_LABELS = {
-  anthropic:"Anthropic", openai:"OpenAI",
-  openai_compatible:"OpenAI-compatible (LM Studio, Ollama, etc.)",
-  openrouter:"OpenRouter",
-  google:"Google Gemini",
-  bedrock:"Amazon Bedrock",
-  azure_openai:"Azure OpenAI",
-  azure_foundry:"Azure AI Foundry",
-};
-const PROVIDER_PLACEHOLDERS = {
-  anthropic:"claude-opus-4-5", openai:"gpt-4.1",
-  openai_compatible:"e.g. llama-3.1-8b-instruct",
-  openrouter:"e.g. openrouter/owl-alpha or a :free model id",
-  google:"gemini-2.5-flash-preview-04-17",
-  bedrock:"e.g. anthropic.claude-3-7-sonnet-20250219-v1:0",
-  azure_openai:"Deployment name, e.g. gpt-4o",
-  azure_foundry:"e.g. Meta-Llama-3.3-70B-Instruct",
-};
-const BASE_URL_LABELS = {
-  openai_compatible:"Base URL",
-  bedrock:"Bedrock Runtime Endpoint",
-  azure_openai:"Azure Endpoint",
-  azure_foundry:"Endpoint URL",
-};
-const BASE_URL_PLACEHOLDERS = {
-  openai_compatible:"http://localhost:1234/v1",
-  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
-  azure_openai:"https://myresource.openai.azure.com/",
-  azure_foundry:"https://models.inference.ai.azure.com",
-};
-const BASE_URL_HINTS = {
-  openai_compatible:"LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1 · OpenRouter: https://openrouter.ai/api/v1",
-  bedrock:"Use the Bedrock Runtime endpoint for the region where your model is available.",
-  azure_openai:"Found in Azure Portal under your Azure OpenAI resource → Keys and Endpoint",
-  azure_foundry:"Serverless endpoint URL from Azure AI Foundry. Include /v1 if required.",
-};
-
-const DEFAULT_LLM_FORM = {
-  name:"Default", provider:"anthropic", api_key:"", base_url:"",
-  model:"claude-opus-4-5", max_tokens:4096, temperature:0, use_vision:false,
-};
-
-function llmProfileToForm(cfg) {
-  return cfg ? {
-    name:cfg.name??"Default", provider:cfg.provider, api_key:cfg.api_key??"", base_url:cfg.base_url??"",
-    model:cfg.model, max_tokens:cfg.max_tokens, temperature:cfg.temperature,
-    use_vision:cfg.use_vision??false,
-  } : {...DEFAULT_LLM_FORM};
-}
-
-function llmPayload(form) {
-  const needsBaseUrl = ["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
-  return {
-    name:form.name.trim(),
-    provider:form.provider,
-    api_key:form.api_key.trim()||null,
-    base_url:needsBaseUrl?form.base_url.trim():null,
-    model:form.model.trim(),
-    max_tokens:Number(form.max_tokens),
-    temperature:Number(form.temperature),
-    use_vision:form.use_vision,
-  };
-}
-
-function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => llmProfileToForm(profile));
-  const [customModel, setCustomModel] = useState(false);
+function UpstreamProxySettings() {
+  const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(null);
   const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
-  const changeProv = p => { const ms=dms[p]||[]; setCustomModel(false); upd({provider:p,model:ms[0]||"",api_key:"",base_url:""}); };
 
+  useEffect(() => {
+    (async () => {
+      try { setForm(await api.getUpstreamProxy()); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const saved = await api.upsertUpstreamProxy({
+        proxy_url: form.proxy_scanner || form.proxy_llm ? (form.proxy_url||"").trim()||null : null,
+        proxy_scanner: !!form.proxy_scanner,
+        proxy_llm: !!form.proxy_llm,
+      });
+      setForm(saved);
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const anyProxy = form && (form.proxy_scanner || form.proxy_llm);
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Upstream Proxy</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${!!form.proxy_scanner} onChange=${e=>upd({proxy_scanner:e.target.checked})}/>
+          <span>Send target requests through an upstream proxy</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${!!form.proxy_llm} onChange=${e=>upd({proxy_llm:e.target.checked})}/>
+          <span>Send LLM requests through the upstream proxy</span>
+        </label>
+        ${anyProxy&&html`
+          <div className="field">
+            <label>Proxy URL</label>
+            <input type="url" required value=${form.proxy_url||""} placeholder="http://127.0.0.1:8080" onChange=${e=>upd({proxy_url:e.target.value})}/>
+          </div>
+        `}
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save"}</button>
+        </div>
+      </form>`}`;
+}
+
+const DEFAULT_SPECIALIST_AGENT_FORM = {
+  enabled: true,
+  max_concurrent: 5,
+  max_steps: 30,
+  min_priority: 7,
+  dispatch_idor: true,
+  dispatch_auth_bypass: true,
+  dispatch_sqli: true,
+  dispatch_xss: true,
+  dispatch_business_logic: true,
+  dispatch_ssrf: true,
+  dispatch_path_traversal: true,
+  dispatch_cors: false,
+  dispatch_crypto: true,
+  dispatch_config: false,
+  trigger_specialist_on_burp: false,
+};
+
+function specialistAgentToForm(cfg) {
+  return cfg ? {
+    enabled:           cfg.enabled           ?? true,
+    max_concurrent:    cfg.max_concurrent     ?? 5,
+    max_steps:         cfg.max_steps          ?? 30,
+    min_priority:      cfg.min_priority       ?? 7,
+    dispatch_idor:     cfg.dispatch_idor      ?? true,
+    dispatch_auth_bypass: cfg.dispatch_auth_bypass ?? true,
+    dispatch_sqli:     cfg.dispatch_sqli      ?? true,
+    dispatch_xss:      cfg.dispatch_xss       ?? true,
+    dispatch_business_logic: cfg.dispatch_business_logic ?? true,
+    dispatch_ssrf:     cfg.dispatch_ssrf      ?? true,
+    dispatch_path_traversal: cfg.dispatch_path_traversal ?? true,
+    dispatch_cors:     cfg.dispatch_cors      ?? false,
+    dispatch_crypto:   cfg.dispatch_crypto    ?? true,
+    dispatch_config:   cfg.dispatch_config    ?? false,
+    trigger_specialist_on_burp: cfg.trigger_specialist_on_burp ?? false,
+  } : { ...DEFAULT_SPECIALIST_AGENT_FORM };
+}
+
+function specialistAgentPayload(form) {
+  return {
+    enabled:             !!form.enabled,
+    max_concurrent:      Number(form.max_concurrent),
+    max_steps:           Number(form.max_steps),
+    min_priority:        Number(form.min_priority),
+    dispatch_idor:       !!form.dispatch_idor,
+    dispatch_auth_bypass:!!form.dispatch_auth_bypass,
+    dispatch_sqli:       !!form.dispatch_sqli,
+    dispatch_xss:        !!form.dispatch_xss,
+    dispatch_business_logic: !!form.dispatch_business_logic,
+    dispatch_ssrf:       !!form.dispatch_ssrf,
+    dispatch_path_traversal: !!form.dispatch_path_traversal,
+    dispatch_cors:       !!form.dispatch_cors,
+    dispatch_crypto:     !!form.dispatch_crypto,
+    dispatch_config:     !!form.dispatch_config,
+    trigger_specialist_on_burp: !!form.trigger_specialist_on_burp,
+  };
+}
+
+function SpecialistAgentSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(specialistAgentToForm(await api.getSpecialistAgentConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertSpecialistAgentConfig(specialistAgentPayload(form));
+      setForm(specialistAgentToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Specialist Agent Dispatch</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable specialist agent dispatch</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, the Test Lead can dispatch focused specialist agents to investigate
+          specific vulnerability leads in parallel. Each specialist receives an independent
+          LLM session and a subset of tools (HTTP, browser, context, write_finding).
+        </div>
+
+        <div className="form-section-title">Concurrency &amp; Budget</div>
+        <div className="field">
+          <label>Max concurrent specialists</label>
+          <input type="number" min="0" max="20" value=${form.max_concurrent} disabled=${dis}
+            onChange=${e=>upd({max_concurrent:Number(e.target.value)})}/>
+          <div className="field-hint">Maximum number of specialist agents running at the same time (0 = effectively disabled). Default: 5.</div>
+        </div>
+        <div className="field">
+          <label>Max steps per specialist</label>
+          <input type="number" min="1" max="200" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">Step budget for each specialist agent before it is stopped. Default: 30.</div>
+        </div>
+        <div className="field">
+          <label>Minimum priority to dispatch</label>
+          <input type="number" min="1" max="10" value=${form.min_priority} disabled=${dis}
+            onChange=${e=>upd({min_priority:Number(e.target.value)})}/>
+          <div className="field-hint">Only dispatch a specialist if the lead's priority score meets this threshold (1–10). Default: 7.</div>
+        </div>
+
+        <div className="divider"/>
+        <div className="form-section-title">Attack Classes to Dispatch</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>
+          Only dispatch specialists for the selected vulnerability classes. Disable classes
+          you don't need to keep token usage under control.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_idor} disabled=${dis} onChange=${e=>upd({dispatch_idor:e.target.checked})}/>
+          <span>IDOR / Broken Object Level Authorization (A01)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_auth_bypass} disabled=${dis} onChange=${e=>upd({dispatch_auth_bypass:e.target.checked})}/>
+          <span>Authentication Bypass / Broken Auth (A07)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_sqli} disabled=${dis} onChange=${e=>upd({dispatch_sqli:e.target.checked})}/>
+          <span>SQL Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_xss} disabled=${dis} onChange=${e=>upd({dispatch_xss:e.target.checked})}/>
+          <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_business_logic} disabled=${dis} onChange=${e=>upd({dispatch_business_logic:e.target.checked})}/>
+          <span>Business Logic (A04)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_ssrf} disabled=${dis} onChange=${e=>upd({dispatch_ssrf:e.target.checked})}/>
+          <span>Server-Side Request Forgery / SSRF (A10)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_path_traversal} disabled=${dis} onChange=${e=>upd({dispatch_path_traversal:e.target.checked})}/>
+          <span>Path Traversal / LFI (A01/A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_crypto} disabled=${dis} onChange=${e=>upd({dispatch_crypto:e.target.checked})}/>
+          <span>Cryptographic Failures (A02)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_cors} disabled=${dis} onChange=${e=>upd({dispatch_cors:e.target.checked})}/>
+          <span>CORS Misconfiguration (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.dispatch_config} disabled=${dis} onChange=${e=>upd({dispatch_config:e.target.checked})}/>
+          <span>Security Misconfiguration (A05)</span>
+        </label>
+
+        <div className="divider"/>
+        <div className="row spread">
+          <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Specialist Settings"}</button>
+        </div>
+      </form>`}`;
+}
+
+const DEFAULT_BURP_REST_API_FORM = {
+  api_key:"",
+  scan_configuration_name:"Audit checks - all except time-based detection methods",
+  scan_sqli:true,
+  scan_xss:true,
+  scan_command_injection:true,
+  scan_path_traversal:true,
+  scan_ssrf:true,
+  scan_xxe:true,
+  scan_ssti:true,
+};
+
+function burpRestApiToForm(cfg) {
+  return cfg ? {
+    enabled:cfg.enabled ?? false,
+    api_url:cfg.api_url || DEFAULT_BURP_REST_API_FORM.api_url,
+    api_key:cfg.api_key || "",
+    scan_configuration_name:cfg.scan_configuration_name || "",
+    scan_sqli:cfg.scan_sqli ?? true,
+    scan_xss:cfg.scan_xss ?? true,
+    scan_command_injection:cfg.scan_command_injection ?? true,
+    scan_path_traversal:cfg.scan_path_traversal ?? true,
+    scan_ssrf:cfg.scan_ssrf ?? true,
+    scan_xxe:cfg.scan_xxe ?? true,
+    scan_ssti:cfg.scan_ssti ?? true,
+  } : {...DEFAULT_BURP_REST_API_FORM};
+}
+
+function burpRestApiPayload(form) {
+  return {
+    enabled:!!form.enabled,
+    api_url:form.api_url.trim(),
+    api_key:form.api_key.trim() || null,
+    scan_configuration_name:form.scan_configuration_name.trim() || null,
+    scan_sqli:!!form.scan_sqli,
+    scan_xss:!!form.scan_xss,
+    scan_command_injection:!!form.scan_command_injection,
+    scan_path_traversal:!!form.scan_path_traversal,
+    scan_ssrf:!!form.scan_ssrf,
+    scan_xxe:!!form.scan_xxe,
+    scan_ssti:!!form.scan_ssti,
+  };
+}
+
+function BurpRestApiSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const [connTest, setConnTest] = useState(null);
+  const [connTesting, setConnTesting] = useState(false);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(burpRestApiToForm(await api.getBurpRestApiConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertBurpRestApiConfig(burpRestApiPayload(form));
+      setForm(burpRestApiToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const onTestConnection = async () => {
+    setConnTest(null); setConnTesting(true);
+    try {
+      const result = await api.testBurpConnection();
+      setConnTest(result);
+    } catch(e) { setConnTest({ok:false, message:e.message}); } finally { setConnTesting(false); }
+  };
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Burp Suite Active Scan</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable Burp Suite active scan integration</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, the scanner automatically triggers Burp Suite active scans for
+          enabled vulnerability classes as the LLM discovers candidate endpoints.
+          Requires Burp Suite Professional with the REST API enabled (Burp menu → Settings → Suite → REST API).
+        </div>
+        <div className="field">
+          <label>REST API URL</label>
+          <input type="url" required value=${form.api_url} placeholder="http://127.0.0.1:1337"
+            onChange=${e=>upd({api_url:e.target.value})}/>
+          <div className="field-hint">Default: http://127.0.0.1:1337. Configure under Burp → Settings → Suite → REST API.</div>
+        </div>
+        <div className="field">
+          <label>API key <span className="subtle">(optional)</span></label>
+          <input type="password" value=${form.api_key} placeholder="Leave blank if not configured"
+            onChange=${e=>upd({api_key:e.target.value})}/>
+          <div className="field-hint">Set an API key in Burp REST API settings and paste it here for authentication.</div>
+        </div>
+        <div className="field">
+          <label>Scan configuration <span className="subtle">(optional)</span></label>
+          <input type="text" value=${form.scan_configuration_name} placeholder="Audit checks - all except time-based detection methods"
+            onChange=${e=>upd({scan_configuration_name:e.target.value})}/>
+          <div className="field-hint">Only enter a named configuration that exists in your Burp project. Blank avoids Unknown configuration errors.</div>
+        </div>
+        <div className="divider"/>
+        <div className="form-section-title">Vulnerability Classes to Active Scan</div>
+        <div className="field-hint" style=${{marginBottom:"8px"}}>When the LLM investigates a selected vulnerability class on a URL, Burp will actively scan that endpoint.</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_sqli} onChange=${e=>upd({scan_sqli:e.target.checked})}/>
+          <span>SQL Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_xss} onChange=${e=>upd({scan_xss:e.target.checked})}/>
+          <span>Cross-Site Scripting / XSS (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_command_injection} onChange=${e=>upd({scan_command_injection:e.target.checked})}/>
+          <span>OS Command Injection (A03)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_path_traversal} onChange=${e=>upd({scan_path_traversal:e.target.checked})}/>
+          <span>Path Traversal / File Inclusion (A01/A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_ssrf} onChange=${e=>upd({scan_ssrf:e.target.checked})}/>
+          <span>Server-Side Request Forgery / SSRF (A10)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_xxe} onChange=${e=>upd({scan_xxe:e.target.checked})}/>
+          <span>XML External Entity / XXE (A05)</span>
+        </label>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.scan_ssti} onChange=${e=>upd({scan_ssti:e.target.checked})}/>
+          <span>Server-Side Template Injection / SSTI (A03)</span>
+        </label>
+        <div className="divider"/>
+        ${connTest&&html`<div className=${"alert "+(connTest.ok?"success":"error")} style=${{marginBottom:"12px"}}>${connTest.message}</div>`}
+        <div className="row spread">
+          <div className="row" style=${{gap:"8px"}}>
+            ${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            <button type="button" className="btn secondary" disabled=${connTesting} onClick=${onTestConnection}>
+              ${connTesting?"Testing…":"Test Connection"}
+            </button>
+          </div>
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save Burp Settings"}</button>
+        </div>
+      </form>`}`;
+}
+
+const API_FORMAT_LABELS = {
+  anthropic:"Anthropic API",
+  openai:"OpenAI API",
+  openai_compatible:"OpenAI-compatible API",
+  openrouter:"OpenRouter",
+  google:"Google Gemini API",
+  bedrock:"Amazon Bedrock Converse",
+  azure_openai:"Azure OpenAI",
+  azure_foundry:"Azure AI Foundry (OpenAI API)",
+  azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
+  azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
+};
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
+const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
+const PROVIDER_BASE_URL_PLACEHOLDERS = {
+  anthropic:"https://api.anthropic.com",
+  openai:"https://api.openai.com/v1",
+  openai_compatible:"http://localhost:1234/v1",
+  openrouter:"https://openrouter.ai/api/v1",
+  google:"https://generativelanguage.googleapis.com",
+  bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  azure_openai:"https://myresource.openai.azure.com",
+  azure_foundry:"https://myresource.services.ai.azure.com",
+  azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
+  azure_foundry_anthropic:"https://myresource.services.ai.azure.com/anthropic/v1",
+};
+// Actual runtime defaults used by the backend when base_url is blank
+const PROVIDER_DEFAULT_BASE_URLS = {
+  anthropic:  "https://api.anthropic.com",
+  openai:     "https://api.openai.com/v1",
+  openai_compatible: null,           // no sensible default — must be set
+  openrouter: "https://openrouter.ai/api/v1",
+  google:     "https://generativelanguage.googleapis.com",
+  bedrock:    "AWS SDK default (us-east-1)",
+  azure_openai: null,                // must be set
+  azure_foundry: null,
+  azure_foundry_openai: null,
+  azure_foundry_anthropic: null,
+};
+const PROVIDER_MODEL_PLACEHOLDERS = {
+  anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
+  openai:"gpt-4.1\ngpt-4o\nllama-3.1-8b-instruct",
+  openai_compatible:"llama-3.1-8b-instruct\nqwen2.5-coder",
+  openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
+  bedrock:"global.anthropic.claude-sonnet-4-6\nglobal.anthropic.claude-opus-4-7",
+  azure_openai:"gpt-4o\ngpt-4.1",
+  azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
+  azure_foundry_anthropic:"claude-sonnet-4-5\nclaude-opus-4-1",
+};
+
+function providerToForm(provider) {
+  return provider ? {
+    name:provider.name || "",
+    api_format:provider.api_format || "anthropic",
+    base_url:provider.base_url || "",
+    models:(provider.models || []).join("\n"),
+    api_key:provider.api_key || "",
+    max_tpm:provider.max_tpm != null ? provider.max_tpm : "",
+    max_rpm:provider.max_rpm != null ? provider.max_rpm : "",
+  } : {...DEFAULT_PROVIDER_FORM};
+}
+
+function providerPayload(form) {
+  return {
+    name:form.name.trim(),
+    api_format:form.api_format,
+    base_url:form.base_url.trim() || null,
+    models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
+    api_key:form.api_key.trim() || null,
+    max_tpm:form.max_tpm !== "" ? Number(form.max_tpm) : null,
+    max_rpm:form.max_rpm !== "" ? Number(form.max_rpm) : null,
+  };
+}
+
+
+function llmProfileToForm(cfg, providers=[]) {
+  const providerId = cfg?.provider_id || providers[0]?.id || "";
+  const provider = providers.find(p=>p.id===providerId) || providers[0];
+  if (cfg) {
+    const hasTemp = cfg.temperature !== null && cfg.temperature !== undefined;
+    return {
+      name:cfg.name??"Default",
+      provider_id:providerId,
+      model:cfg.model,
+      max_tokens:cfg.max_tokens,
+      temperature:hasTemp ? cfg.temperature : 0.2,
+      use_temperature:hasTemp,
+      use_vision:cfg.use_vision??false,
+      force_tool_choice:cfg.force_tool_choice??true,
+    };
+  }
+  return {
+    ...DEFAULT_LLM_FORM,
+    provider_id:provider?.id || "",
+    model:provider?.models?.[0] || "",
+  };
+}
+
+function llmPayload(form) {
+  return {
+    name:form.name.trim(),
+    provider_id:Number(form.provider_id),
+    model:form.model.trim(),
+    max_tokens:Number(form.max_tokens),
+    temperature:form.use_temperature ? Number(form.temperature) : null,
+    use_vision:form.use_vision,
+    force_tool_choice:form.force_tool_choice,
+  };
+}
+
+function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => providerToForm(provider));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const payload = providerPayload(form);
+      const savedProvider = mode === "edit"
+        ? await api.updateLLMProvider(provider.id, payload)
+        : await api.createLLMProvider(payload);
+      setSaved(true);
+      onSaved?.(savedProvider);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+  return html`
+    ${error&&html`<div className="alert error">${error}</div>`}
+    <form className="card" onSubmit=${onSubmit}>
+      <div className="form-section-title">Provider</div>
+      <div className="field"><label>Name</label>
+        <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
+      <div className="field">
+        <label>API format</label>
+        <select className="select" value=${form.api_format} onChange=${e=>upd({api_format:e.target.value})}>
+          <option value="anthropic">Anthropic API</option>
+          <option value="openai">OpenAI API</option>
+          <option value="openai_compatible">OpenAI-compatible API</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="google">Google Gemini API</option>
+          <option value="bedrock">Amazon Bedrock Converse</option>
+          <option value="azure_openai">Azure OpenAI</option>
+          <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
+          <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
+        </select>
+      </div>
+      <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+        <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({base_url:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
+      </div>
+      <div className="field"><label>Model names</label>
+        <textarea required rows="5" value=${form.models} placeholder=${PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
+          onChange=${e=>upd({models:e.target.value})}></textarea>
+        <div className="field-hint">Enter one model per line, or separate models with commas.</div>
+      </div>
+      <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
+        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
+          onChange=${e=>upd({api_key:e.target.value})}/>
+        ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
+      <div className="field-hint" style=${{marginBottom:"8px"}}>Set token and request limits to automatically pace requests and prevent API rate-limiting errors (429).</div>
+      <div className="two-col" style=${{gap:"16px", marginBottom:"8px"}}>
+        <div className="field">
+          <label>Max Tokens Per Minute (TPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_tpm} onChange=${e=>upd({max_tpm:e.target.value})}/>
+        </div>
+        <div className="field">
+          <label>Max Requests Per Minute (RPM)</label>
+          <input type="number" min="1" placeholder="Unlimited" value=${form.max_rpm} onChange=${e=>upd({max_rpm:e.target.value})}/>
+        </div>
+      </div>
+      <div className="divider"/>
+      <div className="row spread">
+        <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+        <div className="row">
+          ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save provider":"Create provider"}</button>
+        </div>
+      </div>
+    </form>`;
+}
+
+function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
   const onSubmit = async (e) => {
     e.preventDefault(); setError(null); setSaving(true); setSaved(false);
     try {
@@ -2296,10 +8086,8 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
     } catch(e) { setError(e.message); } finally { setSaving(false); }
   };
 
-  const models = form?(dms[form.provider]||[]):[];
-  const isCustom = customModel||(form&&models.length>0&&!models.includes(form.model)&&form.model!=="");
-  const needsBaseUrl = form&&["openai_compatible","bedrock","azure_openai","azure_foundry"].includes(form.provider);
-  const needsKey     = form&&["anthropic","openai","openrouter","google","bedrock","azure_openai","azure_foundry"].includes(form.provider);
+  const selectedProvider = providers.find(p=>p.id===Number(form.provider_id));
+  const models = selectedProvider?.models || [];
 
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
@@ -2307,57 +8095,32 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
       <div className="form-section-title">Profile</div>
       <div className="field"><label>Name</label>
         <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
-      <div className="divider"/>
-      <div className="form-section-title">Provider</div>
-      <div className="provider-grid">
-        ${Object.entries(PROVIDER_LABELS).map(([k,lbl])=>html`
-          <label key=${k} className=${"provider-card"+(form.provider===k?" selected":"")}>
-            <input type="radio" name="provider" value=${k} checked=${form.provider===k} onChange=${()=>changeProv(k)}/>
-            <span className="provider-name">${lbl}</span>
-          </label>`)}
+      <div className="field">
+        <label>Provider</label>
+        <select className="select" required value=${form.provider_id} onChange=${e=>{
+          const provider = providers.find(p=>p.id===Number(e.target.value));
+          upd({provider_id:e.target.value, model:provider?.models?.[0] || ""});
+        }}>
+          ${providers.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${API_FORMAT_LABELS[p.api_format]||p.api_format})</option>`)}
+        </select>
       </div>
-      <div className="divider"/>
-      <div className="form-section-title">${PROVIDER_LABELS[form.provider]} Configuration</div>
-      ${needsBaseUrl&&html`
-        <div className="field">
-          <label>${BASE_URL_LABELS[form.provider]||"Base URL"}</label>
-          <input type="url" required value=${form.base_url}
-            placeholder=${BASE_URL_PLACEHOLDERS[form.provider]||""}
-            onChange=${e=>upd({base_url:e.target.value})}/>
-          ${BASE_URL_HINTS[form.provider]&&html`<div className="field-hint">${BASE_URL_HINTS[form.provider]}</div>`}
-        </div>`}
-      ${needsKey&&html`
-        <div className="field"><label>API Key</label>
-          <input type="password" required value=${form.api_key}
-            placeholder=${form.provider==="anthropic"?"sk-ant-…":form.provider==="google"?"AIza…":form.provider==="openrouter"?"sk-or-v1-…":form.provider==="bedrock"?"Bedrock API key":""}
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
-      ${form.provider==="openai_compatible"&&html`
-        <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-          <input type="password" value=${form.api_key} placeholder="Leave blank if not required"
-            onChange=${e=>upd({api_key:e.target.value})}/></div>`}
       <div className="field"><label>Model</label>
-        ${models.length>0?html`
-          <div className="model-select-group">
-            <select className="select" value=${isCustom?"__custom__":form.model}
-              onChange=${e=>{
-                if(e.target.value!=="__custom__"){setCustomModel(false);upd({model:e.target.value});}
-                else{setCustomModel(true);upd({model:""});}
-              }}>
-              ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
-              <option value="__custom__">Custom…</option>
-            </select>
-            ${isCustom&&html`<input type="text" required value=${form.model} placeholder="Enter model name" onChange=${e=>upd({model:e.target.value})}/>`}
-          </div>`:html`
-          <input type="text" required value=${form.model} placeholder=${PROVIDER_PLACEHOLDERS[form.provider]}
-            onChange=${e=>upd({model:e.target.value})}/>`}
+        <select className="select" required value=${form.model} onChange=${e=>upd({model:e.target.value})}>
+          ${models.map(m=>html`<option key=${m} value=${m}>${m}</option>`)}
+        </select>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Sampling</div>
       <div className="two-col">
         <div className="field"><label>Max tokens</label>
-          <input type="number" required min="1" max="32768" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
-        <div className="field"><label>Temperature <span className="field-hint-inline">(0-2)</span></label>
-          <input type="number" required min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/></div>
+          <input type="number" required min="1" max="256000" value=${form.max_tokens} onChange=${e=>upd({max_tokens:e.target.value})}/></div>
+        <div className="field">
+          <label style=${{display:"flex", alignItems:"center", gap:"6px", cursor:"pointer"}}>
+            <input type="checkbox" checked=${form.use_temperature} onChange=${e=>upd({use_temperature:e.target.checked})} style=${{width:"14px", height:"14px", accentColor:"var(--accent)", cursor:"pointer", margin:0}}/>
+            <span>Temperature <span className="field-hint-inline">(0-2)</span></span>
+          </label>
+          <input type="number" required=${form.use_temperature} disabled=${!form.use_temperature} min="0" max="2" step="0.05" value=${form.temperature} onChange=${e=>upd({temperature:e.target.value})}/>
+        </div>
       </div>
       <div className="divider"/>
       <div className="form-section-title">Vision</div>
@@ -2365,6 +8128,17 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
         <input type="checkbox" checked=${form.use_vision} onChange=${e=>upd({use_vision:e.target.checked})}/>
         <span>Include page screenshots in LLM prompts (requires vision-capable model)</span>
       </label>
+      <div className="divider"/>
+      <div className="form-section-title">Advanced</div>
+      <label className="toggle-row">
+        <input type="checkbox" checked=${form.force_tool_choice} onChange=${e=>upd({force_tool_choice:e.target.checked})}/>
+        <span>Force tool execution</span>
+      </label>
+      <div className="field-hint" style=${{marginBottom:"12px"}}>
+        Enforces tool execution constraints on the LLM via standard OpenAI wire parameters. 
+        Recommended for standard models to maintain high scanning density. 
+        Disable if using custom reasoning/thinking models that reject forced tool choice (e.g. DeepSeek-R1, deepseek-reasoner).
+      </div>
       <div className="divider"/>
       <div className="row spread">
         <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
@@ -2378,29 +8152,33 @@ function LLMProfileForm({ mode, profile, dms, onSaved, onCancel }) {
 
 function SettingsPage() {
   const [profiles, setProfiles] = useState(null);
-  const [dms, setDMs] = useState({});
+  const [providers, setProviders] = useState(null);
+  const [tab, setTab] = useState("profiles");
   const [screen, setScreen] = useState("list");
   const [editing, setEditing] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [items,dm] = await Promise.all([api.listLLMProfiles(), api.getDefaultModels()]);
+      const [items,providerItems] = await Promise.all([api.listLLMProfiles(), api.listLLMProviders()]);
       setProfiles(items);
-      setDMs(dm);
-      if (items.length === 0) { setScreen("new"); setEditing(null); }
-      else if (screen === "new" && profiles?.length === 0) { setScreen("list"); }
+      setProviders(providerItems);
+      if (tab === "profiles" && items.length === 0 && providerItems.length > 0) { setScreen("new"); setEditing(null); }
+      else if (tab === "providers" && providerItems.length === 0) { setScreen("new"); setEditing(null); }
+      else if (screen === "new" && ((tab === "profiles" && profiles?.length === 0) || (tab === "providers" && providers?.length === 0))) { setScreen("list"); }
     } catch(e) { setError(e.message); }
-  }, [screen, profiles?.length]);
+  }, [screen, tab, profiles?.length, providers?.length]);
 
   useEffect(() => { load(); }, []);
 
   const onSaved = async () => { await load(); setScreen("list"); setEditing(null); };
   const onEdit = profile => { setEditing(profile); setScreen("edit"); setError(null); };
   const onNew = () => { setEditing(null); setScreen("new"); setError(null); };
-  const onCancel = () => { setScreen(profiles?.length ? "list" : "new"); setEditing(null); setError(null); };
+  const onCancel = () => { setScreen("list"); setEditing(null); setError(null); };
   const onActivate = async (profile) => {
     setBusyId(profile.id); setError(null);
     try { await api.activateLLMProfile(profile.id); await load(); }
@@ -2412,57 +8190,894 @@ function SettingsPage() {
     try { await api.deleteLLMProfile(profile.id); await load(); }
     catch(e) { setError(e.message); } finally { setBusyId(null); }
   };
+  const onDeleteProvider = async (provider) => {
+    if (!confirm(`Delete LLM provider "${provider.name}"?`)) return;
+    setBusyId(provider.id); setError(null);
+    try { await api.deleteLLMProvider(provider.id); await load(); }
+    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  };
+  const switchTab = next => { setTab(next); setScreen("list"); setEditing(null); setError(null); };
 
-  const title = screen === "new" ? "New LLM Settings Profile" : screen === "edit" ? "Edit LLM Settings Profile" : "LLM Settings";
+  const onExport = async () => {
+    setError(null);
+    try {
+      const data = await api.exportLLMConfig();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aespa-llm-config-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch(e) { setError(e.message); }
+  };
+
+  const onImportClick = () => { if (importRef.current) importRef.current.click(); };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setError(null); setImporting(true);
+    try {
+      const text = await file.text();
+      let parsed;
+      try { parsed = JSON.parse(text); } catch { throw new Error("Invalid JSON file"); }
+      const result = await api.importLLMConfig(parsed);
+      await load();
+      alert(`Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} profile(s) created, ${result.profiles_updated} updated.`);
+    } catch(e) { setError(e.message); } finally { setImporting(false); }
+  };
+
+  const title = tab === "providers"
+    ? (screen === "new" ? "New LLM Provider" : screen === "edit" ? "Edit LLM Provider" : "LLM Providers")
+    : (screen === "new" ? "New LLM Profile" : screen === "edit" ? "Edit LLM Profile" : "LLM Profiles");
+  const canCreateProfile = (providers || []).length > 0;
 
   return html`
     <div className="topbar">
       <div className="topbar-title">${title}</div>
-      ${screen==="list"&&html`<div className="topbar-actions"><button className="btn" onClick=${onNew}>New profile</button></div>`}
+      <div className="topbar-actions">
+        <button className="btn secondary sm" disabled=${importing} onClick=${onExport}>Export</button>
+        <button className="btn secondary sm" disabled=${importing} onClick=${onImportClick}>${importing?"Importing…":"Import"}</button>
+        <input ref=${importRef} type="file" accept=".json,application/json" style=${{display:"none"}} onChange=${onImportFile} />
+        ${screen==="list"&&html`<button className="btn" disabled=${tab==="profiles"&&!canCreateProfile} onClick=${onNew}>${tab==="providers"?"New provider":"New profile"}</button>`}
+      </div>
     </div>
-    <div className="content scroll-content">
-      ${!profiles&&!error&&html`<div className="subtle">Loading…</div>`}
+    <div className="content scroll-content settings-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn "+(tab==="profiles"?"active":"")} onClick=${()=>switchTab("profiles")}>Profiles</button>
+        <button className=${"tab-btn "+(tab==="providers"?"active":"")} onClick=${()=>switchTab("providers")}>Providers</button>
+      </div>
+      ${(!profiles||!providers)&&!error&&html`<div className="subtle">Loading…</div>`}
       ${error&&html`<div className="alert error">${error}</div>`}
-      ${profiles&&screen==="list"&&html`
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Vision</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-              ${profiles.map(p=>html`
-                <tr key=${p.id}>
-                  <td><strong>${p.name}</strong></td>
-                  <td>${PROVIDER_LABELS[p.provider]||p.provider}</td>
-                  <td className="mono">${p.model}</td>
-                  <td>${p.use_vision?"On":"Off"}</td>
-                  <td>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</td>
-                  <td>
-                    <div className="row" style=${{justifyContent:"flex-end"}}>
-                      ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
-                      <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
-                      <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
-                    </div>
-                  </td>
-                </tr>`)}
-            </tbody>
-          </table>
+      ${profiles&&providers&&tab==="profiles"&&screen==="list"&&html`
+        ${providers.length===0&&html`<div className="alert">Create a provider before adding LLM profiles.</div>`}
+        <div className="settings-list settings-list-profiles">
+          <div className="settings-list-head">
+            <div>Name</div><div>Provider</div><div>Model</div><div>Vision</div><div>Status</div><div></div>
+          </div>
+          ${profiles.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${p.provider_name || `Provider #${p.provider_id}`}</div>
+              <div className="mono">${p.model}</div>
+              <div>${p.use_vision?"On":"Off"}</div>
+              <div>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</div>
+              <div className="row settings-list-actions">
+                ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
+              </div>
+            </div>`)}
         </div>`}
-      ${profiles&&screen==="new"&&html`<${LLMProfileForm} mode="new" dms=${dms} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
-      ${profiles&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} dms=${dms} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="list"&&html`
+        <div className="settings-list settings-list-providers">
+          <div className="settings-list-head">
+            <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div>Limits</div><div></div>
+          </div>
+          ${providers.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div>${API_FORMAT_LABELS[p.api_format]||p.api_format}</div>
+              <div className="mono">${p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}</div>
+              <div className="mono">${(p.models||[]).join(", ")}</div>
+              <div>
+                ${p.max_tpm || p.max_rpm ? html`
+                  ${p.max_tpm ? html`<div>${Number(p.max_tpm).toLocaleString()} TPM</div>` : ""}
+                  ${p.max_rpm ? html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:1}}>${Number(p.max_rpm).toLocaleString()} RPM</div>` : ""}
+                ` : html`<span className="subtle">Unlimited</span>`}
+              </div>
+              <div className="row settings-list-actions">
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDeleteProvider(p)}>Delete</button>
+              </div>
+            </div>`)}
+        </div>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="new"&&html`<${LLMProfileForm} mode="new" providers=${providers} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
+      ${profiles&&providers&&tab==="profiles"&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} providers=${providers} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${providers&&tab==="providers"&&screen==="new"&&html`<${LLMProviderForm} mode="new" onSaved=${onSaved} onCancel=${providers.length?onCancel:null}/>`}
+      ${providers&&tab==="providers"&&screen==="edit"&&editing&&html`<${LLMProviderForm} mode="edit" provider=${editing} onSaved=${onSaved} onCancel=${onCancel}/>`}
+    </div>`;
+}
+
+const DEFAULT_VALIDATOR_FORM = {
+  enabled: true,
+  max_steps: 20,
+  min_severity: "low",
+  auto_validate_inline: true,
+  require_concrete_disproof: true,
+};
+
+function validatorToForm(cfg) {
+  return {
+    enabled: cfg.enabled ?? true,
+    max_steps: cfg.max_steps ?? 20,
+    min_severity: cfg.min_severity ?? "low",
+    auto_validate_inline: cfg.auto_validate_inline ?? true,
+    require_concrete_disproof: cfg.require_concrete_disproof ?? true,
+  };
+}
+
+function validatorPayload(form) {
+  return {
+    enabled: form.enabled,
+    max_steps: Number(form.max_steps),
+    min_severity: form.min_severity,
+    auto_validate_inline: form.auto_validate_inline,
+    require_concrete_disproof: form.require_concrete_disproof,
+  };
+}
+
+function ValidatorSettings() {
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+
+  useEffect(() => {
+    (async () => {
+      try { setForm(validatorToForm(await api.getAdversarialValidatorConfig())); }
+      catch(e) { setError(e.message); }
+    })();
+  }, []);
+
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const savedConfig = await api.upsertAdversarialValidatorConfig(validatorPayload(form));
+      setForm(validatorToForm(savedConfig));
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const dis = form && !form.enabled;
+
+  return html`
+    ${!form&&!error&&html`<div className="subtle">Loading…</div>`}
+    ${error&&html`<div className="alert error">${error}</div>`}
+    ${form&&html`
+      <form className="card" onSubmit=${onSubmit}>
+        <div className="form-section-title">Adversarial Validator</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.enabled} onChange=${e=>upd({enabled:e.target.checked})}/>
+          <span>Enable adversarial validator</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is reviewed by an adversarial LLM agent whose explicit
+          mandate is to <em>disprove</em> the finding before confirming it. This reduces false
+          positives without relying on the scanner's own judgment. When disabled, the legacy
+          static-probe validator is used instead.
+        </div>
+
+        <div className="form-section-title">Step Budget</div>
+        <div className="field">
+          <label>Max steps per finding</label>
+          <input type="number" min="1" max="50" value=${form.max_steps} disabled=${dis}
+            onChange=${e=>upd({max_steps:Number(e.target.value)})}/>
+          <div className="field-hint">
+            Maximum number of tool calls the validator may make per finding (1–50). Default: 20.
+            Higher values give the validator more opportunities to disprove a finding but increase
+            cost and latency.
+          </div>
+        </div>
+
+        <div className="form-section-title">Severity Filter</div>
+        <div className="field">
+          <label>Minimum severity to validate</label>
+          <select value=${form.min_severity} disabled=${dis}
+            onChange=${e=>upd({min_severity:e.target.value})}>
+            <option value="critical">Critical only</option>
+            <option value="high">High and above</option>
+            <option value="medium">Medium and above</option>
+            <option value="low">Low and above (default)</option>
+            <option value="info">All (including Info)</option>
+          </select>
+          <div className="field-hint">
+            Findings below this severity are skipped by the validator and left as "unconfirmed".
+          </div>
+        </div>
+
+        <div className="form-section-title">Behaviour</div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.auto_validate_inline} disabled=${dis}
+            onChange=${e=>upd({auto_validate_inline:e.target.checked})}/>
+          <span>Auto-validate findings inline during scan</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled, each finding is validated immediately after it is written, while the
+          scan is still running. When disabled, validation only runs when triggered manually.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${form.require_concrete_disproof} disabled=${dis}
+            onChange=${e=>upd({require_concrete_disproof:e.target.checked})}/>
+          <span>Require concrete disproof (strict mode)</span>
+        </label>
+        <div className="field-hint" style=${{marginBottom:"12px"}}>
+          When enabled (recommended), the validator must find a specific innocent explanation
+          to mark a finding as a false positive — failure to reproduce is not sufficient.
+          When disabled, inability to reproduce is treated as a false positive (lenient mode).
+        </div>
+
+        <div className="form-row">
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":"Save"}</button>
+          ${saved&&html`<span className="saved-indicator">Saved</span>`}
+        </div>
+      </form>`}`;
+}
+
+function ScopeHostsPanel({ siteId, hosts, onChange }) {
+  const [input, setInput] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const remove = async (host) => {
+    const next = hosts.filter(h => h !== host);
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const add = async () => {
+    const host = input.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0];
+    if (!host || hosts.includes(host)) { setInput(""); return; }
+    const next = [...hosts, host];
+    setSaving(true);
+    try { await api.updateScopeHosts(siteId, next); onChange(next); setInput(""); }
+    catch(e) { alert(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const onKey = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+
+  return html`
+    <div className="scope-hosts-panel">
+      <div className="scope-hosts-title">Attack Scope</div>
+      <div className="scope-hosts-list">
+        ${hosts.length === 0 && html`<span className="scope-hosts-empty">No restriction — all hosts allowed</span>`}
+        ${hosts.map(h => html`
+          <span key=${h} className="scope-host-chip">
+            ${h}
+            <button className="scope-host-remove" title="Remove" disabled=${saving}
+              onClick=${()=>remove(h)}>×</button>
+          </span>`)}
+      </div>
+      <div className="scope-hosts-add">
+        <input className="scope-hosts-input" placeholder="Add hostname…" value=${input}
+          onInput=${e=>setInput(e.target.value)} onKeyDown=${onKey} disabled=${saving}/>
+        <button className="btn sm" onClick=${add} disabled=${saving||!input.trim()}>Add</button>
+      </div>
     </div>`;
 }
 
 function ScanPolicyPage() {
+  const [tab, setTab] = useState("scanner");
   return html`
-    <div className="topbar"><div className="topbar-title">Scan Policy</div></div>
+    <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
+    <div className="content" style=${{paddingLeft:16,paddingRight:0,paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(tab==="scanner"?" active":"")} onClick=${()=>setTab("scanner")}>Scanner</button>
+        <button className=${"tab-btn"+(tab==="specialists"?" active":"")} onClick=${()=>setTab("specialists")}>Specialist Agents</button>
+        <button className=${"tab-btn"+(tab==="validator"?" active":"")} onClick=${()=>setTab("validator")}>Validator</button>
+      </div>
+      <div className="scroll-content" style=${{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",paddingTop:16,paddingBottom:28}}>
+        ${tab==="scanner"     && html`<${ScannerPolicySettings}/>`}
+        ${tab==="specialists" && html`<${SpecialistAgentSettings}/>`}
+        ${tab==="validator"   && html`<${ValidatorSettings}/>`}
+      </div>
+    </div>`;
+}
+
+function ExternalIntegrationsPage() {
+  const [tab, setTab] = useState("burp");
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">External Integrations</div>
+    </div>
+    <div className="content" style=${{paddingLeft:16,paddingRight:0,paddingBottom:0,display:"flex",flexDirection:"column",flex:1,minHeight:0}}>
+      <div className="tab-bar">
+        <button className=${"tab-btn"+(tab==="burp"?" active":"")} onClick=${()=>setTab("burp")}>Burp Suite Integration</button>
+        <button className=${"tab-btn"+(tab==="proxy"?" active":"")} onClick=${()=>setTab("proxy")}>Upstream Proxy</button>
+      </div>
+      <div className="scroll-content" style=${{flex:1,minHeight:0,overflowY:"auto",overflowX:"hidden",paddingTop:16,paddingBottom:28}}>
+        ${tab==="burp"  && html`<${BurpRestApiSettings}/>`}
+        ${tab==="proxy" && html`<${UpstreamProxySettings}/>`}
+      </div>
+    </div>`;
+}
+
+function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg, setReportingDebugCfg }) {
+  const [cfg, setCfg] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+
+  const [hdrCfg, setHdrCfg] = useState(null);
+  const [hdrForm, setHdrForm] = useState({ header_name: "", header_value: "" });
+  const [hdrSaving, setHdrSaving] = useState(false);
+  const [hdrSaved, setHdrSaved] = useState(false);
+  const [hdrError, setHdrError] = useState(null);
+  const [repSaving, setRepSaving] = useState(false);
+  const [repSaved, setRepSaved] = useState(false);
+  const [repError, setRepError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try { setCfg(await api.getSpecialistAgentConfig()); }
+      catch(e) { setError(e.message); }
+    })();
+    (async () => {
+      try {
+        const h = await api.getGlobalHttpHeader();
+        setHdrCfg(h);
+        setHdrForm({ header_name: h.header_name || "", header_value: h.header_value || "" });
+      } catch(e) { setHdrError(e.message); }
+    })();
+    (async () => {
+      try { setReportingDebugCfg(await api.getReportingDebugConfig()); }
+      catch(e) { setRepError(e.message); }
+    })();
+  }, []);
+
+  const toggle = async (checked) => {
+    setSaved(false); setSaving(true); setError(null);
+    try {
+      const updated = await api.upsertSpecialistAgentConfig({ ...cfg, trigger_specialist_on_burp: checked });
+      setCfg(updated);
+      setSaved(true);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const saveHeader = async (e) => {
+    e.preventDefault();
+    setHdrSaved(false); setHdrSaving(true); setHdrError(null);
+    try {
+      const updated = await api.upsertGlobalHttpHeader({
+        header_name: hdrForm.header_name.trim() || null,
+        header_value: hdrForm.header_value.trim() || null,
+      });
+      setHdrCfg(updated);
+      setHdrForm({ header_name: updated.header_name || "", header_value: updated.header_value || "" });
+      setHdrSaved(true);
+    } catch(e) { setHdrError(e.message); } finally { setHdrSaving(false); }
+  };
+
+  const toggleReportingDebug = async (patch) => {
+    const base = reportingDebugCfg || { capture_enabled:false, panel_enabled:false };
+    setRepSaving(true); setRepSaved(false); setRepError(null);
+    try {
+      const updated = await api.upsertReportingDebugConfig({ ...base, ...patch });
+      setReportingDebugCfg(updated);
+      setRepSaved(true);
+    } catch(e) { setRepError(e.message); } finally { setRepSaving(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Debug</div>
+    </div>
     <div className="content scroll-content">
-      <${ScannerPolicySettings}/>
+      ${!cfg && !hdrCfg && !error && !hdrError && html`<div className="subtle">Loading…</div>`}
+
+      <div className="card">
+        <div className="form-section-title">Global Extra HTTP Header</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Inject an additional HTTP header into every request made by the scanner and crawler
+          (Playwright and HTTPX). Does not affect requests sent to LLMs. Leave the header name
+          empty to disable.
+        </div>
+        ${hdrError && html`<div className="alert error">${hdrError}</div>`}
+        ${hdrCfg !== null && html`
+          <form onSubmit=${saveHeader}>
+            <div className="form-row">
+              <label className="form-label">Header Name</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. X-Debug-Token"
+                value=${hdrForm.header_name}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_name: e.target.value})); }}/>
+            </div>
+            <div className="form-row">
+              <label className="form-label">Header Value</label>
+              <input className="form-input" type="text"
+                placeholder="e.g. my-secret-value"
+                value=${hdrForm.header_value}
+                disabled=${hdrSaving}
+                onInput=${e => { setHdrSaved(false); setHdrForm(f => ({...f, header_value: e.target.value})); }}/>
+            </div>
+            <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+              <button className="btn btn-primary" type="submit" disabled=${hdrSaving}>
+                ${hdrSaving ? "Saving…" : "Save"}
+              </button>
+              ${hdrSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+            </div>
+          </form>`}
+      </div>
+
+      ${error && html`<div className="alert error">${error}</div>`}
+      ${cfg && html`
+        <div className="card">
+          <div className="form-section-title">Specialist Agent</div>
+          <label className="toggle-row">
+            <input type="checkbox" checked=${cfg.trigger_specialist_on_burp ?? false}
+              disabled=${saving}
+              onChange=${e=>toggle(e.target.checked)}/>
+            <span>Trigger a Specialist Agent whenever a Burp active scan is triggered</span>
+          </label>
+          <div className="field-hint">
+            When enabled, a specialist agent is dispatched immediately alongside every Burp active scan,
+            independently investigating the same URL. Use this to force specialist agents to fire for
+            debugging purposes.
+          </div>
+          ${saved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
+        </div>`}
+
+      <div className="card" style=${{marginTop:16}}>
+        <div className="form-section-title">Reporting Lab</div>
+        <div className="field-hint" style=${{marginBottom:12}}>
+          Capture reporting LLM messages from real scans and expose the replay lab in the sidebar.
+          Captures include final reporting batches and during-scan writeups, and are stored
+          in a separate SQLite database next to the main AESPA database.
+        </div>
+        ${repError && html`<div className="alert error">${repError}</div>`}
+        <label className="toggle-row">
+          <input type="checkbox" checked=${reportingDebugCfg?.capture_enabled ?? false}
+            disabled=${repSaving}
+            onChange=${e=>toggleReportingDebug({ capture_enabled:e.target.checked })}/>
+          <span>Capture reporting LLM messages during scans</span>
+        </label>
+        <label className="toggle-row" style=${{marginTop:8}}>
+          <input type="checkbox" checked=${reportingDebugCfg?.panel_enabled ?? false}
+            disabled=${repSaving}
+            onChange=${e=>toggleReportingDebug({ panel_enabled:e.target.checked })}/>
+          <span>Show Reporting Lab in the sidebar</span>
+        </label>
+        ${repSaved && html`<div className="save-confirm" style=${{marginTop:8}}><${IconCheck}/> Saved</div>`}
+      </div>
+
+      <div className="card" style=${{marginTop: 16}}>
+        <div className="form-section-title">Cloudflare Access</div>
+        <div className="field-hint" style=${{marginBottom: 12}}>
+          Show the authenticated user's email/username above the application version on the bottom left of the sidebar.
+        </div>
+        <label className="toggle-row">
+          <input type="checkbox" checked=${showUsername}
+            onChange=${e => {
+              const checked = e.target.checked;
+              setShowUsername(checked);
+              try { localStorage.setItem("aespa_show_username", String(checked)); } catch(_) {}
+            }}/>
+          <span>Show Username in Sidebar</span>
+        </label>
+        ${showUsername && html`
+          <div className="field-hint" style=${{marginTop: 8}}>
+            Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
+          </div>
+        `}
+      </div>
+    </div>`;
+}
+
+function ReportingDebugPage() {
+  const [tab, setTab] = useState("prompt");
+  const [promptKey, setPromptKey] = useState("reporting.analyse");
+  const [promptVersions, setPromptVersions] = useState([]);
+  const [selectedPromptVersionId, setSelectedPromptVersionId] = useState("");
+  const [promptVersionName, setPromptVersionName] = useState("");
+  const [promptText, setPromptText] = useState("");
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptSaved, setPromptSaved] = useState(false);
+  const [captures, setCaptures] = useState([]);
+  const [captureDbPath, setCaptureDbPath] = useState("");
+  const [selectedCaptureId, setSelectedCaptureId] = useState("");
+  const [selectedCaptureDetail, setSelectedCaptureDetail] = useState(null);
+
+  const [selectedReplayVersionId, setSelectedReplayVersionId] = useState("");
+  const [replay, setReplay] = useState(null);
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replays, setReplays] = useState([]);
+  const [selectedReplayId, setSelectedReplayId] = useState("");
+  const [compareReplayId, setCompareReplayId] = useState("");
+  const [compareReplay, setCompareReplay] = useState(null);
+  const [error, setError] = useState(null);
+
+  const selectedCapture = captures.find(c => String(c.id) === String(selectedCaptureId));
+  const replayPromptKey = selectedCapture?.kind === "writeup" ? "reporting.writeup" : "reporting.analyse";
+  const selectedPromptVersion = promptVersions.find(v => String(v.id) === String(selectedPromptVersionId));
+  const promptKeyVersions = promptVersions.filter(v => v.key === promptKey);
+  const replayPromptVersions = promptVersions.filter(v => v.key === replayPromptKey);
+  const selectedReplayVersion = replayPromptVersions.find(v => String(v.id) === String(selectedReplayVersionId));
+  const currentFindings = replay?.findings || [];
+  const compareFindings = compareReplay?.findings || [];
+
+  const setEditorVersion = (version) => {
+    if (!version) return;
+    setSelectedPromptVersionId(String(version.id));
+    setPromptVersionName(version.name || "");
+    setPromptText(version.prompt_text || "");
+  };
+  const loadPromptVersions = useCallback(async (key, selectedId = "") => {
+    const d = await api.listReportingPromptVersions(key);
+    const versions = d.versions || [];
+    setPromptVersions(prev => [...prev.filter(v => v.key !== key), ...versions]);
+    const current = versions.find(v => String(v.id) === String(selectedId)) || versions[0];
+    if (key === promptKey) setEditorVersion(current);
+    return versions;
+  }, [promptKey]);
+  const loadCaptures = useCallback(async () => {
+    const d = await api.listReportingCaptures();
+    setCaptures(d.captures || []);
+    setCaptureDbPath(d.db_path || "");
+    if (!selectedCaptureId && d.captures?.[0]) setSelectedCaptureId(String(d.captures[0].id));
+  }, [selectedCaptureId]);
+  const loadReplays = useCallback(async () => {
+    const d = await api.listReportingReplays();
+    setReplays(d.replays || []);
+    if (!selectedReplayId && d.replays?.[0]) setSelectedReplayId(String(d.replays[0].id));
+  }, [selectedReplayId]);
+
+  useEffect(() => {
+    loadPromptVersions("reporting.analyse").catch(e=>setError(e.message));
+    loadPromptVersions("reporting.writeup").catch(e=>setError(e.message));
+    loadCaptures().catch(e=>setError(e.message));
+    loadReplays().catch(e=>setError(e.message));
+  }, []);
+  useEffect(() => {
+    setSelectedPromptVersionId("");
+    loadPromptVersions(promptKey).catch(e=>setError(e.message));
+  }, [promptKey]);
+  useEffect(() => {
+    if (replayPromptVersions.length === 0) {
+      loadPromptVersions(replayPromptKey).catch(e=>setError(e.message));
+      return;
+    }
+    if (!selectedReplayVersionId || !replayPromptVersions.some(v => String(v.id) === String(selectedReplayVersionId))) {
+      const builtin = replayPromptVersions.find(v => v.is_builtin) || replayPromptVersions[0];
+      setSelectedReplayVersionId(String(builtin.id));
+    }
+  }, [replayPromptKey, selectedReplayVersionId, replayPromptVersions.length]);
+
+  useEffect(() => {
+    if (!replay || !["queued","running"].includes(replay.status)) return;
+    const iv = setInterval(async () => {
+      try {
+        const next = await api.getReportingReplay(replay.id);
+        setReplay(next);
+        if (!["queued","running"].includes(next.status)) {
+          setReplayBusy(false);
+          setSelectedReplayId(String(next.id));
+          loadReplays().catch(()=>{});
+        }
+      } catch(e) {
+        setError(e.message);
+        setReplayBusy(false);
+      }
+    }, 1500);
+    return () => clearInterval(iv);
+  }, [replay?.id, replay?.status]);
+  useEffect(() => {
+    if (!selectedReplayId) return;
+    api.getReportingReplay(selectedReplayId).then(setReplay).catch(()=>{});
+  }, [selectedReplayId]);
+  useEffect(() => {
+    if (!compareReplayId) { setCompareReplay(null); return; }
+    api.getReportingReplay(compareReplayId).then(setCompareReplay).catch(()=>{});
+  }, [compareReplayId]);
+  useEffect(() => {
+    if (!selectedCaptureId) { setSelectedCaptureDetail(null); return; }
+    api.getReportingCapture(selectedCaptureId).then(setSelectedCaptureDetail).catch(()=>{});
+  }, [selectedCaptureId]);
+
+  const savePrompt = async () => {
+    if (!selectedPromptVersion || selectedPromptVersion.is_builtin) return;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      const p = await api.updateReportingPromptVersion(selectedPromptVersion.id, {
+        name: promptVersionName,
+        prompt_text: promptText,
+      });
+      await loadPromptVersions(promptKey, p.id);
+      setPromptSaved(true);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const createPromptVersion = async () => {
+    const name = promptVersionName.trim() || `Version ${new Date().toLocaleString()}`;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      const p = await api.createReportingPromptVersion({ key: promptKey, name, prompt_text: promptText });
+      await loadPromptVersions(promptKey, p.id);
+      setPromptSaved(true);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const deletePromptVersion = async () => {
+    if (!selectedPromptVersion || selectedPromptVersion.is_builtin) return;
+    if (!confirm(`Delete prompt version "${selectedPromptVersion.name}"? Saved replay findings remain available.`)) return;
+    setPromptSaving(true); setPromptSaved(false); setError(null);
+    try {
+      await api.deleteReportingPromptVersion(selectedPromptVersion.id);
+      await loadPromptVersions(promptKey);
+    } catch(e) { setError(e.message); } finally { setPromptSaving(false); }
+  };
+  const startReplay = async () => {
+    if (!selectedCaptureId || !selectedReplayVersion?.id) return;
+    setReplayBusy(true); setError(null); setReplay(null);
+    try {
+      const r = await api.replayReportingCapture(selectedCaptureId, { prompt_version_id: Number(selectedReplayVersion.id) });
+      setReplay(r);
+      setSelectedReplayId(String(r.id));
+      setTab("replay");
+    } catch(e) { setError(e.message); setReplayBusy(false); }
+  };
+
+  return html`
+    <div className="topbar">
+      <div className="topbar-title">Reporting Lab</div>
+    </div>
+    <div className="content scroll-content settings-content">
+      <div className="tab-bar settings-tab-bar">
+        <button className=${"tab-btn"+(tab==="prompt"?" active":"")} onClick=${()=>setTab("prompt")}>Prompt</button>
+        <button className=${"tab-btn"+(tab==="replay"?" active":"")} onClick=${()=>{ setTab("replay"); loadCaptures().catch(()=>{}); }}>Replay</button>
+        <button className=${"tab-btn"+(tab==="findings"?" active":"")} onClick=${()=>{ setTab("findings"); loadReplays().catch(()=>{}); }}>Debug Findings</button>
+      </div>
+      ${error && html`<div className="alert error">${error}</div>`}
+
+      ${tab==="prompt" && html`
+        <div className="card">
+          <div className="form-section-title">Reporting Prompt Versions</div>
+          <div className="field-hint" style=${{marginBottom:12}}>
+            Default versions load from reporting.py. New versions are saved in the Reporting Lab database and can be replayed against the same captures.
+            <br />Reporting Lab uses the DEFAULT LLM setting and does not respect the overriden setting in the scan the data came from.
+            <br />Set the Version name BEFORE clicking new version!
+            <br />Batch reporting has {url} and {results} placeholders. 
+            <br />During-scan writeups have {source}, {base_url}, {finding_json}, {evidence_json}.
+          </div>
+          <div className="form-row">
+            <label className="form-label">Prompt</label>
+            <select className="form-input" value=${promptKey}
+              onChange=${e=>{ setPromptKey(e.target.value); setPromptSaved(false); }}>
+              <option value="reporting.analyse">Final reporting batch</option>
+              <option value="reporting.writeup">During-scan writeup replay</option>
+            </select>
+          </div>
+          <div className="form-row">
+            <label className="form-label">Version</label>
+            <select className="form-input" value=${selectedPromptVersionId}
+              onChange=${e=>{
+                const v = promptVersions.find(p=>String(p.id)===String(e.target.value));
+                setEditorVersion(v);
+                setPromptSaved(false);
+              }}>
+              ${promptKeyVersions.map(v=>html`
+                <option key=${v.id} value=${String(v.id)}>
+                  ${v.name}${v.is_builtin ? " (from reporting.py)" : ""}
+                </option>`)}
+            </select>
+          </div>
+          <div className="form-row">
+            <label className="form-label">Version name</label>
+            <input className="form-input" value=${promptVersionName}
+              disabled=${promptSaving}
+              onInput=${e=>{ setPromptSaved(false); setPromptVersionName(e.target.value); }} />
+          </div>
+          ${selectedPromptVersion && html`
+            <div className="row" style=${{gap:8,marginBottom:8}}>
+              <span className="source-badge">${selectedPromptVersion.is_builtin ? "from reporting.py" : "DB version"}</span>
+              ${selectedPromptVersion.updated_at && html`<span className="subtle">Updated ${fmtDate(selectedPromptVersion.updated_at)}</span>`}
+            </div>`}
+          <textarea className="form-input mono" style=${{minHeight:520,whiteSpace:"pre",fontSize:12}}
+            value=${promptText}
+            disabled=${promptSaving}
+            onInput=${e=>{ setPromptSaved(false); setPromptText(e.target.value); }} />
+          <div className="row" style=${{gap:8,marginTop:12}}>
+            <button className="btn" onClick=${savePrompt} disabled=${promptSaving || !promptText.trim() || selectedPromptVersion?.is_builtin}>
+              ${promptSaving ? "Saving…" : "Save Prompt"}
+            </button>
+            <button className="btn secondary" onClick=${createPromptVersion} disabled=${promptSaving || !promptText.trim()}>
+              New Version
+            </button>
+            <button className="btn danger-outline" onClick=${deletePromptVersion} disabled=${promptSaving || selectedPromptVersion?.is_builtin}>
+              Delete Version
+            </button>
+            ${promptSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+          </div>
+        </div>`}
+
+      ${tab==="replay" && html`
+        <div className="card">
+          <div className="form-section-title">Replay Captured Reporting Batch</div>
+          <div className="field-hint" style=${{marginBottom:12}}>
+            Captures are read from <span className="mono">${captureDbPath || "reporting debug DB"}</span>.
+          </div>
+          <div className="row" style=${{gap:8,alignItems:"center",marginBottom:12}}>
+            <select className="form-input" style=${{maxWidth:520}} value=${selectedCaptureId}
+              onChange=${e=>{ setSelectedCaptureId(e.target.value); setSelectedReplayVersionId(""); }}>
+              <option value="">Select a capture…</option>
+              ${captures.map(c=>html`
+                <option key=${c.id} value=${String(c.id)}>
+                  #${c.id} · ${c.kind === "writeup" ? "during-scan writeup" : "final reporting"} · ${fmtDate(c.created_at)} · ${truncUrl(c.url, 52)} · ${c.finding_count} findings
+                </option>`)}
+            </select>
+            <select className="form-input" style=${{maxWidth:300}} value=${selectedReplayVersionId}
+              onChange=${e=>setSelectedReplayVersionId(e.target.value)}>
+              <option value="">Select prompt version…</option>
+              ${replayPromptVersions.map(v=>html`
+                <option key=${v.id} value=${String(v.id)}>
+                  ${v.name}${v.is_builtin ? " (default)" : ""}
+                </option>`)}
+            </select>
+            <button className="btn secondary" onClick=${()=>loadCaptures().catch(e=>setError(e.message))}>Refresh</button>
+            <button className="btn" onClick=${startReplay} disabled=${replayBusy || !selectedCaptureId || !selectedReplayVersion?.id}>
+              ${replayBusy ? "Replaying…" : "Replay"}
+            </button>
+          </div>
+          ${selectedCapture && html`
+            <div className="settings-list-row" style=${{marginBottom:8}}>
+              <div>
+                <strong>Capture #${selectedCapture.id}</strong>
+                <div className="mono" style=${{fontSize:11,wordBreak:"break-all"}}>${selectedCapture.url}</div>
+                <div className="subtle">
+                  ${selectedCapture.kind === "writeup" ? `Source ${selectedCapture.source || "unknown"}` : `Model ${selectedCapture.llm?.model || "unknown"} · ${selectedCapture.llm?.provider || "unknown"}`}
+                </div>
+                <div className="subtle">Prompt version ${selectedReplayVersion?.name || "unknown"}</div>
+              </div>
+              <div><span className="finding-count-badge">${selectedCapture.finding_count}</span></div>
+            </div>
+            ${selectedCaptureDetail?.findings?.length > 0 && html`
+              <div style=${{marginBottom:12}}>
+                <div className="subtle" style=${{fontSize:11,fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>Original findings in this capture</div>
+                <${DebugFindingsTable}
+                  findings=${selectedCaptureDetail.findings}/>
+              </div>`}
+          `}
+          ${replay && html`
+            <div className="activity-token-bar" style=${{cursor:"default"}}>
+              ${["queued","running"].includes(replay.status) && html`<span className="inline-spinner"></span>`}
+              <span className="token-bar-label">${replay.status}</span>
+              <span>${replay.progress_message || ""}</span>
+              ${replay.prompt_version_name && html`<span className="source-badge">${replay.prompt_version_name}</span>`}
+              ${replay.error && html`<span className="alert error" style=${{marginLeft:8}}>${replay.error}</span>`}
+            </div>
+            ${replay.status==="complete" && html`
+              <div className="row" style=${{gap:8,marginTop:12}}>
+                <button className="btn" onClick=${()=>setTab("findings")}>
+                  View ${replay.finding_count} Debug Finding${replay.finding_count===1?"":"s"}
+                </button>
+              </div>`}
+          `}
+        </div>`}
+
+      ${tab==="findings" && html`
+        <div className="card">
+          <div className="form-section-title">Debug Reporter Findings</div>
+          <div className="row" style=${{gap:8,alignItems:"center",marginBottom:12}}>
+            <select className="form-input" style=${{maxWidth:460}} value=${selectedReplayId}
+              onChange=${e=>setSelectedReplayId(e.target.value)}>
+              <option value="">Select a replay…</option>
+              ${replays.map(r=>html`
+                <option key=${r.id} value=${String(r.id)}>
+                  Replay #${r.id} · ${r.prompt_version_name || "unknown version"} · ${r.status} · ${fmtDate(r.started_at)} · ${r.finding_count} findings
+                </option>`)}
+            </select>
+            <select className="form-input" style=${{maxWidth:460}} value=${compareReplayId}
+              onChange=${e=>setCompareReplayId(e.target.value)}>
+              <option value="">Compare with…</option>
+              ${replays.filter(r=>String(r.id)!==String(selectedReplayId)).map(r=>html`
+                <option key=${r.id} value=${String(r.id)}>
+                  Replay #${r.id} · ${r.prompt_version_name || "unknown version"} · ${r.status} · ${fmtDate(r.started_at)}
+                </option>`)}
+            </select>
+            <button className="btn secondary" onClick=${()=>loadReplays().catch(e=>setError(e.message))}>Refresh</button>
+          </div>
+          ${compareReplay
+            ? html`
+              <div style=${{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:16}}>
+                <div>
+                  <div className="form-section-title">Replay #${replay?.id || "—"} · ${replay?.prompt_version_name || "unknown version"}</div>
+                  ${currentFindings.length === 0
+                    ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+                    : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
+                </div>
+                <div>
+                  <div className="form-section-title">Replay #${compareReplay.id} · ${compareReplay.prompt_version_name || "unknown version"}</div>
+                  ${compareFindings.length === 0
+                    ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+                    : html`<${DebugFindingsTable} findings=${compareFindings}/>`}
+                </div>
+              </div>`
+            : currentFindings.length === 0
+              ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>No debug findings for this replay.</div>`
+              : html`<${DebugFindingsTable} findings=${currentFindings}/>`}
+        </div>`}
+    </div>`;
+}
+
+function DebugFindingsTable({ findings }) {
+  const [expandedFinding, setExpandedFinding] = useState(null);
+  const SEV_ORDER = {critical:0,high:1,medium:2,low:3,info:4};
+  const sorted = [...findings].sort((a,b)=>(SEV_ORDER[a.severity]??99)-(SEV_ORDER[b.severity]??99));
+  return html`
+    <div className="findings-table-wrap">
+      <table className="findings-table" style=${{tableLayout:"fixed",width:"100%"}}>
+        <colgroup><col style=${{width:80}}/><col/></colgroup>
+        <thead>
+          <tr><th>Sev</th><th>Title</th></tr>
+        </thead>
+        <tbody>
+          ${sorted.map((f,idx)=>html`
+            <tr key=${idx} className="finding-group-row"
+              onClick=${()=>setExpandedFinding(expandedFinding===idx?null:idx)}>
+              <td><span className=${"sev-badge sev-"+(f.severity||"info")}>${f.severity||"info"}</span></td>
+              <td className="finding-title" style=${{width:"100%"}}>
+                <div className="row" style=${{alignItems:"flex-start",gap:8}}>
+                  <div style=${{flex:1,minWidth:0}}>
+                    <span className="group-chevron">${expandedFinding===idx?"▾":"▸"}</span>
+                    ${f.title || "Untitled finding"}
+                    <div className="mono" style=${{fontSize:11,wordBreak:"break-all",marginTop:4}}>${f.affected_url || ""}</div>
+                  </div>
+                  ${f.cvss_score != null && html`<span className="subtle" style=${{whiteSpace:"nowrap",fontSize:11,paddingTop:2}}>${f.cvss_score}</span>`}
+                </div>
+              </td>
+            </tr>
+            ${expandedFinding===idx && html`
+              <tr className="finding-evidence-row">
+                <td colSpan="2">
+                  <div className="finding-description">
+                    <div><strong>Description</strong></div><div>${markdownText(f.description) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${markdownText(f.impact) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${markdownText(f.likelihood) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${markdownText(f.recommendation) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
+                    <div>${f.cvss_score ?? "—"} ${f.cvss_vector && html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>`}</div>
+                  </div>
+                  ${f.evidence && html`<pre className="finding-evidence">${f.evidence}</pre>`}
+                </td>
+              </tr>`}
+          `)}
+        </tbody>
+      </table>
     </div>`;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
+function parseDate(val) {
+  if (!val) return new Date(val);
+  if (val instanceof Date) return val;
+  let s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) {
+    s = s.replace(" ", "T");
+    if (!s.endsWith("Z")) {
+      s += "Z";
+    }
+  }
+  return new Date(s);
+}
+
 function fmtDate(iso) {
-  return iso ? new Date(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
+  return iso ? parseDate(iso).toLocaleString(undefined, {dateStyle:"short",timeStyle:"short"}) : "—";
 }
 
 function truncUrl(url, maxLen=40) {
@@ -2473,10 +9088,245 @@ function truncUrl(url, maxLen=40) {
   } catch { return url.slice(0, maxLen); }
 }
 
+function sourceLabel(source) {
+  const labels = {
+    alice: "A.L.I.C.E",
+    dynamic_scan: "Dynamic",
+    burp_active_scan: "Burp",
+    burp_mcp: "Burp MCP",
+    deterministic_probe: "Deterministic",
+    manual_import: "Imported",
+    debug_reporter: "Debug Reporter",
+    unknown: "Unknown",
+  };
+  return labels[source] || String(source || "Unknown").replace(/_/g, " ");
+}
+
 function apiTranscriptText(text) {
   if (!text) return "";
   const value = String(text).trim();
   return value.includes("REQUEST\n") && value.includes("RESPONSE\n") ? value : "";
+}
+
+function markdownText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "object") {
+    // Flatten content-block shapes ({text}/[{text}]) the LLM sometimes returns
+    // so they never render as the literal "[object Object]".
+    if (Array.isArray(value)) return value.map(markdownText).filter(Boolean).join("\n").trim();
+    if (typeof value.text === "string") return value.text.trim();
+    try { return JSON.stringify(value); } catch (_) { return ""; }
+  }
+  return String(value).trim();
+}
+
+function markdownListValue(value) {
+  const text = markdownText(value);
+  return text || "—";
+}
+
+function markdownCodeBlock(value) {
+  const text = markdownText(value);
+  if (!text) return "—";
+  const fence = text.includes("```") ? "````" : "```";
+  return `${fence}\n${text}\n${fence}`;
+}
+
+function slugForFilename(value) {
+  return String(value || "issues")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "issues";
+}
+
+function markdownExportFilename(run, siteName) {
+  const base = slugForFilename(run?.name || siteName || `run-${run?.id || "issues"}`);
+  const date = new Date().toISOString().slice(0, 10);
+  return `${base}-issues-${date}.md`;
+}
+
+function downloadTextFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function findingsToMarkdown(findings, meta = {}) {
+  const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
+  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4,low_confidence:4};
+  const sorted = [...(findings || [])].sort((a, b) => {
+    const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
+    if (sev !== 0) return sev;
+    const val = (valOrder[a.validation_status] ?? 99) - (valOrder[b.validation_status] ?? 99);
+    if (val !== 0) return val;
+    return String(a.title || "").localeCompare(String(b.title || ""));
+  });
+  const lines = [
+    `# Issue Export${meta.runName ? `: ${meta.runName}` : ""}`,
+    "",
+  ];
+  if (meta.siteName) lines.push(`- Site: ${meta.siteName}`);
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total findings: ${sorted.length}`, "");
+  lines.push(
+    "<!-- aespa-findings-json",
+    encodeURIComponent(JSON.stringify(sorted.map(findingImportPayload))),
+    "-->",
+    "",
+  );
+
+  sorted.forEach((f, idx) => {
+    lines.push(
+      `## ${idx + 1}. ${markdownListValue(f.title)}`,
+      "",
+      `- Severity: ${markdownListValue(f.severity)}`,
+      `- OWASP: ${markdownListValue(f.owasp_category)}`,
+      ...(f.owasp_api_category ? [`- OWASP API: ${markdownListValue(f.owasp_api_category)}`] : []),
+      `- Source: ${markdownListValue(sourceLabel(f.finding_source))}`,
+
+      `- Validation: ${markdownListValue(f.validation_status)}`,
+      `- Affected URL: ${markdownListValue(f.affected_url)}`,
+      `- CVSS: ${markdownListValue(f.cvss_score)}${f.cvss_vector ? ` (${f.cvss_vector})` : ""}`,
+      "",
+      "### Description",
+      markdownListValue(f.description),
+      "",
+      "### Impact",
+      markdownListValue(f.impact),
+      "",
+      "### Likelihood",
+      markdownListValue(f.likelihood),
+      "",
+      "### Recommendation",
+      markdownListValue(f.recommendation),
+      "",
+      "### Evidence",
+      markdownCodeBlock(f.evidence || f.response_evidence || f.request_evidence),
+      "",
+    );
+    if (f.request_evidence) {
+      lines.push("### Request Evidence", markdownCodeBlock(f.request_evidence), "");
+    }
+    if (f.response_evidence) {
+      lines.push("### Response Evidence", markdownCodeBlock(f.response_evidence), "");
+    }
+    if (f.validation_note) {
+      lines.push("### Validation Note", markdownListValue(f.validation_note), "");
+    }
+    if (f.poc_command) {
+      lines.push("### Validation Command", markdownCodeBlock(f.poc_command), "");
+    }
+    if (f.poc_setup) {
+      lines.push("### Validation Setup", f.poc_setup, "");
+    }
+    const mergedInstances = (() => {
+      try { return JSON.parse(f.merged_instances || "[]"); } catch (_) { return []; }
+    })();
+    if (mergedInstances.length > 0) {
+      lines.push("### Additional Instances", "");
+      mergedInstances.forEach((inst, idx) => {
+        lines.push(`- **Instance ${idx + 2}:** \`${inst.url || "\u2014"}\``);
+        const ev = inst.request_evidence || inst.evidence;
+        if (ev) lines.push("", markdownCodeBlock(ev), "");
+      });
+      lines.push("");
+    }
+  });
+
+  return lines.join("\n");
+}
+
+function findingImportPayload(f) {
+  return {
+    owasp_category: f.owasp_category || "A00",
+    severity: f.severity || "info",
+    title: f.title || "Imported finding",
+    description: f.description || "",
+    impact: f.impact || "",
+    likelihood: f.likelihood || "",
+    recommendation: f.recommendation || "",
+    cvss_score: Number(f.cvss_score) || 0,
+    cvss_vector: f.cvss_vector || "",
+    affected_url: f.affected_url || "",
+    evidence: f.evidence || "",
+    request_evidence: f.request_evidence || "",
+    response_evidence: f.response_evidence || "",
+    finding_source: f.finding_source || "manual_import",
+    validation_status: f.validation_status || "unvalidated",
+    validation_note: f.validation_note || null,
+    merged_instances: f.merged_instances || "[]",
+    poc_command: f.poc_command || "",
+    poc_setup: f.poc_setup || "",
+  };
+}
+
+function parseFindingsMarkdown(markdown) {
+  const text = String(markdown || "");
+  const embedded = text.match(/<!--\s*aespa-findings-json\s+([\s\S]*?)\s+-->/);
+  if (embedded) {
+    const parsed = JSON.parse(decodeURIComponent(embedded[1].trim()));
+    if (Array.isArray(parsed)) return parsed.map(findingImportPayload);
+  }
+  return parseFindingsMarkdownSections(text);
+}
+
+function parseFindingsMarkdownSections(markdown) {
+  const matches = [...markdown.matchAll(/^##\s+\d+\.\s+(.+)$/gm)];
+  return matches.map((match, idx) => {
+    const start = match.index + match[0].length;
+    const end = idx + 1 < matches.length ? matches[idx + 1].index : markdown.length;
+    const block = markdown.slice(start, end);
+    const cvss = markdownBullet(block, "CVSS");
+    const cvssMatch = cvss.match(/^([0-9.]+)(?:\s+\((.*)\))?$/);
+    return findingImportPayload({
+      title: match[1],
+      severity: markdownBullet(block, "Severity"),
+      owasp_category: markdownBullet(block, "OWASP"),
+      finding_source: markdownBullet(block, "Source") || "manual_import",
+      validation_status: markdownBullet(block, "Validation"),
+      affected_url: markdownBullet(block, "Affected URL"),
+      cvss_score: cvssMatch ? parseFloat(cvssMatch[1]) : 0,
+      cvss_vector: cvssMatch?.[2] || "",
+      description: markdownSection(block, "Description"),
+      impact: markdownSection(block, "Impact"),
+      likelihood: markdownSection(block, "Likelihood"),
+      recommendation: markdownSection(block, "Recommendation"),
+      evidence: stripMarkdownFence(markdownSection(block, "Evidence")),
+      request_evidence: stripMarkdownFence(markdownSection(block, "Request Evidence")),
+      response_evidence: stripMarkdownFence(markdownSection(block, "Response Evidence")),
+      validation_note: markdownSection(block, "Validation Note") || null,
+      poc_command: stripMarkdownFence(markdownSection(block, "Validation Command")),
+      poc_setup: markdownSection(block, "Validation Setup"),
+    });
+  });
+}
+
+function markdownBullet(block, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`^- ${escaped}: (.*)$`, "m"));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function markdownSection(block, title) {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = block.match(new RegExp(`### ${escaped}\\n([\\s\\S]*?)(?=\\n### |$)`));
+  const value = match?.[1]?.trim() || "";
+  return value === "—" ? "" : value;
+}
+
+function stripMarkdownFence(value) {
+  const text = markdownText(value);
+  const match = text.match(/^(`{3,4})\n([\s\S]*)\n\1$/);
+  return match ? match[2] : text;
 }
 
 createRoot(document.getElementById("root")).render(html`<${App}/>`);

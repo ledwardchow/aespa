@@ -1,7 +1,10 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from aespa.db import get_session
+from aespa.models import ScannerSession, TargetIntelItem
 
 
 def _make_site(client: TestClient, **kw):
@@ -37,6 +40,7 @@ def test_create_run_uses_global_scan_policy(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["scan_mode"] = "aggressive"
     policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 140
     client.put("/api/settings/scanner-policy", json=policy)
 
     site = _make_site(client)
@@ -46,6 +50,7 @@ def test_create_run_uses_global_scan_policy(client: TestClient):
     assert data["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["scan_mode"] == "aggressive"
     assert data["scanner_policy"]["max_probes_per_page"] == 7
+    assert data["scanner_policy"]["thinking_max_steps"] == 140
 
 
 def test_create_run_auto_increments(client: TestClient):
@@ -69,6 +74,29 @@ def test_list_runs_unknown_site(client: TestClient):
     assert r.status_code == 404
 
 
+
+def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monkeypatch):
+    from aespa.services import scanner as scanner_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"])
+    monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {
+        "status": "analysing",
+        "findings_count": 1,
+    })
+
+    r = client.get("/api/test-runs/active")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert data[0]["job_type"] == "Dynamic Scan"
+    assert data[0]["status"] == "analysing"
+    assert data[0]["findings_count"] == 1
+
+
 def test_get_run(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -77,10 +105,280 @@ def test_get_run(client: TestClient):
     assert r.json()["id"] == run["id"]
 
 
-def test_run_summary_prefers_live_scan_status(monkeypatch):
-    from aespa import models as _models  # noqa: F401
+def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/accounts",
+            value="https://target.local/api/accounts",
+            url="https://target.local/dashboard",
+            method="GET",
+            source="dom_link",
+            confidence=0.8,
+            evidence="Accounts",
+            item_metadata='{"page_url":"https://target.local/dashboard"}',
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="input",
+            key="account_id",
+            value="request_body",
+            url="https://target.local/api/transfers",
+            method="POST",
+            source="api_request",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.get(f"/api/test-runs/{run['id']}/target-intelligence")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"] == {"endpoint": 1, "input": 1}
+    assert {item["kind"] for item in data["items"]} == {"endpoint", "input"}
+    endpoint = next(item for item in data["items"] if item["kind"] == "endpoint")
+    assert endpoint["item_metadata"]["page_url"] == "https://target.local/dashboard"
+
+
+def test_seed_task_graph_from_target_intelligence(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="endpoint",
+            key="/api/health",
+            value="https://target.local/api/health",
+            url="https://target.local/api/health",
+            method="GET",
+            source="js_asset",
+            evidence="public asset referenced /api/health",
+        ))
+        session.add(TargetIntelItem(
+            test_run_id=run["id"],
+            kind="response_field",
+            key="password_hash",
+            value="string",
+            url="https://target.local/api/me",
+            method="GET",
+            source="response_body",
+            evidence="profile response contained password_hash",
+        ))
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    r = client.post(f"/api/test-runs/{run['id']}/task-graph/seed")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"]["hypotheses"] >= 2
+    assert data["counts"]["tasks"] >= 2
+    titles = {h["title"] for h in data["hypotheses"]}
+    assert "Public operational/config endpoint exposure" in titles
+    assert "Sensitive field exposure" in titles
+    task_targets = {t["target_url"] for t in data["tasks"]}
+    assert "https://target.local/api/health" in task_targets
+    assert "https://target.local/api/me" in task_targets
+
+
+def test_import_findings_creates_findings_and_pages(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [{
+        "owasp_category": "A01",
+        "severity": "high",
+        "title": "Imported authorization bypass",
+        "description": "A protected resource is accessible.",
+        "impact": "Unauthorized data access.",
+        "likelihood": "Likely",
+        "recommendation": "Enforce authorization checks.",
+        "cvss_score": 8.1,
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+        "affected_url": "https://target.local/admin",
+        "evidence": "GET /admin returned 200",
+        "request_evidence": "GET /admin",
+        "response_evidence": "Status: 200",
+        "evidence_items": [{"type": "status", "label": "HTTP status", "value": "200"}],
+        "finding_source": "manual_import",
+        "validation_status": "confirmed",
+        "validation_note": "Imported validated issue.",
+    }]
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/import", json=payload)
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["imported"] == 1
+    finding = data["findings"][0]
+    assert finding["title"] == "Imported authorization bypass"
+    assert finding["validation_status"] == "confirmed"
+    assert finding["finding_source"] == "manual_import"
+    assert finding["affected_url"] == "https://target.local/admin"
+    assert finding["evidence_items"][0]["type"] == "status"
+    run_after = client.get(f"/api/test-runs/{run['id']}").json()
+    assert run_after["pages_discovered"] == 1
+
+
+def test_deduplicate_findings_removes_substantially_same_targets(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    other_run = _make_run(client, site["id"]).json()
+
+    duplicate_payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Broken object level authorization exposes account records",
+            "description": (
+                "The account details endpoint returns private account data "
+                "for object reference 123."
+            ),
+            "impact": "An attacker can read another user's account data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/accounts/123",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "medium",
+            "title": "Broken object-level authorization exposes account records",
+            "description": (
+                "The account details endpoint returns private account data "
+                "for object reference 456."
+            ),
+            "impact": "An attacker can read another user's account data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/accounts/456",
+            "validation_status": "confirmed",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Broken object level authorization exposes order records",
+            "description": (
+                "The order details endpoint returns private order data "
+                "for object reference 123."
+            ),
+            "impact": "An attacker can read another user's order data.",
+            "recommendation": "Enforce object-level authorization checks.",
+            "affected_url": "https://target.local/api/orders/123",
+        },
+    ]
+
+    imported = client.post(
+        f"/api/test-runs/{run['id']}/findings/import",
+        json=duplicate_payload,
+    ).json()["findings"]
+    other_imported = client.post(
+        f"/api/test-runs/{other_run['id']}/findings/import",
+        json=[duplicate_payload[0]],
+    ).json()["findings"][0]
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/deduplicate")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_before"] == 3
+    assert data["total_after"] == 2
+    assert data["removed"] == 1
+    assert data["groups"][0]["kept_id"] == imported[1]["id"]
+    assert data["groups"][0]["removed_ids"] == [imported[0]["id"]]
+
+    findings = client.get(f"/api/test-runs/{run['id']}/findings").json()
+    assert {f["id"] for f in findings} == {imported[1]["id"], imported[2]["id"]}
+    other_findings = client.get(f"/api/test-runs/{other_run['id']}/findings").json()
+    assert other_findings[0]["id"] == other_imported["id"]
+
+
+def test_deduplicate_findings_unknown_run(client: TestClient):
+    r = client.post("/api/test-runs/9999/findings/deduplicate")
+    assert r.status_code == 404
+
+
+def test_deduplicate_findings_uses_llm_for_semantic_matches(
+    client: TestClient,
+    monkeypatch,
+):
+    from aespa.api import scan as scan_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Invoice export exposes arbitrary tenant documents",
+            "description": (
+                "The export workflow returns files for invoice 111 when "
+                "requested by another tenant."
+            ),
+            "impact": "Confidential documents can be disclosed.",
+            "recommendation": "Scope export access to tenant ownership.",
+            "affected_url": "https://target.local/api/invoices/111/export",
+        },
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Missing authorization check in download workflow",
+            "description": (
+                "A user can fetch document 222 from the download route despite "
+                "not owning it."
+            ),
+            "impact": "Sensitive files from another organization can be retrieved.",
+            "recommendation": "Verify ownership before serving files.",
+            "affected_url": "https://target.local/api/invoices/222/export",
+        },
+    ]
+    imported = client.post(
+        f"/api/test-runs/{run['id']}/findings/import",
+        json=payload,
+    ).json()["findings"]
+    calls = []
+
+    async def fake_llm_dedupe(config, *, target, findings):  # noqa: ARG001
+        calls.append({"target": target, "findings": findings})
+        return [[imported[0]["id"], imported[1]["id"]]]
+
+    monkeypatch.setattr(scan_api, "get_llm_config_for_run", lambda session, run: object())
+    monkeypatch.setattr(
+        scan_api.findings_svc.llm_svc,
+        "deduplicate_finding_groups",
+        fake_llm_dedupe,
+    )
+
+    r = client.post(f"/api/test-runs/{run['id']}/findings/deduplicate")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["llm_used"] is True
+    assert data["removed"] == 1
+    assert calls
+    assert len(client.get(f"/api/test-runs/{run['id']}/findings").json()) == 1
+
+
+def test_get_scanner_sessions_redacts_auth_material():
     from aespa.api import test_runs as test_runs_api
-    from aespa.models import Site, TestRun, TestRunStatus
+    from aespa.models import Site, TestRun
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -91,28 +389,95 @@ def test_run_summary_prefers_live_scan_status(monkeypatch):
 
     try:
         with Session(engine) as session:
-            from aespa.services import scanner as scanner_svc
-
             site = Site(name="Target", base_url="https://target.local")
             session.add(site)
             session.commit()
             session.refresh(site)
 
-            run = TestRun(
-                site_id=site.id,
-                name="Run #1",
-                status=TestRunStatus.complete,
-                error_message="scan:complete",
-            )
+            run = TestRun(site_id=site.id, name="Run #1")
             session.add(run)
             session.commit()
             session.refresh(run)
 
-            monkeypatch.setattr(scanner_svc, "is_running", lambda run_id: run_id == run.id)
+            session.add(ScannerSession(
+                test_run_id=run.id,
+                label="configured_primary",
+                kind="mixed",
+                username="alice",
+                credential_id=3,
+                source="test",
+                cookies_json='{"sid":"secret-cookie"}',
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+                session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
+                token_hint="secret...token",
+            ))
+            session.commit()
 
-            summary = test_runs_api._run_summary(run, session)
+            summary = test_runs_api.get_scanner_sessions(run.id, session=session)
 
-        assert summary.scan_status == "running"
+        assert summary.counts["total"] == 1
+        item = summary.sessions[0]
+        assert item.label == "configured_primary"
+        assert item.cookie_names == ["sid"]
+        assert item.header_names == ["Authorization"]
+        assert item.session_metadata["login_url"] == "https://target.local/login"
+        assert item.session_metadata["password"] == "[REDACTED]"
+        assert "secret-cookie" not in item.model_dump_json()
+        assert "secret-token" not in item.model_dump_json()
+        assert "generated-secret" not in item.model_dump_json()
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_update_scanner_session_renames_and_deactivates():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import Site, TestRun
+    from aespa.schemas import ScannerSessionUpdate
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            record = ScannerSession(
+                test_run_id=run.id,
+                label="discovered_token",
+                kind="bearer",
+                source="test",
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+
+            updated = test_runs_api.update_scanner_session(
+                run.id,
+                record.id,
+                ScannerSessionUpdate(label="Forged Admin", is_active=False),
+                session=session,
+            )
+
+            summary = test_runs_api.get_scanner_sessions(run.id, include_inactive=True, session=session)
+
+        assert updated.label == "forged_admin"
+        assert updated.is_active is False
+        assert summary.counts["inactive"] == 1
+        assert summary.sessions[0].label == "forged_admin"
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -146,12 +511,14 @@ def test_create_run_invalid_max_pages(client: TestClient):
 def test_run_scan_policy_tracks_global_defaults(client: TestClient):
     policy = client.get("/api/settings/scanner-policy").json()
     policy["max_probes_per_page"] = 7
+    policy["thinking_max_steps"] = 90
     client.put("/api/settings/scanner-policy", json=policy)
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
     assert run["scanner_policy"]["source"] == "global_default"
     assert run["scanner_policy"]["max_probes_per_page"] == 7
+    assert run["scanner_policy"]["thinking_max_steps"] == 90
 
     policy["max_probes_per_page"] = 30
     policy["scan_mode"] = "passive"
@@ -213,84 +580,16 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     assert r.json()["status"] == "stopped"
 
 
-def test_normal_scan_start_does_not_start_thinking_scan(client: TestClient, monkeypatch):
-    from aespa.api import scan as scan_api
-
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    calls = {"normal": [], "thinking": []}
-
-    async def fake_start_scan(run_id, page_ids=None):
-        calls["normal"].append((run_id, page_ids))
-
-    async def fake_start_thinking_scan(run_id):
-        calls["thinking"].append(run_id)
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "get_scan_status", lambda run_id: {
-        "total_pages": 0,
-        "pages_done": 0,
-        "findings_count": 0,
-        "status": "running",
-    })
-
-    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
-
-    assert r.status_code == 200
-    assert calls["normal"] == [(run["id"], None)]
-    assert calls["thinking"] == []
-    assert r.json()["status"] == "running"
-
-
-def test_thinking_scan_start_does_not_start_normal_scan(client: TestClient, monkeypatch):
-    from aespa.api import scan as scan_api
-
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-    calls = {"normal": [], "thinking": []}
-
-    async def fake_start_scan(run_id, page_ids=None):
-        calls["normal"].append((run_id, page_ids))
-
-    async def fake_start_thinking_scan(run_id):
-        calls["thinking"].append(run_id)
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_scan", fake_start_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "start_thinking_scan", fake_start_thinking_scan)
-    monkeypatch.setattr(scan_api.scanner_svc, "get_thinking_scan_status", lambda run_id: {
-        "status": "running",
-    })
-
-    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
-
-    assert r.status_code == 200
-    assert calls["normal"] == []
-    assert calls["thinking"] == [run["id"]]
-    assert r.json()["status"] == "running"
-
-
-def test_scan_modes_block_each_other(client: TestClient, monkeypatch):
+def test_thinking_scan_start_blocked_when_already_running(client: TestClient, monkeypatch):
     from aespa.api import scan as scan_api
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
 
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: True)
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: False)
-    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
-    assert r.status_code == 409
-    assert r.json()["detail"] == "Scan already running"
-
-    monkeypatch.setattr(scan_api.scanner_svc, "is_running", lambda run_id: False)
     monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
-    r = client.post(f"/api/test-runs/{run['id']}/scan/start")
+    r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
     assert r.status_code == 409
-    assert r.json()["detail"] == "Thinking scan already running"
+    assert r.json()["detail"] == "Dynamic Scan already running"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────
@@ -311,6 +610,99 @@ def test_list_pages_empty(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}/pages")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_clear_crawl_resets_run_without_restarting(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+    from aespa.main import create_app
+    from aespa.models import (
+        CrawledPage,
+        PageCredentialView,
+        PageLink,
+        ScanFinding,
+        Site,
+        TestRun,
+        TestRunStatus,
+    )
+    from aespa.services import crawler as crawler_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    started: list[int] = []
+
+    async def fake_start_crawl(run_id: int) -> None:
+        started.append(run_id)
+
+    monkeypatch.setattr(crawler_svc, "start_crawl", fake_start_crawl)
+
+    def _override_session():
+        with Session(engine) as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = TestRun(
+                site_id=site.id,
+                name="Run #1",
+                status=TestRunStatus.complete,
+                pages_discovered=1,
+                current_url="https://target.local/account",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            page = CrawledPage(test_run_id=run.id, url="https://target.local/account")
+            session.add(page)
+            session.commit()
+            session.refresh(page)
+            session.add(PageLink(test_run_id=run.id, source_page_id=page.id, target_url="https://target.local/next"))
+            session.add(PageCredentialView(test_run_id=run.id, page_id=page.id, username="alice"))
+            session.add(TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account"))
+            finding = ScanFinding(
+                test_run_id=run.id,
+                page_id=page.id,
+                owasp_category="A01",
+                severity="medium",
+                title="Finding",
+                description="Desc",
+            )
+            session.add(finding)
+            session.commit()
+            run_id = run.id
+            finding_id = finding.id
+
+        with TestClient(app, raise_server_exceptions=True) as api_client:
+            response = api_client.post(f"/api/test-runs/{run_id}/crawl/clear")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "pending"
+        assert data["pages_discovered"] == 0
+        assert data["current_url"] is None
+        assert started == []
+
+        with Session(engine) as session:
+            assert session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all() == []
+            assert session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all() == []
+            assert session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all() == []
+            assert session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all() == []
+            finding_after = session.get(ScanFinding, finding_id)
+            assert finding_after is not None
+            assert finding_after.page_id is None
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 # ── Cascaded delete when site is deleted ──────────────────────────────────────
