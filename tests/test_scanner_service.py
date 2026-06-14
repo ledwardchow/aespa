@@ -68,6 +68,7 @@ def test_load_findings_snapshot_returns_existing_findings(monkeypatch):
         snapshot = scanner._load_findings_snapshot(7)
 
         assert len(snapshot) == 1
+        assert snapshot[0]["id"] == 1
         assert snapshot[0]["title"] == "SQL injection in /search"
         assert snapshot[0]["owasp"] == "A03"
 
