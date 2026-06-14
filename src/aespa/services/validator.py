@@ -121,6 +121,17 @@ async def validate_finding_inline(
         run = s.get(TestRun, run_id)
         if finding is None or run is None:
             return
+        # Defensive: never run the site validator against an API-scan finding.
+        # ApiTestRun and TestRun share an integer id space across separate tables,
+        # so a stray inline-validation call with an ApiTestRun id can resolve to a
+        # colliding (wrong) Site here. API findings are recorded via report_finding
+        # and are not validated through the site/TestRun pipeline.
+        if finding.api_test_run_id is not None:
+            log.info(
+                "Skipping inline validation for API finding %s (run_id=%s)",
+                finding_id, run_id,
+            )
+            return
         site = s.get(Site, run.site_id)
         if llm_cfg is None:
             llm_cfg = get_llm_config(s)
