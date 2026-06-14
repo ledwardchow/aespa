@@ -989,6 +989,30 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "required": ["attack_class", "target_url", "rationale"],
         },
     },
+    {
+        "name": "remove_finding",
+        "description": (
+            "Delete a previously recorded finding from this scan. "
+            "Use only when a finding was written in error, is a confirmed duplicate, "
+            "or has been invalidated by subsequent testing. "
+            "Provide the finding_id returned by write_finding or report_finding, "
+            "or obtained via finding_list / context_tool(finding_list)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {
+                    "type": "integer",
+                    "description": "The numeric ID of the finding to delete.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for removal (e.g. duplicate, false positive).",
+                },
+            },
+            "required": ["finding_id"],
+        },
+    },
 ]
 
 
