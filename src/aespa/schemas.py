@@ -1143,21 +1143,6 @@ class ScanFindingImportResult(BaseModel):
     findings: list[ScanFindingOut]
 
 
-class ScanFindingDeduplicationGroup(BaseModel):
-    kept_id: int
-    removed_ids: list[int]
-    target: str
-    title: str
-
-
-class ScanFindingDeduplicationResult(BaseModel):
-    total_before: int
-    total_after: int
-    removed: int
-    llm_used: bool = False
-    groups: list[ScanFindingDeduplicationGroup]
-
-
 class ValidationStatusOut(BaseModel):
     total: int
     confirmed: int
