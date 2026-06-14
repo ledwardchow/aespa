@@ -42,6 +42,7 @@ _ALICE_TOOL_NAMES = {
     "http_request", "browser", "context_tool",
     "write_finding", "update_lead", "forge_jwt", "decode_jwt",
     "credential_check", "register_account", "agent_dispatch", "done",
+    "remove_finding",
 }
 
 
@@ -561,6 +562,40 @@ async def _execute_alice_tool(
         except Exception as exc:
             log.warning("ALICE update_lead error: %s", exc)
             return f"update_lead failed: {exc}"
+
+    # ── remove_finding ────────────────────────────────────────────────────────
+    if tool_name == "remove_finding":
+        from aespa.models import ScanFinding as _SF
+
+        finding_id = tool_input.get("finding_id")
+        reason = str(tool_input.get("reason") or "").strip()
+
+        if finding_id is None:
+            return "remove_finding requires finding_id."
+        try:
+            finding_id = int(finding_id)
+        except (TypeError, ValueError):
+            return "remove_finding: finding_id must be an integer."
+
+        with Session(get_engine()) as s:
+            finding = s.get(_SF, finding_id)
+            # Accept the finding if it belongs to this run, whether it was
+            # recorded against the web-scan (test_run_id) or API-scan
+            # (api_test_run_id) — run_id is the same value in both contexts.
+            if finding is None or (
+                finding.test_run_id != run_id
+                and finding.api_test_run_id != run_id
+            ):
+                return f"remove_finding: finding #{finding_id} not found for this run."
+            title = finding.title
+            s.delete(finding)
+            s.commit()
+
+        log.info(
+            "ALICE remove_finding run_id=%s finding_id=%s title=%r reason=%r",
+            run_id, finding_id, title, reason,
+        )
+        return f"Finding #{finding_id} '{title}' deleted successfully."
 
     return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
