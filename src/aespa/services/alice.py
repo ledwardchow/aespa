@@ -53,10 +53,16 @@ def _extract_user_directive(history: list[dict]) -> str:
     return "Prioritize general penetration testing."
 
 
-def _get_alice_tools() -> list[dict]:
-    """Return the full THINKING_AGENT_TOOLS list filtered to ALICE's allowed set."""
+def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
+    """Return the full THINKING_AGENT_TOOLS list filtered to ALICE's allowed set.
+
+    ``exclude`` drops tools by name — used to withhold the site-oriented
+    ``write_finding`` from API runs, which record findings via the API-aware
+    ``report_finding`` context_tool instead.
+    """
     from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
-    return [t for t in THINKING_AGENT_TOOLS if t["name"] in _ALICE_TOOL_NAMES]
+    allowed = _ALICE_TOOL_NAMES - (exclude or set())
+    return [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
 
 
 def _select_session(
@@ -1383,7 +1389,11 @@ async def run_api_alice_turn_stream(
             messages.append({"role": role, "content": text})
     messages.append({"role": "user", "content": initial_user_message})
 
-    alice_tools = _get_alice_tools()
+    # API runs record findings via the API-aware report_finding context_tool.
+    # Withhold the site-oriented write_finding tool, which would persist the
+    # finding against the TestRun/Site tables and trigger the site validator with
+    # an ApiTestRun id (wrong/colliding cross-table lookup → stuck validation).
+    alice_tools = _get_alice_tools(exclude={"write_finding"})
     accumulated_thought = ""
     accumulated_message = ""
     step_count = 0
@@ -1460,8 +1470,9 @@ async def run_api_alice_turn_stream(
                         "text": (
                             "Your previous response did not call a tool. "
                             "Please continue by calling exactly one tool now — "
-                            "http_request, context_tool, write_finding, forge_jwt, "
-                            "decode_jwt, credential_check, register_account, agent_dispatch, or done."
+                            "http_request, context_tool (use report_finding to record a finding), "
+                            "forge_jwt, decode_jwt, credential_check, register_account, "
+                            "agent_dispatch, or done."
                         ),
                     }],
                 })
