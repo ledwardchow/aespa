@@ -155,7 +155,6 @@ const api = {
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
-  deduplicateFindings:   (id)       => req(`/api/test-runs/${id}/findings/deduplicate`, { method:"POST" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
@@ -4631,11 +4630,22 @@ function TestRunDetail({ runId, initialTab }) {
     setAliceGlobalRunning(false);
   };
 
-  const handleAliceSend = async () => {
-    if (!aliceInputText.trim() || aliceIsThinking) return;
-    const userText = aliceInputText;
-    setAliceInputText("");
+  // Core ALICE turn submission. `handleAliceSend` drives this from the chat input,
+  // but other UI affordances (e.g. the De-duplicate Issues button) reuse it so a
+  // click does exactly what typing the same directive into the chat would do.
+  const submitAliceDirective = (rawText, { fromInput = false, onComplete = null } = {}) => {
+    const userText = (rawText || "").trim();
+    if (!userText || aliceIsThinking) return;
+    if (fromInput) setAliceInputText("");
     const currentTabId = activeAliceTabId;
+
+    // Make sure the A.L.I.C.E. panel is expanded so the user can watch it work.
+    setCollapsedAgentIds(prev => {
+      if (!prev.has("alice")) return prev;
+      const next = new Set(prev);
+      next.delete("alice");
+      return next;
+    });
 
     const userMsg = {
       id: Date.now().toString(),
@@ -4702,7 +4712,7 @@ function TestRunDetail({ runId, initialTab }) {
       historyPayload,
       thinkMsgId,
       replyMsgId,
-      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); if (onComplete) onComplete(null); },
       onFail: (err) => {
         if (err.name === "AbortError") {
           setAliceChats(prev => prev.map(tab => {
@@ -4731,9 +4741,12 @@ function TestRunDetail({ runId, initialTab }) {
         }
         setAliceThinkingTabId(null);
         setAliceGlobalRunning(false);
+        if (onComplete) onComplete(err);
       },
     });
   };
+
+  const handleAliceSend = () => submitAliceDirective(aliceInputText, { fromInput: true });
 
 
   const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
@@ -5576,21 +5589,30 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(err) { setError(err.message); setValidateBusy(false); }
   };
 
-  const onDeduplicateFindings = async () => {
-    if (dedupeBusy) return;
+  // The directive sent to A.L.I.C.E. when the user clicks "De-duplicate Issues".
+  // Clicking the button is equivalent to typing this into the A.L.I.C.E. chat, so
+  // the results match what users get when they ask A.L.I.C.E. to deduplicate.
+  const ALICE_DEDUP_DIRECTIVE =
+    "Review all of the findings recorded for this scan and remove duplicates. " +
+    "Use the finding_list context tool to load every finding, then identify the ones that " +
+    "describe the same vulnerability on the same endpoint or target, and remove the duplicates. " +
+    "If multiple findings describe the same underlying issue but with somewhat different details, " +
+    "you can consolidate them into a single finding by re-writing it (write a new issue then delete the " +
+    "superseded ones). Do not run any new HTTP requests, browser actions, or probes — this is a " +
+    "findings cleanup task only. When you finish, briefly summarize the changes made.";
+
+  const onDeduplicateFindings = () => {
+    if (dedupeBusy || aliceIsThinking) return;
     setDedupeBusy(true);
-    try {
-      const result = await api.deduplicateFindings(runId);
-      setFindings(await api.getFindings(runId));
-      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
-      if (result.removed > 0) {
+    submitAliceDirective(ALICE_DEDUP_DIRECTIVE, {
+      onComplete: () => {
+        api.getFindings(runId).then(setFindings).catch(() => {});
+        api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
         setExpandedFinding(null);
         setExpandedGroups(new Set());
-      }
-      const mode = result.llm_used ? " with LLM review" : "";
-      alert(`Removed ${result.removed} duplicate issue${result.removed === 1 ? "" : "s"}${mode}.`);
-    } catch(err) { setError(err.message); }
-    finally { setDedupeBusy(false); }
+        setDedupeBusy(false);
+      },
+    });
   };
 
   const onExportFindingsMarkdown = () => {
@@ -6087,7 +6109,7 @@ function TestRunDetail({ runId, initialTab }) {
             ${dedupeBusy && html`
               <span className="val-status-badge val-running dedupe-status">
                 <span className="inline-spinner"></span>
-                De-duplicating with LLM…
+                A.L.I.C.E. is de-duplicating issues…
               </span>`}
             <div className="row" style=${{gap:8,marginLeft:8}}>
               ${findings.length>0 && html`
@@ -6105,7 +6127,7 @@ function TestRunDetail({ runId, initialTab }) {
                   onClick=${onValidateAll}>✓ Validate Issues</button>`}
               ${findings.length>0 && html`
                 <button className="btn sm"
-                  disabled=${dedupeBusy||validateBusy||validateStatus?.status==="running"}
+                  disabled=${dedupeBusy||validateBusy||aliceIsThinking||validateStatus?.status==="running"}
                   onClick=${onDeduplicateFindings}>
                   ${dedupeBusy && html`<span className="inline-spinner"></span>`}
                   ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
