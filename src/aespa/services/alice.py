@@ -40,7 +40,7 @@ ALICE_MAX_STEPS = 40
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
     "http_request", "browser", "context_tool",
-    "write_finding", "forge_jwt", "decode_jwt",
+    "write_finding", "update_lead", "forge_jwt", "decode_jwt",
     "credential_check", "register_account", "agent_dispatch", "done",
 }
 
@@ -516,6 +516,45 @@ async def _execute_alice_tool(
                 )
             except Exception as exc:
                 return f"Browser fetch failed: {exc}"
+
+    # ── update_lead ───────────────────────────────────────────────────────────
+    if tool_name == "update_lead":
+        from aespa.services.scan_leads import update_lead as _update_lead
+
+        lead_id = tool_input.get("lead_id")
+        outcome = str(tool_input.get("outcome") or "")
+        note = str(tool_input.get("note") or "")
+        finding_id = tool_input.get("finding_id")
+
+        if lead_id is None or not outcome:
+            return "update_lead requires lead_id and outcome."
+
+        # Map outcome → status (same mapping as scanner.py)
+        status_map = {"confirmed": "confirmed", "dismissed": "dismissed", "inconclusive": "inconclusive"}
+        status = status_map.get(outcome.lower())
+        if status is None:
+            return f"Invalid outcome '{outcome}'. Must be confirmed, dismissed, or inconclusive."
+
+        try:
+            updated = _update_lead(
+                int(lead_id),
+                status=status,
+                note=note,
+                investigated_by_run_type="api",
+                investigated_by_run_id=run_id,
+                linked_finding_id=int(finding_id) if finding_id is not None else None,
+            )
+            if updated is None:
+                return f"Lead #{lead_id} not found."
+            return json.dumps({
+                "ok": True,
+                "lead_id": updated.id,
+                "status": updated.status,
+                "note": updated.note,
+            })
+        except Exception as exc:
+            log.warning("ALICE update_lead error: %s", exc)
+            return f"update_lead failed: {exc}"
 
     return f"Tool '{tool_name}' is not supported in the A.L.I.C.E. context."
 
@@ -1071,6 +1110,33 @@ def _run_api_context_tool(
             ],
         }
 
+    # ── lead_list ─────────────────────────────────────────────────────────────
+    if tool_name == "lead_list":
+        from aespa.services.scan_leads import get_open_leads_for_collection
+        try:
+            cap = max(1, min(50, int(args.get("limit") or 20)))
+        except (TypeError, ValueError):
+            cap = 20
+        leads = get_open_leads_for_collection(collection_id)[:cap]
+        return {
+            "tool": "lead_list",
+            "count": len(leads),
+            "leads": [
+                {
+                    "id": ld.id,
+                    "title": ld.title,
+                    "category": ld.category,
+                    "severity": ld.severity,
+                    "confidence_pct": int((ld.confidence or 0) * 100),
+                    "location": ld.location,
+                    "description": ld.description,
+                    "evidence": (ld.evidence or "")[:400],
+                    "status": ld.status,
+                }
+                for ld in leads
+            ],
+        }
+
     # ── finding_list ──────────────────────────────────────────────────────────
     if tool_name == "finding_list":
         from aespa.services.scanner import _load_findings_snapshot
@@ -1135,7 +1201,10 @@ def _run_api_context_tool(
     return {
         "tool": tool_name,
         "error": "unknown tool",
-        "available_tools": ["endpoint_list", "endpoint_detail", "collection_info", "finding_list", "report_finding"],
+        "available_tools": [
+            "endpoint_list", "endpoint_detail", "collection_info",
+            "finding_list", "report_finding", "lead_list",
+        ],
     }
 
 
@@ -1178,28 +1247,56 @@ async def run_api_alice_turn_stream(
 
     # Load stored API credentials into the session vault so http_request
     # can carry authentication automatically.
+    # `login` scheme creds (username:password + auth_endpoint) are NOT pre-loaded
+    # into the vault — they require a live POST to obtain a token/cookie.  Instead
+    # they are surfaced to the LLM in plain text (see creds_text below) so ALICE
+    # can perform the login step itself using http_request.
     from aespa.models import ApiCredential
     from sqlmodel import select as _sel
     session_vault: dict[str, dict] = {}
+    login_creds_for_llm: list[dict] = []
     with Session(get_engine()) as s:
         creds = list(s.exec(
             _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
         ).all())
     for cred in creds:
+        scheme = (cred.scheme or "").lower()
         label = cred.label or cred.scheme
-        entry: dict = {"label": label, "kind": cred.scheme, "cookies": {}, "extra_headers": {}}
-        if cred.scheme in ("bearer", "apikey"):
-            entry["extra_headers"] = {cred.name: f"Bearer {cred.value}" if cred.scheme == "bearer" else cred.value}
-        elif cred.scheme == "header":
+        if scheme == "login":
+            # Surface username/password/login_url to the LLM; do not pre-populate vault.
+            if ":" in (cred.value or ""):
+                uname, _, pword = cred.value.partition(":")
+            else:
+                uname, pword = label, cred.value
+            login_creds_for_llm.append({
+                "username": uname,
+                "password": pword,
+                "login_url": cred.auth_endpoint or "",
+                "label": label,
+            })
+            continue
+        entry: dict = {"label": label, "kind": scheme, "cookies": {}, "extra_headers": {}}
+        if scheme in ("bearer", "apikey"):
+            header_name = cred.name or "Authorization"
+            header_val = (
+                f"Bearer {cred.value}"
+                if scheme == "bearer" and not (cred.value or "").lower().startswith("bearer ")
+                else cred.value
+            )
+            entry["extra_headers"] = {header_name: header_val}
+        elif scheme == "header":
             entry["extra_headers"] = {cred.name: cred.value}
-        elif cred.scheme == "cookie":
-            entry["cookies"] = {cred.name: cred.value}
-        elif cred.scheme == "basic":
+        elif scheme == "cookie":
+            parts = (cred.value or "").split("=", 1)
+            cookie_name = parts[0].strip() if len(parts) == 2 else cred.name or "session"
+            cookie_val = parts[1].strip() if len(parts) == 2 else cred.value
+            entry["cookies"] = {cookie_name: cookie_val}
+        elif scheme == "basic":
             import base64 as _b64
-            encoded = _b64.b64encode(cred.value.encode()).decode()
+            encoded = _b64.b64encode((cred.value or "").encode()).decode()
             entry["extra_headers"] = {"Authorization": f"Basic {encoded}"}
         session_vault[label] = entry
-        # Mark the first credential as the default primary session.
+        # Mark the first non-login credential as the default primary session.
         if "configured_primary" not in session_vault:
             session_vault["configured_primary"] = entry
 
@@ -1228,6 +1325,54 @@ async def run_api_alice_turn_stream(
         user_directive=user_instruction,
     )
 
+    # Build login-credential block so ALICE knows how to authenticate.
+    creds_text = ""
+    if login_creds_for_llm:
+        c_lines = [
+            f"  - username={c['username']}  password={c['password']}"
+            + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
+            + (f"  store_as={c['label']}" if c.get("label") else "")
+            for c in login_creds_for_llm
+        ]
+        creds_text = (
+            "Test credentials (login-scheme — you must POST to the login endpoint first "
+            "to obtain a session token/cookie, then use forge_jwt or the Set-Cookie value "
+            "in subsequent requests via use_session):\n" + "\n".join(c_lines)
+        )
+
+    # Build session-vault summary for non-login pre-loaded sessions.
+    sessions_text = ""
+    if session_vault:
+        s_lines = [
+            f"  - label={label}  kind={sd.get('kind', 'bearer')}"
+            + (f"  username={sd.get('username')}" if sd.get("username") else "")
+            for label, sd in session_vault.items()
+            if label != "configured_primary"
+        ]
+        if s_lines:
+            sessions_text = (
+                "Pre-loaded sessions (use these labels with use_session to authenticate):\n"
+                + "\n".join(s_lines)
+            )
+
+    # Inject any open SAST leads so ALICE can investigate them.
+    leads_block = ""
+    try:
+        from aespa.services.scan_leads import format_leads_for_context
+        leads_block = format_leads_for_context(collection_id)
+    except Exception:
+        pass
+
+    # Build the initial user message, mirroring the scanner's pattern.
+    initial_parts = filter(None, [
+        f"Target: {base_url}",
+        creds_text,
+        sessions_text,
+        leads_block,
+        user_instruction,
+    ])
+    initial_user_message = "\n\n".join(initial_parts)
+
     # Convert history to Anthropic-format messages.
     messages: list[dict] = []
     for h in history:
@@ -1236,7 +1381,7 @@ async def run_api_alice_turn_stream(
         if sender and text:
             role = "user" if sender == "user" else "assistant"
             messages.append({"role": role, "content": text})
-    messages.append({"role": "user", "content": user_instruction})
+    messages.append({"role": "user", "content": initial_user_message})
 
     alice_tools = _get_alice_tools()
     accumulated_thought = ""
