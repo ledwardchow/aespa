@@ -53,6 +53,7 @@ const api = {
   getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
   clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  deleteApiFinding:    (id,fid)   => req(`/api/api-test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
@@ -3007,6 +3008,15 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
     finally { setClearBusy(false); }
   };
 
+  const onDeleteApiFinding = async (e, findingId) => {
+    e.stopPropagation();
+    try {
+      await api.deleteApiFinding(runId, findingId);
+      setFindings(prev => prev.filter(f => f.id !== findingId));
+      setExpanded(prev => { const next = new Set(prev); next.delete(findingId); return next; });
+    } catch(err) { setError(err.message); }
+  };
+
   const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
 
   if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
@@ -3042,6 +3052,8 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
               ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
               ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
               <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+              <button className="btn ghost sm finding-del-btn" title="Delete finding"
+                onClick=${e=>onDeleteApiFinding(e,f.id)}>🗑</button>
             </div>
             ${expanded.has(f.id) && html`
               <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
@@ -6505,7 +6517,8 @@ function TestRunDetail({ runId, initialTab }) {
               );
               const hasThinkingDetail = entry.phase === "thinking_step" && !!(
                 entry.data?.observation || entry.data?.hypothesis ||
-                entry.data?.payload_purpose || entry.data?.payload_summary
+                entry.data?.payload_purpose || entry.data?.payload_summary ||
+                entry.data?.tool_input || entry.data?.tool_output
               );
               const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
               const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
@@ -6540,7 +6553,13 @@ function TestRunDetail({ runId, initialTab }) {
                           <pre>${entry.data.payload_purpose}</pre>`}
                         ${entry.data?.payload_summary && html`
                           <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
-                          <pre>${entry.data.payload_summary}</pre>`}`}
+                          <pre>${entry.data.payload_summary}</pre>`}
+                        ${entry.data?.tool_input && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Sub-tool Input (${entry.data.tool})</div>
+                          <pre>${JSON.stringify(entry.data.tool_input, null, 2)}</pre>`}
+                        ${entry.data?.tool_output && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Sub-tool Output</div>
+                          <pre>${JSON.stringify(entry.data.tool_output, null, 2)}</pre>`}`}
                       ${(entry.phase === "reporting_turn" && entry.data?.titles?.length > 0) && html`
                         <div className="activity-payload-label">Issues identified this turn</div>
                         <ul style=${{margin:"4px 0 0 0",paddingLeft:18}}>
