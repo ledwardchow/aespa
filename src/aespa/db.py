@@ -80,6 +80,42 @@ def _backfill_run_kind(engine: Engine) -> None:
         pass  # never block startup on a best-effort backfill
 
 
+def _reset_orphaned_validating_findings(engine: Engine) -> None:
+    """Reset findings left stuck in ``validation_status='validating'``.
+
+    Validation runs entirely as in-memory asyncio tasks, so a fresh process can
+    have nothing in flight.  Any finding still marked ``validating`` at startup is
+    therefore an orphan from a previous process that was interrupted (restart,
+    crash, or a mis-wired validation that never reached a verdict — e.g. the old
+    ALICE-on-API path).  Flip it back to ``unvalidated`` so it can be re-validated
+    instead of showing a perpetual spinner.  Idempotent and best-effort.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    _text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            if "scan_finding" not in tables:
+                return
+            conn.execute(
+                _text(
+                    "UPDATE scan_finding "
+                    "SET validation_status='unvalidated', "
+                    "    validation_note='Validation was interrupted before a verdict "
+                    "(process restart); reset for re-validation.' "
+                    "WHERE validation_status='validating'"
+                )
+            )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
@@ -139,6 +175,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _backfill_run_kind(engine)
+    _reset_orphaned_validating_findings(engine)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS reporting_debug_config (
