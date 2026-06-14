@@ -213,10 +213,31 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
         return f"{method} {url}" if url else f"{method} request"
     if tool_name == "context_tool":
         inner = tool_input.get("tool") or "context lookup"
+        args = tool_input.get("args") or {}
+        if inner == "report_finding":
+            title = args.get("title") or "untitled"
+            return f"Report finding: {title}"
+        if inner == "remove_finding":
+            fid = args.get("finding_id") or ""
+            return f"Remove finding {fid}"
         return f"Query: {inner}"
     if tool_name == "write_finding":
         title = tool_input.get("title") or "untitled"
         return f"Write finding: {title}"
+    if tool_name == "remove_finding":
+        fid = tool_input.get("finding_id") or ""
+        return f"Remove finding {fid}"
+    if tool_name == "agent_dispatch":
+        attack_class = tool_input.get("attack_class") or "lead"
+        return f"Dispatch specialist: {attack_class}"
+    if tool_name == "forge_jwt":
+        return "Forge JWT"
+    if tool_name == "decode_jwt":
+        return "Decode JWT"
+    if tool_name == "credential_check":
+        return "Credential check"
+    if tool_name == "register_account":
+        return "Register account"
     if tool_name == "done":
         return "Completing assessment"
     if tool_name == "browser":
@@ -4112,6 +4133,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "note": note,
                             "observation": action.get("observation"),
                             "hypothesis": action.get("hypothesis"),
+                            "tool_input": args,
+                            "tool_output": output,
                         },
                     })
                     history.append(_thinking_tool_result_record(step, tool_name, args, output, note))
@@ -5373,6 +5396,8 @@ async def _do_agentic_thinking_loop(
                     "note": note,
                     "observation": tool_input.get("observation"),
                     "hypothesis": tool_input.get("hypothesis"),
+                    "tool_input": args,
+                    "tool_output": output,
                 },
             })
             history.append(
