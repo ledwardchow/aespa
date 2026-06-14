@@ -921,6 +921,7 @@ def _load_findings_snapshot(run_id: int) -> list[dict[str, Any]]:
         ).all()
     return [
         {
+            "id":           f.id,
             "title":        f.title,
             "severity":     f.severity,
             "owasp":        f.owasp_category,
@@ -3653,6 +3654,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         ).all()
         findings_snapshot = [
             {
+                "id":          f.id,
                 "title":       f.title,
                 "severity":    f.severity,
                 "owasp":       f.owasp_category,
@@ -4168,11 +4170,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                     if saved is not None:
                         progressive_findings_count += 1
                         findings_snapshot.append({
-                            "title": saved.title,
-                            "severity": saved.severity,
-                            "owasp": saved.owasp_category,
+                            "id":           saved.id,
+                            "title":        saved.title,
+                            "severity":     saved.severity,
+                            "owasp":        saved.owasp_category,
                             "affected_url": saved.affected_url,
-                            "description": saved.description[:200],
+                            "description":  saved.description[:200],
                         })
                     history.append({
                         "step": step,
@@ -5490,11 +5493,12 @@ async def _do_agentic_thinking_loop(
                     except Exception as _pf_exc:
                         log.warning("post_finding_fn error: %s", _pf_exc)
                 findings_snapshot.append({
-                    "title": saved.title,
-                    "severity": saved.severity,
-                    "owasp": saved.owasp_category,
+                    "id":           saved.id,
+                    "title":        saved.title,
+                    "severity":     saved.severity,
+                    "owasp":        saved.owasp_category,
                     "affected_url": saved.affected_url,
-                    "description": saved.description[:200],
+                    "description":  saved.description[:200],
                 })
             history.append({
                 "step": step,
