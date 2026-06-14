@@ -3647,19 +3647,52 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
     if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
     const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
     streamRef.current = es;
+    // Re-accumulate from scratch on every (re)connect: the stream replays from
+    // cursor 0, so we rebuild each message's text/stepData and REPLACE state
+    // rather than append — otherwise a mid-run reconnect would double-count
+    // text deltas and tool entries. Mirrors the web scan's aliceSessionConnect.
+    const textAcc = {};   // msg_id -> accumulated text
+    const stepAcc = {};   // msg_id -> stepData ({ [step]: { llmMessages, tools } })
     es.onmessage = (ev) => {
       try {
         const event = JSON.parse(ev.data);
-        if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
+        if ((event.type === "thinking_chunk" || event.type === "message_chunk")
+            && event.delta && event.tab_id && event.msg_id) {
+          textAcc[event.msg_id] = (textAcc[event.msg_id] || "") + event.delta;
+          const text = textAcc[event.msg_id];
           setAliceChats(prev => prev.map(s =>
             s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
-              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              m.id === event.msg_id ? { ...m, text } : m
             )}
           ));
-        } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
+        } else if (event.type === "step_llm_call" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          entry.llmMessages = event.messages || [];
           setAliceChats(prev => prev.map(s =>
             s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
-              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              m.id === event.msg_id ? { ...m, stepData } : m
+            )}
+          ));
+        } else if (event.type === "step_tool_call" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          entry.tools.push({ tool: event.tool, input: event.input, result: null });
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, stepData } : m
+            )}
+          ));
+        } else if (event.type === "step_tool_result" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          const tools = entry.tools;
+          if (tools.length > 0 && tools[tools.length - 1].result === null) {
+            tools[tools.length - 1].result = event.result;
+          }
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, stepData } : m
             )}
           ));
         } else if (event.type === "done") {
@@ -3827,7 +3860,7 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
                                 <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
                               </div>
                               ${isThinkExp && html`
-                                <div className="alice-thinking-body">${renderMarkdown(msg.text)}</div>`}
+                                <div className="alice-thinking-body">${renderAliceBlocks(msg.text, true, msg.stepData || {})}</div>`}
                             </div>
                           </div>`;
                       }
@@ -3835,7 +3868,7 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
                       return html`
                         <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                           <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
-                            ${renderMarkdown(msg.text)}
+                            ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false, msg.stepData || {})}
                             <div className="alice-msg-meta"><span>${msg.ts}</span></div>
                           </div>
                         </div>`;
