@@ -152,6 +152,10 @@ def _append(task: AliceTask, event: dict) -> None:
     elif t == "message_chunk" and event.get("delta"):
         task.accumulated_message += event["delta"]
         event = {**event, "tab_id": task.tab_id, "msg_id": task.reply_msg_id}
+    elif t in ("step_llm_call", "step_tool_call", "step_tool_result"):
+        # Route step detail events to the thinking message so the client can
+        # build the expandable tool-call / tool-result UI (matches web scans).
+        event = {**event, "tab_id": task.tab_id, "msg_id": task.think_msg_id}
     elif t == "done":
         if event.get("thought"):
             task.accumulated_thought = event["thought"]
