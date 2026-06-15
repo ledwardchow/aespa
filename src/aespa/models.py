@@ -698,6 +698,9 @@ class AliceChatSession(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
+    # same run_id. "web" | "api".
+    run_kind: str = Field(default="web", index=True)
     session_key: str = Field(index=True)   # client-assigned tab ID, e.g. "tab-default"
     title: str = Field(default="Session 1")
     position: int = Field(default=0)       # tab ordering
