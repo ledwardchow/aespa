@@ -9,8 +9,9 @@ scanner with API-specific overrides:
       collection_info / finding_list`` to the API context tool and routes all
       other sub-commands (history_search, traffic_search, …) to the shared
       web-scanner context tool
-  * ``_set_api_finding_attrs`` post-save hook — stamps ``api_test_run_id`` and
-    maps the OWASP category to the OWASP API Top-10 field on every finding
+  * ``_make_post_finding_fn`` post-save hook — maps the OWASP category to the
+    OWASP API Top-10 field on every finding and updates the coverage matrix
+    (``api_test_run_id`` is already set at creation time in API mode)
   * No browser/Playwright needed — REST APIs are all httpx
 """
 from __future__ import annotations
@@ -811,22 +812,24 @@ _OWASP_WEB_TO_API: dict[str, str] = {
 
 
 def _make_post_finding_fn(api_run_id: int):
-    """Return a hook that stamps ``api_test_run_id`` and ``owasp_api_category`` on each finding
-    and updates the coverage matrix cell for the finding's endpoint + category."""
+    """Return a hook that derives ``owasp_api_category`` for each finding and
+    updates the coverage matrix cell for the finding's endpoint + category.
+
+    ``api_test_run_id`` is already set at creation time (the finding writers run
+    in API mode), so this hook only fills in the API-specific OWASP category,
+    which the shared finding builder doesn't know about."""
 
     def _fn(finding: ScanFinding) -> None:
         with Session(get_engine()) as s:
             f = s.get(ScanFinding, finding.id)
             if f is None:
                 return
-            f.api_test_run_id = api_run_id
             owasp = str(f.owasp_category or "").strip()
             # If the LLM wrote API1-API10 directly into owasp_category, move it.
             if owasp.upper().startswith("API"):
                 f.owasp_api_category = owasp.upper()
             elif owasp.upper() in _OWASP_WEB_TO_API:
                 f.owasp_api_category = _OWASP_WEB_TO_API[owasp.upper()]
-            f.finding_source = f.finding_source or "api_scanner"
             s.add(f)
             s.commit()
             s.refresh(f)
@@ -1134,7 +1137,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         })
 
     # Pre-existing findings snapshot.
-    findings_snapshot = _load_findings_snapshot(api_run_id)
+    findings_snapshot = _load_findings_snapshot(api_run_id, is_api_run=True)
 
     # Context tool + finding hooks.
     context_tool_fn = _make_api_context_tool_fn(collection_id, api_run_id)
@@ -1161,6 +1164,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     async with _make_scanner_client(run_id=None, api_run_id=api_run_id, verify=False) as hx:
         finding_count = await _do_agentic_thinking_loop(
             run_id=api_run_id,
+            is_api_run=True,
             llm_cfg=llm_cfg,
             base_url=base_url,
             crawl_context=crawl_context,
@@ -1306,39 +1310,43 @@ async def start_api_scan(api_run_id: int) -> None:
 
     log.info("start_api_scan: api_run_id=%s", api_run_id)
 
-    # Tag this id as an API run so its agent_log / scan_log rows are written with
-    # run_kind='api' and never collide with a web TestRun that shares the id.
-    events_svc.register_api_run(api_run_id)
+    # Tag every event this run emits as run_kind='api'.  Run ids collide across
+    # web / api / sast (independent counters), so the scope — not the id — is the
+    # authoritative discriminator.  asyncio.create_task snapshots this context,
+    # so the scan task (and its child specialist tasks) inherit the tag even
+    # after this function returns.
+    with events_svc.run_kind_scope("api"):
+        events_svc.register_api_run(api_run_id)
 
-    with Session(get_engine()) as s:
-        run = s.get(ApiTestRun, api_run_id)
-        if run is None:
-            raise ValueError(f"ApiTestRun {api_run_id} not found")
-        run.status = "scanning"
-        run.started_at = run.started_at or datetime.now(_UTC)
-        run.updated_at = datetime.now(_UTC)
-        s.add(run)
-        s.commit()
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, api_run_id)
+            if run is None:
+                raise ValueError(f"ApiTestRun {api_run_id} not found")
+            run.status = "scanning"
+            run.started_at = run.started_at or datetime.now(_UTC)
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
 
-    # Seed the coverage matrix before starting the scan task.
-    seed_coverage_matrix(api_run_id)
+        # Seed the coverage matrix before starting the scan task.
+        seed_coverage_matrix(api_run_id)
 
-    # Emit an immediate agent_status row so the Agents sidebar is non-empty.
-    events_svc.emit(api_run_id, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "active",
-        "current_task": "API security scan starting…",
-        "outcome": None,
-        "_persist": True,
-    })
+        # Emit an immediate agent_status row so the Agents sidebar is non-empty.
+        events_svc.emit(api_run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": "API security scan starting…",
+            "outcome": None,
+            "_persist": True,
+        })
 
-    task = asyncio.create_task(
-        _api_scan_task(api_run_id),
-        name=f"api-scan-{api_run_id}",
-    )
-    _scan_tasks[api_run_id] = task
+        task = asyncio.create_task(
+            _api_scan_task(api_run_id),
+            name=f"api-scan-{api_run_id}",
+        )
+        _scan_tasks[api_run_id] = task
 
 
 async def stop_api_scan(api_run_id: int) -> bool:
@@ -1364,15 +1372,16 @@ async def stop_api_scan(api_run_id: int) -> bool:
         except Exception:
             pass
         _update_run_status(api_run_id, "cancelled")
-        events_svc.emit(api_run_id, {
-            "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
-            "status": "idle",
-            "current_task": "Scan stopped",
-            "outcome": "stopped",
-            "_persist": True,
-        })
+        with events_svc.run_kind_scope("api"):
+            events_svc.emit(api_run_id, {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "idle",
+                "current_task": "Scan stopped",
+                "outcome": "stopped",
+                "_persist": True,
+            })
         return True
     return False
 

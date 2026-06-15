@@ -650,6 +650,7 @@ _API_THINKING_AGENT_SYSTEM = (
     "- agent_dispatch: dispatch a specialist for sqli/idor/auth_bypass/ssrf/business_logic.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
+    "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
     "- done: end the assessment when all surface is covered.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
@@ -695,6 +696,7 @@ _THINKING_AGENT_SYSTEM = (
     "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
     "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
     "yourself after dispatching.\n"
+    "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
     "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
@@ -987,6 +989,30 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["attack_class", "target_url", "rationale"],
+        },
+    },
+    {
+        "name": "remove_finding",
+        "description": (
+            "Delete a previously recorded finding from this scan. "
+            "Use only when a finding was written in error, is a confirmed duplicate, "
+            "or has been invalidated by subsequent testing. "
+            "Provide the finding_id returned by write_finding or report_finding, "
+            "or obtained via finding_list / context_tool(finding_list)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {
+                    "type": "integer",
+                    "description": "The numeric ID of the finding to delete.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for removal (e.g. duplicate, false positive).",
+                },
+            },
+            "required": ["finding_id"],
         },
     },
 ]

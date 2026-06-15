@@ -590,7 +590,13 @@ class ScanFinding(SQLModel, table=True):
     __tablename__ = "scan_finding"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # Nullable: a finding belongs to EITHER a web TestRun (test_run_id) OR an
+    # ApiTestRun (api_test_run_id), never both.  The two tables have independent
+    # autoincrement id sequences, so populating test_run_id for an API finding
+    # made it collide with — and leak into — the web run of the same number.
+    test_run_id: Optional[int] = Field(
+        default=None, foreign_key="test_run.id", index=True, nullable=True
+    )
     page_id: Optional[int] = Field(
         default=None,
         sa_column=Column(

@@ -4,6 +4,54 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #174] 15th June Update - Lots of bug fixes!
+**Opened:** 2026-06-15 | Branch: `develop → main`
+
+ALICE improvements for API scans, two `ScanFinding` ID-space correctness fixes, removal of the server-side deduplication pipeline, vendored frontend dependencies, and supporting bug fixes (17 commits across ~15 files).
+
+### Bug Fixes for ALICE on API Scans
+
+- **`update_lead` tool** (`services/alice.py`): ALICE now has access to `update_lead`, which marks a `ScanLead` row as `confirmed`, `dismissed`, or `inconclusive` after a dynamic investigation, and optionally links it to a written finding. Available to both web and API ALICE sessions.
+- **`remove_finding` tool** (`services/alice.py`): New tool that deletes a specific finding by ID from the current run. Accepts findings keyed on either `test_run_id` (web) or `api_test_run_id` (API) so it works correctly in both contexts. Requires a `reason` argument for auditability.
+- **`lead_list` context tool for API ALICE** (`services/alice.py`): ALICE in API run context can now call `context_tool(tool='lead_list')` to retrieve open `ScanLead` rows for the collection (capped at 50), giving it visibility into SAST-generated leads during an interactive session.
+- **`write_finding` withheld from API ALICE** (`services/alice.py`): API runs record findings via the API-aware `context_tool(tool='report_finding')` path. `write_finding` is now excluded from the API ALICE tool set to prevent it persisting findings against the wrong (web) table and triggering validation with a colliding run ID. The nudge-back prompt and the API ALICE system prompt updated accordingly.
+- **Finding ID added to `list_findings`** (`services/prompts/test_lead.py`, `services/scanner.py`): The `list_findings` context tool response now includes the `id` field on each finding, so ALICE and the Test Lead can reference specific findings when calling `remove_finding` or `update_lead`.
+- **`remove_finding` prompts updated** (`services/prompts/alice.py`, `services/prompts/test_lead.py`): System prompts for both web and API ALICE updated to document the `remove_finding` tool and when to use it.
+- **Thought-process display fixes for API ALICE** (`services/alice_tasks.py`, `web/app.js`): Thinking-block accumulation and SSE event handling fixed for API ALICE sessions — thought deltas were being dropped or rendered in the wrong bubble, causing blank thought-process panels.
+- **ALICE fixes for API scans** (`services/alice.py`, `services/prompts/alice.py`): Extended `run_api_alice_turn_stream` with correct API context-tool routing for `lead_list`, `endpoint_list`, `endpoint_detail`, and `collection_info`; fixed scope-check logic that was blocking all API-run ALICE requests; fixed the accumulated thought/message state used for cursor-based replay.
+
+### Bug Fixes for logs and findings attaching to the wrong test runs
+
+- **API and web scan finding IDs clash** (`db.py`, `models.py`, `schemas.py`, `services/api_scanner.py`, `services/scanner.py`): `ApiTestRun` and `TestRun` use independent autoincrement sequences, so their integer IDs can coincide. Previously, API scan findings were stamped with both `api_test_run_id` and `test_run_id` (set to the same integer), causing API findings to bleed into whichever web scan run happened to share that ID. Fix: `test_run_id` is now nullable on `ScanFinding`; API findings set it to `NULL`. A `_ensure_scan_finding_test_run_id_nullable` migration (SQLite table-rebuild pattern) clears `test_run_id` on all existing API findings. `DELETE /api-test-runs/{id}/findings/{finding_id}` endpoint added so individual API findings can be removed. Regression tests added in `tests/test_api_test_runs.py` and `tests/test_db_migration.py`.
+
+- **API scan agent logs blank when run IDs collide** (`services/events.py`, `services/api_scanner.py`, `services/sast_scanner.py`, `services/scanner.py`, `services/alice_tasks.py`, `#169`): `AgentLog`/`ScanLog` rows are tagged with a `run_kind` discriminator (`web`, `api`, `sast`) so the API Status page can query only its own rows. The discriminator was previously resolved from in-memory id-keyed sets; because web/API/SAST run IDs come from independent sequences they can collide, and the SAST set was checked first — so an API run whose ID matched a SAST run had its agent rows mis-tagged `sast`, returning nothing to the API log endpoint. Fix: replaced id-based resolution with `events.run_kind_scope()`, a `contextvars.ContextVar`-based scope that each scan orchestrator opens at start (`api`, `sast`, `web`). `asyncio.create_task` snapshots the context, so the scan task and all its child specialist/ALICE tasks inherit the correct tag regardless of ID collisions. Regression tests added in `tests/test_api_test_runs.py`.
+
+- **Validator hidden from API scan UI** (`web/app.js`): The adversarial validator agent row was being rendered in the API scan Agents panel even though the validator does not run for API scans. One-line fix to suppress it.
+
+- **Stuck findings reset on startup** (`db.py`): Findings left in `validating` status by a previous server crash are reset to `unvalidated` on startup, preventing them from being permanently stuck and never re-validated.
+
+- **ALICE API reporting tool** (`services/alice.py`, `services/prompts/alice.py`, `services/validator.py`): The `report_finding` context-tool path used by API ALICE was calling the web validator with wrong arguments; fixed to use the API-aware validation flow. The validator service updated to handle `ApiTestRun`-scoped findings correctly.
+
+### Deduplication Pipeline Removed
+
+- **LLM-based finding deduplication removed** (`services/findings.py`, `services/llm.py`, `services/prompts/reporting.py`, `api/scan.py`, `schemas.py`): The `POST /api/test-runs/{id}/findings/deduplicate` endpoint and the `findings_svc.deduplicate_findings` pipeline (~878 lines) have been removed. Deduplication is now handled exclusively by ALICE on user instruction, which produces more accurate results with less hallucination than the batch LLM pass. The `DebugFindingsTable` UI component updated to remove the Deduplicate button.
+
+### Vendored Frontend Dependencies
+
+- **External JS libraries vendored** (`web/vendor/`, `web/index.html`, `main.py`): React, ReactDOM, HTM, and D3 are now served from `src/aespa/web/vendor/` as static files rather than loaded from CDNs. This eliminates network dependency at runtime and avoids CSP issues when running in air-gapped environments. FastAPI serves the vendor directory as a static mount.
+
+### Documentation
+
+- `CHANGELOG.md` relocated from `docs/` to the repository root.
+- `README.md` created at repository root.
+- `docs/` documentation updates.
+
+### Version
+
+- `pyproject.toml`: bumped to `0.5.20260615.2`.
+
+---
+
 ## [PR #162] 12th June Update
 **Opened:** 2026-06-12 | Branch: `develop → main`
 
