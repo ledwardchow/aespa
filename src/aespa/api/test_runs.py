@@ -257,7 +257,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
             )
 
         from aespa.services import alice_tasks
-        alice_task = alice_tasks.get(run.id)
+        alice_task = alice_tasks.get(run.id, run_type="site")
         if alice_task is not None and not alice_task.done:
             findings_count = session.exec(
                 select(func.count()).select_from(ScanFinding).where(ScanFinding.test_run_id == run.id)
@@ -305,7 +305,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                 )
             )
 
-        api_alice_task = alice_tasks_svc.get(api_run.id)
+        api_alice_task = alice_tasks_svc.get(api_run.id, run_type="api")
         if api_alice_task is not None and not api_alice_task.done:
             findings_count = session.exec(
                 select(func.count()).select_from(ScanFinding).where(ScanFinding.api_test_run_id == api_run.id)
@@ -398,6 +398,15 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         select(AgentLog).where(AgentLog.test_run_id == run_id).where(AgentLog.run_kind == "web")
     ).all():
         session.delete(log_entry)
+    from aespa.models import AliceChatMessage, AliceChatSession
+    for sess in session.exec(
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "web")
+    ).all():
+        for msg in session.exec(select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)).all():
+            session.delete(msg)
+        session.delete(sess)
     session.delete(run)
     session.commit()
 
