@@ -178,6 +178,7 @@ def _append(task: AliceTask, event: dict) -> None:
 
 async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     from aespa.services import alice as alice_svc
+    from aespa.services import events as events_svc
 
     # Choose the right streaming function based on whether this is an API run.
     if task.run_type == "api":
@@ -185,13 +186,19 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     else:
         stream_fn = alice_svc.run_alice_turn_stream
 
+    # Tag every event this turn emits with the right run_kind for the lifetime of
+    # the stream.  Run ids collide across web / api / sast, so the scope — not the
+    # id — is authoritative; child tasks spawned during the turn inherit it.
+    run_kind = "api" if task.run_type == "api" else "web"
+
     try:
-        async for sse_line in stream_fn(task.run_id, message, history):
-            if sse_line.startswith("data: "):
-                try:
-                    _append(task, json.loads(sse_line[6:].strip()))
-                except Exception:
-                    pass
+        with events_svc.run_kind_scope(run_kind):
+            async for sse_line in stream_fn(task.run_id, message, history):
+                if sse_line.startswith("data: "):
+                    try:
+                        _append(task, json.loads(sse_line[6:].strip()))
+                    except Exception:
+                        pass
     except asyncio.CancelledError:
         _append(task, {
             "type": "done",
