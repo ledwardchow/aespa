@@ -199,6 +199,14 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
                         _append(task, json.loads(sse_line[6:].strip()))
                     except Exception:
                         pass
+            
+            # Calibrate all findings for this run when Alice finishes
+            is_api = (task.run_type == "api")
+            from aespa.services.scanner import calibrate_all_findings_for_run
+            try:
+                calibrate_all_findings_for_run(task.run_id, is_api_run=is_api)
+            except Exception as ce:
+                log.warning("calibrate_all_findings_for_run failed: %s", ce)
     except asyncio.CancelledError:
         _append(task, {
             "type": "done",
