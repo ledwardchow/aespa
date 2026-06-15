@@ -5,31 +5,58 @@ Crawler and scanner push events here; the SSE endpoint drains them to clients.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Iterator
 
 # run_id → list of subscriber queues
 _queues: dict[int, list[asyncio.Queue]] = {}
 
-# Ids of runs that emit as API scans.  web TestRun ids and ApiTestRun ids come
-# from independent counters and collide, so the shared agent_log / scan_log
-# tables need a discriminator written at persist time.  An API run registers
-# its id here for the lifetime of the process; persisted rows are tagged "api"
-# when their run_id is registered (or the event carries ``_run_kind="api"``),
-# and "web" otherwise.
+# web TestRun, ApiTestRun and SastRun ids come from independent counters and
+# collide (id 1 can be all three at once), so the shared agent_log / scan_log
+# tables need a discriminator written at persist time.  Resolving that
+# discriminator from the run id alone is impossible when ids collide, so the
+# authoritative source is ``_run_kind_ctx`` — a context variable each scan
+# orchestrator sets (via ``run_kind_scope``) for the duration of its work.
+# Because ``asyncio.create_task`` snapshots the current context, every event a
+# scan emits — directly or from child tasks it spawns — inherits the correct
+# kind regardless of id collisions.  The id-keyed sets below remain only as a
+# best-effort fallback for emit paths that run outside any scope.
+_run_kind_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "aespa_run_kind", default=None
+)
+
 _api_run_ids: set[int] = set()
 _sast_run_ids: set[int] = set()
 
 
+@contextlib.contextmanager
+def run_kind_scope(kind: str) -> Iterator[None]:
+    """Tag every event emitted within this context (and any task spawned from
+    it) with ``run_kind=kind``.  Nests correctly: a SAST pre-phase awaited
+    inside an API scan can open its own ``run_kind_scope('sast')`` and the
+    surrounding ``'api'`` scope is restored on exit."""
+    token = _run_kind_ctx.set(kind)
+    try:
+        yield
+    finally:
+        _run_kind_ctx.reset(token)
+
+
 def register_api_run(run_id: int) -> None:
     """Mark a run id as belonging to an API scan so its persisted log rows are
-    tagged ``run_kind='api'``.  Safe to call repeatedly."""
+    tagged ``run_kind='api'``.  Safe to call repeatedly.
+
+    Fallback only — prefer ``run_kind_scope('api')``, which is collision-proof."""
     _api_run_ids.add(run_id)
 
 
 def register_sast_run(run_id: int) -> None:
     """Mark a run id as belonging to a SAST scan so its persisted log rows are
-    tagged ``run_kind='sast'``.  Safe to call repeatedly."""
+    tagged ``run_kind='sast'``.  Safe to call repeatedly.
+
+    Fallback only — prefer ``run_kind_scope('sast')``, which is collision-proof."""
     _sast_run_ids.add(run_id)
 
 
@@ -37,6 +64,9 @@ def _run_kind_for(run_id: int, event: dict) -> str:
     explicit = event.get("_run_kind")
     if explicit:
         return str(explicit)
+    scoped = _run_kind_ctx.get()
+    if scoped:
+        return scoped
     if run_id in _sast_run_ids:
         return "sast"
     if run_id in _api_run_ids:
