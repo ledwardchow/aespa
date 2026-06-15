@@ -3118,7 +3118,7 @@ async def _run_specialist_agent(
                 )
                 import json as _json
                 result = _json.dumps(output, separators=(",", ":"), default=str)
-                return result[:8192]
+                return result[:30000]
             except Exception as exc:
                 return f"Context tool error: {exc}"
 

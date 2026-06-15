@@ -184,7 +184,7 @@ async def _execute_alice_tool(
                     base_url=base_url,
                 )
             result = json.dumps(output, separators=(",", ":"), default=str)
-            return result[:8192]
+            return result[:30000]
         except Exception as exc:
             return f"Context tool error: {exc}"
 
@@ -904,9 +904,10 @@ async def run_alice_turn_stream(
                     result_str = f"Tool execution error: {exc}"
 
                 # Cap result length to avoid blowing up context
-                if len(result_str) > 16000:
-                    omitted = len(result_str) - 16000
-                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+                limit = 30000 if tool_name == "context_tool" else 16000
+                if len(result_str) > limit:
+                    omitted = len(result_str) - limit
+                    result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
@@ -1595,9 +1596,10 @@ async def run_api_alice_turn_stream(
                     log.warning("ALICE API tool %r step %d failed: %s", tool_name, step_count, exc)
                     result_str = f"Tool execution error: {exc}"
 
-                if len(result_str) > 16000:
-                    omitted = len(result_str) - 16000
-                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+                limit = 30000 if tool_name == "context_tool" else 16000
+                if len(result_str) > limit:
+                    omitted = len(result_str) - limit
+                    result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:

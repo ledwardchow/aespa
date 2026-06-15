@@ -2891,10 +2891,11 @@ async def thinking_agentic_loop(
                 )
                 result_str = f"Tool execution error: {exc}"
 
-            if len(result_str) > TOOL_RESULT_CHAR_LIMIT:
-                omitted = len(result_str) - TOOL_RESULT_CHAR_LIMIT
+            limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+            if len(result_str) > limit:
+                omitted = len(result_str) - limit
                 result_str = (
-                    result_str[:TOOL_RESULT_CHAR_LIMIT]
+                    result_str[:limit]
                     + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
                 )
 
