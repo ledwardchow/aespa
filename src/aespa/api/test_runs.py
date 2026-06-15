@@ -388,7 +388,11 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(log_entry)
     for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
         session.delete(ckpt)
-    for ss in session.exec(select(ScannerSession).where(ScannerSession.test_run_id == run_id)).all():
+    for ss in session.exec(
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+    ).all():
         session.delete(ss)
     for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
         session.delete(hyp)
@@ -641,7 +645,11 @@ def get_scanner_sessions(
     session: Session = Depends(get_session),
 ) -> ScannerSessionSummary:
     _get_run_or_404(session, run_id)
-    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    query = (
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+    )
     if not include_inactive:
         query = query.where(ScannerSession.is_active == True)  # noqa: E712
     records = session.exec(query.order_by(ScannerSession.label)).all()
@@ -667,7 +675,7 @@ def update_scanner_session(
 ) -> ScannerSessionOut:
     _get_run_or_404(session, run_id)
     record = session.get(ScannerSession, session_id)
-    if record is None or record.test_run_id != run_id:
+    if record is None or record.test_run_id != run_id or record.run_kind != "web":
         raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
 
     if payload.label is not None:
@@ -677,6 +685,7 @@ def update_scanner_session(
         duplicate = session.exec(
             select(ScannerSession)
             .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == "web")
             .where(ScannerSession.label == normalized)
             .where(ScannerSession.id != session_id)
         ).first()

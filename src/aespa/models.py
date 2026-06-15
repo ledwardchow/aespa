@@ -489,6 +489,10 @@ class ScannerSession(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # See AgentLog.run_kind — web TestRun ids and ApiTestRun ids come from
+    # independent counters and collide.  Without this discriminator a web run and
+    # an API run that share an integer id would read/delete each other's sessions.
+    run_kind: str = Field(default="web", index=True)  # "web" | "api"
     label: str = Field(index=True)                 # anonymous | configured_primary | forged_admin | ...
     kind: str = Field(default="cookie", index=True)  # anonymous | cookie | bearer | mixed
     username: Optional[str] = Field(default=None, index=True)
