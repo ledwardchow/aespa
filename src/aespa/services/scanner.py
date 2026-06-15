@@ -184,6 +184,223 @@ def _cvss_score(value: float | int | str | None) -> float:
         return 0.0
 
 
+def parse_cvss_vector(vector_str: str) -> dict[str, str]:
+    metrics = {}
+    if not vector_str:
+        return metrics
+    parts = vector_str.strip().split("/")
+    for part in parts:
+        if ":" in part:
+            k, v = part.split(":", 1)
+            metrics[k.upper()] = v.upper()
+    return metrics
+
+
+def format_cvss_vector(metrics: dict[str, str]) -> str:
+    keys = ["AV", "AC", "PR", "UI", "S", "C", "I", "A"]
+    parts = ["CVSS:3.1"]
+    for k in keys:
+        if k in metrics:
+            parts.append(f"{k}:{metrics[k]}")
+    return "/".join(parts)
+
+
+def calculate_cvss_score(metrics: dict[str, str]) -> float:
+    import math
+    required = {"AV", "AC", "PR", "UI", "S", "C", "I", "A"}
+    if not required.issubset(metrics.keys()):
+        return 0.0
+    
+    av_map = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
+    ac_map = {"L": 0.77, "H": 0.44}
+    ui_map = {"N": 0.85, "R": 0.62}
+    
+    pr_map = {
+        "U": {"N": 0.85, "L": 0.62, "H": 0.27},
+        "C": {"N": 0.85, "L": 0.68, "H": 0.50}
+    }
+    
+    c_map = {"N": 0.0, "L": 0.22, "H": 0.56}
+    i_map = {"N": 0.0, "L": 0.22, "H": 0.56}
+    a_map = {"N": 0.0, "L": 0.22, "H": 0.56}
+    
+    av = av_map.get(metrics["AV"], 0.85)
+    ac = ac_map.get(metrics["AC"], 0.77)
+    ui = ui_map.get(metrics["UI"], 0.85)
+    scope = metrics["S"]
+    pr = pr_map.get(scope, pr_map["U"]).get(metrics["PR"], 0.85)
+    
+    c = c_map.get(metrics["C"], 0.0)
+    i = i_map.get(metrics["I"], 0.0)
+    a = a_map.get(metrics["A"], 0.0)
+    
+    exploitability = 8.22 * av * ac * pr * ui
+    iss = 1.0 - (1.0 - c) * (1.0 - i) * (1.0 - a)
+    
+    if iss <= 0:
+        return 0.0
+        
+    if scope == "U":
+        impact = 6.42 * iss
+        base_score = impact + exploitability
+    else:
+        impact = 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02)**15
+        base_score = 1.08 * (impact + exploitability)
+        
+    base_score = min(10.0, base_score)
+    
+    val_str = f"{base_score:.9f}"
+    dec_parts = val_str.split(".")
+    if len(dec_parts) == 2:
+        dec = dec_parts[1]
+        if any(d != "0" for d in dec[1:]):
+            return math.ceil(base_score * 10) / 10.0
+        else:
+            return round(base_score, 1)
+    return round(base_score, 1)
+
+
+def _calibrate_finding_rating(title: str, cvss_score: float, vector_str: str) -> tuple[float, str, str]:
+    title_lower = (title or "").lower()
+    
+    if not vector_str or "CVSS" not in vector_str:
+        vector_str = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
+        
+    metrics = parse_cvss_vector(vector_str)
+    is_calibrated = False
+    
+    # 1. CORS
+    if "cors" in title_lower or "cross-origin" in title_lower or "cross origin" in title_lower:
+        metrics["AC"] = "H"
+        metrics["UI"] = "R"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        metrics["I"] = "N"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 2. Server headers (including CSP)
+    elif any(h in title_lower for h in (
+        "server header", "security header", "missing header", "disclosure via header",
+        "x-powered-by", "x-frame-options", "x-content-type-options", "strict-transport-security",
+        "content-security-policy", "csp", "content security policy"
+    )):
+        metrics["AC"] = "H"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        metrics["I"] = "N"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 3. Username enumeration
+    elif "username enumeration" in title_lower or "user enumeration" in title_lower:
+        metrics["AC"] = "H"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        metrics["I"] = "N"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 4. Session logout invalidation
+    elif any(s in title_lower for s in (
+        "logout", "session invalidation", "session not invalidated", "insufficient session invalidation"
+    )):
+        metrics["AV"] = "L"
+        metrics["AC"] = "H"
+        metrics["UI"] = "R"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        if metrics.get("I") == "H":
+            metrics["I"] = "L"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 5. Stack traces
+    elif any(s in title_lower for s in (
+        "stack trace", "verbose error", "debug page", "traceback", "exception page"
+    )):
+        metrics["AC"] = "H"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        metrics["I"] = "N"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 6. Information disclosure (excluding sensitive data/credentials)
+    elif any(s in title_lower for s in (
+        "information disclosure", "path disclosure", "directory listing", "internal path", "leak"
+    )) and not any(ex in title_lower for ex in (
+        "sensitive data exposed", "credential", "secret", "private key", "password", "token"
+    )):
+        metrics["AC"] = "H"
+        metrics["S"] = "U"
+        if metrics.get("C") == "H":
+            metrics["C"] = "L"
+        metrics["I"] = "N"
+        metrics["A"] = "N"
+        is_calibrated = True
+        
+    # 7. Rate Limiting / Brute Force
+    elif any(s in title_lower for s in (
+        "rate limit", "rate-limiting", "brute force", "brute-force", "request limit"
+    )):
+        if any(mfa in title_lower for mfa in (
+            "totp", "otp", "mfa", "2fa", "multi-factor", "two-factor"
+        )):
+            metrics["AC"] = "L"
+        else:
+            metrics["AC"] = "H"
+        metrics["C"] = "N"
+        metrics["I"] = "N"
+        metrics["A"] = "L"
+        is_calibrated = True
+        
+    if is_calibrated:
+        calibrated_vector = format_cvss_vector(metrics)
+        score = calculate_cvss_score(metrics)
+    else:
+        calibrated_vector = vector_str
+        score = cvss_score
+            
+    severity = _severity_from_cvss(score)
+    return score, severity, calibrated_vector
+
+
+def calibrate_all_findings_for_run(run_id: int, is_api_run: bool = False) -> None:
+    from sqlmodel import Session, select
+    from aespa.models import ScanFinding
+    
+    with Session(get_engine()) as s:
+        if is_api_run:
+            q = select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+        else:
+            q = select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            
+        findings = s.exec(q).all()
+        updated_any = False
+        for f in findings:
+            old_score = f.cvss_score
+            old_severity = f.severity
+            old_vector = f.cvss_vector
+            
+            new_score, new_severity, new_vector = _calibrate_finding_rating(f.title, old_score, old_vector)
+            
+            if new_score != old_score or new_severity != old_severity or new_vector != old_vector:
+                f.cvss_score = new_score
+                f.severity = new_severity
+                f.cvss_vector = new_vector
+                s.add(f)
+                updated_any = True
+                
+        if updated_any:
+            s.commit()
+
+
 def _compact_log_value(value, limit: int = 180) -> str:
     if value is None:
         return ""
@@ -1841,6 +2058,10 @@ def _finding_from_llm(
         summary_evidence,
     )
     cvss_score = _cvss_score(raw.get("cvss_score"))
+    title = _as_text(raw.get("title")) or "Untitled finding"
+    cvss_vector = _as_text(raw.get("cvss_vector")) or ""
+    cvss_score, severity, cvss_vector = _calibrate_finding_rating(title, cvss_score, cvss_vector)
+
     prebuilt_items = _evidence_items_from_json(str(matched.get("evidence_json") or ""))
     if prebuilt_items:
         evidence_json = _evidence_items_json(
@@ -1867,14 +2088,14 @@ def _finding_from_llm(
         api_test_run_id=run_id if is_api_run else None,
         page_id=page_id,
         owasp_category=_as_text(raw.get("owasp_category")) or "A00",
-        severity=_severity_from_cvss(cvss_score),
-        title=_as_text(raw.get("title")) or "Untitled finding",
+        severity=severity,
+        title=title,
         description=_as_text(raw.get("description")),
         impact=_as_text(raw.get("impact")),
         likelihood=_as_text(raw.get("likelihood")),
         recommendation=_as_text(raw.get("recommendation")),
         cvss_score=cvss_score,
-        cvss_vector=_as_text(raw.get("cvss_vector")),
+        cvss_vector=cvss_vector,
         affected_url=affected_url,
         evidence=_clip_evidence(evidence, EVIDENCE_TEXT_LIMIT),
         request_evidence=_request_evidence(request_evidence),
@@ -3227,14 +3448,21 @@ async def _persist_dynamic_finding(
                 db_finding = s2.get(ScanFinding, finding_id)
                 if db_finding is not None:
                     db_finding.owasp_category = _as_text(rewritten.get("owasp_category")) or db_finding.owasp_category
-                    db_finding.title = _as_text(rewritten.get("title")) or db_finding.title
+                    title = _as_text(rewritten.get("title")) or db_finding.title
+                    db_finding.title = title
                     db_finding.description = _as_text(rewritten.get("description")) or db_finding.description
                     db_finding.impact = _as_text(rewritten.get("impact")) or db_finding.impact
                     db_finding.likelihood = _as_text(rewritten.get("likelihood")) or db_finding.likelihood
                     db_finding.recommendation = _as_text(rewritten.get("recommendation")) or db_finding.recommendation
-                    db_finding.cvss_score = _cvss_score(rewritten.get("cvss_score"))
-                    db_finding.cvss_vector = _as_text(rewritten.get("cvss_vector")) or db_finding.cvss_vector
-                    db_finding.severity = _severity_from_cvss(db_finding.cvss_score)
+                    
+                    cvss_score = _cvss_score(rewritten.get("cvss_score"))
+                    cvss_vector = _as_text(rewritten.get("cvss_vector")) or db_finding.cvss_vector or ""
+                    cvss_score, severity, cvss_vector = _calibrate_finding_rating(title, cvss_score, cvss_vector)
+                    
+                    db_finding.cvss_score = cvss_score
+                    db_finding.cvss_vector = cvss_vector
+                    db_finding.severity = severity
+                    
                     db_finding.evidence = _as_text(rewritten.get("evidence")) or db_finding.evidence
                     db_finding.affected_url = _as_text(rewritten.get("affected_url")) or db_finding.affected_url
                     s2.add(db_finding)
