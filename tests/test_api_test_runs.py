@@ -201,3 +201,70 @@ def test_agent_log_404(client):
 def test_events_endpoint_404(client):
     r = client.get("/api/api-test-runs/9999/events")
     assert r.status_code == 404
+
+
+# ── Regression: API and web findings must not cross the shared id space ─────────
+
+def test_api_and_web_findings_do_not_cross():
+    """ApiTestRun.id and TestRun.id are independent autoincrement sequences, so
+    the first run of each kind both get id=1.  Findings must stay attached to
+    their own run kind: web findings key on test_run_id, API findings on
+    api_test_run_id (with test_run_id left NULL).  Regression for API findings
+    leaking into the web run of the same integer id."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from aespa import models
+    from aespa.db import get_session
+    from aespa.main import create_app
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as s:
+        site = models.Site(name="S", base_url="https://example.com")
+        s.add(site); s.commit(); s.refresh(site)
+        web_run = models.TestRun(site_id=site.id, name="web")
+        s.add(web_run); s.commit(); s.refresh(web_run)
+
+        coll = models.ApiCollection(name="C", base_url="https://example.com")
+        s.add(coll); s.commit(); s.refresh(coll)
+        api_run = models.ApiTestRun(collection_id=coll.id, name="api")
+        s.add(api_run); s.commit(); s.refresh(api_run)
+
+        web_run_id, api_run_id = web_run.id, api_run.id
+        # The collision that used to cause the leak.
+        assert web_run_id == api_run_id == 1
+
+        s.add(models.ScanFinding(
+            test_run_id=web_run_id, owasp_category="A01", severity="high",
+            title="WEB FINDING", description="d", evidence="e",
+        ))
+        s.add(models.ScanFinding(
+            api_test_run_id=api_run_id, owasp_category="API1", severity="high",
+            title="API FINDING", description="d", evidence="e",
+        ))
+        s.commit()
+
+    def _override_session():
+        with Session(engine) as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        web = c.get(f"/api/test-runs/{web_run_id}/findings")
+        api = c.get(f"/api/api-test-runs/{api_run_id}/findings")
+        assert web.status_code == 200
+        assert api.status_code == 200
+        assert [f["title"] for f in web.json()] == ["WEB FINDING"]
+        assert [f["title"] for f in api.json()] == ["API FINDING"]
+        # The API finding serialises fine even with a NULL test_run_id.
+        assert api.json()[0]["test_run_id"] is None
+
+    SQLModel.metadata.drop_all(engine)
+    engine.dispose()

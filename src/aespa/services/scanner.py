@@ -909,15 +909,17 @@ _FINDING_CATEGORY_ALIASES: dict[str, str] = {
 }
 
 
-def _load_findings_snapshot(run_id: int) -> list[dict[str, Any]]:
+def _load_findings_snapshot(run_id: int, is_api_run: bool = False) -> list[dict[str, Any]]:
     """Load existing findings for a run as context-tool snapshots.
 
     Shared by the thinking scan, specialists and ALICE so the ``finding_list``
-    context tool reflects what has actually been recorded in the DB.
+    context tool reflects what has actually been recorded in the DB.  Pass
+    ``is_api_run=True`` for ApiTestRun ids so the snapshot keys on
+    ``api_test_run_id`` rather than ``test_run_id``.
     """
     with Session(get_engine()) as s:
         existing = s.exec(
-            select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+            select(ScanFinding).where(_finding_run_filter(run_id, is_api_run))
         ).all()
     return [
         {
@@ -1794,6 +1796,20 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+def _finding_run_filter(run_id: int, is_api_run: bool = False):
+    """WHERE expression selecting the findings that belong to *run_id*.
+
+    Web findings are keyed by ``test_run_id``; API findings by
+    ``api_test_run_id`` (with ``test_run_id`` left NULL).  The two id spaces are
+    independent, so the correct column must be chosen per run kind — keying API
+    findings on ``test_run_id`` is exactly what made them leak into the web run
+    of the same number.
+    """
+    if is_api_run:
+        return ScanFinding.api_test_run_id == run_id
+    return ScanFinding.test_run_id == run_id
+
+
 def _finding_from_llm(
     *,
     run_id: int,
@@ -1803,6 +1819,7 @@ def _finding_from_llm(
     result_by_url: dict[str, dict],
     validation_status: str = "validating",
     validation_note: str | None = "Validation queued.",
+    is_api_run: bool = False,
 ) -> ScanFinding:
     probe_urls = list(result_by_url.keys())
     llm_url = (raw.get("affected_url") or "").strip()
@@ -1846,7 +1863,8 @@ def _finding_from_llm(
         )
 
     return ScanFinding(
-        test_run_id=run_id,
+        test_run_id=None if is_api_run else run_id,
+        api_test_run_id=run_id if is_api_run else None,
         page_id=page_id,
         owasp_category=_as_text(raw.get("owasp_category")) or "A00",
         severity=_severity_from_cvss(cvss_score),
@@ -2053,10 +2071,11 @@ def _dynamic_finding_exists(
     title: str,
     affected_url: str,
     owasp_category: str,
+    is_api_run: bool = False,
 ) -> bool:
     existing = session.exec(
         select(ScanFinding)
-        .where(ScanFinding.test_run_id == run_id)
+        .where(_finding_run_filter(run_id, is_api_run))
         .where(ScanFinding.affected_url == affected_url)
     ).all()
     normalized_title = title.strip().lower()
@@ -3089,6 +3108,7 @@ async def _persist_dynamic_finding(
     result_by_url: dict[str, dict],
     writeup_source: str | None = None,
     skip_normalize: bool = False,
+    is_api_run: bool = False,
 ) -> ScanFinding | None:
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
@@ -3103,7 +3123,7 @@ async def _persist_dynamic_finding(
         try:
             with Session(get_engine()) as s:
                 existing = s.exec(
-                    select(ScanFinding).where(ScanFinding.test_run_id == run_id)
+                    select(ScanFinding).where(_finding_run_filter(run_id, is_api_run))
                 ).all()
                 existing_summaries = [
                     {
@@ -3143,6 +3163,7 @@ async def _persist_dynamic_finding(
                 title=str(raw.get("title") or "Untitled finding"),
                 affected_url=affected,
                 owasp_category=str(raw.get("owasp_category") or "A00"),
+                is_api_run=is_api_run,
             ):
                 return None
 
@@ -3154,6 +3175,7 @@ async def _persist_dynamic_finding(
                 result_by_url=result_by_url,
                 validation_status="unvalidated",
                 validation_note=None,
+                is_api_run=is_api_run,
             )
             s.add(finding)
             s.commit()
@@ -5153,6 +5175,7 @@ async def _do_agentic_thinking_loop(
     creds: list | None = None,
     login_url: str = "",
     # API-mode overrides — when provided these replace the web-scan defaults
+    is_api_run: bool = False,   # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
     context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
     post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
@@ -5484,6 +5507,7 @@ async def _do_agentic_thinking_loop(
                 first_page_id=first_page_id,
                 result_by_url={affected: fw_result},
                 writeup_source="test_lead",
+                is_api_run=is_api_run,
             )
             if saved is not None:
                 progressive_findings_count += 1
