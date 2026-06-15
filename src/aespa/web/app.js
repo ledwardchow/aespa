@@ -6165,7 +6165,7 @@ function TestRunDetail({ runId, initialTab }) {
             ${dedupeBusy && html`
               <span className="val-status-badge val-running dedupe-status">
                 <span className="inline-spinner"></span>
-                A.L.I.C.E. is de-duplicating issues…
+                A.L.I.C.E. is reviewing issues…
               </span>`}
             <div className="row" style=${{gap:8,marginLeft:8}}>
               ${findings.length>0 && html`
@@ -6186,7 +6186,7 @@ function TestRunDetail({ runId, initialTab }) {
                   disabled=${dedupeBusy||validateBusy||aliceIsThinking||validateStatus?.status==="running"}
                   onClick=${onDeduplicateFindings}>
                   ${dedupeBusy && html`<span className="inline-spinner"></span>`}
-                  ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
+                  ${dedupeBusy ? "Reviewing…" : "AI Review Issues"}
                 </button>`}
               ${findings.length>0 && html`
                 <button className="btn danger-outline sm"
