@@ -40,18 +40,18 @@ class AliceTask:
     accumulated_message: str = ""
 
 
-# One entry per run_id.
-_registry: dict[int, AliceTask] = {}
+# One entry per (run_type, run_id).
+_registry: dict[tuple[str, int], AliceTask] = {}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get(run_id: int) -> Optional[AliceTask]:
-    return _registry.get(run_id)
+def get(run_id: int, run_type: str = "site") -> Optional[AliceTask]:
+    return _registry.get((run_type, run_id))
 
 
-def status(run_id: int) -> dict[str, Any]:
-    t = _registry.get(run_id)
+def status(run_id: int, run_type: str = "site") -> dict[str, Any]:
+    t = _registry.get((run_type, run_id))
     if t is None:
         return {"running": False, "done": False}
     return {
@@ -75,7 +75,7 @@ async def start(
     run_type: str = "site",
 ) -> AliceTask:
     """Start a new ALICE background task, cancelling any existing one first."""
-    existing = _registry.get(run_id)
+    existing = _registry.get((run_type, run_id))
     if existing and existing.asyncio_task and not existing.asyncio_task.done():
         existing.asyncio_task.cancel()
         try:
@@ -90,17 +90,17 @@ async def start(
         reply_msg_id=reply_msg_id,
         run_type=run_type,
     )
-    _registry[run_id] = task
+    _registry[(run_type, run_id)] = task
     task.asyncio_task = asyncio.create_task(
         _run(task, message, history),
-        name=f"alice-run-{run_id}",
+        name=f"alice-run-{run_type}-{run_id}",
     )
     return task
 
 
-async def stop(run_id: int) -> bool:
+async def stop(run_id: int, run_type: str = "site") -> bool:
     """Cancel the running task for this run.  Returns True if one was active."""
-    task = _registry.get(run_id)
+    task = _registry.get((run_type, run_id))
     if task is None or task.done:
         return False
     if task.asyncio_task and not task.asyncio_task.done():
@@ -109,9 +109,9 @@ async def stop(run_id: int) -> bool:
     return False
 
 
-async def stream_events(run_id: int, cursor: int = 0) -> AsyncGenerator[str, None]:
+async def stream_events(run_id: int, cursor: int = 0, run_type: str = "site") -> AsyncGenerator[str, None]:
     """Yield SSE lines: buffered events from *cursor*, then live events."""
-    task = _registry.get(run_id)
+    task = _registry.get((run_type, run_id))
 
     if task is None:
         # No task — send an empty done so the client knows there's nothing.
