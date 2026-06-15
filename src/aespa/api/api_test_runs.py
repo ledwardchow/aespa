@@ -353,6 +353,21 @@ def get_api_findings(
     return [ScanFindingOut.model_validate(f) for f in findings]
 
 
+@router.delete("/{run_id}/findings/{finding_id}", status_code=204)
+def delete_api_finding(
+    run_id: int,
+    finding_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete a single finding belonging to this API test run."""
+    _get_run_or_404(session, run_id)
+    finding = session.get(ScanFinding, finding_id)
+    if finding is None or finding.api_test_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    session.delete(finding)
+    session.commit()
+
+
 @router.delete("/{run_id}/findings", status_code=204)
 def clear_api_findings(
     run_id: int,
@@ -389,7 +404,7 @@ def import_api_findings(
             else "unvalidated"
         )
         finding = ScanFinding(
-            test_run_id=run.id,  # ApiTestRun.id reused as test_run_id (FK not enforced in SQLite)
+            test_run_id=None,  # API findings key on api_test_run_id only (see ScanFinding model)
             api_test_run_id=run.id,
             page_id=None,
             owasp_category=(item.owasp_category or "A00").strip()[:32],

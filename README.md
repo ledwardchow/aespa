@@ -29,7 +29,7 @@ And a [comparison](docs/vuln-scanner-comparison.md) of a single (specialist agen
 
 See [Architecture](docs/architecture.md).
 
-Also, the [changelog](docs/CHANGELOG.md).
+Also, the [changelog](CHANGELOG.md).
 
 ## Requirements
 

@@ -12,18 +12,15 @@ from aespa.db import get_session
 from aespa.models import AgentLog, CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
 from aespa.schemas import (
     ScanCheckpointStatusOut,
-    ScanFindingDeduplicationResult,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
     ValidationStatusOut,
 )
-from aespa.services import findings as findings_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import llm as llm_svc
-from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["scan"])
 
@@ -150,26 +147,6 @@ def get_findings(
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
     return [ScanFindingOut.model_validate(f) for f in findings]
-
-
-@router.post(
-    "/api/test-runs/{run_id}/findings/deduplicate",
-    response_model=ScanFindingDeduplicationResult,
-)
-async def deduplicate_findings(
-    run_id: int,
-    session: Session = Depends(get_session),
-) -> ScanFindingDeduplicationResult:
-    run = _get_run_or_404(session, run_id)
-    llm_cfg = get_llm_config_for_run(session, run)
-    result = await findings_svc.deduplicate_findings(session, run_id, llm_cfg)
-    return ScanFindingDeduplicationResult(
-        total_before=result.total_before,
-        total_after=result.total_after,
-        removed=result.removed,
-        llm_used=result.llm_used,
-        groups=[group.__dict__ for group in result.groups],
-    )
 
 
 def _page_for_imported_finding(

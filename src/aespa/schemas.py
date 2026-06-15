@@ -1086,7 +1086,7 @@ class ScanFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    test_run_id: int
+    test_run_id: int | None = None
     page_id: int | None
     owasp_category: str
     severity: str
@@ -1141,21 +1141,6 @@ class ScanFindingImportIn(BaseModel):
 class ScanFindingImportResult(BaseModel):
     imported: int
     findings: list[ScanFindingOut]
-
-
-class ScanFindingDeduplicationGroup(BaseModel):
-    kept_id: int
-    removed_ids: list[int]
-    target: str
-    title: str
-
-
-class ScanFindingDeduplicationResult(BaseModel):
-    total_before: int
-    total_after: int
-    removed: int
-    llm_used: bool = False
-    groups: list[ScanFindingDeduplicationGroup]
 
 
 class ValidationStatusOut(BaseModel):
