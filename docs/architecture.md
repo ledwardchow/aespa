@@ -8,25 +8,55 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 
 ---
 
-## Table of Contents
+## Index
 
 1. [Repository Layout](#1-repository-layout)
 2. [How to Run](#2-how-to-run)
 3. [System Overview](#3-system-overview)
 4. [Configuration](#4-configuration)
+   - [LLM Configuration (`LLMProviderConfig` & `LLMConfig`)](#llm-configuration-llmproviderconfig--llmconfig-models)
+   - [Scanner Policy](#scanner-policy-scannerpolicy-model)
+   - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
+   - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
+   - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
+   - [Adversarial Validator Config](#adversarial-validator-config-adversarialvalidatorconfig-model)
 5. [Data Models](#5-data-models)
+   - [Core entities](#core-entities)
+   - [`CrawledPage` flags](#crawledpage-flags-set-by-llm-during-crawl)
+   - [`ScanFinding` key fields](#scanfinding-key-fields)
 6. [Crawling](#6-crawling)
-7. [Dynamic Scan (Thinking Mode)](#7-dynamic-scan-thinking-mode)
+   - [Process](#process) · [LLM involvement](#llm-involvement)
+7. [Dynamic Scan](#7-dynamic-scan)
+   - [Bootstrap](#bootstrap) · [Scan resume](#scan-resume) · [Agentic loop](#agentic-loop)
+   - [Actions available to the LLM](#actions-available-to-the-llm)
+   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph)
 8. [Multi-Agent System](#8-multi-agent-system)
+   - [Agent types](#agent-types) · [Specialist agents](#specialist-agents)
+   - [Adversarial validator](#adversarial-validator) · [Post-scan review](#post-scan-review-reporting-agent)
+   - [Recon summary](#recon-summary)
 9. [LLM Integration](#9-llm-integration)
+   - [Agent tool sets](#agent-tool-sets) · [WSTG skills](#wstg-skills) · [Prompt caching](#prompt-caching)
+   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing)
 10. [Burp Suite Integration](#10-burp-suite-integration)
+    - [Workflow](#workflow) · [Scope pinning](#scope-pinning) · [Per-class routing](#per-class-routing) · [Connection test](#connection-test)
 11. [Findings & Validation](#11-findings--validation)
+    - [Deduplication](#deduplication) · [Validation](#validation)
 12. [API Layer](#12-api-layer)
+    - [Key route groups](#key-route-groups)
 13. [Frontend & Real-time Events](#13-frontend--real-time-events)
+    - [WebSocket event types](#websocket-event-types-emitted-by-serviceseventspy) · [UI tabs](#ui-tabs)
 14. [Concurrency & State Management](#14-concurrency--state-management)
 15. [A.L.I.C.E. — Interactive Pentesting Chat](#15-alice--interactive-pentesting-chat)
+    - [Architecture overview](#architecture-overview) · [Background task registry](#background-task-registry-alice_taskspy)
+    - [Reconnect and replay](#reconnect-and-replay) · [Agentic loop](#agentic-loop-alicepy) · [Tools available to ALICE](#tools-available-to-alice)
+    - [Chat session persistence](#chat-session-persistence) · [Client-side streaming state](#client-side-streaming-state) · [Stop A.L.I.C.E.](#stop-alice)
 16. [API Collections & API Scanning](#16-api-collections--api-scanning)
+    - [API Collections](#api-collections) · [Document parsing](#document-parsing-servicesapi_docspy) · [LLM readiness assessment](#llm-readiness-assessment-servicesapi_readinesspy)
+    - [OWASP API Top-10 coverage matrix](#owasp-api-top-10-coverage-matrix) · [API scan engine](#api-scan-engine-servicesapi_scannerpy)
+    - [Scope enforcement](#scope-enforcement) · [ALICE on API runs](#alice-on-api-runs)
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
+    - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
+    - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Automatic SAST pre-phase](#automatic-sast-pre-phase) · [Concurrency](#concurrency)
 
 ---
 
@@ -47,13 +77,16 @@ src/aespa/
 │   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   ├── events.py          # WebSocket event stream
+│   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
 │   ├── api_collections.py # /api/api-collections/* — collections, documents, endpoints
 │   ├── api_test_runs.py   # /api/api-collections/{id}/test-runs/* — API scan runs
-│   └── sast_runs.py       # /api/sast-runs/* and /api/api-collections/{id}/sast-runs
+│   ├── sast_runs.py       # /api/sast-runs/* and /api/api-collections/{id}/sast-runs
+│   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
+    ├── sites.py           # CRUD service layer for Site and Credential
     ├── crawler.py         # LLM-guided parallel web crawl
-    ├── scanner.py         # Dynamic (agentic) scan + specialist agent dispatch
-    ├── llm.py             # Multi-provider LLM client, agent tools, WSTG skills
+    ├── scanner.py         # Dynamic (agentic) scan, specialist dispatch, finding dedup & post-scan review
+    ├── llm.py             # Multi-provider LLM client, agent tools, WSTG skills, rate limiting
     ├── prompts/           # Extracted modular prompt templates
     │   ├── reporting.py   # Reporting / post-scan review prompts
     │   ├── specialist.py  # Specialist agent prompts
@@ -70,7 +103,7 @@ src/aespa/
     ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
     ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
-    ├── findings.py        # Deduplication, grouping, post-scan LLM pre-screen
+    ├── reporting_debug.py # Reporting-prompt version store & write-up replay harness
     ├── sast_scanner.py    # SAST agentic loop over uploaded source archives
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
@@ -110,9 +143,9 @@ AESPA_PORT         = 8000
                   │  HTTP + WebSocket
 ┌─────────────────▼───────────────────────────────────────────┐
 │  FastAPI application  (src/aespa/main.py)                   │
-│  Routers: sites · settings · test_runs · scan               │
+│  Routers: sites · settings · test_runs · scan · alice       │
 │           traffic · events · api_collections                │
-│           api_test_runs · sast_runs                         │
+│           api_test_runs · sast_runs · reporting_debug       │
 └──────┬───────────────────────┬──────────────────────────────┘
        │                       │
        ▼                       ▼
@@ -160,7 +193,7 @@ Defines API connections and rate limits for different LLM backends:
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `azure_openai`, `azure_foundry` etc. |
+| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored securely in DB, never exposed in API) |
 | `base_url` | — | Override endpoint URL (e.g., custom OpenAI compatible base URLs or Azure Foundry endpoints) |
 | `models_json` | `[]` | JSON list of available model names for this provider |
@@ -177,9 +210,10 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Master active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
-| `max_tokens` | `4096` | Max tokens per LLM call (60000+ recommended for Claude 3.5 Sonnet) |
-| `temperature` | `0.0` | Deterministic by default |
+| `max_tokens` | `70000` | Max tokens per LLM call (high default to accommodate extended thinking) |
+| `temperature` | — | Unset by default — falls through to the provider/model default |
 | `use_vision` | `false` | Include Playwright screenshots in prompts (requires vision-capable model) |
+| `force_tool_choice` | `true` | Force tool selection via the wire-format `tool_choice: required/any` |
 
 ### Scanner Policy (`ScannerPolicy` model)
 
@@ -400,8 +434,8 @@ Two execution modes depending on the configured LLM provider:
 
 | Mode | Providers | Description |
 |---|---|---|
-| **Native tool-use** | All models | Single continuous session; the LLM natively calls tools. Produces tighter reasoning chains. |
-| **Step-by-step** | DEPRECATED| Each iteration sends the full conversation history; the LLM emits a JSON action; the harness executes it and appends the result. |
+| **Native tool-use** | Any provider in `llm.AGENTIC_LOOP_PROVIDERS` (currently every supported provider) | Single continuous session; the LLM natively calls tools. Produces tighter reasoning chains. |
+| **Step-by-step** | DEPRECATED — dormant fallback for providers outside `AGENTIC_LOOP_PROVIDERS` | Each iteration sends the full conversation history; the LLM emits a JSON action; the harness executes it and appends the result. |
 
 The loop terminates when:
 - The LLM calls the `done` action (with a summary)
@@ -645,14 +679,14 @@ Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.
 
 ## 11. Findings & Validation
 
-**Files**: `src/aespa/services/findings.py`, `src/aespa/services/validator.py`
+**Files**: `src/aespa/services/scanner.py` (finding-write & dedup path), `src/aespa/services/llm.py` (`normalize_finding_titles`), `src/aespa/services/validator.py`
 
 ### Deduplication
 
-`findings.py` runs two deduplication passes:
+Findings are deduplicated as they are written, on the dynamic finding-write path in `scanner.py`:
 
-1. **Title normalisation** — the LLM rewrites finding titles to a canonical form so near-identical findings (same vulnerability class, different parameter name) get the same heading
-2. **Global deduplication** — findings are grouped by vulnerability class and host; the LLM identifies which are true duplicates and which are distinct instances
+1. **Title normalisation** — before a finding is persisted, `llm.normalize_finding_titles` asks the LLM to rewrite its title to a canonical form so near-identical findings (same vulnerability class, different parameter name) collapse to the same heading. ALICE findings skip this pass (`skip_normalize=True`) because they already carry specific, human-readable titles — see §15.
+2. **Exact-title deduplication** — `_dynamic_finding_exists` then rejects any finding whose (normalised) title already exists at the same URL for the run, so genuinely identical findings are not written twice.
 
 ### Validation
 
