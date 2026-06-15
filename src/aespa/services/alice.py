@@ -1181,7 +1181,8 @@ def _run_api_context_tool(
     # ── finding_list ──────────────────────────────────────────────────────────
     if tool_name == "finding_list":
         from aespa.services.scanner import _load_findings_snapshot
-        findings = _load_findings_snapshot(run_id)
+        # _run_api_context_tool is the API dispatcher: run_id is an ApiTestRun id.
+        findings = _load_findings_snapshot(run_id, is_api_run=True)
         severity = str(args.get("severity") or "").lower()
         matches = []
         for f in findings:
@@ -1209,7 +1210,9 @@ def _run_api_context_tool(
         owasp = _as_text(args.get("owasp_category") or args.get("owasp_api_category")).strip()
 
         finding = _SF(
-            test_run_id=run_id,
+            # API findings key on api_test_run_id only; test_run_id stays NULL so
+            # they never leak into the web run of the same integer id.
+            test_run_id=None,
             api_test_run_id=run_id,
             page_id=None,
             owasp_category=owasp or "A00",
