@@ -3785,7 +3785,6 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
         taskHistory: byId["scanner"]?.taskHistory || [],
       },
       { id: "specialist", name: "Specialist", children: specialistChildren },
-      { id: "validator",  name: "Validator",  children: validatorChildren  },
       {
         id: "reporting",
         name: "Reporting",

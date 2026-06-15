@@ -39,7 +39,7 @@ class AliceSessionsRequest(BaseModel):
 
 # ── Chat session persistence helpers ──────────────────────────────────────────
 
-def _load_sessions(run_id: int, session: Session) -> dict:
+def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict:
     run = session.get(TestRun, run_id)
     # Stable per-run identity. SQLite reuses INTEGER PRIMARY KEY ids after the
     # highest run is deleted, so a new run can inherit a deleted run's id. The
@@ -50,6 +50,7 @@ def _load_sessions(run_id: int, session: Session) -> dict:
     sess_rows = session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == run_kind)
         .order_by(AliceChatSession.position, AliceChatSession.id)
     ).all()
 
@@ -80,12 +81,14 @@ def _load_sessions(run_id: int, session: Session) -> dict:
     }
 
 
-def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> None:
+def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session, run_kind: str = "web") -> None:
     incoming_keys = {chat["id"] for chat in req.chats}
     now = _now()
 
     existing_sess = session.exec(
-        select(AliceChatSession).where(AliceChatSession.test_run_id == run_id)
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == run_kind)
     ).all()
     by_key: dict[str, AliceChatSession] = {s.session_key: s for s in existing_sess}
 
@@ -110,6 +113,7 @@ def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> 
         else:
             sess_row = AliceChatSession(
                 test_run_id=run_id,
+                run_kind=run_kind,
                 session_key=key,
                 title=chat.get("title", "Session"),
                 position=pos,
