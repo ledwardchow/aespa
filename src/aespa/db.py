@@ -66,7 +66,7 @@ def _backfill_run_kind(engine: Engine) -> None:
                 "SELECT id FROM api_test_run "
                 "WHERE id NOT IN (SELECT id FROM test_run)"
             )
-            for table in ("agent_log", "scan_log", "alice_chat_session"):
+            for table in ("agent_log", "scan_log", "alice_chat_session", "scanner_session"):
                 if table not in tables:
                     continue
                 conn.execute(
@@ -178,6 +178,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "alice_chat_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _ensure_column(engine, "scanner_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _backfill_run_kind(engine)
     _reset_orphaned_validating_findings(engine)
     with engine.connect() as conn:
@@ -546,6 +547,7 @@ def _migrate(engine: Engine) -> None:
             CREATE TABLE IF NOT EXISTS scanner_session (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                run_kind TEXT NOT NULL DEFAULT 'web',
                 label TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'cookie',
                 username TEXT,
@@ -560,7 +562,7 @@ def _migrate(engine: Engine) -> None:
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """))
-        for column in ("test_run_id", "label", "kind", "username", "credential_id", "is_active"):
+        for column in ("test_run_id", "run_kind", "label", "kind", "username", "credential_id", "is_active"):
             conn.execute(__import__("sqlalchemy").text(
                 f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
                 f"ON scanner_session ({column})"
