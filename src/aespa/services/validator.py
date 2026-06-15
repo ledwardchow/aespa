@@ -1394,6 +1394,39 @@ async def _get_or_create_sessions(
         log.info("Validator: reusing %d active scanner sessions for run_id=%s", len(active), run_id)
         return active
 
+    # Check if there are stored sessions for this run in the database.
+    # If there are, we can load them instead of trying to bootstrap or fail.
+    from aespa.services import scanner_sessions as session_svc
+    try:
+        vault = session_svc.load_session_vault(run_id)
+    except Exception as e:
+        log.warning("Validator: failed to load session vault for run_id=%s: %s", run_id, e)
+        vault = {}
+
+    if vault:
+        stored_sessions: dict[int, dict] = {}
+        synthetic_id = -1
+        for label, stored in vault.items():
+            if stored.get("kind") == "anonymous":
+                continue
+            credential_id = stored.get("credential_id")
+            if isinstance(credential_id, int) and credential_id > 0:
+                key = credential_id
+            else:
+                while synthetic_id in stored_sessions:
+                    synthetic_id -= 1
+                key = synthetic_id
+                synthetic_id -= 1
+            stored_sessions[key] = {
+                "username": stored.get("username") or label,
+                "label": stored.get("label") or label,
+                "cookies": stored.get("cookies") or {},
+                "extra_headers": stored.get("extra_headers") or {},
+            }
+        if stored_sessions:
+            log.info("Validator: loaded %d stored sessions from database for run_id=%s", len(stored_sessions), run_id)
+            return stored_sessions
+
     if not requires_auth or not creds:
         return {}
 
