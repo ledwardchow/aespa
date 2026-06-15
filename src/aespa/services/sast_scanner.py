@@ -662,34 +662,38 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
     log.info("start_sast_scan: sast_run_id=%s", sast_run_id)
 
-    # Register the run-kind so agent/scan log rows get run_kind='sast'.
-    events_svc.register_sast_run(sast_run_id)
+    # Tag every event this run emits as run_kind='sast'.  Run ids collide across
+    # web / api / sast, so the scope is authoritative.  This also overrides any
+    # surrounding 'api' scope when run as an API scan's SAST pre-phase, since the
+    # task created below snapshots this 'sast' context.
+    with events_svc.run_kind_scope("sast"):
+        events_svc.register_sast_run(sast_run_id)
 
-    with Session(get_engine()) as s:
-        run = s.get(SastRun, sast_run_id)
-        if run is None:
-            raise ValueError(f"SastRun {sast_run_id} not found")
-        run.status = "scanning"
-        run.started_at = run.started_at or datetime.now(_UTC)
-        run.updated_at = datetime.now(_UTC)
-        s.add(run)
-        s.commit()
+        with Session(get_engine()) as s:
+            run = s.get(SastRun, sast_run_id)
+            if run is None:
+                raise ValueError(f"SastRun {sast_run_id} not found")
+            run.status = "scanning"
+            run.started_at = run.started_at or datetime.now(_UTC)
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
 
-    events_svc.emit(sast_run_id, {
-        "type": "agent_status",
-        "agent_id": "sast-scanner",
-        "role": "SAST Analyst",
-        "status": "active",
-        "current_task": "SAST scan starting…",
-        "outcome": None,
-        "_persist": True,
-    })
+        events_svc.emit(sast_run_id, {
+            "type": "agent_status",
+            "agent_id": "sast-scanner",
+            "role": "SAST Analyst",
+            "status": "active",
+            "current_task": "SAST scan starting…",
+            "outcome": None,
+            "_persist": True,
+        })
 
-    task = asyncio.create_task(
-        _sast_scan_task(sast_run_id),
-        name=f"sast-scan-{sast_run_id}",
-    )
-    _sast_tasks[sast_run_id] = task
+        task = asyncio.create_task(
+            _sast_scan_task(sast_run_id),
+            name=f"sast-scan-{sast_run_id}",
+        )
+        _sast_tasks[sast_run_id] = task
 
 
 async def run_sast_scan(sast_run_id: int) -> None:
