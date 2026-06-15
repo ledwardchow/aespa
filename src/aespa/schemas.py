@@ -1086,7 +1086,7 @@ class ScanFindingOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    test_run_id: int
+    test_run_id: int | None = None
     page_id: int | None
     owasp_category: str
     severity: str

@@ -158,6 +158,9 @@ def _migrate(engine: Engine) -> None:
     # Slice 6 — API test run attribution for findings
     _ensure_column(engine, "scan_finding", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scan_finding", "owasp_api_category", "TEXT")
+    # Both scan_finding FK columns now exist — decouple the id spaces: make
+    # test_run_id nullable and clear it on findings that belong to an API run.
+    _ensure_scan_finding_test_run_id_nullable(engine)
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
@@ -937,6 +940,120 @@ def _ensure_scan_finding_page_id_nullable(engine: Engine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_scan_finding_owasp_category "
             "ON scan_finding (owasp_category)"
         ))
+        conn.commit()
+
+
+def _ensure_scan_finding_test_run_id_nullable(engine: Engine) -> None:
+    """Decouple API findings from the web TestRun id space.
+
+    ``test_run_id`` and ``api_test_run_id`` are FKs into independent
+    autoincrement sequences.  API scans used to stamp the ApiTestRun id into
+    ``test_run_id`` as well, so an API finding leaked into the web run that
+    happened to share that integer id.  Make ``test_run_id`` nullable and null
+    it out for every finding that already belongs to an API run.  SQLite cannot
+    drop a NOT NULL constraint in place, so rebuild the table (same approach as
+    ``_ensure_scan_finding_page_id_nullable``).  Idempotent and best-effort.
+
+    Must run AFTER every scan_finding column has been ensured, since the rebuild
+    must carry the full current column set.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    columns = [
+        "id",
+        "test_run_id",
+        "page_id",
+        "owasp_category",
+        "severity",
+        "title",
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "cvss_vector",
+        "affected_url",
+        "evidence",
+        "request_evidence",
+        "response_evidence",
+        "evidence_json",
+        "merged_instances",
+        "poc_command",
+        "poc_setup",
+        "screenshot_b64",
+        "finding_source",
+        "validation_status",
+        "validation_note",
+        "api_test_run_id",
+        "owasp_api_category",
+        "created_at",
+    ]
+    column_list = ", ".join(columns)
+    # On copy, drop test_run_id for anything that belongs to an API run.
+    select_list = ", ".join(
+        "CASE WHEN api_test_run_id IS NOT NULL THEN NULL ELSE test_run_id END "
+        "AS test_run_id"
+        if c == "test_run_id"
+        else c
+        for c in columns
+    )
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(scan_finding)")))
+        if not rows:
+            return  # table not created yet (fresh DB handled by create_all)
+        test_run_id_row = next((row for row in rows if row[1] == "test_run_id"), None)
+        # row[3] == notnull flag; already nullable means this migration has run.
+        if test_run_id_row is None or int(test_run_id_row[3] or 0) == 0:
+            return
+
+        conn.execute(sql("DROP TABLE IF EXISTS scan_finding_trn_migration"))
+        conn.execute(sql("""
+            CREATE TABLE scan_finding_trn_migration (
+                id INTEGER PRIMARY KEY,
+                test_run_id INTEGER REFERENCES test_run(id),
+                page_id INTEGER REFERENCES crawled_page(id),
+                owasp_category TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                impact TEXT NOT NULL DEFAULT '',
+                likelihood TEXT NOT NULL DEFAULT '',
+                recommendation TEXT NOT NULL DEFAULT '',
+                cvss_score REAL NOT NULL DEFAULT 0.0,
+                cvss_vector TEXT NOT NULL DEFAULT '',
+                affected_url TEXT NOT NULL DEFAULT '',
+                evidence TEXT NOT NULL,
+                request_evidence TEXT NOT NULL DEFAULT '',
+                response_evidence TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '[]',
+                merged_instances TEXT NOT NULL DEFAULT '[]',
+                poc_command TEXT NOT NULL DEFAULT '',
+                poc_setup TEXT NOT NULL DEFAULT '',
+                screenshot_b64 TEXT,
+                finding_source TEXT NOT NULL DEFAULT 'unknown',
+                validation_status TEXT NOT NULL DEFAULT 'unvalidated',
+                validation_note TEXT,
+                api_test_run_id INTEGER,
+                owasp_api_category TEXT,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(sql(f"""
+            INSERT INTO scan_finding_trn_migration ({column_list})
+            SELECT {select_list}
+            FROM scan_finding
+        """))
+        conn.execute(sql("DROP TABLE scan_finding"))
+        conn.execute(sql(
+            "ALTER TABLE scan_finding_trn_migration RENAME TO scan_finding"
+        ))
+        for col in ("test_run_id", "page_id", "owasp_category", "api_test_run_id"):
+            conn.execute(sql(
+                f"CREATE INDEX IF NOT EXISTS ix_scan_finding_{col} "
+                f"ON scan_finding ({col})"
+            ))
         conn.commit()
 
 

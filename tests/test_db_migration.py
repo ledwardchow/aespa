@@ -423,3 +423,89 @@ def test_migrate_preserves_legacy_provider_formats():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_ensure_scan_finding_test_run_id_nullable_decouples_api_findings():
+    """Legacy DBs stamped the ApiTestRun id into both test_run_id and
+    api_test_run_id.  The migration must make test_run_id nullable and clear it
+    for every API finding, while leaving genuine web findings untouched."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        # Legacy schema: test_run_id NOT NULL, both FK columns present.
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE scan_finding (
+                    id INTEGER PRIMARY KEY,
+                    test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                    page_id INTEGER REFERENCES crawled_page(id),
+                    owasp_category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    impact TEXT NOT NULL DEFAULT '',
+                    likelihood TEXT NOT NULL DEFAULT '',
+                    recommendation TEXT NOT NULL DEFAULT '',
+                    cvss_score REAL NOT NULL DEFAULT 0.0,
+                    cvss_vector TEXT NOT NULL DEFAULT '',
+                    affected_url TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL,
+                    request_evidence TEXT NOT NULL DEFAULT '',
+                    response_evidence TEXT NOT NULL DEFAULT '',
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    merged_instances TEXT NOT NULL DEFAULT '[]',
+                    poc_command TEXT NOT NULL DEFAULT '',
+                    poc_setup TEXT NOT NULL DEFAULT '',
+                    screenshot_b64 TEXT,
+                    finding_source TEXT NOT NULL DEFAULT 'unknown',
+                    validation_status TEXT NOT NULL DEFAULT 'unvalidated',
+                    validation_note TEXT,
+                    api_test_run_id INTEGER,
+                    owasp_api_category TEXT,
+                    created_at DATETIME NOT NULL
+                )
+            """))
+            # Web finding (api_test_run_id NULL) and an API finding (both ids set).
+            conn.execute(text(
+                "INSERT INTO scan_finding "
+                "(id, test_run_id, owasp_category, severity, title, description, "
+                " evidence, api_test_run_id, created_at) VALUES "
+                "(1, 7, 'A01', 'high', 'web', 'd', 'e', NULL, '2024-01-01'),"
+                "(2, 4, 'API1', 'high', 'api', 'd', 'e', 4, '2024-01-01')"
+            ))
+            conn.commit()
+
+        db._ensure_scan_finding_test_run_id_nullable(engine)
+
+        with engine.connect() as conn:
+            trn = next(
+                r for r in conn.execute(text("PRAGMA table_info(scan_finding)"))
+                if r[1] == "test_run_id"
+            )
+            assert int(trn[3]) == 0, "test_run_id should be nullable"
+
+            rows = {
+                r[0]: r[1]
+                for r in conn.execute(text("SELECT id, test_run_id FROM scan_finding"))
+            }
+            assert rows[1] == 7, "web finding test_run_id preserved"
+            assert rows[2] is None, "API finding test_run_id cleared"
+
+            indexes = {
+                r[0] for r in conn.execute(text(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name='scan_finding'"
+                ))
+            }
+            assert "ix_scan_finding_api_test_run_id" in indexes
+
+        # Idempotent: a second pass is a no-op and does not error.
+        db._ensure_scan_finding_test_run_id_nullable(engine)
+        with engine.connect() as conn:
+            count = next(conn.execute(text("SELECT count(*) FROM scan_finding")))[0]
+            assert count == 2
+    finally:
+        engine.dispose()
