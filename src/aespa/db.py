@@ -66,7 +66,7 @@ def _backfill_run_kind(engine: Engine) -> None:
                 "SELECT id FROM api_test_run "
                 "WHERE id NOT IN (SELECT id FROM test_run)"
             )
-            for table in ("agent_log", "scan_log"):
+            for table in ("agent_log", "scan_log", "alice_chat_session"):
                 if table not in tables:
                     continue
                 conn.execute(
@@ -177,6 +177,7 @@ def _migrate(engine: Engine) -> None:
     # row with the run kind so the two panels stop reading each other's rows.
     _ensure_column(engine, "agent_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _ensure_column(engine, "alice_chat_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _backfill_run_kind(engine)
     _reset_orphaned_validating_findings(engine)
     with engine.connect() as conn:

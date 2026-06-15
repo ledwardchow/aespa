@@ -68,7 +68,11 @@ def get_api_test_run(
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
     run = _get_run_or_404(session, run_id)
-    for sess in session.exec(select(AliceChatSession).where(AliceChatSession.test_run_id == run_id)).all():
+    for sess in session.exec(
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "api")
+    ).all():
         for msg in session.exec(select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)).all():
             session.delete(msg)
         session.delete(sess)
@@ -90,6 +94,7 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
     sess_rows = session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "api")
         .order_by(AliceChatSession.position, AliceChatSession.id)
     ).all()
 
@@ -136,7 +141,7 @@ class AliceRunRequest(BaseModel):
 def _save_api_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> None:
     from aespa.api.alice import AliceSessionsRequest as _AReq, _save_sessions
     # Delegate to the canonical implementation — same DB tables, same logic.
-    _save_sessions(run_id, req, session)  # type: ignore[arg-type]
+    _save_sessions(run_id, req, session, run_kind="api")  # type: ignore[arg-type]
 
 
 # ── Alice alias routes ─────────────────────────────────────────────────────────
@@ -181,7 +186,7 @@ async def alice_stream(
 ) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     return StreamingResponse(
-        alice_tasks.stream_events(run_id, cursor),
+        alice_tasks.stream_events(run_id, cursor, run_type="api"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -194,14 +199,14 @@ async def alice_stream(
 @router.delete("/{run_id}/alice/run")
 async def stop_alice_run(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
-    stopped = await alice_tasks.stop(run_id)
+    stopped = await alice_tasks.stop(run_id, run_type="api")
     return {"ok": True, "stopped": stopped}
 
 
 @router.get("/{run_id}/alice/status")
 def alice_status(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
-    return alice_tasks.status(run_id)
+    return alice_tasks.status(run_id, run_type="api")
 
 
 # ── Events alias ───────────────────────────────────────────────────────────────
