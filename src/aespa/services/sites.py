@@ -228,7 +228,11 @@ def export_site(session: Session, site_id: int) -> dict:
         pages   = list(session.exec(select(CrawledPage).where(CrawledPage.test_run_id == rid)).all())
         links   = list(session.exec(select(PageLink).where(PageLink.test_run_id == rid)).all())
         traffic = list(session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == rid)).all())
-        sessions_ = list(session.exec(select(ScannerSession).where(ScannerSession.test_run_id == rid)).all())
+        sessions_ = list(session.exec(
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == rid)
+            .where(ScannerSession.run_kind == "web")
+        ).all())
         views   = list(session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == rid)).all())
         intel   = list(session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == rid)).all())
         hyps    = list(session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == rid)).all())
