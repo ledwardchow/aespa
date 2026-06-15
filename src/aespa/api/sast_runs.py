@@ -12,6 +12,7 @@ from aespa.db import get_session
 from aespa.models import AgentLog, ApiCollection, ApiDocument, SastRun, ScanLead, ScanLog
 from aespa.schemas import SastRunSummary, ScanLeadOut
 from aespa.services import events as events_svc
+from aespa.services import run_cleanup
 
 _UTC = timezone.utc
 
@@ -125,18 +126,8 @@ def get_sast_run(run_id: int, session: Session = Depends(get_session)) -> SastRu
 
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
-    run = _get_run_or_404(session, run_id)
-    for lead in session.exec(
-        select(ScanLead).where(ScanLead.producer_run_id == run_id)
-    ).all():
-        session.delete(lead)
-    for log_entry in session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == run_id)
-        .where(AgentLog.run_kind == "sast")
-    ).all():
-        session.delete(log_entry)
-    session.delete(run)
+    _get_run_or_404(session, run_id)
+    run_cleanup.cascade_delete_sast_run(session, run_id)
     session.commit()
 
 

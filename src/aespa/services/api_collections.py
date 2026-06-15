@@ -91,6 +91,59 @@ def update_collection(
 
 
 def delete_collection(session: Session, collection_id: int) -> None:
+    """Delete a collection and every row that hangs off it.
+
+    Like the run ids, ``ApiCollection`` ids are reused by SQLite, so any child
+    left behind (runs, findings, endpoints, uploaded docs, …) would resurface
+    under a newly created collection that reuses the freed id.  Cascade through
+    every child: API/SAST runs go via the shared ``run_cleanup`` helpers so their
+    findings/traffic/logs are cleaned too.
+    """
+    from pathlib import Path
+
+    from aespa.models import (
+        ApiCredential,
+        ApiDocument,
+        ApiEndpoint,
+        ApiTestRun,
+        SastRun,
+        ScanLead,
+    )
+    from aespa.services import run_cleanup
+
     collection = get_collection(session, collection_id)
+
+    for run in session.exec(
+        select(ApiTestRun).where(ApiTestRun.collection_id == collection_id)
+    ).all():
+        run_cleanup.cascade_delete_api_run(session, run.id)
+    for run in session.exec(
+        select(SastRun).where(SastRun.collection_id == collection_id)
+    ).all():
+        run_cleanup.cascade_delete_sast_run(session, run.id)
+    # Leads carry a collection_id of their own; sweep any not tied to a SAST run.
+    for lead in session.exec(
+        select(ScanLead).where(ScanLead.collection_id == collection_id)
+    ).all():
+        session.delete(lead)
+    for ep in session.exec(
+        select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
+    ).all():
+        session.delete(ep)
+    for cred in session.exec(
+        select(ApiCredential).where(ApiCredential.collection_id == collection_id)
+    ).all():
+        session.delete(cred)
+    for doc in session.exec(
+        select(ApiDocument).where(ApiDocument.collection_id == collection_id)
+    ).all():
+        try:
+            path = Path(doc.stored_path)
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+        session.delete(doc)
+
     session.delete(collection)
     session.commit()

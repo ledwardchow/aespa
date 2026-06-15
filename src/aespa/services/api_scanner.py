@@ -698,7 +698,7 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
         ).all())
 
     seeded = 0
-    scanner_sessions.ensure_anonymous_session(api_run_id, source="api_scanner")
+    scanner_sessions.ensure_anonymous_session(api_run_id, source="api_scanner", run_kind="api")
     seeded += 1
 
     for cred in creds:
@@ -733,6 +733,7 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
             cookies=cookies,
             extra_headers=extra_headers,
             metadata={"scheme": cred.scheme, "scope": cred.scope},
+            run_kind="api",
         )
         seeded += 1
 
@@ -1096,7 +1097,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
 
     # Seed scanner sessions from credentials.
     seed_sessions_from_credentials(api_run_id)
-    session_vault = scanner_sessions.load_session_vault(api_run_id)
+    session_vault = scanner_sessions.load_session_vault(api_run_id, run_kind="api")
 
     # Build the per-category probe hook (replaces the old broad traffic hook).
     post_probe_fn = _make_post_probe_fn(api_run_id)
