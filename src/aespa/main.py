@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -115,6 +116,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     web_dir: Path = settings.web_dir
     if web_dir.exists() and (web_dir / "index.html").exists():
+        # Ensure StaticFiles serves .js with a JS MIME type. On Windows the
+        # registry can map .js to text/plain, which makes browsers reject
+        # `<script type="module">` imports (e.g. the vendored libraries).
+        mimetypes.add_type("application/javascript", ".js")
+
         _NO_CACHE = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
 
         def _index_html() -> HTMLResponse:

@@ -380,25 +380,9 @@ th {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  /* resizable columns */
-  resize: horizontal;
   overflow: hidden;
   position: relative;
 }
-/* visual drag affordance on the right edge of each header */
-th::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  top: 20%;
-  height: 60%;
-  width: 3px;
-  background: var(--border);
-  border-radius: 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-th:hover::after { opacity: 1; }
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: rgba(255,255,255,0.02); }
 

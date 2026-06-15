@@ -53,6 +53,7 @@ const api = {
   getApiScanStatus:    (id)       => req(`/api/api-test-runs/${id}/scan/status`),
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
   clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
+  deleteApiFinding:    (id,fid)   => req(`/api/api-test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
@@ -154,7 +155,6 @@ const api = {
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
-  deduplicateFindings:   (id)       => req(`/api/test-runs/${id}/findings/deduplicate`, { method:"POST" }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
   validateFinding:       (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}/validate`, { method:"POST" }),
   stopValidation:        (id)       => req(`/api/test-runs/${id}/validate/stop`, { method:"POST" }),
@@ -3007,6 +3007,15 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
     finally { setClearBusy(false); }
   };
 
+  const onDeleteApiFinding = async (e, findingId) => {
+    e.stopPropagation();
+    try {
+      await api.deleteApiFinding(runId, findingId);
+      setFindings(prev => prev.filter(f => f.id !== findingId));
+      setExpanded(prev => { const next = new Set(prev); next.delete(findingId); return next; });
+    } catch(err) { setError(err.message); }
+  };
+
   const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
 
   if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
@@ -3042,6 +3051,8 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
               ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
               ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
               <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+              <button className="btn ghost sm finding-del-btn" title="Delete finding"
+                onClick=${e=>onDeleteApiFinding(e,f.id)}>🗑</button>
             </div>
             ${expanded.has(f.id) && html`
               <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
@@ -3635,19 +3646,52 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
     if (streamRef.current) { streamRef.current.close(); streamRef.current = null; }
     const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
     streamRef.current = es;
+    // Re-accumulate from scratch on every (re)connect: the stream replays from
+    // cursor 0, so we rebuild each message's text/stepData and REPLACE state
+    // rather than append — otherwise a mid-run reconnect would double-count
+    // text deltas and tool entries. Mirrors the web scan's aliceSessionConnect.
+    const textAcc = {};   // msg_id -> accumulated text
+    const stepAcc = {};   // msg_id -> stepData ({ [step]: { llmMessages, tools } })
     es.onmessage = (ev) => {
       try {
         const event = JSON.parse(ev.data);
-        if (event.type === "thinking_chunk" && event.delta && event.tab_id && event.msg_id) {
+        if ((event.type === "thinking_chunk" || event.type === "message_chunk")
+            && event.delta && event.tab_id && event.msg_id) {
+          textAcc[event.msg_id] = (textAcc[event.msg_id] || "") + event.delta;
+          const text = textAcc[event.msg_id];
           setAliceChats(prev => prev.map(s =>
             s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
-              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              m.id === event.msg_id ? { ...m, text } : m
             )}
           ));
-        } else if (event.type === "message_chunk" && event.delta && event.tab_id && event.msg_id) {
+        } else if (event.type === "step_llm_call" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          entry.llmMessages = event.messages || [];
           setAliceChats(prev => prev.map(s =>
             s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
-              m.id === event.msg_id ? { ...m, text: m.text + event.delta } : m
+              m.id === event.msg_id ? { ...m, stepData } : m
+            )}
+          ));
+        } else if (event.type === "step_tool_call" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          entry.tools.push({ tool: event.tool, input: event.input, result: null });
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, stepData } : m
+            )}
+          ));
+        } else if (event.type === "step_tool_result" && event.tab_id && event.msg_id) {
+          const stepData = stepAcc[event.msg_id] || (stepAcc[event.msg_id] = {});
+          const entry = stepData[event.step] || (stepData[event.step] = { llmMessages: [], tools: [] });
+          const tools = entry.tools;
+          if (tools.length > 0 && tools[tools.length - 1].result === null) {
+            tools[tools.length - 1].result = event.result;
+          }
+          setAliceChats(prev => prev.map(s =>
+            s.id !== event.tab_id ? s : { ...s, messages: s.messages.map(m =>
+              m.id === event.msg_id ? { ...m, stepData } : m
             )}
           ));
         } else if (event.type === "done") {
@@ -3741,7 +3785,6 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
         taskHistory: byId["scanner"]?.taskHistory || [],
       },
       { id: "specialist", name: "Specialist", children: specialistChildren },
-      { id: "validator",  name: "Validator",  children: validatorChildren  },
       {
         id: "reporting",
         name: "Reporting",
@@ -3815,7 +3858,7 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
                                 <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
                               </div>
                               ${isThinkExp && html`
-                                <div className="alice-thinking-body">${renderMarkdown(msg.text)}</div>`}
+                                <div className="alice-thinking-body">${renderAliceBlocks(msg.text, true, msg.stepData || {})}</div>`}
                             </div>
                           </div>`;
                       }
@@ -3823,7 +3866,7 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
                       return html`
                         <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                           <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
-                            ${renderMarkdown(msg.text)}
+                            ${isUser ? renderMarkdown(msg.text) : renderAliceBlocks(msg.text, false, msg.stepData || {})}
                             <div className="alice-msg-meta"><span>${msg.ts}</span></div>
                           </div>
                         </div>`;
@@ -4586,11 +4629,22 @@ function TestRunDetail({ runId, initialTab }) {
     setAliceGlobalRunning(false);
   };
 
-  const handleAliceSend = async () => {
-    if (!aliceInputText.trim() || aliceIsThinking) return;
-    const userText = aliceInputText;
-    setAliceInputText("");
+  // Core ALICE turn submission. `handleAliceSend` drives this from the chat input,
+  // but other UI affordances (e.g. the De-duplicate Issues button) reuse it so a
+  // click does exactly what typing the same directive into the chat would do.
+  const submitAliceDirective = (rawText, { fromInput = false, onComplete = null } = {}) => {
+    const userText = (rawText || "").trim();
+    if (!userText || aliceIsThinking) return;
+    if (fromInput) setAliceInputText("");
     const currentTabId = activeAliceTabId;
+
+    // Make sure the A.L.I.C.E. panel is expanded so the user can watch it work.
+    setCollapsedAgentIds(prev => {
+      if (!prev.has("alice")) return prev;
+      const next = new Set(prev);
+      next.delete("alice");
+      return next;
+    });
 
     const userMsg = {
       id: Date.now().toString(),
@@ -4657,7 +4711,7 @@ function TestRunDetail({ runId, initialTab }) {
       historyPayload,
       thinkMsgId,
       replyMsgId,
-      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); },
+      onFinish: () => { setAliceThinkingTabId(null); setAliceGlobalRunning(false); if (onComplete) onComplete(null); },
       onFail: (err) => {
         if (err.name === "AbortError") {
           setAliceChats(prev => prev.map(tab => {
@@ -4686,9 +4740,12 @@ function TestRunDetail({ runId, initialTab }) {
         }
         setAliceThinkingTabId(null);
         setAliceGlobalRunning(false);
+        if (onComplete) onComplete(err);
       },
     });
   };
+
+  const handleAliceSend = () => submitAliceDirective(aliceInputText, { fromInput: true });
 
 
   const [tokenUsage, setTokenUsage] = useState(null);   // {total_input, total_output, by_model}
@@ -5531,21 +5588,30 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(err) { setError(err.message); setValidateBusy(false); }
   };
 
-  const onDeduplicateFindings = async () => {
-    if (dedupeBusy) return;
+  // The directive sent to A.L.I.C.E. when the user clicks "De-duplicate Issues".
+  // Clicking the button is equivalent to typing this into the A.L.I.C.E. chat, so
+  // the results match what users get when they ask A.L.I.C.E. to deduplicate.
+  const ALICE_DEDUP_DIRECTIVE =
+    "Review all of the findings recorded for this scan and remove duplicates. " +
+    "Use the finding_list context tool to load every finding, then identify the ones that " +
+    "describe the same vulnerability on the same endpoint or target, and remove the duplicates. " +
+    "If multiple findings describe the same underlying issue but with somewhat different details, " +
+    "you can consolidate them into a single finding by re-writing it (write a new issue then delete the " +
+    "superseded ones). Do not run any new HTTP requests, browser actions, or probes — this is a " +
+    "findings cleanup task only. When you finish, briefly summarize the changes made.";
+
+  const onDeduplicateFindings = () => {
+    if (dedupeBusy || aliceIsThinking) return;
     setDedupeBusy(true);
-    try {
-      const result = await api.deduplicateFindings(runId);
-      setFindings(await api.getFindings(runId));
-      api.getValidateStatus(runId).then(setValidateStatus).catch(()=>{});
-      if (result.removed > 0) {
+    submitAliceDirective(ALICE_DEDUP_DIRECTIVE, {
+      onComplete: () => {
+        api.getFindings(runId).then(setFindings).catch(() => {});
+        api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
         setExpandedFinding(null);
         setExpandedGroups(new Set());
-      }
-      const mode = result.llm_used ? " with LLM review" : "";
-      alert(`Removed ${result.removed} duplicate issue${result.removed === 1 ? "" : "s"}${mode}.`);
-    } catch(err) { setError(err.message); }
-    finally { setDedupeBusy(false); }
+        setDedupeBusy(false);
+      },
+    });
   };
 
   const onExportFindingsMarkdown = () => {
@@ -6042,7 +6108,7 @@ function TestRunDetail({ runId, initialTab }) {
             ${dedupeBusy && html`
               <span className="val-status-badge val-running dedupe-status">
                 <span className="inline-spinner"></span>
-                De-duplicating with LLM…
+                A.L.I.C.E. is de-duplicating issues…
               </span>`}
             <div className="row" style=${{gap:8,marginLeft:8}}>
               ${findings.length>0 && html`
@@ -6060,7 +6126,7 @@ function TestRunDetail({ runId, initialTab }) {
                   onClick=${onValidateAll}>✓ Validate Issues</button>`}
               ${findings.length>0 && html`
                 <button className="btn sm"
-                  disabled=${dedupeBusy||validateBusy||validateStatus?.status==="running"}
+                  disabled=${dedupeBusy||validateBusy||aliceIsThinking||validateStatus?.status==="running"}
                   onClick=${onDeduplicateFindings}>
                   ${dedupeBusy && html`<span className="inline-spinner"></span>`}
                   ${dedupeBusy ? "De-duplicating…" : "De-duplicate Issues"}
@@ -6505,7 +6571,8 @@ function TestRunDetail({ runId, initialTab }) {
               );
               const hasThinkingDetail = entry.phase === "thinking_step" && !!(
                 entry.data?.observation || entry.data?.hypothesis ||
-                entry.data?.payload_purpose || entry.data?.payload_summary
+                entry.data?.payload_purpose || entry.data?.payload_summary ||
+                entry.data?.tool_input || entry.data?.tool_output
               );
               const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
               const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
@@ -6540,7 +6607,13 @@ function TestRunDetail({ runId, initialTab }) {
                           <pre>${entry.data.payload_purpose}</pre>`}
                         ${entry.data?.payload_summary && html`
                           <div className="activity-payload-label" style=${{marginTop:6}}>Payload</div>
-                          <pre>${entry.data.payload_summary}</pre>`}`}
+                          <pre>${entry.data.payload_summary}</pre>`}
+                        ${entry.data?.tool_input && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Sub-tool Input (${entry.data.tool})</div>
+                          <pre>${JSON.stringify(entry.data.tool_input, null, 2)}</pre>`}
+                        ${entry.data?.tool_output && html`
+                          <div className="activity-payload-label" style=${{marginTop:6}}>Sub-tool Output</div>
+                          <pre>${JSON.stringify(entry.data.tool_output, null, 2)}</pre>`}`}
                       ${(entry.phase === "reporting_turn" && entry.data?.titles?.length > 0) && html`
                         <div className="activity-payload-label">Issues identified this turn</div>
                         <ul style=${{margin:"4px 0 0 0",paddingLeft:18}}>
