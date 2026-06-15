@@ -791,8 +791,13 @@ async def run_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
                     await asyncio.sleep(0)
 
-            # Stream text blocks
+            # Stream text blocks. Commentary on a step that also calls a tool is
+            # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
+            # markers in the thinking stream) so it breaks the collapsed trace
+            # into a box-above / box-below. The final tool-less turn's text and
+            # the done summary become the prominent reply bubble.
             import re as _re
+            has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -806,18 +811,25 @@ async def run_alice_turn_stream(
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                    if outer_text:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
-                            accumulated_message += "\n\n"
-                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                        accumulated_message += outer_text
-                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 else:
+                    outer_text = text_content
+
+                if not outer_text:
+                    await asyncio.sleep(0)
+                    continue
+
+                if has_tools:
+                    # Intermediate commentary — a chat bubble that splits the trace.
+                    wrapped = f"\n[[ALICE_SAY]]\n{outer_text}\n[[/ALICE_SAY]]\n"
+                    accumulated_thought += wrapped
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
+                else:
+                    # Final tool-less turn: this text is the actual answer.
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                    accumulated_message += text_content
-                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                    accumulated_message += outer_text
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 await asyncio.sleep(0)
 
             # Handle no tool use (text-only turn)
@@ -855,6 +867,12 @@ async def run_alice_turn_stream(
                 if tool_name == "done":
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE done at step %d: %s", step_count, summary[:200])
+                    if summary:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                        accumulated_message += summary
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
@@ -1470,7 +1488,11 @@ async def run_api_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
                     await asyncio.sleep(0)
 
+            # Stream text blocks. Commentary on a step that also calls a tool is
+            # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
+            # markers in the thinking stream) so it breaks the collapsed trace.
             import re as _re
+            has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -1482,18 +1504,25 @@ async def run_api_alice_turn_stream(
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                    if outer_text:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
-                            accumulated_message += "\n\n"
-                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                        accumulated_message += outer_text
-                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 else:
+                    outer_text = text_content
+
+                if not outer_text:
+                    await asyncio.sleep(0)
+                    continue
+
+                if has_tools:
+                    # Intermediate commentary — a chat bubble that splits the trace.
+                    wrapped = f"\n[[ALICE_SAY]]\n{outer_text}\n[[/ALICE_SAY]]\n"
+                    accumulated_thought += wrapped
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
+                else:
+                    # Final tool-less turn: this text is the actual answer.
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                    accumulated_message += text_content
-                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                    accumulated_message += outer_text
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 await asyncio.sleep(0)
 
             if not tool_use_blocks:
@@ -1528,6 +1557,12 @@ async def run_api_alice_turn_stream(
                 if tool_name == "done":
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE API done at step %d: %s", step_count, summary[:200])
+                    if summary:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                        accumulated_message += summary
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,

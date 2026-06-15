@@ -1038,6 +1038,70 @@ const renderMarkdown = (text) => {
 };
 
 
+// Summarize an ALICE thinking trace into a one-line label for the collapsed
+// box: the last step number and the last tool that was called.
+const aliceTraceSummary = (text) => {
+  const blocks = parseAliceThinking(text);
+  let lastStep = 0;
+  let lastTool = null;
+  for (const b of blocks) {
+    if (b.type === "status" && b.stepNum) lastStep = Math.max(lastStep, b.stepNum);
+    if (b.type === "status" && b.stepKind === "tool_call" && b.toolName) lastTool = b.toolName;
+    if (b.type === "tool_call" && b.tool) lastTool = b.tool;
+  }
+  let label = lastStep > 0 ? `Step ${lastStep}` : "Reasoning";
+  if (lastTool) label += ` · ${lastTool}`;
+  return { label, lastStep, lastTool };
+};
+
+
+// Split a turn's thinking text into an ordered list of segments. Commentary the
+// model emits mid-run is wrapped in [[ALICE_SAY]]...[[/ALICE_SAY]] markers; each
+// such marker becomes a prominent chat bubble that breaks the surrounding trace
+// into a box-above / box-below (Claude-code style).
+const ALICE_SAY_RE = /\[\[ALICE_SAY\]\]([\s\S]*?)\[\[\/ALICE_SAY\]\]/g;
+const parseAliceTurnSegments = (text) => {
+  if (!text) return [];
+  const segments = [];
+  let lastIndex = 0;
+  let m;
+  ALICE_SAY_RE.lastIndex = 0;
+  while ((m = ALICE_SAY_RE.exec(text)) !== null) {
+    const before = text.slice(lastIndex, m.index);
+    if (before.trim()) segments.push({ kind: "trace", text: before });
+    const said = m[1].trim();
+    if (said) segments.push({ kind: "message", text: said });
+    lastIndex = m.index + m[0].length;
+  }
+  const tail = text.slice(lastIndex);
+  if (tail.trim()) segments.push({ kind: "trace", text: tail });
+  return segments;
+};
+
+
+// Render the collapsed "steps" box. Low-prominence; the summary shows the last
+// step + tool, and expands to the full trace for that segment.
+const renderAliceTraceBox = (segKey, segText, stepData, isOpen, toggle) => {
+  const traceSummary = aliceTraceSummary(segText);
+  return html`
+    <div key=${segKey} className="alice-msg-row alice-msg-row--alice alice-msg-row--trace">
+      <div className=${"alice-trace-box" + (isOpen ? " alice-trace-box--open" : "")}>
+        <div className="alice-trace-summary" onClick=${toggle}>
+          <${IconBrain}/>
+          <span className="alice-trace-summary-label">${traceSummary.label}</span>
+          <span className="alice-trace-caret">${isOpen ? "▼" : "▶"}</span>
+        </div>
+        ${isOpen && html`
+          <div className="alice-thinking-inline">
+            ${renderAliceBlocks(segText, true, stepData || {})}
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+};
+
+
 const renderAliceBlocks = (text, isThinking, stepData = {}) => {
   const blocks = parseAliceThinking(text);
   return blocks.map((block, idx) => {
@@ -3719,7 +3783,6 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
       s.id !== tabId ? s : { ...s, messages: [...s.messages, userMsg, thinkMsg, replyMsg] }
     ));
     setAliceRunning(true);
-    setAliceExpandedThinkIds(prev => { const n = new Set(prev); n.add(thinkId); return n; });
     const activeSession = sessionsRef.current.find(s => s.id === tabId) || { messages: [] };
     const history = activeSession.messages.map(m => ({ sender: m.sender, text: m.text }));
     try {
@@ -3842,27 +3905,32 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
                       <div style=${{ padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
                         Send A.L.I.C.E. an instruction to begin interactive API testing.
                       </div>`}
-                    ${aliceMessages.map(msg => {
+                    ${aliceMessages.map((msg, msgIdx) => {
+                      // Thinking message renders as ordered trace boxes + chat bubbles.
                       if (msg.type === "thinking") {
-                        const isThinkExp = aliceExpandedThinkIds.has(msg.id);
-                        return html`
-                          <div key=${msg.id} className="alice-msg-row">
-                            <div className="alice-msg-bubble--thinking">
-                              <div className="alice-thinking-header" onClick=${() => {
-                                setAliceExpandedThinkIds(prev => {
-                                  const n = new Set(prev); n.has(msg.id) ? n.delete(msg.id) : n.add(msg.id); return n;
-                                });
-                              }}>
-                                <${IconBrain}/>
-                                <span>Thought Process ${isThinkExp ? "▲" : "▼"}</span>
-                                <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
-                              </div>
-                              ${isThinkExp && html`
-                                <div className="alice-thinking-body">${renderAliceBlocks(msg.text, true, msg.stepData || {})}</div>`}
-                            </div>
-                          </div>`;
+                        if (!msg.text) return null;
+                        const segs = parseAliceTurnSegments(msg.text);
+                        return segs.map((seg, si) => {
+                          if (seg.kind === "message") {
+                            return html`
+                              <div key=${msg.id + ":m" + si} className="alice-msg-row alice-msg-row--alice">
+                                <div className="alice-msg-bubble alice-msg-bubble--alice">
+                                  <div>${renderMarkdown(seg.text)}</div>
+                                </div>
+                              </div>`;
+                          }
+                          const segKey = msg.id + ":t" + si;
+                          return renderAliceTraceBox(
+                            segKey, seg.text, msg.stepData || {},
+                            aliceExpandedThinkIds.has(segKey),
+                            () => setAliceExpandedThinkIds(prev => {
+                              const n = new Set(prev); n.has(segKey) ? n.delete(segKey) : n.add(segKey); return n;
+                            }),
+                          );
+                        });
                       }
                       const isUser = msg.sender === "user";
+                      if (!isUser && !msg.text) return null;
                       return html`
                         <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                           <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
@@ -4409,7 +4477,6 @@ function TestRunDetail({ runId, initialTab }) {
       const { tab_id, think_msg_id, reply_msg_id } = st;
       setAliceGlobalRunning(true);
       setAliceThinkingTabId(tab_id);
-      setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(think_msg_id); return s; });
       // Pre-populate session so the subscriber can find the right messages.
       const sess = getAliceSession(runId, tab_id);
       sess.thinkMsgId = think_msg_id;
@@ -4467,10 +4534,6 @@ function TestRunDetail({ runId, initialTab }) {
           })
         };
       }));
-      // Auto-expand the thinking bubble so recovered progress is visible
-      if (recThinkId) {
-        setAliceExpandedThinkIds(prev => { const s = new Set(prev); s.add(recThinkId); return s; });
-      }
     }
 
     const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
@@ -4691,12 +4754,6 @@ function TestRunDetail({ runId, initialTab }) {
     }));
     setAliceThinkingTabId(currentTabId);
     setAliceGlobalRunning(true);
-
-    setAliceExpandedThinkIds(prev => {
-      const next = new Set(prev);
-      next.add(thinkMsgId);
-      return next;
-    });
 
     const historyPayload = aliceMessages.map(m => ({
       sender: m.sender,
@@ -6852,33 +6909,37 @@ function TestRunDetail({ runId, initialTab }) {
                             </button>
                           </div>
                           <div className="alice-chat-history" style=${{ height: `${aliceChatHeight}px` }} ref=${(el) => { if (el) { el.scrollTop = el.scrollHeight; } }}>
-                            ${aliceMessages.map((msg) => {
+                            ${aliceMessages.map((msg, msgIdx) => {
+                              // The thinking message renders as an ordered run of
+                              // collapsed trace boxes and chat bubbles; commentary
+                              // breaks the trace into box-above / box-below.
                               if (msg.type === "thinking") {
-                                const isThinkExpanded = aliceExpandedThinkIds.has(msg.id);
-                                return html`
-                                  <div key=${msg.id} className="alice-msg-row">
-                                    <div className="alice-msg-bubble--thinking">
-                                      <div className="alice-thinking-header" onClick=${() => {
-                                        setAliceExpandedThinkIds(prev => {
-                                          const next = new Set(prev);
-                                          next.has(msg.id) ? next.delete(msg.id) : next.add(msg.id);
-                                          return next;
-                                        });
-                                      }}>
-                                        <${IconBrain}/>
-                                        <span>Thought Process ${isThinkExpanded ? "▲" : "▼"}</span>
-                                        <span style=${{ marginLeft: "auto", fontSize: "9px", opacity: 0.6 }}>${msg.ts}</span>
-                                      </div>
-                                      ${isThinkExpanded && html`
-                                        <div className="alice-thinking-body">
-                                          ${renderAliceBlocks(msg.text, true, msg.stepData || {})}
+                                if (!msg.text) return null;
+                                const segs = parseAliceTurnSegments(msg.text);
+                                return segs.map((seg, si) => {
+                                  if (seg.kind === "message") {
+                                    return html`
+                                      <div key=${msg.id + ":m" + si} className="alice-msg-row alice-msg-row--alice">
+                                        <div className="alice-msg-bubble alice-msg-bubble--alice">
+                                          <div>${renderMarkdown(seg.text)}</div>
                                         </div>
-                                      `}
-                                    </div>
-                                  </div>
-                                `;
+                                      </div>
+                                    `;
+                                  }
+                                  const segKey = msg.id + ":t" + si;
+                                  return renderAliceTraceBox(
+                                    segKey, seg.text, msg.stepData || {},
+                                    aliceExpandedThinkIds.has(segKey),
+                                    () => setAliceExpandedThinkIds(prev => {
+                                      const next = new Set(prev);
+                                      next.has(segKey) ? next.delete(segKey) : next.add(segKey);
+                                      return next;
+                                    }),
+                                  );
+                                });
                               }
                               const isUser = msg.sender === "user";
+                              if (!isUser && !msg.text) return null;
                               return html`
                                 <div key=${msg.id} className=${"alice-msg-row" + (isUser ? " alice-msg-row--user" : " alice-msg-row--alice")}>
                                   <div className=${"alice-msg-bubble" + (isUser ? " alice-msg-bubble--user" : " alice-msg-bubble--alice")}>
