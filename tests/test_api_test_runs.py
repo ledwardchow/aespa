@@ -132,6 +132,54 @@ def test_delete_run_404(client):
     assert r.status_code == 404
 
 
+def _import_finding(client: TestClient, run_id: int, title: str = "Leaky finding") -> None:
+    r = client.post(
+        f"/api/api-test-runs/{run_id}/findings/import",
+        json=[{"title": title, "severity": "high", "owasp_api_category": "API1"}],
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_delete_run_cleans_up_findings_so_reused_id_is_clean(client):
+    """Regression for #173: deleting an API run must remove its findings, or a new
+    run that reuses the freed (SQLite-recycled) id inherits them."""
+    cid = _make_collection(client)
+    run1 = _make_run(client, cid, "Run 1")
+    _import_finding(client, run1["id"])
+
+    # The run owns the finding before deletion.
+    r = client.get(f"/api/api-test-runs/{run1['id']}/findings")
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+    # Delete the run; a freshly created run reuses the same integer id.
+    assert client.delete(f"/api/api-test-runs/{run1['id']}").status_code == 204
+    run2 = _make_run(client, cid, "Run 2")
+    assert run2["id"] == run1["id"], "expected SQLite to recycle the freed id"
+
+    # The new run must NOT see the deleted run's finding.
+    r = client.get(f"/api/api-test-runs/{run2['id']}/findings")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_delete_collection_cascades_runs_and_findings(client):
+    """Deleting a collection must remove its runs (and their findings), or a new
+    collection reusing the freed id inherits the orphaned runs."""
+    cid = _make_collection(client, "App A")
+    run = _make_run(client, cid, "Run 1")
+    _import_finding(client, run["id"])
+
+    assert client.delete(f"/api/api-collections/{cid}").status_code == 204
+
+    # New collection reuses the freed id; it must start with no runs.
+    cid2 = _make_collection(client, "App B")
+    assert cid2 == cid, "expected SQLite to recycle the freed collection id"
+    r = client.get(f"/api/api-collections/{cid2}/test-runs")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 # ── Alice alias endpoints (session persistence) ────────────────────────────────
 
 def test_alice_sessions_get_empty(client):

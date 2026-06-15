@@ -15,3 +15,4 @@ docs/images/.DS_Store
 /.vscode
 saml.b64
 aespa.db-journal
+*.backup
