@@ -1310,39 +1310,43 @@ async def start_api_scan(api_run_id: int) -> None:
 
     log.info("start_api_scan: api_run_id=%s", api_run_id)
 
-    # Tag this id as an API run so its agent_log / scan_log rows are written with
-    # run_kind='api' and never collide with a web TestRun that shares the id.
-    events_svc.register_api_run(api_run_id)
+    # Tag every event this run emits as run_kind='api'.  Run ids collide across
+    # web / api / sast (independent counters), so the scope — not the id — is the
+    # authoritative discriminator.  asyncio.create_task snapshots this context,
+    # so the scan task (and its child specialist tasks) inherit the tag even
+    # after this function returns.
+    with events_svc.run_kind_scope("api"):
+        events_svc.register_api_run(api_run_id)
 
-    with Session(get_engine()) as s:
-        run = s.get(ApiTestRun, api_run_id)
-        if run is None:
-            raise ValueError(f"ApiTestRun {api_run_id} not found")
-        run.status = "scanning"
-        run.started_at = run.started_at or datetime.now(_UTC)
-        run.updated_at = datetime.now(_UTC)
-        s.add(run)
-        s.commit()
+        with Session(get_engine()) as s:
+            run = s.get(ApiTestRun, api_run_id)
+            if run is None:
+                raise ValueError(f"ApiTestRun {api_run_id} not found")
+            run.status = "scanning"
+            run.started_at = run.started_at or datetime.now(_UTC)
+            run.updated_at = datetime.now(_UTC)
+            s.add(run)
+            s.commit()
 
-    # Seed the coverage matrix before starting the scan task.
-    seed_coverage_matrix(api_run_id)
+        # Seed the coverage matrix before starting the scan task.
+        seed_coverage_matrix(api_run_id)
 
-    # Emit an immediate agent_status row so the Agents sidebar is non-empty.
-    events_svc.emit(api_run_id, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "active",
-        "current_task": "API security scan starting…",
-        "outcome": None,
-        "_persist": True,
-    })
+        # Emit an immediate agent_status row so the Agents sidebar is non-empty.
+        events_svc.emit(api_run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": "API security scan starting…",
+            "outcome": None,
+            "_persist": True,
+        })
 
-    task = asyncio.create_task(
-        _api_scan_task(api_run_id),
-        name=f"api-scan-{api_run_id}",
-    )
-    _scan_tasks[api_run_id] = task
+        task = asyncio.create_task(
+            _api_scan_task(api_run_id),
+            name=f"api-scan-{api_run_id}",
+        )
+        _scan_tasks[api_run_id] = task
 
 
 async def stop_api_scan(api_run_id: int) -> bool:
@@ -1368,15 +1372,16 @@ async def stop_api_scan(api_run_id: int) -> bool:
         except Exception:
             pass
         _update_run_status(api_run_id, "cancelled")
-        events_svc.emit(api_run_id, {
-            "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
-            "status": "idle",
-            "current_task": "Scan stopped",
-            "outcome": "stopped",
-            "_persist": True,
-        })
+        with events_svc.run_kind_scope("api"):
+            events_svc.emit(api_run_id, {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "idle",
+                "current_task": "Scan stopped",
+                "outcome": "stopped",
+                "_persist": True,
+            })
         return True
     return False
 

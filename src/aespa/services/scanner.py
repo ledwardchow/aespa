@@ -3357,10 +3357,15 @@ async def start_thinking_scan(run_id: int) -> None:
         return
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
-    task = asyncio.create_task(
-        _thinking_scan_task(run_id),
-        name=f"thinking-scan-{run_id}",
-    )
+    # Tag this run's events as run_kind='web'.  Run ids collide across
+    # web / api / sast, so the scope — snapshotted by create_task below — keeps
+    # web log rows correctly tagged even if the same id was registered as an API
+    # run earlier in this process.
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(
+            _thinking_scan_task(run_id),
+            name=f"thinking-scan-{run_id}",
+        )
     _thinking_tasks[run_id] = task
     task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
 
@@ -3373,10 +3378,11 @@ async def start_thinking_scan_resume(run_id: int) -> None:
     """
     if run_id in _thinking_tasks:
         return
-    task = asyncio.create_task(
-        _thinking_scan_task(run_id),
-        name=f"thinking-scan-resume-{run_id}",
-    )
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(
+            _thinking_scan_task(run_id),
+            name=f"thinking-scan-resume-{run_id}",
+        )
     _thinking_tasks[run_id] = task
     task.add_done_callback(lambda _: _thinking_tasks.pop(run_id, None))
 
