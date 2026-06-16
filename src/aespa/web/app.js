@@ -3209,14 +3209,14 @@ const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","A
 const OWASP_WEB_LABELS = {
   A01:"Broken Access Control", A02:"Cryptographic Failures", A03:"Injection",
   A04:"Insecure Design", A05:"Security Misconfiguration",
-  A06:"Vulnerable & Outdated Components", A07:"Identification & Auth Failures",
+  A06:"Software & Data Supply Chain Failures", A07:"Identification & Auth Failures",
   A08:"Software & Data Integrity Failures", A09:"Logging & Monitoring Failures",
   A10:"SSRF",
 };
 const OWASP_WEB_SHORT = {
   A01:"Access Control", A02:"Crypto Failures", A03:"Injection",
   A04:"Insecure Design", A05:"Misconfig",
-  A06:"Vuln Components", A07:"Auth Failures",
+  A06:"Supply Chain", A07:"Auth Failures",
   A08:"Data Integrity", A09:"Logging & Mon.",
   A10:"SSRF",
 };
