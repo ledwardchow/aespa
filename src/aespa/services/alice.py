@@ -99,6 +99,7 @@ async def _execute_alice_tool(
     session_vault: dict[str, dict] | None = None,
     scope_check_fn=None,    # Optional override: scope_check_fn(url) -> str | None
     context_tool_fn=None,   # Optional override: context_tool_fn(tool_name, args) -> dict
+    post_probe_fn=None,     # Optional: post_probe_fn(url, method, owasp_category) -> None (API runs)
 ) -> str:
     """Execute a single ALICE tool call and return the result string."""
     session_vault = session_vault or {}
@@ -152,6 +153,16 @@ async def _execute_alice_tool(
                     kwargs["headers"] = headers
                 resp = await hx.request(method, _url, **kwargs)
                 resp_body = resp.text[:8192]
+                # Coverage tracking (API runs): attribute this probe to the OWASP
+                # category ALICE declared so the endpoint × category work-program
+                # cell flips to in_progress. No-op for site runs (post_probe_fn None).
+                if post_probe_fn is not None:
+                    _owasp = str(tool_input.get("owasp_category") or "").strip()
+                    if _owasp:
+                        try:
+                            post_probe_fn(_url, method, _owasp)
+                        except Exception as _pp_exc:
+                            log.debug("ALICE post_probe_fn error: %s", _pp_exc)
                 return (
                     f"HTTP {resp.status_code} {method} {_url}\n"
                     f"Response Headers: {dict(resp.headers)}\n"
@@ -184,7 +195,7 @@ async def _execute_alice_tool(
                     base_url=base_url,
                 )
             result = json.dumps(output, separators=(",", ":"), default=str)
-            return result[:8192]
+            return result[:30000]
         except Exception as exc:
             return f"Context tool error: {exc}"
 
@@ -701,6 +712,10 @@ async def run_alice_turn_stream(
     # Register run context so LLM calls attribute token usage to this run.
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
+    # Build web workprogram probe hook so ALICE populates the coverage matrix.
+    from aespa.services.web_workprogram import _make_web_post_probe_fn as _wp_probe_fn
+    _web_post_probe_fn = _wp_probe_fn(run_id)
+
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -791,8 +806,13 @@ async def run_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
                     await asyncio.sleep(0)
 
-            # Stream text blocks
+            # Stream text blocks. Commentary on a step that also calls a tool is
+            # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
+            # markers in the thinking stream) so it breaks the collapsed trace
+            # into a box-above / box-below. The final tool-less turn's text and
+            # the done summary become the prominent reply bubble.
             import re as _re
+            has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -806,18 +826,25 @@ async def run_alice_turn_stream(
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                    if outer_text:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
-                            accumulated_message += "\n\n"
-                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                        accumulated_message += outer_text
-                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 else:
+                    outer_text = text_content
+
+                if not outer_text:
+                    await asyncio.sleep(0)
+                    continue
+
+                if has_tools:
+                    # Intermediate commentary — a chat bubble that splits the trace.
+                    wrapped = f"\n[[ALICE_SAY]]\n{outer_text}\n[[/ALICE_SAY]]\n"
+                    accumulated_thought += wrapped
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
+                else:
+                    # Final tool-less turn: this text is the actual answer.
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                    accumulated_message += text_content
-                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                    accumulated_message += outer_text
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 await asyncio.sleep(0)
 
             # Handle no tool use (text-only turn)
@@ -855,6 +882,12 @@ async def run_alice_turn_stream(
                 if tool_name == "done":
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE done at step %d: %s", step_count, summary[:200])
+                    if summary:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                        accumulated_message += summary
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
@@ -880,15 +913,17 @@ async def run_alice_turn_stream(
                         tool_input=tool_input,
                         step=step_count,
                         session_vault=session_vault,
+                        post_probe_fn=_web_post_probe_fn,
                     )
                 except Exception as exc:
                     log.warning("ALICE tool %r step %d failed: %s", tool_name, step_count, exc)
                     result_str = f"Tool execution error: {exc}"
 
                 # Cap result length to avoid blowing up context
-                if len(result_str) > 16000:
-                    omitted = len(result_str) - 16000
-                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+                limit = 30000 if tool_name == "context_tool" else 16000
+                if len(result_str) > limit:
+                    omitted = len(result_str) - limit
+                    result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
@@ -1234,12 +1269,179 @@ def _run_api_context_tool(
             s.add(finding)
             s.commit()
             s.refresh(finding)
+
+        # Auto-link the work-program coverage cell, mirroring the scanner's
+        # post-finding hook: match the finding's affected_url to an in-scope
+        # endpoint and flip its (endpoint × category) cell to "finding".
+        cell_linked = None
+        if owasp:
+            try:
+                from aespa.services.api_scanner import (
+                    _match_endpoint_for_url,
+                    update_coverage_cell,
+                    OWASP_API_CATEGORIES,
+                )
+                from aespa.models import ApiCollection as _AC, ApiEndpoint as _AE
+
+                cat = owasp.upper()
+                if cat in OWASP_API_CATEGORIES and finding.id is not None:
+                    with Session(get_engine()) as s2:
+                        endpoints = list(s2.exec(
+                            select(_AE)
+                            .where(_AE.collection_id == collection_id)
+                            .where(_AE.in_scope == True)  # noqa: E712
+                        ).all())
+                        coll = s2.get(_AC, collection_id)
+                        base = (coll.base_url if coll else "").rstrip("/")
+                    ep = _match_endpoint_for_url(finding.affected_url or "", endpoints, base)
+                    if ep is not None:
+                        update_coverage_cell(
+                            run_id, ep.id, cat, "finding", finding_id=finding.id
+                        )
+                        cell_linked = {"endpoint_id": ep.id, "owasp_api_category": cat}
+            except Exception as exc:
+                log.debug("report_finding coverage link failed: %s", exc)
+
         return {
             "tool": "report_finding",
             "ok": True,
             "finding_id": finding.id,
             "title": finding.title,
             "severity": finding.severity,
+            "coverage_cell": cell_linked,
+        }
+
+    # ── coverage_matrix ───────────────────────────────────────────────────────
+    # Read the OWASP work-program coverage matrix so ALICE can see which
+    # endpoint × category cells still need attention before deciding what to test.
+    if tool_name == "coverage_matrix":
+        from aespa.services.api_scanner import get_coverage_matrix
+
+        status_filter = str(args.get("status") or "").strip().lower()
+        try:
+            ep_filter = int(args["endpoint_id"]) if args.get("endpoint_id") is not None else None
+        except (TypeError, ValueError):
+            ep_filter = None
+
+        matrix = get_coverage_matrix(run_id)
+        if not matrix:
+            return {"tool": "coverage_matrix", "error": "no coverage matrix for this run"}
+
+        cells_out = []
+        for ep in matrix.get("endpoints", []):
+            if ep_filter is not None and ep.get("endpoint_id") != ep_filter:
+                continue
+            for cat, cell in (ep.get("cells") or {}).items():
+                if status_filter and cell.get("status") != status_filter:
+                    continue
+                cells_out.append({
+                    "endpoint_id": ep.get("endpoint_id"),
+                    "method": ep.get("method"),
+                    "path": ep.get("path"),
+                    "owasp_api_category": cat,
+                    "status": cell.get("status"),
+                    "finding_ids": cell.get("finding_ids") or [],
+                })
+
+        return {
+            "tool": "coverage_matrix",
+            "coverage_mode": matrix.get("coverage_mode"),
+            "totals": matrix.get("totals", {}),
+            "count": len(cells_out),
+            "cells": cells_out[:limit],
+            "truncated": len(cells_out) > limit,
+        }
+
+    # ── set_coverage ──────────────────────────────────────────────────────────
+    # Set a work-program cell's state. Lets ALICE drive coverage explicitly:
+    # mark a cell in_progress while testing, covered when clean, skipped (with a
+    # reason) when not applicable, or finding (with the backing finding_id).
+    if tool_name == "set_coverage":
+        from aespa.services.api_scanner import (
+            update_coverage_cell,
+            OWASP_API_CATEGORIES,
+            _applicable_categories,
+        )
+        from aespa.models import ApiEndpoint as _AE, ApiEndpointTest as _AET
+
+        _ALLOWED_STATUS = {"in_progress", "covered", "skipped", "finding"}
+        status = str(args.get("status") or "").strip().lower()
+        if status not in _ALLOWED_STATUS:
+            return {
+                "tool": "set_coverage",
+                "error": f"invalid status {status!r}",
+                "allowed": sorted(_ALLOWED_STATUS),
+                "hint": "Cells never downgrade — not_started is the seeded default and cannot be set.",
+            }
+
+        category = str(
+            args.get("owasp_api_category") or args.get("category") or ""
+        ).strip().upper()
+        if category not in OWASP_API_CATEGORIES:
+            return {
+                "tool": "set_coverage",
+                "error": f"invalid owasp_api_category {category!r}",
+                "allowed": OWASP_API_CATEGORIES,
+            }
+
+        try:
+            endpoint_id = int(args["endpoint_id"])
+        except (KeyError, TypeError, ValueError):
+            return {"tool": "set_coverage", "error": "endpoint_id (integer) is required"}
+
+        skip_reason = str(args.get("skip_reason") or "").strip() or None
+        finding_id = args.get("finding_id")
+        try:
+            finding_id = int(finding_id) if finding_id is not None else None
+        except (TypeError, ValueError):
+            finding_id = None
+
+        # Validate the endpoint belongs to this collection, is in scope, and that
+        # the category is one the work program actually tracks for it — otherwise
+        # update_coverage_cell would create an orphan cell the matrix never shows.
+        with Session(get_engine()) as s:
+            ep = s.get(_AE, endpoint_id)
+            if ep is None or ep.collection_id != collection_id:
+                return {
+                    "tool": "set_coverage",
+                    "error": f"endpoint {endpoint_id} not found in this collection",
+                    "hint": "Call endpoint_list or coverage_matrix for valid endpoint_id values.",
+                }
+            if not ep.in_scope:
+                return {"tool": "set_coverage", "error": f"endpoint {endpoint_id} is out of scope"}
+            applicable = _applicable_categories(ep)
+            if category not in applicable:
+                return {
+                    "tool": "set_coverage",
+                    "error": f"{category} is not a tracked category for endpoint {endpoint_id}",
+                    "applicable_categories": applicable,
+                }
+
+        update_coverage_cell(
+            run_id, endpoint_id, category, status,
+            finding_id=finding_id, skip_reason=skip_reason,
+        )
+
+        # Re-read so ALICE sees the *actual* resulting status. update_coverage_cell
+        # only upgrades (finding > covered/skipped > in_progress > not_started), so a
+        # request to lower a cell is silently kept at the higher state.
+        with Session(get_engine()) as s:
+            cell = s.exec(
+                select(_AET)
+                .where(_AET.api_test_run_id == run_id)
+                .where(_AET.endpoint_id == endpoint_id)
+                .where(_AET.owasp_api_category == category)
+            ).first()
+            actual = cell.status if cell else status
+
+        return {
+            "tool": "set_coverage",
+            "ok": True,
+            "endpoint_id": endpoint_id,
+            "owasp_api_category": category,
+            "requested_status": status,
+            "status": actual,
+            "downgrade_ignored": actual != status,
         }
 
     return {
@@ -1248,6 +1450,7 @@ def _run_api_context_tool(
         "available_tools": [
             "endpoint_list", "endpoint_detail", "collection_info",
             "finding_list", "report_finding", "lead_list",
+            "coverage_matrix", "set_coverage",
         ],
     }
 
@@ -1358,6 +1561,31 @@ async def run_api_alice_turn_stream(
     _coll_proxy = _CollProxy()
     _scope_fn = lambda url: _check_api_scope(url, _coll_proxy)  # noqa: E731
     _ctx_fn = lambda tool_name, args: _run_api_context_tool(collection_id, api_run_id, tool_name, args)  # noqa: E731
+
+    def _post_probe_fn(url: str, method: str, owasp_category: str) -> None:
+        """Flip the endpoint × category work-program cell to in_progress when
+        ALICE sends a probe declaring the OWASP category it is testing. Mirrors
+        the automated scanner's per-probe coverage hook."""
+        from aespa.services.api_scanner import (
+            _match_endpoint_for_url,
+            update_coverage_cell,
+            OWASP_API_CATEGORIES,
+        )
+        from aespa.models import ApiEndpoint as _AE
+
+        cat = (owasp_category or "").strip().upper()
+        if cat not in OWASP_API_CATEGORIES:
+            return
+        with Session(get_engine()) as s:
+            endpoints = list(s.exec(
+                select(_AE)
+                .where(_AE.collection_id == collection_id)
+                .where(_AE.in_scope == True)  # noqa: E712
+            ).all())
+        ep = _match_endpoint_for_url(url, endpoints, base_url.rstrip("/"))
+        if ep is None:
+            return
+        update_coverage_cell(api_run_id, ep.id, cat, "in_progress")
 
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. API Mode] Loading API collection endpoint inventory...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -1470,7 +1698,11 @@ async def run_api_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_text})}\n\n"
                     await asyncio.sleep(0)
 
+            # Stream text blocks. Commentary on a step that also calls a tool is
+            # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
+            # markers in the thinking stream) so it breaks the collapsed trace.
             import re as _re
+            has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -1482,18 +1714,25 @@ async def run_api_alice_turn_stream(
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                    if outer_text:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
-                            accumulated_message += "\n\n"
-                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                        accumulated_message += outer_text
-                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 else:
+                    outer_text = text_content
+
+                if not outer_text:
+                    await asyncio.sleep(0)
+                    continue
+
+                if has_tools:
+                    # Intermediate commentary — a chat bubble that splits the trace.
+                    wrapped = f"\n[[ALICE_SAY]]\n{outer_text}\n[[/ALICE_SAY]]\n"
+                    accumulated_thought += wrapped
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
+                else:
+                    # Final tool-less turn: this text is the actual answer.
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
-                    accumulated_message += text_content
-                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': text_content})}\n\n"
+                    accumulated_message += outer_text
+                    yield f"data: {json.dumps({'type': 'message_chunk', 'delta': outer_text})}\n\n"
                 await asyncio.sleep(0)
 
             if not tool_use_blocks:
@@ -1528,6 +1767,12 @@ async def run_api_alice_turn_stream(
                 if tool_name == "done":
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE API done at step %d: %s", step_count, summary[:200])
+                    if summary:
+                        if accumulated_message and not accumulated_message.endswith("\n"):
+                            accumulated_message += "\n\n"
+                            yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
+                        accumulated_message += summary
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
@@ -1555,14 +1800,16 @@ async def run_api_alice_turn_stream(
                         session_vault=session_vault,
                         scope_check_fn=_scope_fn,
                         context_tool_fn=_ctx_fn,
+                        post_probe_fn=_post_probe_fn,
                     )
                 except Exception as exc:
                     log.warning("ALICE API tool %r step %d failed: %s", tool_name, step_count, exc)
                     result_str = f"Tool execution error: {exc}"
 
-                if len(result_str) > 16000:
-                    omitted = len(result_str) - 16000
-                    result_str = result_str[:16000] + f"\n[{omitted} chars omitted]"
+                limit = 30000 if tool_name == "context_tool" else 16000
+                if len(result_str) > limit:
+                    omitted = len(result_str) - limit
+                    result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:

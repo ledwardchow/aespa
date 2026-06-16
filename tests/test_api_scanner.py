@@ -135,7 +135,7 @@ def test_seed_sessions_creates_anonymous_and_configured(db_engine, collection, a
 
     count = seed_sessions_from_credentials(api_run.id)
 
-    sessions = list_run_sessions(api_run.id)
+    sessions = list_run_sessions(api_run.id, run_kind="api")
     labels = {s.label for s in sessions}
 
     assert count >= 2  # anonymous + at least the bearer cred
@@ -149,7 +149,7 @@ def test_seed_sessions_bearer_sets_extra_header(db_engine, collection, api_run, 
     from aespa.services.scanner_sessions import list_run_sessions
 
     seed_sessions_from_credentials(api_run.id)
-    sessions = list_run_sessions(api_run.id)
+    sessions = list_run_sessions(api_run.id, run_kind="api")
 
     bearer_session = next((s for s in sessions if "admin_token" in s.label or s.kind == "bearer"), None)
     assert bearer_session is not None
@@ -165,7 +165,7 @@ def test_seed_sessions_no_creds_only_anonymous(db_engine, collection, api_run):
     from aespa.services.scanner_sessions import list_run_sessions
 
     count = seed_sessions_from_credentials(api_run.id)
-    sessions = list_run_sessions(api_run.id)
+    sessions = list_run_sessions(api_run.id, run_kind="api")
 
     assert count == 1
     assert sessions[0].label == "anonymous"

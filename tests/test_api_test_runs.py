@@ -132,6 +132,54 @@ def test_delete_run_404(client):
     assert r.status_code == 404
 
 
+def _import_finding(client: TestClient, run_id: int, title: str = "Leaky finding") -> None:
+    r = client.post(
+        f"/api/api-test-runs/{run_id}/findings/import",
+        json=[{"title": title, "severity": "high", "owasp_api_category": "API1"}],
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_delete_run_cleans_up_findings_so_reused_id_is_clean(client):
+    """Regression for #173: deleting an API run must remove its findings, or a new
+    run that reuses the freed (SQLite-recycled) id inherits them."""
+    cid = _make_collection(client)
+    run1 = _make_run(client, cid, "Run 1")
+    _import_finding(client, run1["id"])
+
+    # The run owns the finding before deletion.
+    r = client.get(f"/api/api-test-runs/{run1['id']}/findings")
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+
+    # Delete the run; a freshly created run reuses the same integer id.
+    assert client.delete(f"/api/api-test-runs/{run1['id']}").status_code == 204
+    run2 = _make_run(client, cid, "Run 2")
+    assert run2["id"] == run1["id"], "expected SQLite to recycle the freed id"
+
+    # The new run must NOT see the deleted run's finding.
+    r = client.get(f"/api/api-test-runs/{run2['id']}/findings")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_delete_collection_cascades_runs_and_findings(client):
+    """Deleting a collection must remove its runs (and their findings), or a new
+    collection reusing the freed id inherits the orphaned runs."""
+    cid = _make_collection(client, "App A")
+    run = _make_run(client, cid, "Run 1")
+    _import_finding(client, run["id"])
+
+    assert client.delete(f"/api/api-collections/{cid}").status_code == 204
+
+    # New collection reuses the freed id; it must start with no runs.
+    cid2 = _make_collection(client, "App B")
+    assert cid2 == cid, "expected SQLite to recycle the freed collection id"
+    r = client.get(f"/api/api-collections/{cid2}/test-runs")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
 # ── Alice alias endpoints (session persistence) ────────────────────────────────
 
 def test_alice_sessions_get_empty(client):
@@ -401,3 +449,151 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
         set_engine(prev_engine)
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+# ── ALICE Collision isolation tests ──────────────────────────────────────────
+
+def test_alice_sessions_do_not_cross_colliding_ids():
+    """Verify that ALICE sessions for web and API scans with colliding IDs do not overlap."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from aespa import models
+    from aespa.db import get_session
+    from aespa.main import create_app
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as s:
+        site = models.Site(name="S", base_url="https://example.com")
+        s.add(site); s.commit(); s.refresh(site)
+        web_run = models.TestRun(site_id=site.id, name="web")
+        s.add(web_run); s.commit(); s.refresh(web_run)
+
+        coll = models.ApiCollection(name="C", base_url="https://example.com")
+        s.add(coll); s.commit(); s.refresh(coll)
+        api_run = models.ApiTestRun(collection_id=coll.id, name="api")
+        s.add(api_run); s.commit(); s.refresh(api_run)
+
+        web_run_id, api_run_id = web_run.id, api_run.id
+        assert web_run_id == api_run_id == 1
+
+    def _override_session():
+        with Session(engine) as session:
+            yield session
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        # PUT web scan Alice session
+        web_payload = {
+            "chats": [{
+                "id": "tab-web",
+                "title": "WEB SESSION",
+                "messages": [{"id": "m1", "sender": "user", "type": "message", "text": "hello web", "ts": "12:00"}],
+            }],
+            "active_tab_id": "tab-web",
+        }
+        r_web_put = c.put(f"/api/test-runs/{web_run_id}/alice/sessions", json=web_payload)
+        assert r_web_put.status_code == 200
+
+        # PUT API scan Alice session
+        api_payload = {
+            "chats": [{
+                "id": "tab-api",
+                "title": "API SESSION",
+                "messages": [{"id": "m2", "sender": "user", "type": "message", "text": "hello api", "ts": "12:01"}],
+            }],
+            "active_tab_id": "tab-api",
+        }
+        r_api_put = c.put(f"/api/api-test-runs/{api_run_id}/alice/sessions", json=api_payload)
+        assert r_api_put.status_code == 200
+
+        # GET web scan Alice session and verify it is not overwritten
+        r_web_get = c.get(f"/api/test-runs/{web_run_id}/alice/sessions")
+        assert r_web_get.status_code == 200
+        web_chats = r_web_get.json()["chats"]
+        assert len(web_chats) == 1
+        assert web_chats[0]["title"] == "WEB SESSION"
+
+        # GET API scan Alice session and verify it is isolated
+        r_api_get = c.get(f"/api/api-test-runs/{api_run_id}/alice/sessions")
+        assert r_api_get.status_code == 200
+        api_chats = r_api_get.json()["chats"]
+        assert len(api_chats) == 1
+        assert api_chats[0]["title"] == "API SESSION"
+
+        # Delete API test run and verify web sessions remain, but API sessions are deleted
+        r_api_del = c.delete(f"/api/api-test-runs/{api_run_id}")
+        assert r_api_del.status_code == 204
+
+        r_web_get2 = c.get(f"/api/test-runs/{web_run_id}/alice/sessions")
+        assert r_web_get2.status_code == 200
+        assert len(r_web_get2.json()["chats"]) == 1
+
+        r_api_get2 = c.get(f"/api/api-test-runs/{api_run_id}/alice/sessions")
+        assert r_api_get2.status_code == 404
+
+        # Delete Web test run and verify web sessions are deleted
+        r_web_del = c.delete(f"/api/test-runs/{web_run_id}")
+        assert r_web_del.status_code == 204
+
+        # Verify both are empty now (or deleted)
+        with Session(engine) as s:
+            assert s.exec(select(models.AliceChatSession)).all() == []
+
+    SQLModel.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def test_alice_tasks_do_not_cross_colliding_ids():
+    """Verify that background tasks for web and API scans with colliding IDs do not overlap in registry."""
+    import asyncio
+    from aespa.services import alice_tasks
+
+    # Patch out the actual _run coroutine
+    async def _fake_run(task, message, history):
+        pass
+
+    import aespa.services.alice_tasks as at_mod
+    orig_run = at_mod._run
+    at_mod._run = _fake_run
+
+    try:
+        web_task = asyncio.run(alice_tasks.start(
+            1,
+            tab_id="tab-web",
+            think_msg_id="th-web",
+            reply_msg_id="re-web",
+            message="hello web",
+            history=[],
+            run_type="site",
+        ))
+        api_task = asyncio.run(alice_tasks.start(
+            1,
+            tab_id="tab-api",
+            think_msg_id="th-api",
+            reply_msg_id="re-api",
+            message="hello api",
+            history=[],
+            run_type="api",
+        ))
+
+        # Check they both exist in registry concurrently without overwriting each other
+        assert alice_tasks.get(1, run_type="site") is web_task
+        assert alice_tasks.get(1, run_type="api") is api_task
+        assert alice_tasks.status(1, run_type="site")["tab_id"] == "tab-web"
+        assert alice_tasks.status(1, run_type="api")["tab_id"] == "tab-api"
+
+        # Cancel both tasks to clean up registry
+        asyncio.run(alice_tasks.stop(1, run_type="site"))
+        asyncio.run(alice_tasks.stop(1, run_type="api"))
+    finally:
+        at_mod._run = orig_run
+        alice_tasks._registry.pop(("site", 1), None)
+        alice_tasks._registry.pop(("api", 1), None)

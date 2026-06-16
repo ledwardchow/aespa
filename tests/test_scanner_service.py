@@ -369,3 +369,162 @@ def test_dynamic_page_assignment_returns_none_for_non_page_finding():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_cvss_score_calculator():
+    # Test known CVSS v3.1 vectors
+    # 1. SQLi: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N -> 9.1
+    metrics1 = scanner.parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N")
+    assert scanner.calculate_cvss_score(metrics1) == 9.1
+
+    # 2. XSS: CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N -> 6.1
+    metrics2 = scanner.parse_cvss_vector("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N")
+    assert scanner.calculate_cvss_score(metrics2) == 6.1
+
+    # 3. Low: CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N -> 3.1
+    metrics3 = scanner.parse_cvss_vector("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N")
+    assert scanner.calculate_cvss_score(metrics3) == 3.1
+
+
+def test_calibrate_finding_rating():
+    # 1. CORS should calibrate to 3.1 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "CORS arbitrary Origin reflection", 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N"
+    )
+    assert score == 3.1
+    assert severity == "low"
+    assert "AC:H" in vector
+    assert "C:L" in vector
+    assert "I:N" in vector
+
+    # 2. Server headers (including CSP) should calibrate to 3.7 (Low) or 0.0 (Info)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Content-Security-Policy missing", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    )
+    assert score == 3.7
+    assert severity == "low"
+    assert "AC:H" in vector
+    assert "C:L" in vector
+
+    # 3. Username enumeration should calibrate to 3.7 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Username Enumeration on login page", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    )
+    assert score == 3.7
+    assert severity == "low"
+    assert "AC:H" in vector
+
+    # 4. Session logout invalidation should calibrate to 3.6 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Session not invalidated on logout", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+    )
+    assert score == 3.6
+    assert severity == "low"
+    assert "AV:L" in vector
+    assert "AC:H" in vector
+    assert "C:L" in vector
+    assert "I:L" in vector
+
+    # 5. Stack trace should calibrate to 3.7 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Verbose stack trace disclosure", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    )
+    assert score == 3.7
+    assert severity == "low"
+    assert "AC:H" in vector
+
+    # 6. Generic info disclosure (without secrets) should calibrate to 3.7 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Internal path disclosure", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    )
+    assert score == 3.7
+    assert severity == "low"
+    assert "AC:H" in vector
+
+    # Sensitive data exposed (with secrets) should NOT calibrate
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Sensitive data exposed: private key leaked", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+    )
+    assert score == 7.5
+    assert severity == "high"
+
+    # 7. Rate Limiting (normal) should calibrate to 3.7 (Low)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Missing login rate limiting", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    )
+    assert score == 3.7
+    assert severity == "low"
+    assert "AC:H" in vector
+
+    # Rate Limiting (TOTP/MFA) should calibrate to 5.3 (Medium)
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "Rate limiting bypass on TOTP validation", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+    )
+    assert score == 5.3
+    assert severity == "medium"
+    assert "AC:L" in vector
+    assert "C:N" in vector
+    assert "I:N" in vector
+    assert "A:L" in vector
+
+    # 8. Unaffected findings (SQL Injection) should remain unchanged
+    score, severity, vector = scanner._calibrate_finding_rating(
+        "SQL injection error disclosure", 7.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
+    )
+    assert score == 7.1
+    assert severity == "high"
+
+
+def test_calibrate_all_findings_for_run():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            # Add one CORS finding (should calibrate to Low) and one SQLi finding (should remain High)
+            cors = ScanFinding(
+                test_run_id=1,
+                owasp_category="A05",
+                severity="medium",
+                title="CORS arbitrary Origin reflection",
+                description="",
+                cvss_score=6.5,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            )
+            sqli = ScanFinding(
+                test_run_id=1,
+                owasp_category="A03",
+                severity="high",
+                title="SQL injection error disclosure",
+                description="",
+                cvss_score=7.1,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+            )
+            session.add(cors)
+            session.add(sqli)
+            session.commit()
+
+        # Monkeypatch get_engine to use our memory db
+        from unittest import mock
+        with mock.patch("aespa.services.scanner.get_engine", return_value=engine):
+            scanner.calibrate_all_findings_for_run(1)
+
+        with Session(engine) as session:
+            findings = session.exec(select(ScanFinding)).all()
+            for f in findings:
+                if "CORS" in f.title:
+                    assert f.severity == "low"
+                    assert f.cvss_score == 3.1
+                    assert "AC:H" in f.cvss_vector
+                else:
+                    assert f.severity == "high"
+                    assert f.cvss_score == 7.1
+
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
