@@ -25,6 +25,15 @@ _ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Match "A01", "A02 - Cryptographic Failures", "A03:Injection" etc. → short code
+_OWASP_CODE_RE = re.compile(r'\b(A\d{2})\b', re.IGNORECASE)
+
+
+def _normalize_owasp_category(cat: str) -> str:
+    """Extract the short OWASP code (A01–A10) from any variant the LLM may produce."""
+    m = _OWASP_CODE_RE.search(cat or "")
+    return m.group(1).upper() if m else (cat or "").strip().upper()
+
 
 def _normalize_url(url: str) -> str:
     """Replace numeric/UUID path segments and query-param values with {id} placeholders."""
@@ -133,6 +142,7 @@ def update_web_coverage_cell(
     Status is never downgraded: once ``finding`` it cannot go back to ``covered``.
     ``skip_reason`` is recorded whenever supplied (used by enforce mode).
     """
+    owasp_category = _normalize_owasp_category(owasp_category)  # "A02 - Crypto…" → "A02"
     with Session(get_engine()) as s:
         cell = s.exec(
             select(PageOwaspTest)
@@ -567,18 +577,23 @@ def get_web_coverage_matrix(run_id: int) -> dict:
 
     # Build (page_id, owasp_category) → finding list; exclude deterministic probes
     finding_map: dict[tuple[int, str], list[dict]] = {}
+    finding_by_id: dict[int, dict] = {}  # fallback for cells whose page_id diverged
     for f in findings:
-        if f.page_id is None or f.finding_source == "deterministic_probe":
+        if f.finding_source == "deterministic_probe":
             continue
-        key = (f.page_id, (f.owasp_category or "").upper())
-        finding_map.setdefault(key, []).append({
+        fd = {
             "id": f.id,
             "title": f.title,
             "severity": f.severity,
             "owasp_category": f.owasp_category,
             "validation_status": f.validation_status,
             "description": f.description,
-        })
+        }
+        finding_by_id[f.id] = fd
+        if f.page_id is None:
+            continue
+        key = (f.page_id, _normalize_owasp_category(f.owasp_category or ""))
+        finding_map.setdefault(key, []).append(fd)
 
     # Build (page_id, category) → PageOwaspTest (keyed for fast lookup)
     cell_map: dict[tuple[int, str], PageOwaspTest] = {
@@ -607,6 +622,10 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                 fids_persisted = []
             # Merge persisted + live finding ids (in case a finding was added after last cell update)
             all_fids = list({f["id"] for f in cell_findings} | set(fids_persisted))
+            # When cell_findings is empty but we have persisted IDs (page_id diverged),
+            # resolve full finding details from finding_by_id so the UI can render writeups.
+            if not cell_findings and all_fids:
+                cell_findings = [finding_by_id[fid] for fid in all_fids if fid in finding_by_id]
             skip_reason = cell.skip_reason
             if cat not in g["cells"]:
                 g["cells"][cat] = {
