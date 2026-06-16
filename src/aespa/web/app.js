@@ -58,6 +58,8 @@ const api = {
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
   getApiCoverageMatrix:(id)       => req(`/api/api-test-runs/${id}/coverage`),
+  getWebCoverageMatrix:(id)       => req(`/api/test-runs/${id}/coverage`),
+  seedWebWorkprogram:  (id)       => req(`/api/test-runs/${id}/coverage/seed`, { method:"POST" }),
   getApiRunLeads:      (id)       => req(`/api/api-test-runs/${id}/leads`),
   // SAST runs
   listSastRuns:        (collId)   => req(`/api/api-collections/${collId}/sast-runs`),
@@ -138,7 +140,7 @@ const api = {
   updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
   deletePage:       (runId,pgId,cascade) => req(`/api/test-runs/${runId}/pages/${pgId}?cascade=${cascade}`, { method:"DELETE" }),
   updateRun:        (id,b)        => req(`/api/test-runs/${id}`,                         { method:"PATCH", body:b }),
-  startThinkingScan:(id)          => req(`/api/test-runs/${id}/thinking-scan/start`,      { method:"POST" }),
+  startThinkingScan:(id, coverageMode) => req(`/api/test-runs/${id}/thinking-scan/start`, { method:"POST", body: coverageMode ? { coverage_mode: coverageMode } : undefined }),
   resumeThinkingScan:(id)         => req(`/api/test-runs/${id}/thinking-scan/resume`,     { method:"POST" }),
   stopThinkingScan: (id)          => req(`/api/test-runs/${id}/thinking-scan/stop`,       { method:"POST" }),
   getThinkingStatus:(id)          => req(`/api/test-runs/${id}/thinking-scan/status`),
@@ -3204,6 +3206,21 @@ const OWASP_LABELS = {
 };
 const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","API8","API9","API10"];
 
+const OWASP_WEB_LABELS = {
+  A01:"Broken Access Control", A02:"Cryptographic Failures", A03:"Injection",
+  A04:"Insecure Design", A05:"Security Misconfiguration",
+  A06:"Vulnerable & Outdated Components", A07:"Identification & Auth Failures",
+  A08:"Software & Data Integrity Failures", A09:"Logging & Monitoring Failures",
+  A10:"SSRF",
+};
+const OWASP_WEB_SHORT = {
+  A01:"Access Control", A02:"Crypto Failures", A03:"Injection",
+  A04:"Insecure Design", A05:"Misconfig",
+  A06:"Vuln Components", A07:"Auth Failures",
+  A08:"Data Integrity", A09:"Logging & Mon.",
+  A10:"SSRF",
+};
+
 function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
   const [matrix, setMatrix] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4812,6 +4829,8 @@ function TestRunDetail({ runId, initialTab }) {
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus]         = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
+  const [coverageMode, setCoverageMode]             = useState("track");
+  const [wpReloadKey, setWpReloadKey]               = useState(0);  // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus]     = useState(null);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
@@ -4848,6 +4867,7 @@ function TestRunDetail({ runId, initialTab }) {
       const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
       setRun(r); setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
+      if (r?.coverage_mode) setCoverageMode(r.coverage_mode);
       api.getThinkingStatus(runId).then(setThinkingStatus).catch(()=>{});
       api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(()=>{});
       api.getSite(r.site_id).then(s => setSiteName(s.name)).catch(()=>{});
@@ -5735,8 +5755,9 @@ function TestRunDetail({ runId, initialTab }) {
       setThinkingStopReq(false);
       setThinkingStatus({ status: "running" });
       setCheckpointStatus(null);
-      const s = await api.startThinkingScan(runId);
+      const s = await api.startThinkingScan(runId, coverageMode);
       setThinkingStatus(s);
+      setWpReloadKey(k => k + 1);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -5746,6 +5767,7 @@ function TestRunDetail({ runId, initialTab }) {
       setThinkingStatus({ status: "running" });
       const s = await api.resumeThinkingScan(runId);
       setThinkingStatus(s);
+      setWpReloadKey(k => k + 1);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -5860,6 +5882,13 @@ function TestRunDetail({ runId, initialTab }) {
       <div className="topbar-actions">
         ${canStart && html`<button className="btn sm" onClick=${onStart}><${IconPlay}/> Start crawl</button>`}
         ${!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus==="idle"||effectiveThinkingStatus==="complete"||effectiveThinkingStatus==="stopped"||effectiveThinkingStatus==="failed"||effectiveThinkingStatus==null) && html`
+          <label className="subtle" style=${{display:"flex",alignItems:"center",gap:6,fontSize:12}} title="Track: observe coverage as the scan runs. Enforce: drive every applicable page × category to covered or skipped-with-reason.">
+            Coverage:
+            <select value=${coverageMode} onChange=${e=>setCoverageMode(e.target.value)}>
+              <option value="track">Track</option>
+              <option value="enforce">Enforce</option>
+            </select>
+          </label>
           <button className="btn sm" title="Run the adaptive Pentest" onClick=${onStartThinkingScan}><${IconPlay}/> Start Pentest</button>`}
         ${hasCheckpoint && html`
           <button className="btn sm" style=${{background:"var(--warn)",color:"#000",borderColor:"var(--warn)"}} title=${`Resume scan from step ${checkpointStatus.step_count}`} onClick=${onResumeThinkingScan}><${IconPlay}/> Resume Pentest</button>`}
@@ -5922,6 +5951,10 @@ function TestRunDetail({ runId, initialTab }) {
         <button className=${"tab-btn"+(activeTab==="traffic"?" active":"")}
           onClick=${()=>{ setActiveTab("traffic"); setSelNode(null); nav(`#/runs/${runId}/traffic`); }}>
           Traffic Log${trafficTotal>0?html` <span className="traffic-count">${trafficTotal}</span>`:""}
+        </button>
+        <button className=${"tab-btn"+(activeTab==="workprogram"?" active":"")}
+          onClick=${()=>{ setActiveTab("workprogram"); setSelNode(null); nav(`#/runs/${runId}/workprogram`); }}>
+          Workprogram
         </button>
         <div style=${{flex:1}}></div>
         ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
@@ -6024,7 +6057,7 @@ function TestRunDetail({ runId, initialTab }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions"||activeTab==="workprogram") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -6100,6 +6133,16 @@ function TestRunDetail({ runId, initialTab }) {
                     </div>`;
                   })}
                 </div>
+
+                ${pageDetail.owasp_applicable && Object.keys(pageDetail.owasp_applicable).length > 0 && html`
+                  <div className="graph-panel-section-label" style=${{marginTop:14}}>OWASP Top 10:2025</div>
+                  <div className="page-cats">
+                    ${Object.entries(pageDetail.owasp_applicable).map(([cat, applicable]) => html`
+                      <div key=${cat} className="cat-row">
+                        <span className="cat-label" style=${{fontSize:11}}>${cat} ${OWASP_WEB_LABELS[cat]||""}</span>
+                        <span className=${"cat-badge "+(applicable?"cat-yes":"cat-no")}>${applicable?"Yes":"No"}</span>
+                      </div>`)}
+                  </div>`}
 
                 ${pageViews.length > 0 ? html`
                   <div className="graph-panel-section-label" style=${{marginTop:14}}>
@@ -7118,7 +7161,201 @@ function TestRunDetail({ runId, initialTab }) {
               </div>
             </div>`}
         </div>`}
+      ${activeTab==="workprogram" && html`
+        <div className="content scroll-content" style=${{padding:0}}>
+          <${WebRunWorkProgramTab} runId=${runId} run=${run} reloadKey=${wpReloadKey} scanRunning=${isDynamicScanActive(thinkingStatus?.status)||run?.status==="crawling"||run?.status==="crawled"}/>
+        </div>`}
     </div>`;
+}
+
+// ── WebRunWorkProgramTab ───────────────────────────────────────────────────────
+
+const OWASP_WEB_CATEGORIES = ["A01","A02","A03","A04","A05","A06","A07","A08","A09","A10"];
+
+function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
+  const [matrix, setMatrix] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [seeding, setSeeding] = useState(false);
+  const [selectedCell, setSelectedCell] = useState(null);
+  const [seedMsg, setSeedMsg] = useState(null);
+  const [enforce, setEnforce] = useState(null);   // latest enforce_progress event
+  const esRef = useRef(null);
+
+  const loadMatrix = () =>
+    api.getWebCoverageMatrix(runId)
+      .then(m => { setMatrix(m); setLoading(false); })
+      .catch(() => setLoading(false));
+
+  useEffect(() => { loadMatrix(); }, [runId]);
+  useEffect(() => { if (reloadKey > 0) loadMatrix(); }, [reloadKey]);
+
+  // Poll during scan.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadMatrix, 5000);
+    return () => clearInterval(t);
+  }, [scanRunning, runId]);
+
+  // SSE live updates — mirrors ApiRunWorkProgramTab.
+  useEffect(() => {
+    if (!scanRunning) return;
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    const es = new EventSource(`/api/test-runs/${runId}/events`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.type === "coverage_update") {
+          setMatrix(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              pages: prev.pages.map(pg => {
+                if (!pg.page_ids.includes(d.page_id) && pg.page_id !== d.page_id) return pg;
+                const cells = { ...pg.cells };
+                const existing = cells[d.owasp_category] || { status:"not_started", finding_ids:[] };
+                const fids = [...(existing.finding_ids || [])];
+                if (d.finding_id && !fids.includes(d.finding_id)) fids.push(d.finding_id);
+                cells[d.owasp_category] = { ...existing, status: d.status, finding_ids: fids };
+                return { ...pg, cells };
+              }),
+            };
+          });
+        } else if (d.type === "enforce_progress") {
+          setEnforce(d);
+          if (d.phase === "complete") loadMatrix();
+        }
+      } catch {}
+    };
+    return () => { es.close(); esRef.current = null; };
+  }, [scanRunning, runId]);
+
+  const onSeed = async () => {
+    setSeeding(true); setSeedMsg(null);
+    try {
+      const r = await api.seedWebWorkprogram(runId);
+      setSeedMsg(r.created > 0 ? `Added ${r.created} new cell${r.created!==1?"s":""}.` : "No new cells — workprogram is up to date.");
+      await loadMatrix();
+    } catch(e) { setSeedMsg("Error: " + e.message); }
+    finally { setSeeding(false); }
+  };
+
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading workprogram…</div>`;
+
+  const cats = OWASP_WEB_CATEGORIES;
+  const totals = matrix?.totals || {};
+  const totalCells = Object.values(totals).reduce((a,b)=>a+b,0);
+  const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
+  const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
+  const effectiveCoverageMode = matrix?.coverage_mode || run?.coverage_mode || "track";
+
+  return html`
+    <div style=${{padding:16}}>
+      <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
+        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <span className=${"badge "+(effectiveCoverageMode==="enforce"?"warning":"neutral")}>
+          ${effectiveCoverageMode} mode
+        </span>
+        <span className="badge neutral">${pct}% coverage (${coveredCount}/${totalCells} cells)</span>
+        ${scanRunning && html`<span className="badge warning">● Live</span>`}
+        ${enforce && enforce.phase !== "complete" && html`
+          <span className="badge warning" title="Enforce mode is resolving remaining coverage cells">
+            Enforcing… ${enforce.resolved!=null?`${enforce.resolved}/${enforce.total}`:`${enforce.remaining} left`}
+          </span>`}
+        ${enforce && enforce.phase === "complete" && html`
+          <span className="badge success" title=${enforce.message||""}>
+            Enforce done · ${enforce.covered||0} covered, ${enforce.skipped||0} skipped${enforce.budget_exhausted?" (budget hit)":""}
+          </span>`}
+        <div style=${{flex:1}}></div>
+        <button className="btn sm" disabled=${seeding} onClick=${onSeed}>
+          ${seeding ? "Populating…" : "Populate from Site Map"}
+        </button>
+      </div>
+      ${seedMsg && html`<div className=${"alert "+(seedMsg.startsWith("Error")?"error":"success")} style=${{marginBottom:10,padding:"6px 12px",fontSize:12}}>${seedMsg}</div>`}
+
+      ${!matrix?.seeded && html`
+        <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+          No workprogram data yet. Click <b>Populate from Site Map</b> to seed the matrix from crawl data.
+        </div>`}
+
+      ${matrix?.seeded && !matrix?.pages?.length && html`
+        <div className="subtle" style=${{padding:24,textAlign:"center"}}>
+          No applicable pages found. Run a crawl first so OWASP categories can be classified.
+        </div>`}
+
+      ${matrix?.seeded && matrix?.pages?.length > 0 && html`
+        <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
+          ${[["not_started","cov-not-started","Not started"],["in_progress","cov-in-progress","In progress"],
+             ["covered","cov-covered","Covered"],["finding","cov-finding","Finding"],
+             ["skipped","cov-skipped","Skipped"]].map(([s,cls,label])=>html`
+            <span key=${s} style=${{display:"flex",alignItems:"center",gap:4}}>
+              <span className=${"cov-cell "+cls} style=${{display:"inline-block",width:14,height:14,borderRadius:3}}></span>
+              ${label} (${totals[s]||0})
+            </span>`)}
+        </div>
+        <div style=${{overflowX:"auto"}}>
+          <table className="coverage-matrix" style=${{borderCollapse:"collapse",fontSize:11,minWidth:700}}>
+            <thead>
+              <tr>
+                <th style=${{textAlign:"left",padding:"4px 8px",minWidth:300,width:"35%"}}>Page</th>
+                ${cats.map(cat=>html`
+                  <th key=${cat} style=${{padding:"4px 4px",textAlign:"center",minWidth:70}}
+                    title=${cat+": "+(OWASP_WEB_LABELS[cat]||cat)}>
+                    <div style=${{fontWeight:600}}>${cat}</div>
+                    <div style=${{color:"var(--muted)",fontWeight:400,fontSize:10,lineHeight:1.2,whiteSpace:"pre-line"}}>${(OWASP_WEB_SHORT[cat]||OWASP_WEB_LABELS[cat]||"").replace(/ /g,"\n")}</div>
+                  </th>`)}
+              </tr>
+            </thead>
+            <tbody>
+              ${matrix.pages.map(pg => html`
+                <tr key=${pg.page_id} style=${{borderBottom:"1px solid var(--border)"}}>
+                  <td style=${{padding:"4px 8px"}}>
+                    <div className="mono" style=${{fontSize:11,wordBreak:"break-all"}} title=${pg.url}>${pg.url}</div>
+                    ${pg.title && html`<div style=${{fontSize:10,color:"var(--muted)"}}>${pg.title}</div>`}
+                  </td>
+                  ${cats.map(cat => {
+                    const cell = pg.cells?.[cat];
+                    if (!cell) return html`<td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}><span className="cov-cell cov-na" title="N/A">—</span></td>`;
+                    const fids = cell.finding_ids || [];
+                    const isSelected = selectedCell?.page_id===pg.page_id && selectedCell?.cat===cat;
+                    return html`
+                      <td key=${cat} style=${{textAlign:"center",padding:"2px 4px"}}>
+                        <span
+                          className=${"cov-cell cov-"+cell.status.replace("_","-")+(isSelected?" selected":"")+(fids.length?" has-findings":"")}
+                          title=${cat+": "+cell.status+(fids.length?" ("+fids.length+" finding"+(fids.length>1?"s":"")+"":"")+")\n"+pg.url}
+                          style=${{cursor:fids.length?"pointer":"default"}}
+                          onClick=${()=>fids.length && setSelectedCell(isSelected?null:{page_id:pg.page_id,cat,url:pg.url,fids,findings:cell.findings})}
+                        >${fids.length>0?fids.length:""}</span>
+                      </td>`;
+                  })}
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>
+
+        ${selectedCell && html`
+          <div style=${{marginTop:12,padding:12,background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6}}>
+            <div style=${{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+              <b style=${{fontSize:13}}>${selectedCell.cat} ${OWASP_WEB_LABELS[selectedCell.cat]||""} — ${selectedCell.url}</b>
+              <button className="btn ghost sm" onClick=${()=>setSelectedCell(null)}>✕</button>
+            </div>
+            ${(selectedCell.findings && selectedCell.findings.length)
+              ? selectedCell.findings.map(f => html`
+                  <div key=${f.id} style=${{padding:"6px 0",borderTop:"1px solid var(--border)"}}>
+                    <div style=${{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                      <span className=${"sev-badge sev-"+(f.severity||"info")}>${f.severity||"info"}</span>
+                      <b style=${{fontSize:12}}>${f.title}</b>
+                      ${f.validation_status && f.validation_status!=="unvalidated"
+                        ? html`<span style=${{fontSize:11,color:"var(--muted)"}}>(${f.validation_status})</span>` : ""}
+                    </div>
+                    ${f.description ? html`<div style=${{fontSize:12,color:"var(--muted)",whiteSpace:"pre-wrap"}}>${f.description}</div>` : ""}
+                    <div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>Finding #${f.id} — view in the Findings tab.</div>
+                  </div>`)
+              : html`<div style=${{fontSize:12}}>Finding IDs: ${selectedCell.fids.join(", ")} — view in the Findings tab.</div>`}
+          </div>`}
+      `}
+    </div>
+  `;
 }
 
 function TargetIntelligencePanel({ data, selectedKind, onKind, refresh, onClear, clearing }) {

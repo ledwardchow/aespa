@@ -910,6 +910,7 @@ class CrawledPageOut(BaseModel):
     takes_input: bool | None = None
     has_object_ref: bool | None = None
     has_business_logic: bool | None = None
+    owasp_applicable: dict[str, bool] = {}
     discovered_at: datetime
     # screenshot returned separately via /pages/{id} to keep list responses light
 
