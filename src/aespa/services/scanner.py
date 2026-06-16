@@ -2828,6 +2828,8 @@ _specialist_running: dict[int, int] = {}
 _specialist_seq: dict[int, int] = {}
 # Tracks live specialist asyncio tasks so they can be cancelled on stop.
 _specialist_tasks: dict[int, list[asyncio.Task]] = {}
+# Per-run callback fired after every persisted finding (covers all agents, not just the main loop).
+_finding_hooks: dict[int, Any] = {}
 
 # Pseudo-OOB reflected-SSRF detection: inject the canary URL into SSRF-prone
 # parameters and flag any response that reflects the fingerprint back.
@@ -3480,6 +3482,14 @@ async def _persist_dynamic_finding(
     except Exception as exc:
         log.warning("rewrite_finding_writeup failed for finding %s: %s", finding_id, exc)
 
+    # Fire the per-run finding hook (covers specialist + test lead paths uniformly).
+    hook = _finding_hooks.get(run_id)
+    if hook is not None and finding is not None:
+        try:
+            hook(finding)
+        except Exception as _hk_exc:
+            log.warning("_finding_hooks error run=%s finding=%s: %s", run_id, finding_id, _hk_exc)
+
     return finding
 
 
@@ -3688,6 +3698,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         _specialist_seq.pop(run_id, None)
         _specialist_tasks.pop(run_id, None)
         _ssrf_canary.pop(run_id, None)
+        _finding_hooks.pop(run_id, None)
 
 
 async def _run_post_scan_llm_review(
@@ -4080,6 +4091,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             log.warning("build_web_enforce_directive failed (non-fatal): %s", _ed_exc)
     _web_post_probe_fn = _make_web_post_probe_fn(run_id)
     _web_post_finding_fn = _make_web_post_finding_fn(run_id)
+    _finding_hooks[run_id] = _web_post_finding_fn  # covers specialists + all other paths
 
     creds_for_llm = [
         {
@@ -5807,11 +5819,6 @@ async def _do_agentic_thinking_loop(
             )
             if saved is not None:
                 progressive_findings_count += 1
-                if post_finding_fn is not None:
-                    try:
-                        post_finding_fn(saved)
-                    except Exception as _pf_exc:
-                        log.warning("post_finding_fn error: %s", _pf_exc)
                 findings_snapshot.append({
                     "id":           saved.id,
                     "title":        saved.title,

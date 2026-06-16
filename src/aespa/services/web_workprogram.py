@@ -57,6 +57,19 @@ _ENFORCE_DEFAULT_MAX_ATTEMPTS = 500
 _ENFORCE_DEFAULT_TIME_BUDGET_S = 1800.0
 
 
+# Static file extensions that are never meaningful pentest targets.
+_STATIC_EXTS = re.compile(
+    r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|txt|xml|pdf)(\?|$)',
+    re.IGNORECASE,
+)
+
+
+def _is_static_asset(url: str) -> bool:
+    """Return True for JS/CSS/image/font/map URLs that carry no server-side logic."""
+    path = url.split('?')[0]
+    return bool(_STATIC_EXTS.search(path))
+
+
 def seed_web_workprogram(run_id: int) -> int:
     """Idempotently create PageOwaspTest rows for every in-scope page × applicable category.
 
@@ -83,6 +96,8 @@ def seed_web_workprogram(run_id: int) -> int:
 
         created = 0
         for page in pages:
+            if _is_static_asset(page.url):
+                continue  # skip JS/CSS/image/font — no server-side security logic to test
             try:
                 applicable = json.loads(page.owasp_applicable_json or "{}")
             except Exception:
@@ -232,15 +247,54 @@ def _make_web_post_probe_fn(run_id: int):
 
 
 def _make_web_post_finding_fn(run_id: int):
-    """Return ``(ScanFinding) → None`` that flips the matching cell to ``finding``."""
+    """Return ``(ScanFinding) → None`` that flips the matching cell to ``finding``.
+
+    Uses ``affected_url`` (the specific endpoint where the issue was observed) to
+    resolve the workprogram row.  Falls back to ``page_id`` only when
+    ``affected_url`` is blank.  Creates a placeholder CrawledPage if the URL is
+    not already in the crawl, so no finding is ever silently dropped.
+    """
     def _post_finding(finding: Any) -> None:
         if finding is None:
             return
-        page_id = getattr(finding, "page_id", None)
+        if getattr(finding, "finding_source", None) == "deterministic_probe":
+            return  # deterministic findings are excluded from the workprogram
         cat = (getattr(finding, "owasp_category", None) or "").strip().upper()
-        if page_id is None or not cat:
+        if not cat:
             return
         fid = getattr(finding, "id", None)
+
+        affected_url = (getattr(finding, "affected_url", None) or "").strip()
+        if affected_url:
+            # Resolve (and if necessary create) the page for the affected URL.
+            with Session(get_engine()) as s:
+                pages = list(s.exec(
+                    select(CrawledPage)
+                    .where(CrawledPage.test_run_id == run_id)
+                    .where(CrawledPage.in_scope == True)  # noqa: E712
+                ).all())
+                page_id = _match_page_for_url(affected_url, pages)
+                if page_id is None:
+                    page = CrawledPage(
+                        test_run_id=run_id,
+                        url=affected_url,
+                        in_scope=True,
+                        status="crawled",
+                        scan_status="pending",
+                    )
+                    s.add(page)
+                    s.flush()
+                    page_id = page.id
+                    s.commit()
+                    log.info(
+                        "web_workprogram: created placeholder page id=%s url=%s run=%s (finding)",
+                        page_id, affected_url, run_id,
+                    )
+        else:
+            page_id = getattr(finding, "page_id", None)
+
+        if page_id is None:
+            return
         update_web_coverage_cell(run_id, page_id, cat, "finding", finding_id=fid)
 
     return _post_finding
@@ -249,21 +303,21 @@ def _make_web_post_finding_fn(run_id: int):
 def _match_page_for_url(url: str, pages: list[CrawledPage]) -> int | None:
     """Find the best matching CrawledPage id for the given URL.
 
-    Tries exact match first, then prefix overlap; returns None if no page matches.
+    Tries exact match first, then normalised match (strips query string and
+    trailing slash).  Returns None if no page matches — callers should create
+    a placeholder page in that case.
     """
     url = (url or "").strip()
-    # Exact match
+    # 1. Exact match
     for p in pages:
         if p.url == url:
             return p.id
-    # Prefix overlap (longer match wins)
-    best: tuple[int, int] | None = None  # (match_len, page_id)
+    # 2. Normalised match — strip query strings and trailing slashes on both sides
+    url_base = url.split('?')[0].rstrip('/')
     for p in pages:
-        if url.startswith(p.url) or p.url.startswith(url):
-            overlap = len(p.url)
-            if best is None or overlap > best[0]:
-                best = (overlap, p.id)
-    return best[1] if best else None
+        if p.url.split('?')[0].rstrip('/') == url_base:
+            return p.id
+    return None
 
 
 # ── Enforce mode ──────────────────────────────────────────────────────────────
@@ -511,10 +565,10 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         ).all())
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
-    # Build (page_id, owasp_category) → finding list
+    # Build (page_id, owasp_category) → finding list; exclude deterministic probes
     finding_map: dict[tuple[int, str], list[dict]] = {}
     for f in findings:
-        if f.page_id is None:
+        if f.page_id is None or f.finding_source == "deterministic_probe":
             continue
         key = (f.page_id, (f.owasp_category or "").upper())
         finding_map.setdefault(key, []).append({
