@@ -11,6 +11,7 @@ from aespa.models import (
     CrawledPage,
     PageCredentialView,
     PageLink,
+    PageOwaspTest,
     PentestHypothesis,
     PentestTask,
     ScanCheckpoint,
@@ -257,7 +258,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
             )
 
         from aespa.services import alice_tasks
-        alice_task = alice_tasks.get(run.id)
+        alice_task = alice_tasks.get(run.id, run_type="site")
         if alice_task is not None and not alice_task.done:
             findings_count = session.exec(
                 select(func.count()).select_from(ScanFinding).where(ScanFinding.test_run_id == run.id)
@@ -305,7 +306,7 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                 )
             )
 
-        api_alice_task = alice_tasks_svc.get(api_run.id)
+        api_alice_task = alice_tasks_svc.get(api_run.id, run_type="api")
         if api_alice_task is not None and not api_alice_task.done:
             findings_count = session.exec(
                 select(func.count()).select_from(ScanFinding).where(ScanFinding.api_test_run_id == api_run.id)
@@ -388,8 +389,14 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(log_entry)
     for ckpt in session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == run_id)).all():
         session.delete(ckpt)
-    for ss in session.exec(select(ScannerSession).where(ScannerSession.test_run_id == run_id)).all():
+    for ss in session.exec(
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+    ).all():
         session.delete(ss)
+    for cell in session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)).all():
+        session.delete(cell)
     for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
         session.delete(hyp)
     for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
@@ -398,6 +405,15 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         select(AgentLog).where(AgentLog.test_run_id == run_id).where(AgentLog.run_kind == "web")
     ).all():
         session.delete(log_entry)
+    from aespa.models import AliceChatMessage, AliceChatSession
+    for sess in session.exec(
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "web")
+    ).all():
+        for msg in session.exec(select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)).all():
+            session.delete(msg)
+        session.delete(sess)
     session.delete(run)
     session.commit()
 
@@ -509,6 +525,23 @@ def stop_test_run(run_id: int, session: Session = Depends(get_session)) -> TestR
     session.commit()
     session.refresh(run)
     return _run_summary(run, session)
+
+
+# ── Web workprogram ────────────────────────────────────────────────────────────
+
+@router.get("/api/test-runs/{run_id}/coverage")
+def get_web_coverage_matrix(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import web_workprogram
+    return web_workprogram.get_web_coverage_matrix(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/coverage/seed")
+def seed_web_coverage(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import web_workprogram
+    created = web_workprogram.seed_web_workprogram(run_id)
+    return {"ok": True, "created": created}
 
 
 # ── Pages + graph ─────────────────────────────────────────────────────────────
@@ -632,7 +665,11 @@ def get_scanner_sessions(
     session: Session = Depends(get_session),
 ) -> ScannerSessionSummary:
     _get_run_or_404(session, run_id)
-    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    query = (
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+    )
     if not include_inactive:
         query = query.where(ScannerSession.is_active == True)  # noqa: E712
     records = session.exec(query.order_by(ScannerSession.label)).all()
@@ -658,7 +695,7 @@ def update_scanner_session(
 ) -> ScannerSessionOut:
     _get_run_or_404(session, run_id)
     record = session.get(ScannerSession, session_id)
-    if record is None or record.test_run_id != run_id:
+    if record is None or record.test_run_id != run_id or record.run_kind != "web":
         raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
 
     if payload.label is not None:
@@ -668,6 +705,7 @@ def update_scanner_session(
         duplicate = session.exec(
             select(ScannerSession)
             .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == "web")
             .where(ScannerSession.label == normalized)
             .where(ScannerSession.id != session_id)
         ).first()

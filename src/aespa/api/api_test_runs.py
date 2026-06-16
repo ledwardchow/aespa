@@ -24,7 +24,6 @@ from aespa.models import (
     ApiTestRun,
     ScanFinding,
     ScannerSession,
-    TrafficEntry,
 )
 from aespa.schemas import (
     ApiTestRunSummary,
@@ -36,6 +35,7 @@ from aespa.schemas import (
     ScannerSessionUpdate,
 )
 from aespa.services import alice_tasks
+from aespa.services import run_cleanup
 from aespa.services import scanner_sessions as scanner_session_svc
 
 _UTC = timezone.utc
@@ -67,18 +67,8 @@ def get_api_test_run(
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
-    run = _get_run_or_404(session, run_id)
-    for sess in session.exec(select(AliceChatSession).where(AliceChatSession.test_run_id == run_id)).all():
-        for msg in session.exec(select(AliceChatMessage).where(AliceChatMessage.session_id == sess.id)).all():
-            session.delete(msg)
-        session.delete(sess)
-    for log in session.exec(
-        select(AgentLog)
-        .where(AgentLog.test_run_id == run_id)
-        .where(AgentLog.run_kind == "api")
-    ).all():
-        session.delete(log)
-    session.delete(run)
+    _get_run_or_404(session, run_id)
+    run_cleanup.cascade_delete_api_run(session, run_id)
     session.commit()
 
 
@@ -90,6 +80,7 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
     sess_rows = session.exec(
         select(AliceChatSession)
         .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "api")
         .order_by(AliceChatSession.position, AliceChatSession.id)
     ).all()
 
@@ -136,7 +127,7 @@ class AliceRunRequest(BaseModel):
 def _save_api_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> None:
     from aespa.api.alice import AliceSessionsRequest as _AReq, _save_sessions
     # Delegate to the canonical implementation — same DB tables, same logic.
-    _save_sessions(run_id, req, session)  # type: ignore[arg-type]
+    _save_sessions(run_id, req, session, run_kind="api")  # type: ignore[arg-type]
 
 
 # ── Alice alias routes ─────────────────────────────────────────────────────────
@@ -181,7 +172,7 @@ async def alice_stream(
 ) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     return StreamingResponse(
-        alice_tasks.stream_events(run_id, cursor),
+        alice_tasks.stream_events(run_id, cursor, run_type="api"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -194,14 +185,14 @@ async def alice_stream(
 @router.delete("/{run_id}/alice/run")
 async def stop_alice_run(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
-    stopped = await alice_tasks.stop(run_id)
+    stopped = await alice_tasks.stop(run_id, run_type="api")
     return {"ok": True, "stopped": stopped}
 
 
 @router.get("/{run_id}/alice/status")
 def alice_status(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
-    return alice_tasks.status(run_id)
+    return alice_tasks.status(run_id, run_type="api")
 
 
 # ── Events alias ───────────────────────────────────────────────────────────────
@@ -527,7 +518,11 @@ def get_api_scanner_sessions(
     session: Session = Depends(get_session),
 ) -> ScannerSessionSummary:
     _get_run_or_404(session, run_id)
-    query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+    query = (
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "api")
+    )
     if not include_inactive:
         query = query.where(ScannerSession.is_active == True)  # noqa: E712
     records = session.exec(query.order_by(ScannerSession.label)).all()
@@ -553,7 +548,7 @@ def update_api_scanner_session(
 ) -> ScannerSessionOut:
     _get_run_or_404(session, run_id)
     record = session.get(ScannerSession, session_id)
-    if record is None or record.test_run_id != run_id:
+    if record is None or record.test_run_id != run_id or record.run_kind != "api":
         raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
 
     if payload.label is not None:
@@ -563,6 +558,7 @@ def update_api_scanner_session(
         duplicate = session.exec(
             select(ScannerSession)
             .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == "api")
             .where(ScannerSession.label == normalized)
             .where(ScannerSession.id != session_id)
         ).first()
