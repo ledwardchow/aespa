@@ -4,8 +4,40 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [PR #TBA] 16th June Update - More Bugfixes
-**Opened:** TBA | Branch: `develop → main`
+## [PR #186] 16th June Update — OWASP Web Workprogram, even more bug fixes
+**Opened:**  2026-06-16 | Branch: `develop → main`
+
+Implements the OWASP Top-10 (2021) web workprogram coverage matrix for web app scans (#179), mirroring the existing API scan workprogram. Adds Track and Enforce modes, live in-scan progress, and auto-seeding. 5 commits across 9 files.
+
+### OWASP Top-10 Web Workprogram (#179, PR #185)
+
+- **`PageOwaspTest` model promoted to a real coverage cell** (`models.py`, `db.py`): Added `status` (`not_started` / `in_progress` / `covered` / `skipped` / `finding`), `skip_reason`, `finding_ids_json`, and `last_updated` fields. `TestRun.coverage_mode` (`track` | `enforce`) added with a SQL `server_default` so old rows keep the `track` default without a migration failure. All 5 new columns are `_ensure_column`-migrated idempotently on startup.
+
+- **`services/web_workprogram.py` — full implementation**: `seed_web_workprogram` creates one `PageOwaspTest` cell per in-scope page × applicable OWASP category (static assets filtered out). `update_web_coverage_cell` upserts with no-downgrade semantics and normalises OWASP codes (`"A02 - Cryptographic Failures"` → `"A02"`) so LLM full-name variants always hit the right row. `mark_in_progress_to_covered` promotes at scan completion (track mode). Enforce mode adds `_build_web_enforce_directive`, `_enforce_web_coverage_loop`, and an LLM-assisted `_make_web_enforce_prober` that drives every uncovered cell to a terminal state.
+
+- **Auto-seeding** (`services/crawler.py`, `api/scan.py`): Workprogram is seeded automatically (1) at crawl completion after `_merge_all_categories`, (2) synchronously in the `start_thinking_scan` and `resume_thinking_scan` API endpoints before returning — so the workprogram tab is populated the moment the user clicks Start/Resume.
+
+- **Scan wiring** (`services/scanner.py`): `_do_thinking_scan` reads `coverage_mode`, seeds the workprogram, prepends an enforce directive to the crawl context when in enforce mode, and passes `post_probe_fn` / `post_finding_fn` hooks into `_do_agentic_thinking_loop`. Post-scan finalisation either promotes in-progress cells (track) or runs the enforce loop (enforce). A `_finding_hooks` module-level registry (same pattern as `_specialist_tasks`) ensures every finding write path — including **specialist agents** — fires the workprogram hook, not just the main agentic loop.
+
+- **ALICE wiring** (`services/alice.py`): `_web_post_probe_fn` constructed per turn and passed into `_execute_alice_tool` so ALICE probes also update the web workprogram.
+
+- **On-the-fly page creation**: If the scan probes or finds an issue at a URL not in the original crawl, a placeholder `CrawledPage` (in-scope) is created automatically and a cell is written — no probe or finding is silently lost.
+
+- **Finding attribution via `affected_url`** (`services/web_workprogram.py`): `_post_finding` resolves the workprogram cell from `finding.affected_url` (the actual endpoint) rather than `finding.page_id` (the scan entry page), fixing incorrect attribution to root-level page rows. `_match_page_for_url` uses exact + normalised match only — prefix overlap removed — so `/` never absorbs `/api/health`.
+
+- **URL normalisation** (`services/web_workprogram.py`): `_normalize_url` now strips IDs (`\d+` / UUID) from both path segments and query-string values (`/items?id=42` → `/items?id={id}`), grouping equivalent parameterised URLs on the same workprogram row.
+
+- **Deterministic findings excluded**: `_post_finding` and `get_web_coverage_matrix` both ignore `finding_source="deterministic_probe"` findings — they don't count toward cell status or totals.
+
+- **Full writeup display fix**: Matrix builder now maintains a `finding_by_id` lookup so cells whose `page_id` diverged from the finding record can still resolve full finding details (title, severity, description) for the UI panel.
+
+- **API** (`api/scan.py`): `start_thinking_scan` accepts an optional `{ coverage_mode }` JSON body.
+
+- **Frontend** (`web/app.js`): Coverage mode selector (Track / Enforce) in the scan topbar. `WebRunWorkProgramTab` replaced with an SSE-driven live view showing per-cell status badges, enforce-loop progress, mode badge, and `skipped` in the legend. Workprogram tab immediately reloads on scan start/resume via a `reloadKey` signal.
+
+- **Tests** (`tests/test_web_coverage.py`): 22 new in-memory tests covering seeding, upsert semantics, probe/finding hooks, enforce loop, placeholder page creation, wrong-page attribution, root-page non-match, and the `start_thinking_scan` coverage_mode endpoint. 497/497 tests pass.
+
+## ALICE improvements and bug fixes:
 
 Closes out the run-id collision class of bugs (#173), gives ALICE the ability to drive the API work-program coverage matrix (#180), adds CVSS calibration to the AI Review Issues tab (#99), ensures confirmed SAST leads always raise a finding, and polishes ALICE chat rendering and reliability. 9 commits across 28 files (~1,800 insertions, ~170 deletions).
 
