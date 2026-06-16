@@ -883,7 +883,7 @@ def _summary_list(values: list[str], limit: int = 3) -> str:
 
 
 def _thinking_page_flags(page: dict[str, Any]) -> list[str]:
-    return [
+    flags = [
         label for key, label in [
             ("req_auth", "req_auth"),
             ("takes_input", "takes_input"),
@@ -891,6 +891,9 @@ def _thinking_page_flags(page: dict[str, Any]) -> list[str]:
             ("has_business_logic", "has_business_logic"),
         ] if page.get(key)
     ]
+    owasp = page.get("owasp_applicable") or {}
+    flags += [cat for cat, applicable in owasp.items() if applicable]
+    return flags
 
 
 def _thinking_page_kind(page: dict[str, Any]) -> str:
@@ -1233,6 +1236,11 @@ def _run_thinking_context_tool(
             detail["title"] = page.get("title") or ""
         if "flags" in include_set:
             detail["flags"] = _thinking_page_flags(page)
+            detail["owasp_applicable"] = {
+                cat: applicable
+                for cat, applicable in (page.get("owasp_applicable") or {}).items()
+                if applicable
+            }
         if "context" in include_set:
             detail["context"] = str(page.get("context") or "")[:3000]
         if "page_text" in include_set or "transcript" in include_set:
@@ -3880,6 +3888,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
         thinking_max_steps = 0  # unused — no step limit
+        coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
         # Crawled pages — used for context and for resolving page_id on findings.
         all_pages = s.exec(
@@ -3898,6 +3907,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "takes_input": p.takes_input,
                 "has_object_ref": p.has_object_ref,
                 "has_business_logic": p.has_business_logic,
+                "owasp_applicable": p.owasp_applicable,
             }
             for p in all_pages
         ]
@@ -4049,6 +4059,27 @@ async def _do_thinking_scan(run_id: int) -> None:
             "reason": "seeded",
             "data": seeded_task_graph,
         })
+
+    # ── Workprogram: seed coverage cells and build enforce directive ──────────
+    from aespa.services.web_workprogram import (
+        seed_web_workprogram,
+        _build_web_enforce_directive,
+        _make_web_post_probe_fn,
+        _make_web_post_finding_fn,
+    )
+    try:
+        seed_web_workprogram(run_id)
+    except Exception as _wp_exc:
+        log.warning("seed_web_workprogram failed (non-fatal): %s", _wp_exc)
+    if coverage_mode == "enforce":
+        try:
+            _enforce_directive = _build_web_enforce_directive(run_id)
+            if _enforce_directive:
+                crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
+        except Exception as _ed_exc:
+            log.warning("build_web_enforce_directive failed (non-fatal): %s", _ed_exc)
+    _web_post_probe_fn = _make_web_post_probe_fn(run_id)
+    _web_post_finding_fn = _make_web_post_finding_fn(run_id)
 
     creds_for_llm = [
         {
@@ -4276,6 +4307,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     site_id=site_id,
                     creds=creds,
                     login_url=login_url or "",
+                    post_probe_fn=_web_post_probe_fn,
+                    post_finding_fn=_web_post_finding_fn,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -5343,6 +5376,35 @@ async def _do_thinking_scan(run_id: int) -> None:
             log.warning("Thinking scan analysis failed: %s", exc)
 
     stopped = run_id in _thinking_stop_requested
+    # ── Workprogram finalisation ───────────────────────────────────────────────
+    from aespa.services.web_workprogram import (
+        mark_in_progress_to_covered,
+        _make_web_enforce_prober,
+        _enforce_web_coverage_loop,
+    )
+    if coverage_mode == "enforce" and not stopped:
+        try:
+            events_svc.emit(run_id, {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "active",
+                "current_task": "Enforcing web coverage — resolving remaining cells…",
+                "outcome": None,
+                "_persist": True,
+            })
+            _wp_prober = _make_web_enforce_prober(run_id, llm_cfg)
+            await _enforce_web_coverage_loop(
+                run_id, _wp_prober,
+                stop_check=lambda: run_id in _thinking_stop_requested,
+            )
+        except Exception as _enf_exc:
+            log.warning("enforce_web_coverage_loop failed (non-fatal): %s", _enf_exc)
+    else:
+        try:
+            mark_in_progress_to_covered(run_id)
+        except Exception as _mc_exc:
+            log.warning("mark_in_progress_to_covered failed (non-fatal): %s", _mc_exc)
     if not stopped:
         try:
             await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
