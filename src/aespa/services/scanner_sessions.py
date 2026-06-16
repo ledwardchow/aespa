@@ -72,6 +72,7 @@ def upsert_session(
     cookies: dict[str, Any] | None = None,
     extra_headers: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    run_kind: str = "web",
 ) -> ScannerSession:
     normalized_label = stable_label(label)
     now = _utcnow()
@@ -79,9 +80,12 @@ def upsert_session(
         existing = session.exec(
             select(ScannerSession)
             .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == run_kind)
             .where(ScannerSession.label == normalized_label)
         ).first()
-        record = existing or ScannerSession(test_run_id=run_id, label=normalized_label)
+        record = existing or ScannerSession(
+            test_run_id=run_id, run_kind=run_kind, label=normalized_label
+        )
         record.kind = kind
         record.username = username
         record.credential_id = credential_id
@@ -100,7 +104,9 @@ def upsert_session(
         return record
 
 
-def ensure_anonymous_session(run_id: int, *, source: str = "scanner") -> ScannerSession:
+def ensure_anonymous_session(
+    run_id: int, *, source: str = "scanner", run_kind: str = "web"
+) -> ScannerSession:
     return upsert_session(
         run_id,
         label="anonymous",
@@ -109,20 +115,27 @@ def ensure_anonymous_session(run_id: int, *, source: str = "scanner") -> Scanner
         cookies={},
         extra_headers={},
         metadata={"description": "No cookies or Authorization header"},
+        run_kind=run_kind,
     )
 
 
-def list_run_sessions(run_id: int, *, active_only: bool = True) -> list[ScannerSession]:
+def list_run_sessions(
+    run_id: int, *, active_only: bool = True, run_kind: str = "web"
+) -> list[ScannerSession]:
     with Session(get_engine()) as session:
-        query = select(ScannerSession).where(ScannerSession.test_run_id == run_id)
+        query = (
+            select(ScannerSession)
+            .where(ScannerSession.test_run_id == run_id)
+            .where(ScannerSession.run_kind == run_kind)
+        )
         if active_only:
             query = query.where(ScannerSession.is_active == True)  # noqa: E712
         return list(session.exec(query.order_by(ScannerSession.label)))
 
 
-def load_session_vault(run_id: int) -> dict[str, dict[str, Any]]:
+def load_session_vault(run_id: int, *, run_kind: str = "web") -> dict[str, dict[str, Any]]:
     vault: dict[str, dict[str, Any]] = {}
-    for record in list_run_sessions(run_id):
+    for record in list_run_sessions(run_id, run_kind=run_kind):
         vault[record.label] = {
             "label": record.label,
             "kind": record.kind,

@@ -40,7 +40,7 @@ For each entry point:
 For each potential issue found:
 - Call write_lead to record the candidate with a concrete data-flow path.
 - Immediately call filter_lead to self-evaluate its confidence (0.0–1.0).
-- Keep only leads whose confidence meets the threshold (≥ 0.8).
+- Keep only leads whose confidence meets the threshold (≥ 0.7).
   Do NOT keep theoretical or unsubstantiated candidates.
 
 ## Categories to prioritise (in order)
@@ -53,7 +53,7 @@ For each potential issue found:
 7. Sensitive data exposure in logs or responses
 8. Broken object property level authorisation (BOPLA / mass assignment)
 
-## False-positive exclusion rules — call filter_lead with confidence < 0.8 for:
+## False-positive exclusion rules — call filter_lead with confidence < 0.7 for:
 - Theoretical vulnerabilities with no concrete attack path
 - Issues that require an already-compromised account unless BOLA/BFLA
 - Client-side-only XSS when the backend uses a framework-level auto-escape
@@ -233,7 +233,7 @@ SAST_TOOLS: list[dict] = [
         "description": (
             "Apply false-positive filtering and assign a confidence score to a previously "
             "written candidate. Must be called once for every write_lead call. "
-            "Leads with confidence < 0.8 will be discarded."
+            "Leads with confidence < 0.7 will be discarded."
         ),
         "input_schema": {
             "type": "object",
@@ -245,7 +245,7 @@ SAST_TOOLS: list[dict] = [
                 "confidence": {
                     "type": "number",
                     "description": (
-                        "Confidence score 0.0–1.0. Only leads ≥ 0.8 are kept. "
+                        "Confidence score 0.0–1.0. Only leads ≥ 0.7 are kept. "
                         "Score lower if: no concrete attack path, requires already-compromised "
                         "account (unless BOLA/BFLA), framework auto-escaping prevents exploit, "
                         "theoretical only, or impact is informational."

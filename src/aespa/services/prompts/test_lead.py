@@ -22,6 +22,18 @@ Return ONLY valid JSON in this exact format (no markdown fences):
     "takes_input": false,
     "has_object_ref": false,
     "has_business_logic": false
+  }},
+  "owasp_applicable": {{
+    "A01": {{"applicable": false, "reason": "one sentence"}},
+    "A02": {{"applicable": false, "reason": "one sentence"}},
+    "A03": {{"applicable": false, "reason": "one sentence"}},
+    "A04": {{"applicable": false, "reason": "one sentence"}},
+    "A05": {{"applicable": false, "reason": "one sentence"}},
+    "A06": {{"applicable": false, "reason": "one sentence"}},
+    "A07": {{"applicable": false, "reason": "one sentence"}},
+    "A08": {{"applicable": false, "reason": "one sentence"}},
+    "A09": {{"applicable": false, "reason": "one sentence"}},
+    "A10": {{"applicable": false, "reason": "one sentence"}}
   }}
 }}
 
@@ -37,7 +49,20 @@ For categories — answer true/false to each:
 - has_object_ref: Does the URL or page content reference a specific object by ID \
 (e.g. id=1 in a query param, /accounts/42/ in the path, or a resource identifier in a POST body)?
 - has_business_logic: Can this page trigger transactions, modify account data, transfer funds, \
-create/update/delete records, or perform other business-significant operations?"""
+create/update/delete records, or perform other business-significant operations?
+
+For owasp_applicable — for each OWASP Top 10:2025 category, set applicable=true if this specific \
+page is a realistic test target for that vulnerability class. Use these criteria:
+- A01 Broken Access Control: page uses object IDs / references, or enforces role/privilege boundaries
+- A02 Cryptographic Failures: page transmits or stores sensitive data (passwords, PII, tokens, payment info)
+- A03 Injection: page accepts user input passed to a backend query, command, or template
+- A04 Insecure Design: page implements business logic that could be abused (rate limits, workflows, trust assumptions)
+- A05 Security Misconfiguration: page exposes error details, debug info, default credentials, or permissive CORS/headers
+- A06 Vulnerable & Outdated Components: page loads identifiable third-party libraries or frameworks with version hints
+- A07 Identification & Authentication Failures: page handles login, session management, password reset, or MFA
+- A08 Software & Data Integrity Failures: page loads scripts/plugins from external sources, or processes unsigned data
+- A09 Security Logging & Monitoring Failures: page performs significant actions that should produce audit logs
+- A10 SSRF: page accepts a URL, hostname, IP, or path that the server will fetch or connect to"""
 
 
 # ── Probe planning ────────────────────────────────────────────────────────────

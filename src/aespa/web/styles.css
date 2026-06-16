@@ -1786,6 +1786,8 @@ legend {
   border: 1px solid var(--border-2);
   border-radius: 14px 14px 14px 2px;
   border-left: 3px solid #c084fc;
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .alice-msg-meta {
@@ -1824,6 +1826,64 @@ legend {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Inline thinking/tool-call trace (Claude-code style): each parsed block flows
+   as its own standalone item in the conversation, between message bubbles. */
+.alice-msg-row--trace {
+  margin: 2px 0;
+}
+/* Collapsed trace box: all steps following a chat message live in one
+   low-prominence expandable box that summarizes the last step + tool. */
+.alice-trace-box {
+  width: 100%;
+  max-width: 90%;
+}
+.alice-trace-summary {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  opacity: 0.7;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.alice-trace-summary:hover {
+  opacity: 1;
+  background: rgba(192, 132, 252, 0.06);
+}
+.alice-trace-summary svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+  flex: none;
+}
+.alice-trace-summary-label {
+  font-family: ui-monospace, "SF Mono", monospace;
+}
+.alice-trace-caret {
+  margin-left: auto;
+  font-size: 8px;
+  opacity: 0.5;
+}
+.alice-trace-box--open .alice-trace-summary {
+  opacity: 0.85;
+}
+.alice-thinking-inline {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(192, 132, 252, 0.25);
+  opacity: 0.85;
+  font-size: 10.5px;
 }
 
 /* Premium Structured Blocks inside Thought Process */

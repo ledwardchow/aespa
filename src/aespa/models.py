@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer
+from sqlalchemy import Column, ForeignKey, Integer, String, text
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -422,6 +422,11 @@ class TestRun(SQLModel, table=True):
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage: {model: {input, output, cache_read, cache_write}}
     token_usage_json: Optional[str] = Field(default=None)
+    # Coverage mode: "track" (observe) or "enforce" (drive every cell to terminal)
+    coverage_mode: str = Field(
+        default="track",
+        sa_column=Column(String, nullable=False, server_default=text("'track'")),
+    )
 
 
 class CrawledPage(SQLModel, table=True):
@@ -445,7 +450,35 @@ class CrawledPage(SQLModel, table=True):
     has_object_ref: Optional[bool] = Field(default=None)   # Contains Object Reference
     has_business_logic: Optional[bool] = Field(default=None)  # Contains Business Functionality
     accessible_by: str = Field(default="[]")  # JSON list of credential IDs that can access this page
+    owasp_applicable_json: str = Field(default="{}")  # JSON {A01: bool, …} OWASP Top 10:2025 applicability
     discovered_at: datetime = Field(default_factory=_utcnow)
+
+    @property
+    def owasp_applicable(self) -> dict:
+        try:
+            return json.loads(self.owasp_applicable_json or "{}")
+        except Exception:
+            return {}
+
+
+class PageOwaspTest(SQLModel, table=True):
+    """One cell in the web workprogram: a (TestRun, CrawledPage, OWASP category) triple.
+
+    Seeded at scan start (or manually via the /coverage/seed endpoint).
+    Status is persisted and updated as the scan runs.
+    """
+
+    __tablename__ = "page_owasp_test"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    page_id: int = Field(foreign_key="crawled_page.id", index=True)
+    owasp_category: str              # A01 … A10
+    status: str = Field(default="not_started")   # not_started|in_progress|covered|skipped|finding
+    skip_reason: Optional[str] = Field(default=None)
+    finding_ids_json: str = Field(default="[]")  # JSON list of ScanFinding.id
+    last_updated: Optional[datetime] = Field(default_factory=_utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class PageLink(SQLModel, table=True):
@@ -489,6 +522,10 @@ class ScannerSession(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # See AgentLog.run_kind — web TestRun ids and ApiTestRun ids come from
+    # independent counters and collide.  Without this discriminator a web run and
+    # an API run that share an integer id would read/delete each other's sessions.
+    run_kind: str = Field(default="web", index=True)  # "web" | "api"
     label: str = Field(index=True)                 # anonymous | configured_primary | forged_admin | ...
     kind: str = Field(default="cookie", index=True)  # anonymous | cookie | bearer | mixed
     username: Optional[str] = Field(default=None, index=True)
@@ -520,6 +557,7 @@ class PageCredentialView(SQLModel, table=True):
     takes_input: Optional[bool] = Field(default=None)
     has_object_ref: Optional[bool] = Field(default=None)
     has_business_logic: Optional[bool] = Field(default=None)
+    owasp_applicable_json: str = Field(default="{}")  # JSON {A01: bool, …}
 
 
 class TargetIntelItem(SQLModel, table=True):
@@ -698,6 +736,9 @@ class AliceChatSession(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
+    # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
+    # same run_id. "web" | "api".
+    run_kind: str = Field(default="web", index=True)
     session_key: str = Field(index=True)   # client-assigned tab ID, e.g. "tab-default"
     title: str = Field(default="Session 1")
     position: int = Field(default=0)       # tab ordering
