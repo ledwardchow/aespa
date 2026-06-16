@@ -223,6 +223,15 @@ async def _do_crawl_inner(run_id: int) -> None:
     # OR-merge page categories from all credential views into each CrawledPage.
     _merge_all_categories(run_id)
 
+    # Seed the workprogram now that we have the full page list + OWASP categories.
+    if run_id not in _stop_requested:
+        from aespa.services.web_workprogram import seed_web_workprogram  # ponytail: local import avoids circular
+        try:
+            seeded = seed_web_workprogram(run_id)
+            log.info("workprogram seeded after crawl: run_id=%s cells=%d", run_id, seeded)
+        except Exception:
+            log.warning("workprogram seed failed after crawl (non-fatal)", exc_info=True)
+
     final_status = TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
     log.info("=== Crawl done: run_id=%s status=%s pages=%d ===",
              run_id, final_status, shared.pages_done)
@@ -527,6 +536,7 @@ async def _crawl_as_credential(
                     req_auth=cats["req_auth"], takes_input=cats["takes_input"],
                     has_object_ref=cats["has_object_ref"],
                     has_business_logic=cats["has_business_logic"],
+                    owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
                 )
                 if is_first:
                     _save_link(run_id, parent_id, page_id, final_url)
@@ -648,6 +658,7 @@ def _save_credential_view(
     page_text: Optional[str],
     cats: dict,
 ) -> None:
+    owasp_json = json.dumps(cats.get("owasp_applicable") or {})
     with Session(get_engine()) as s:
         existing = s.exec(
             select(PageCredentialView)
@@ -664,6 +675,7 @@ def _save_credential_view(
             existing.takes_input = cats.get("takes_input")
             existing.has_object_ref = cats.get("has_object_ref")
             existing.has_business_logic = cats.get("has_business_logic")
+            existing.owasp_applicable_json = owasp_json
             s.add(existing)
             s.commit()
             return
@@ -679,6 +691,7 @@ def _save_credential_view(
             takes_input=cats.get("takes_input"),
             has_object_ref=cats.get("has_object_ref"),
             has_business_logic=cats.get("has_business_logic"),
+            owasp_applicable_json=owasp_json,
         )
         s.add(view)
         s.commit()
@@ -1705,6 +1718,7 @@ def _save_api_page(
             takes_input=categories.get("takes_input"),
             has_object_ref=categories.get("has_object_ref"),
             has_business_logic=categories.get("has_business_logic"),
+            owasp_applicable_json=json.dumps(categories.get("owasp_applicable") or {}),
             accessible_by=json.dumps([credential_id] if credential_id is not None else []),
         )
         s.add(cp)
@@ -1792,12 +1806,34 @@ def _combine_api_context(fallback_context: str, llm_context: str) -> str:
 
 def _api_categories(call: dict, credential_id: Optional[int]) -> dict:
     method = str(call.get("method") or "GET").upper()
+    url = call.get("url") or ""
     request_body = call.get("request_body") or ""
+    url_lower = url.lower()
+    body_lower = request_body.lower()
+    is_mutating = method in ("POST", "PUT", "PATCH", "DELETE")
+    has_id = _url_has_object_ref(url) or _body_has_object_ref(request_body)
+    is_auth_endpoint = any(kw in url_lower for kw in ("/login", "/logout", "/auth", "/token", "/session", "/password", "/reset", "/register", "/signup", "/oauth"))
+    has_url_param = bool(re.search(r'[?&](?:url|uri|href|src|redirect|callback|proxy|fetch|target)=', url_lower)) or \
+        bool(re.search(r'"(?:url|uri|href|src|redirect|callback|proxy|fetch|target)"\s*:', body_lower))
+
+    owasp_applicable = {
+        "A01": has_id or credential_id is not None,                              # Broken Access Control
+        "A02": is_auth_endpoint or bool(re.search(r'password|secret|token|key|credential', body_lower)),  # Cryptographic Failures
+        "A03": is_mutating or bool(request_body),                                # Injection
+        "A04": is_mutating,                                                      # Insecure Design
+        "A05": True,                                                             # Security Misconfiguration (headers etc.)
+        "A06": False,                                                            # Vulnerable Components (can't tell from request)
+        "A07": is_auth_endpoint or credential_id is not None,                   # Auth Failures
+        "A08": is_mutating,                                                      # Software & Data Integrity
+        "A09": is_mutating,                                                      # Logging & Monitoring
+        "A10": has_url_param,                                                    # SSRF
+    }
     return {
         "req_auth": credential_id is not None,
         "takes_input": method not in ("GET", "HEAD", "OPTIONS") or bool(request_body),
-        "has_object_ref": _url_has_object_ref(call.get("url") or "") or _body_has_object_ref(request_body),
+        "has_object_ref": has_id,
         "has_business_logic": None,
+        "owasp_applicable": owasp_applicable,
     }
 
 
@@ -1824,6 +1860,14 @@ def _merge_api_categories(fallback: dict, llm_categories: dict) -> dict:
         merged["has_object_ref"] = True
     if fallback.get("req_auth"):
         merged["req_auth"] = True
+    # Pass through OWASP applicability from LLM; OR-merge with heuristic fallback
+    llm_owasp = llm_categories.get("owasp_applicable") or {}
+    heuristic_owasp = fallback.get("owasp_applicable") or {}
+    if llm_owasp or heuristic_owasp:
+        merged["owasp_applicable"] = {
+            cat: llm_owasp.get(cat, False) or heuristic_owasp.get(cat, False)
+            for cat in set(list(llm_owasp) + list(heuristic_owasp))
+        }
     return merged
 
 
@@ -2099,6 +2143,17 @@ def _merge_all_categories(run_id: int) -> None:
                 vals = [getattr(v, attr) for v in views if getattr(v, attr) is not None]
                 if vals:
                     setattr(cp, attr, any(vals))
+            # OR-merge OWASP applicability: a category is applicable if any credential view says so
+            merged_owasp: dict[str, bool] = {}
+            for v in views:
+                try:
+                    view_owasp = json.loads(v.owasp_applicable_json or "{}")
+                except Exception:
+                    view_owasp = {}
+                for cat, val in view_owasp.items():
+                    merged_owasp[cat] = merged_owasp.get(cat, False) or bool(val)
+            if merged_owasp:
+                cp.owasp_applicable_json = json.dumps(merged_owasp)
             s.add(cp)
         s.commit()
 

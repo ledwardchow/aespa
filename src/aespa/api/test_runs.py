@@ -11,6 +11,7 @@ from aespa.models import (
     CrawledPage,
     PageCredentialView,
     PageLink,
+    PageOwaspTest,
     PentestHypothesis,
     PentestTask,
     ScanCheckpoint,
@@ -394,6 +395,8 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         .where(ScannerSession.run_kind == "web")
     ).all():
         session.delete(ss)
+    for cell in session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)).all():
+        session.delete(cell)
     for hyp in session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == run_id)).all():
         session.delete(hyp)
     for task in session.exec(select(PentestTask).where(PentestTask.test_run_id == run_id)).all():
@@ -522,6 +525,23 @@ def stop_test_run(run_id: int, session: Session = Depends(get_session)) -> TestR
     session.commit()
     session.refresh(run)
     return _run_summary(run, session)
+
+
+# ── Web workprogram ────────────────────────────────────────────────────────────
+
+@router.get("/api/test-runs/{run_id}/coverage")
+def get_web_coverage_matrix(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import web_workprogram
+    return web_workprogram.get_web_coverage_matrix(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/coverage/seed")
+def seed_web_coverage(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import web_workprogram
+    created = web_workprogram.seed_web_workprogram(run_id)
+    return {"ok": True, "created": created}
 
 
 # ── Pages + graph ─────────────────────────────────────────────────────────────

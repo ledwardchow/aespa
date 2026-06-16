@@ -206,6 +206,196 @@ def test_context_tool_unknown_returns_error(db_session):
 
     assert result["error"] == "unknown tool"
     assert "endpoint_list" in result["available_tools"]
+    assert "set_coverage" in result["available_tools"]
+    assert "coverage_matrix" in result["available_tools"]
+
+
+# ── coverage_matrix / set_coverage ────────────────────────────────────────────
+
+def _make_coverage_fixture(db_session):
+    """Create a collection + one in-scope GET endpoint with a path param and a
+    seeded coverage matrix. Returns (collection, endpoint, run)."""
+    from aespa.models import ApiCollection, ApiEndpoint, ApiTestRun
+    from aespa.services.api_scanner import seed_coverage_matrix
+    import aespa.db as db_mod
+
+    coll = ApiCollection(name="Cov API", base_url="https://cov.example.com")
+    db_session.add(coll)
+    db_session.commit()
+    db_session.refresh(coll)
+
+    ep = ApiEndpoint(
+        collection_id=coll.id,
+        method="GET",
+        path="/v1/products/{id}",
+        summary="Get a product",
+        auth_required=True,
+        parameters_json=json.dumps([{"name": "id", "in": "path", "required": True}]),
+        in_scope=True,
+        prereq_can_test=True,
+        prereq_can_test_auth=True,
+    )
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
+
+    run = ApiTestRun(collection_id=coll.id, name="r")
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    # Seed against the same in-memory engine the dispatcher uses.
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        seed_coverage_matrix(run.id)
+    finally:
+        db_mod._engine = orig
+    return coll, ep, run
+
+
+def test_set_coverage_marks_cell_and_matrix_reflects_it(db_session):
+    """set_coverage upgrades a cell and coverage_matrix reports the new status."""
+    from aespa.services.alice import _run_api_context_tool
+    import aespa.db as db_mod
+
+    coll, ep, run = _make_coverage_fixture(db_session)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        # Cell starts not_started.
+        before = _run_api_context_tool(coll.id, run.id, "coverage_matrix", {"endpoint_id": ep.id})
+        api1 = next(c for c in before["cells"] if c["owasp_api_category"] == "API1")
+        assert api1["status"] == "not_started"
+
+        # Mark it covered.
+        res = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API1", "status": "covered",
+        })
+        assert res["ok"] is True
+        assert res["status"] == "covered"
+        assert res["downgrade_ignored"] is False
+
+        # Matrix now reflects covered.
+        after = _run_api_context_tool(coll.id, run.id, "coverage_matrix", {
+            "endpoint_id": ep.id, "status": "covered",
+        })
+        assert any(c["owasp_api_category"] == "API1" for c in after["cells"])
+    finally:
+        db_mod._engine = orig
+
+
+def test_set_coverage_never_downgrades(db_session):
+    """A request to lower a cell's status is silently kept at the higher state."""
+    from aespa.services.alice import _run_api_context_tool
+    import aespa.db as db_mod
+
+    coll, ep, run = _make_coverage_fixture(db_session)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API2", "status": "finding",
+            "finding_id": 7,
+        })
+        # Try to downgrade to in_progress.
+        res = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API2", "status": "in_progress",
+        })
+        assert res["requested_status"] == "in_progress"
+        assert res["status"] == "finding"
+        assert res["downgrade_ignored"] is True
+    finally:
+        db_mod._engine = orig
+
+
+def test_report_finding_auto_links_coverage_cell(db_session):
+    """report_finding flips the matched endpoint × category cell to 'finding'."""
+    from aespa.services.alice import _run_api_context_tool
+    import aespa.db as db_mod
+
+    coll, ep, run = _make_coverage_fixture(db_session)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        res = _run_api_context_tool(coll.id, run.id, "report_finding", {
+            "title": "BOLA on product",
+            "severity": "high",
+            "owasp_api_category": "API1",
+            "affected_url": "https://cov.example.com/v1/products/5",
+            "description": "swapped id to read another user's product",
+        })
+        assert res["ok"] is True
+        assert res["coverage_cell"] == {"endpoint_id": ep.id, "owasp_api_category": "API1"}
+
+        matrix = _run_api_context_tool(coll.id, run.id, "coverage_matrix", {
+            "endpoint_id": ep.id, "status": "finding",
+        })
+        api1 = [c for c in matrix["cells"] if c["owasp_api_category"] == "API1"]
+        assert len(api1) == 1
+        assert res["finding_id"] in api1[0]["finding_ids"]
+    finally:
+        db_mod._engine = orig
+
+
+def test_report_finding_no_link_when_url_matches_nothing(db_session):
+    """A finding whose affected_url matches no endpoint still saves but links no cell."""
+    from aespa.services.alice import _run_api_context_tool
+    import aespa.db as db_mod
+
+    coll, ep, run = _make_coverage_fixture(db_session)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        res = _run_api_context_tool(coll.id, run.id, "report_finding", {
+            "title": "Stray finding",
+            "severity": "low",
+            "owasp_api_category": "API1",
+            "affected_url": "https://cov.example.com/nope/unmatched",
+        })
+        assert res["ok"] is True
+        assert res["coverage_cell"] is None
+    finally:
+        db_mod._engine = orig
+
+
+def test_set_coverage_validates_inputs(db_session):
+    """Invalid status, category, endpoint, and non-applicable category are rejected."""
+    from aespa.services.alice import _run_api_context_tool
+    import aespa.db as db_mod
+
+    coll, ep, run = _make_coverage_fixture(db_session)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        bad_status = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API1", "status": "not_started",
+        })
+        assert "error" in bad_status
+
+        bad_cat = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API99", "status": "covered",
+        })
+        assert "error" in bad_cat
+
+        bad_ep = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": 9999, "owasp_api_category": "API1", "status": "covered",
+        })
+        assert "error" in bad_ep
+
+        # API3 only applies to PUT/PATCH — not this GET endpoint.
+        not_applicable = _run_api_context_tool(coll.id, run.id, "set_coverage", {
+            "endpoint_id": ep.id, "owasp_api_category": "API3", "status": "covered",
+        })
+        assert "error" in not_applicable
+        assert "API3" not in not_applicable.get("applicable_categories", [])
+    finally:
+        db_mod._engine = orig
 
 
 # ── _check_api_scope unit tests ────────────────────────────────────────────────

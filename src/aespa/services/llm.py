@@ -460,6 +460,26 @@ _EMPTY_CATS: PageCategories = {
     "has_business_logic": None,
 }
 
+OWASP_WEB_CATEGORIES: list[str] = [
+    "A01", "A02", "A03", "A04", "A05",
+    "A06", "A07", "A08", "A09", "A10",
+]
+
+OWASP_WEB_LABELS: dict[str, str] = {
+    "A01": "Broken Access Control",
+    "A02": "Cryptographic Failures",
+    "A03": "Injection",
+    "A04": "Insecure Design",
+    "A05": "Security Misconfiguration",
+    "A06": "Vulnerable & Outdated Components",
+    "A07": "Identification & Auth Failures",
+    "A08": "Software & Data Integrity Failures",
+    "A09": "Security Logging & Monitoring Failures",
+    "A10": "SSRF",
+}
+
+_EMPTY_OWASP: dict[str, bool] = {cat: False for cat in OWASP_WEB_CATEGORIES}
+
 
 async def analyse_page(
     config: LLMConfig,
@@ -554,6 +574,16 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         for key in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
             val = raw_cats.get(key)
             cats[key] = bool(val) if val is not None else None
+        # Parse OWASP applicability — normalise to {A01: bool, …}
+        raw_owasp = data.get("owasp_applicable") or {}
+        owasp: dict[str, bool] = dict(_EMPTY_OWASP)
+        for cat in OWASP_WEB_CATEGORIES:
+            entry = raw_owasp.get(cat)
+            if isinstance(entry, dict):
+                owasp[cat] = bool(entry.get("applicable"))
+            elif entry is not None:
+                owasp[cat] = bool(entry)
+        cats["owasp_applicable"] = owasp
         return context, safe_links, cats
     except Exception:
         return raw.strip(), [], dict(_EMPTY_CATS)
@@ -2891,10 +2921,11 @@ async def thinking_agentic_loop(
                 )
                 result_str = f"Tool execution error: {exc}"
 
-            if len(result_str) > TOOL_RESULT_CHAR_LIMIT:
-                omitted = len(result_str) - TOOL_RESULT_CHAR_LIMIT
+            limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+            if len(result_str) > limit:
+                omitted = len(result_str) - limit
                 result_str = (
-                    result_str[:TOOL_RESULT_CHAR_LIMIT]
+                    result_str[:limit]
                     + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
                 )
 
