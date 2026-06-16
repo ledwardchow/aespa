@@ -54,6 +54,12 @@ async def start_thinking_scan(
         run.coverage_mode = body.coverage_mode
         session.add(run)
         session.commit()
+    # Seed workprogram synchronously so it's populated before the response returns.
+    try:
+        from aespa.services.web_workprogram import seed_web_workprogram
+        seed_web_workprogram(run_id)
+    except Exception as _se:
+        pass  # non-fatal
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -97,6 +103,11 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     status = checkpoint_svc.checkpoint_status(run_id)
     if not status["exists"]:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
+    try:
+        from aespa.services.web_workprogram import seed_web_workprogram
+        seed_web_workprogram(run_id)
+    except Exception:
+        pass
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
