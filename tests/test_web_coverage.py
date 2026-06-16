@@ -344,6 +344,7 @@ def test_post_finding_fn_flips_finding(db_engine, db_session, run):
     class _FakeFinding:
         id = 77
         page_id = page.id
+        affected_url = "http://example.com/transfer"
         owasp_category = "A01"
 
     fn = _make_web_post_finding_fn(run.id)
@@ -358,6 +359,82 @@ def test_post_finding_fn_flips_finding(db_engine, db_session, run):
     ).first()
     assert cell.status == "finding"
     assert 77 in json.loads(cell.finding_ids_json)
+
+
+# ── 11b. _make_web_post_finding_fn uses affected_url, not page_id ─────────────
+
+def test_post_finding_fn_uses_affected_url(db_engine, db_session, run):
+    """Finding on /api/admin/customers must NOT land on the root page row."""
+    root = _make_page(db_session, run, "http://example.com/", ["A03"])
+    api_page = _make_page(db_session, run, "http://example.com/api/admin/customers", ["A03"])
+    seed_web_workprogram(run.id)
+
+    class _FakeFinding:
+        id = 99
+        page_id = root.id          # scanner set page_id = root (wrong)
+        affected_url = "http://example.com/api/admin/customers"
+        owasp_category = "A03"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    root_cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == root.id)
+        .where(PageOwaspTest.owasp_category == "A03")
+    ).first()
+    api_cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == api_page.id)
+        .where(PageOwaspTest.owasp_category == "A03")
+    ).first()
+    # finding must land on the api page, not the root
+    assert api_cell.status == "finding"
+    assert root_cell.status == "not_started"
+
+
+# ── 11c. _make_web_post_finding_fn creates page for unknown affected_url ───────
+
+def test_post_finding_fn_creates_page_for_unknown_url(db_engine, db_session, run):
+    """Finding at a URL not in the crawl gets a placeholder page + cell."""
+    class _FakeFinding:
+        id = 42
+        page_id = None
+        affected_url = "http://example.com/api/health"
+        owasp_category = "A05"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    page = db_session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run.id)
+        .where(CrawledPage.url == "http://example.com/api/health")
+    ).first()
+    assert page is not None
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == page.id)
+        .where(PageOwaspTest.owasp_category == "A05")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+
+
+# ── 11d. _match_page_for_url does not swallow sub-paths into root ──────────────
+
+def test_match_page_does_not_match_root_to_subpath(db_engine, db_session, run):
+    """http://example.com/ must NOT match http://example.com/api/health."""
+    from aespa.services.web_workprogram import _match_page_for_url
+    root = _make_page(db_session, run, "http://example.com/", ["A01"])
+    pages = [db_session.get(CrawledPage, root.id)]
+    result = _match_page_for_url("http://example.com/api/health", pages)
+    assert result is None   # no match — should create a new placeholder
 
 
 # ── 12. get_web_coverage_matrix returns seeded=False when no cells ────────────
