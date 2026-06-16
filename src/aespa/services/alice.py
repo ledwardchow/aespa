@@ -712,6 +712,10 @@ async def run_alice_turn_stream(
     # Register run context so LLM calls attribute token usage to this run.
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
+    # Build web workprogram probe hook so ALICE populates the coverage matrix.
+    from aespa.services.web_workprogram import _make_web_post_probe_fn as _wp_probe_fn
+    _web_post_probe_fn = _wp_probe_fn(run_id)
+
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -909,6 +913,7 @@ async def run_alice_turn_stream(
                         tool_input=tool_input,
                         step=step_count,
                         session_vault=session_vault,
+                        post_probe_fn=_web_post_probe_fn,
                     )
                 except Exception as exc:
                     log.warning("ALICE tool %r step %d failed: %s", tool_name, step_count, exc)

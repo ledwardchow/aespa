@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response as HTTPResponse
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -32,15 +34,32 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
     return run
 
 
+class _StartScanBody(BaseModel):
+    coverage_mode: Optional[str] = None  # "track" | "enforce"
+
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
-async def start_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def start_thinking_scan(
+    run_id: int,
+    body: Optional[_StartScanBody] = None,
+    session: Session = Depends(get_session),
+) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
         raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+    if body and body.coverage_mode in ("track", "enforce"):
+        run.coverage_mode = body.coverage_mode
+        session.add(run)
+        session.commit()
+    # Seed workprogram synchronously so it's populated before the response returns.
+    try:
+        from aespa.services.web_workprogram import seed_web_workprogram
+        seed_web_workprogram(run_id)
+    except Exception as _se:
+        pass  # non-fatal
     await scanner_svc.start_thinking_scan(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
@@ -84,6 +103,11 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
     status = checkpoint_svc.checkpoint_status(run_id)
     if not status["exists"]:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
+    try:
+        from aespa.services.web_workprogram import seed_web_workprogram
+        seed_web_workprogram(run_id)
+    except Exception:
+        pass
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
 
