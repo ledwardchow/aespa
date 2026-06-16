@@ -4,6 +4,93 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #186] 16th June Update — OWASP Web Workprogram, even more bug fixes
+**Opened:**  2026-06-16 | Branch: `develop → main`
+
+Implements the OWASP Top-10 (2021) web workprogram coverage matrix for web app scans (#179), mirroring the existing API scan workprogram. Adds Track and Enforce modes, live in-scan progress, and auto-seeding. 5 commits across 9 files.
+
+### OWASP Top-10 Web Workprogram (#179, PR #185)
+
+- **`PageOwaspTest` model promoted to a real coverage cell** (`models.py`, `db.py`): Added `status` (`not_started` / `in_progress` / `covered` / `skipped` / `finding`), `skip_reason`, `finding_ids_json`, and `last_updated` fields. `TestRun.coverage_mode` (`track` | `enforce`) added with a SQL `server_default` so old rows keep the `track` default without a migration failure. All 5 new columns are `_ensure_column`-migrated idempotently on startup.
+
+- **`services/web_workprogram.py` — full implementation**: `seed_web_workprogram` creates one `PageOwaspTest` cell per in-scope page × applicable OWASP category (static assets filtered out). `update_web_coverage_cell` upserts with no-downgrade semantics and normalises OWASP codes (`"A02 - Cryptographic Failures"` → `"A02"`) so LLM full-name variants always hit the right row. `mark_in_progress_to_covered` promotes at scan completion (track mode). Enforce mode adds `_build_web_enforce_directive`, `_enforce_web_coverage_loop`, and an LLM-assisted `_make_web_enforce_prober` that drives every uncovered cell to a terminal state.
+
+- **Auto-seeding** (`services/crawler.py`, `api/scan.py`): Workprogram is seeded automatically (1) at crawl completion after `_merge_all_categories`, (2) synchronously in the `start_thinking_scan` and `resume_thinking_scan` API endpoints before returning — so the workprogram tab is populated the moment the user clicks Start/Resume.
+
+- **Scan wiring** (`services/scanner.py`): `_do_thinking_scan` reads `coverage_mode`, seeds the workprogram, prepends an enforce directive to the crawl context when in enforce mode, and passes `post_probe_fn` / `post_finding_fn` hooks into `_do_agentic_thinking_loop`. Post-scan finalisation either promotes in-progress cells (track) or runs the enforce loop (enforce). A `_finding_hooks` module-level registry (same pattern as `_specialist_tasks`) ensures every finding write path — including **specialist agents** — fires the workprogram hook, not just the main agentic loop.
+
+- **ALICE wiring** (`services/alice.py`): `_web_post_probe_fn` constructed per turn and passed into `_execute_alice_tool` so ALICE probes also update the web workprogram.
+
+- **On-the-fly page creation**: If the scan probes or finds an issue at a URL not in the original crawl, a placeholder `CrawledPage` (in-scope) is created automatically and a cell is written — no probe or finding is silently lost.
+
+- **Finding attribution via `affected_url`** (`services/web_workprogram.py`): `_post_finding` resolves the workprogram cell from `finding.affected_url` (the actual endpoint) rather than `finding.page_id` (the scan entry page), fixing incorrect attribution to root-level page rows. `_match_page_for_url` uses exact + normalised match only — prefix overlap removed — so `/` never absorbs `/api/health`.
+
+- **URL normalisation** (`services/web_workprogram.py`): `_normalize_url` now strips IDs (`\d+` / UUID) from both path segments and query-string values (`/items?id=42` → `/items?id={id}`), grouping equivalent parameterised URLs on the same workprogram row.
+
+- **Deterministic findings excluded**: `_post_finding` and `get_web_coverage_matrix` both ignore `finding_source="deterministic_probe"` findings — they don't count toward cell status or totals.
+
+- **Full writeup display fix**: Matrix builder now maintains a `finding_by_id` lookup so cells whose `page_id` diverged from the finding record can still resolve full finding details (title, severity, description) for the UI panel.
+
+- **API** (`api/scan.py`): `start_thinking_scan` accepts an optional `{ coverage_mode }` JSON body.
+
+- **Frontend** (`web/app.js`): Coverage mode selector (Track / Enforce) in the scan topbar. `WebRunWorkProgramTab` replaced with an SSE-driven live view showing per-cell status badges, enforce-loop progress, mode badge, and `skipped` in the legend. Workprogram tab immediately reloads on scan start/resume via a `reloadKey` signal.
+
+- **Tests** (`tests/test_web_coverage.py`): 22 new in-memory tests covering seeding, upsert semantics, probe/finding hooks, enforce loop, placeholder page creation, wrong-page attribution, root-page non-match, and the `start_thinking_scan` coverage_mode endpoint. 497/497 tests pass.
+
+## ALICE improvements and bug fixes:
+
+Closes out the run-id collision class of bugs (#173), gives ALICE the ability to drive the API work-program coverage matrix (#180), adds CVSS calibration to the AI Review Issues tab (#99), ensures confirmed SAST leads always raise a finding, and polishes ALICE chat rendering and reliability. 9 commits across 28 files (~1,800 insertions, ~170 deletions).
+
+### Run-ID Collision Hardening (#173)
+
+- **`ScannerSession.run_kind` discriminator** (`models.py`, `services/scanner_sessions.py`, `db.py`): `ScannerSession` and `AliceChatSession` were keyed on `test_run_id` alone, so a web `TestRun` and an `ApiTestRun` that happened to share an integer id would read, update, and delete each other's rows. Added a `run_kind` column (`"web" | "api"`) on both tables — mirroring the existing `AgentLog` / `ScanLog` pattern — and threaded it through `upsert_session`, `ensure_anonymous_session`, `list_run_sessions`, `load_session_vault`, and every scanner-session endpoint. Includes a one-time backfill migration that tags pre-existing rows by inspecting their parent run.
+
+- **Cascade-delete helpers** (`services/run_cleanup.py`, `api/api_test_runs.py`, `api/sast_runs.py`, `api/test_runs.py`, `services/api_collections.py`): SQLite recycles freed autoincrement ids, so a deleted run (or collection) that left orphaned `ScanFinding` / `TrafficEntry` / `ApiEndpointTest` / `ScanLog` / `ScannerSession` rows would later see them re-attached to a brand-new run reusing the same id. New `cascade_delete_api_run` and `cascade_delete_sast_run` delete every keyed child row in a single transaction; the API-run, SAST-run and collection delete paths now call them, and collection delete also unlinks uploaded documents from disk. Reported symptom — a fresh run showing findings/logs from the previous occupant of the same id — is gone. Regression tests added in `tests/test_api_scanner.py` and `tests/test_api_test_runs.py` for reused run-id and reused collection-id scenarios.
+
+### ALICE Drives the API Work-Program Coverage Matrix (#180)
+
+- **New ALICE context tools for coverage** (`services/alice.py`, `services/prompts/alice.py`): `coverage_matrix` lets ALICE read the current endpoint × OWASP category matrix (filterable by status / endpoint_id) so it can find `not_started` cells to work on; `set_coverage` explicitly marks a cell `covered` / `skipped` / `in_progress` / `finding`, validated against the collection, scope, and applicable categories. Both are wired into `_run_api_context_tool`.
+
+- **Automatic coverage hooks** (`services/alice.py`): `http_request` now forwards the declared `owasp_category` to a new `post_probe_fn` parameter, flipping the matching endpoint × category cell to `in_progress` when ALICE starts a probe (URL-matched, API runs only). `report_finding` mirrors the scanner's hook: matches the finding's `affected_url` to an in-scope endpoint and flips the cell to `finding` with `finding_id` set. Prompts updated to instruct ALICE to set `owasp_category` on category-specific probes and to use `set_coverage` for covered/skipped conclusions.
+
+- **Tests** (`tests/test_alice_service.py`, `tests/test_api_alice_context.py`): Coverage added for `coverage_matrix` / `set_coverage` routing, the `post_probe_fn` integration on `http_request`, and the auto-link from `report_finding` to a coverage cell.
+
+### Improve Issue Deduplicator + Issue Ratings (#99)
+
+- **CVSS 3.1 parser / calculator** (`services/scanner.py`): New `parse_cvss_vector`, `format_cvss_vector`, and `calculate_cvss_score` (full base-score formula, scope-aware, with the official round-up rule) so the app can recompute scores from the metric vector without depending on a string-typed column.
+
+- **`_calibrate_finding_rating` rule set** (`services/scanner.py`): Heuristic calibrator that downgrades the CVSS vector for known overstated categories — CORS, security-header / server-header / CSP / HSTS / X-Frame-Options / X-Content-Type-Options disclosures — bringing their impact metrics in line with realistic exploitation difficulty. Runs per-finding on the AI Review Issues tab.
+
+- **Auto-calibration on ALICE turn end** (`services/alice_tasks.py`, `services/scanner.py`): When an ALICE turn completes, `calibrate_all_findings_for_run(run_id, is_api_run=...)` is invoked against the run's findings, so newly-written issues land in the AI Review tab with calibrated vectors. Failure is logged, never raised.
+
+- **UI** (`web/app.js`): The AI Review Issues panel surfaces calibrated scores and the underlying vector.
+
+### ALICE Chat Rendering & Reliability
+
+- **Claude-code style trace boxes** (`web/app.js`, `web/styles.css`): Thinking/process panels now split an ALICE turn into ordered segments — each piece of intermediate commentary the model emits mid-run is wrapped in `[[ALICE_SAY]]…[[/ALICE_SAY]]` markers and rendered as a prominent chat bubble, with the surrounding tool-call steps collapsed into a low-prominence "Step N · tool_name" expandable box. The final tool-less turn's text and the done summary become the prominent reply bubble. New helpers: `parseAliceTurnSegments`, `aliceTraceSummary`, `renderAliceTraceBox`. New CSS classes: `.alice-trace-box`, `.alice-trace-summary`, `.alice-thinking-inline`.
+
+- **Done summary now surfaces as a message** (`services/alice.py`): The `done` tool's `summary` field is emitted as a `message_chunk` so the user sees the closing paragraph of an ALICE turn as a real reply bubble instead of only inside the collapsed trace.
+
+- **Larger context-tool payloads** (`services/alice.py`, `services/llm.py`, `services/scanner.py`): `context_tool` result cap raised from 8,192 → 30,000 chars (the standard 16,000-char cap is retained for regular tool results), and the `findings_list` tool now returns the full set of findings rather than truncating mid-list. Prevents mid-prompt truncation in long-running API scans.
+
+- **Validator no longer deadlocks when ALICE writes a finding** (`services/validator.py`): The validator was entering a busy loop while ALICE's `report_finding` was still persisting; fix gives the validator a stable view of the in-flight run state and exits cleanly when there's nothing to validate.
+
+- **ALICE task registry keyed by `(run_type, run_id)`** (`services/alice_tasks.py`, `api/alice.py`, `api/api_test_runs.py`, `api/test_runs.py`, `models.py`, `db.py`, `tests/test_api_test_runs.py`): The in-memory task map was previously keyed on `run_id` only, so a web run and an API run sharing an id could stomp on each other's ALICE sessions. Registry now uses `(run_type, run_id)` tuples; new `run_type` parameter threaded through `get`, `start`, `stop`, `stream_events`, and `status`. The `AliceChatSession.run_kind` column added in the run-id collision fix above is what makes the persisted chat history show up under the correct scan type on reload.
+
+### Fixed: Confirmed SAST leads don't always result in a finding
+
+- **`update_lead` auto-promotes confirmed leads** (`services/scan_leads.py`): When an API or web scan confirmed a SAST lead via `update_lead(status="confirmed")`, the lead's status was set but no `ScanFinding` row was ever created — the leads panel showed "confirmed" while the findings panel stayed empty for that issue. The service now synthesises a `ScanFinding` from the lead's own fields (title, description, location, evidence, severity, OWASP category) whenever `linked_finding_id` is not supplied, and sets `linked_finding_id` to the new id. If the agent already recorded a finding for the same run with the same title (i.e. called `write_finding`/`report_finding` but forgot to pass `finding_id` to `update_lead`), the existing finding is linked instead — no duplicate. For API runs, the matching work-program cell is also flipped to `finding` via the existing `update_coverage_cell` hook; the cell flip is best-effort and only triggers when a path token in the lead text strictly matches an in-scope endpoint (never fabricated). Synthesised rows carry `finding_source="sast_lead"` so the UI can distinguish them from agent-written findings. Only fires on `status="confirmed"`; `dismissed` and `inconclusive` leads remain finding-free.
+
+- **SAST lead confidence threshold realigned to 0.7** (`services/prompts/sast.py`): The SAST prompt instructed the LLM *"Only leads ≥ 0.8 are kept"* in four places, but the `CONFIDENCE_THRESHOLD` constant in `services/scan_leads.py` was `0.7`. The SAST agent was discarding hypotheses the service would have otherwise kept, shrinking the lead funnel feeding the dynamic API scanner. Prompts updated to `≥ 0.7` everywhere; no code change.
+
+- **Tests** (`tests/test_scan_leads.py`): New in-memory SQLite suite (7 cases) covering the auto-promotion path, dedup against an existing same-run/same-title finding, the explicit-`linked_finding_id` short-circuit, the dismissed-doesn't-promote invariant, the work-program cell flip, the no-cell-when-no-endpoint-match case, and the no-`run_id` orphan guard.
+
+### Version
+
+- `pyproject.toml`: bumped to `0.5.20260615.4`.
+
+---
+
 ## [PR #174] 15th June Update - Lots of bug fixes!
 **Opened:** 2026-06-15 | Branch: `develop → main`
 

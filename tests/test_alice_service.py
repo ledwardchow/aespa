@@ -302,6 +302,58 @@ def _capturing_scanner_client(captured: dict):
 
 
 @pytest.mark.anyio
+async def test_alice_http_request_forwards_owasp_category_to_post_probe(db_session, test_data):
+    """A probe declaring owasp_category invokes post_probe_fn(url, method, category)."""
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    calls: list = []
+    captured: dict = {}
+    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="http_request",
+            tool_input={
+                "url": "http://target.local/v1/products/5",
+                "method": "GET",
+                "owasp_category": "API1",
+            },
+            step=1,
+            session_vault={},
+            post_probe_fn=lambda url, method, cat: calls.append((url, method, cat)),
+        )
+
+    assert calls == [("http://target.local/v1/products/5", "GET", "API1")]
+
+
+@pytest.mark.anyio
+async def test_alice_http_request_no_post_probe_without_category(db_session, test_data):
+    """A setup request without owasp_category does not invoke post_probe_fn."""
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    calls: list = []
+    captured: dict = {}
+    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="http_request",
+            tool_input={"url": "http://target.local/login", "method": "POST"},
+            step=1,
+            session_vault={},
+            post_probe_fn=lambda *a: calls.append(a),
+        )
+
+    assert calls == []
+
+
+@pytest.mark.anyio
 async def test_alice_http_request_uses_stored_primary_session(db_session, test_data):
     """http_request carries the run's stored authenticated session by default."""
     from aespa.services.alice import _execute_alice_tool
