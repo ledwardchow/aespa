@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import SastRun, ScanLead
+from aespa.models import SastRun, ScanFinding, ScanLead
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +97,148 @@ def needs_fresh_sast(collection_id: int) -> bool:
     return recent is None
 
 
+def _promote_lead_to_finding(
+    s: Session,
+    lead: ScanLead,
+    run_type: str | None,
+    run_id: int | None,
+) -> int | None:
+    """Synthesise a ScanFinding from a confirmed lead and return its id.
+
+    Called when a lead is confirmed but the caller supplied no finding to link.
+    Without this, confirmation silently drops the finding — the lead reads
+    "confirmed" but nothing surfaces in the findings list. Returns None if we
+    cannot attribute the finding to a run, or links to an existing finding from
+    the same run with a matching title to avoid duplicating one the agent
+    already recorded.
+    """
+    if run_id is None:
+        log.warning(
+            "update_lead: lead %d confirmed without finding and no run_id to "
+            "attribute one — cannot auto-promote", lead.id,
+        )
+        return None
+
+    # API runs key on api_test_run_id; web runs key on test_run_id. The two id
+    # spaces overlap, so writing the wrong column leaks the finding into the
+    # other run of the same number.
+    is_web = (run_type or "").lower() == "web"
+    title = lead.title or "Confirmed static-analysis lead"
+
+    # Dedup: if the agent already recorded a finding for this run with the same
+    # title (case 2 — finding written but finding_id omitted from update_lead),
+    # link to that one instead of creating a second.
+    run_col = ScanFinding.test_run_id if is_web else ScanFinding.api_test_run_id
+    existing = s.exec(
+        select(ScanFinding)
+        .where(run_col == run_id)  # type: ignore[arg-type]
+        .where(ScanFinding.title == title)
+    ).first()
+    if existing is not None:
+        return existing.id
+
+    cat_raw = (lead.category or "").strip().upper()
+    is_api_cat = cat_raw.startswith("API")
+    finding = ScanFinding(
+        test_run_id=run_id if is_web else None,
+        api_test_run_id=None if is_web else run_id,
+        owasp_category=(cat_raw if (cat_raw and not is_api_cat) else "A00"),
+        owasp_api_category=(cat_raw if is_api_cat else None),
+        severity=(lead.severity or "medium").lower(),
+        title=title,
+        description=lead.description or "",
+        affected_url=lead.location or "",
+        evidence=lead.evidence or "",
+        recommendation=lead.note or "",
+        finding_source="sast_lead",
+        validation_status="confirmed",
+        validation_note=lead.note or None,
+    )
+    s.add(finding)
+    s.flush()  # populate finding.id within this transaction
+    log.info(
+        "update_lead: auto-promoted confirmed lead %d to finding %s (run_type=%s run_id=%s)",
+        lead.id, finding.id, run_type, run_id,
+    )
+    return finding.id
+
+
+def _link_promoted_finding_to_coverage(
+    *,
+    collection_id: int | None,
+    run_id: int | None,
+    category_raw: str,
+    finding_id: int,
+    hint_texts: list[str | None],
+) -> dict | None:
+    """Flip the API work-program cell for an auto-promoted finding.
+
+    Mirrors report_finding's post-finding coverage hook so a confirmed lead also
+    shows up on the matrix. Best-effort: a SAST lead's location is a code site
+    (file:line), not a URL, so we scan the lead's text for route-path tokens and
+    only flip a cell when one strictly matches an in-scope endpoint — never
+    fabricating a match. Returns the linked cell, or None when nothing matched.
+    """
+    if collection_id is None or run_id is None:
+        return None
+
+    cat = (category_raw or "").strip().upper()
+    try:
+        from aespa.services.api_scanner import (
+            OWASP_API_CATEGORIES,
+            _match_endpoint_for_url,
+            update_coverage_cell,
+        )
+        from aespa.models import ApiCollection, ApiEndpoint
+    except Exception as exc:  # pragma: no cover - import guard
+        log.debug("coverage link skipped (import failed): %s", exc)
+        return None
+
+    if cat not in OWASP_API_CATEGORIES:
+        return None  # only API categories live on the work program
+
+    import re
+
+    tokens: list[str] = []
+    for text in hint_texts:
+        if not text:
+            continue
+        for raw in re.findall(r"/[A-Za-z0-9_./{}-]+", text):
+            tok = raw.rstrip(".,;:)")
+            if tok and tok not in tokens:
+                tokens.append(tok)
+    if not tokens:
+        return None
+
+    with Session(get_engine()) as s:
+        endpoints = list(s.exec(
+            select(ApiEndpoint)
+            .where(ApiEndpoint.collection_id == collection_id)
+            .where(ApiEndpoint.in_scope == True)  # noqa: E712
+        ).all())
+        coll = s.get(ApiCollection, collection_id)
+        base = (coll.base_url if coll else "").rstrip("/")
+
+    ep = None
+    for tok in tokens:
+        ep = _match_endpoint_for_url(tok, endpoints, base)
+        if ep is not None:
+            break
+    if ep is None or ep.id is None:
+        log.info(
+            "update_lead: promoted finding %s not linked to coverage — no endpoint "
+            "matched lead path hints %s", finding_id, tokens,
+        )
+        return None
+
+    update_coverage_cell(run_id, ep.id, cat, "finding", finding_id=finding_id)
+    log.info(
+        "update_lead: promoted finding %s flipped work-program cell endpoint=%s category=%s",
+        finding_id, ep.id, cat,
+    )
+    return {"endpoint_id": ep.id, "owasp_api_category": cat}
+
+
 def update_lead(
     lead_id: int,
     *,
@@ -125,11 +267,44 @@ def update_lead(
             lead.investigated_by_run_id = investigated_by_run_id
         if linked_finding_id is not None:
             lead.linked_finding_id = linked_finding_id
+
+        # A confirmed lead must always be backed by a finding. If the caller did
+        # not link one (the agent marked it confirmed without recording a
+        # finding), synthesise one from the lead so confirmation never silently
+        # drops a finding.
+        promoted_id = None
+        run_type = investigated_by_run_type or lead.investigated_by_run_type
+        run_id = investigated_by_run_id or lead.investigated_by_run_id
+        if status == "confirmed" and lead.linked_finding_id is None:
+            promoted_id = _promote_lead_to_finding(s, lead, run_type, run_id)
+            if promoted_id is not None:
+                lead.linked_finding_id = promoted_id
+
         lead.updated_at = datetime.now(_UTC)
         s.add(lead)
+        # Snapshot the fields the coverage hook needs before the session closes.
+        cov_args = None
+        if promoted_id is not None and (run_type or "").lower() != "web":
+            cov_args = {
+                "collection_id": lead.collection_id,
+                "run_id": run_id,
+                "category_raw": lead.category,
+                "finding_id": promoted_id,
+                "hint_texts": [lead.location, lead.title, lead.description, lead.evidence],
+            }
         s.commit()
         s.refresh(lead)
-        return lead
+
+    # Flip the API work-program cell for the auto-promoted finding, mirroring
+    # report_finding's coverage hook. Done after commit so the coverage write
+    # runs in its own transaction. Best-effort — never fails the lead update.
+    if cov_args is not None:
+        try:
+            _link_promoted_finding_to_coverage(**cov_args)
+        except Exception as exc:
+            log.debug("update_lead: coverage link failed: %s", exc)
+
+    return lead
 
 
 def format_leads_for_context(collection_id: int, cap: int = 20) -> str:
