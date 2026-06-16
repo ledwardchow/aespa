@@ -14,6 +14,7 @@ scanner with API-specific overrides:
     (``api_test_run_id`` is already set at creation time in API mode)
   * No browser/Playwright needed — REST APIs are all httpx
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,35 +46,35 @@ _UTC = timezone.utc
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
-_scan_tasks: dict[int, asyncio.Task] = {}   # api_run_id → running asyncio.Task
+_scan_tasks: dict[int, asyncio.Task] = {}  # api_run_id → running asyncio.Task
 _stop_requested: set[int] = set()
 
 
 # ── OWASP API Top 10 (2023) ───────────────────────────────────────────────────
 
 OWASP_API_CATEGORIES: list[str] = [
-    "API1",   # BOLA
-    "API2",   # Broken Authentication
-    "API3",   # BOPLA (Broken Object Property Level Authorization)
-    "API4",   # Unrestricted Resource Consumption
-    "API5",   # BFLA (Broken Function Level Authorization)
-    "API6",   # Unrestricted Access to Sensitive Business Flows
-    "API7",   # SSRF
-    "API8",   # Security Misconfiguration
-    "API9",   # Improper Inventory Management
+    "API1",  # BOLA
+    "API2",  # Broken Authentication
+    "API3",  # BOPLA (Broken Object Property Level Authorization)
+    "API4",  # Unrestricted Resource Consumption
+    "API5",  # BFLA (Broken Function Level Authorization)
+    "API6",  # Unrestricted Access to Sensitive Business Flows
+    "API7",  # SSRF
+    "API8",  # Security Misconfiguration
+    "API9",  # Improper Inventory Management
     "API10",  # Unsafe Consumption of APIs
 ]
 
 OWASP_API_LABELS: dict[str, str] = {
-    "API1":  "BOLA",
-    "API2":  "Broken Auth",
-    "API3":  "BOPLA",
-    "API4":  "Resource Consumption",
-    "API5":  "BFLA",
-    "API6":  "Business Flows",
-    "API7":  "SSRF",
-    "API8":  "Misconfiguration",
-    "API9":  "Inventory",
+    "API1": "BOLA",
+    "API2": "Broken Auth",
+    "API3": "BOPLA",
+    "API4": "Resource Consumption",
+    "API5": "BFLA",
+    "API6": "Business Flows",
+    "API7": "SSRF",
+    "API8": "Misconfiguration",
+    "API9": "Inventory",
     "API10": "Unsafe Consumption",
 }
 
@@ -81,6 +82,7 @@ OWASP_API_LABELS: dict[str, str] = {
 def _applicable_categories(endpoint: ApiEndpoint) -> list[str]:
     """Return the OWASP API categories applicable to this endpoint (heuristic)."""
     import re as _re
+
     cats: list[str] = []
     method = (endpoint.method or "GET").upper()
     path = endpoint.path or ""
@@ -107,12 +109,28 @@ def _applicable_categories(endpoint: ApiEndpoint) -> list[str]:
         cats.append("API6")
 
     # API7 SSRF — endpoints likely to accept URL-like inputs
-    if any(kw in path.lower() for kw in ("url", "uri", "link", "redirect", "webhook", "callback", "proxy", "fetch", "import")):
+    if any(
+        kw in path.lower()
+        for kw in (
+            "url",
+            "uri",
+            "link",
+            "redirect",
+            "webhook",
+            "callback",
+            "proxy",
+            "fetch",
+            "import",
+        )
+    ):
         cats.append("API7")
     try:
         params = json.loads(endpoint.parameters_json or "[]")
         if any(
-            any(kw in str(p.get("name", "")).lower() for kw in ("url", "uri", "link", "target", "src", "redirect"))
+            any(
+                kw in str(p.get("name", "")).lower()
+                for kw in ("url", "uri", "link", "target", "src", "redirect")
+            )
             for p in params
         ):
             cats.append("API7")
@@ -157,17 +175,21 @@ def seed_coverage_matrix(api_run_id: int) -> int:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             return 0
-        endpoints = list(s.exec(
-            select(ApiEndpoint)
-            .where(ApiEndpoint.collection_id == run.collection_id)
-            .where(ApiEndpoint.in_scope == True)  # noqa: E712
-        ).all())
+        endpoints = list(
+            s.exec(
+                select(ApiEndpoint)
+                .where(ApiEndpoint.collection_id == run.collection_id)
+                .where(ApiEndpoint.in_scope == True)  # noqa: E712
+            ).all()
+        )
         collection_id = run.collection_id
         # Load existing cells so we can skip duplicates
         existing = set(
             (row.endpoint_id, row.owasp_api_category)
             for row in s.exec(
-                select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run_id)
+                select(ApiEndpointTest).where(
+                    ApiEndpointTest.api_test_run_id == api_run_id
+                )
             ).all()
         )
         created = 0
@@ -188,7 +210,9 @@ def seed_coverage_matrix(api_run_id: int) -> int:
         s.commit()
     # Populate the endpoint cache for use by the traffic hook.
     _endpoint_cache[api_run_id] = (collection_id, endpoints)
-    log.info("seed_coverage_matrix: api_run_id=%s created=%d cells", api_run_id, created)
+    log.info(
+        "seed_coverage_matrix: api_run_id=%s created=%d cells", api_run_id, created
+    )
     return created
 
 
@@ -196,9 +220,9 @@ def seed_coverage_matrix(api_run_id: int) -> int:
 _STATUS_RANK: dict[str, int] = {
     "not_started": 0,
     "in_progress": 1,
-    "covered":     2,
-    "skipped":     2,
-    "finding":     3,
+    "covered": 2,
+    "skipped": 2,
+    "finding": 3,
 }
 
 
@@ -256,13 +280,16 @@ def update_coverage_cell(
     # Emit a live SSE event only for high-value status changes (finding/covered/skipped).
     # in_progress is updated too frequently to justify SSE noise; the 5s poll handles it.
     if status in ("finding", "covered", "skipped"):
-        events_svc.emit(api_run_id, {
-            "type": "coverage_update",
-            "endpoint_id": endpoint_id,
-            "owasp_api_category": owasp_api_category,
-            "status": status,
-            "finding_id": finding_id,
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "coverage_update",
+                "endpoint_id": endpoint_id,
+                "owasp_api_category": owasp_api_category,
+                "status": status,
+                "finding_id": finding_id,
+            },
+        )
 
 
 def _make_post_probe_fn(api_run_id: int):
@@ -273,6 +300,7 @@ def _make_post_probe_fn(api_run_id: int):
     OWASP category the LLM explicitly declared on the tool call, so only the
     specific cell being tested flips to ``in_progress``.
     """
+
     def _post_probe(url: str, method: str, owasp_category: str) -> None:
         cached = _endpoint_cache.get(api_run_id)
         if cached is None:
@@ -281,7 +309,9 @@ def _make_post_probe_fn(api_run_id: int):
         if not endpoints:
             return
         with Session(get_engine()) as s:
-            coll = s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
+            coll = (
+                s.get(ApiCollection, endpoints[0].collection_id) if endpoints else None
+            )
             base_url = (coll.base_url if coll else "").rstrip("/")
         ep = _match_endpoint_for_url(url, endpoints, base_url)
         if ep is None:
@@ -300,18 +330,22 @@ def mark_all_cells_covered(api_run_id: int) -> None:
     are left alone: they mean the scanner never touched that endpoint.
     """
     with Session(get_engine()) as s:
-        cells = list(s.exec(
-            select(ApiEndpointTest)
-            .where(ApiEndpointTest.api_test_run_id == api_run_id)
-            .where(ApiEndpointTest.status == "in_progress")
-        ).all())
+        cells = list(
+            s.exec(
+                select(ApiEndpointTest)
+                .where(ApiEndpointTest.api_test_run_id == api_run_id)
+                .where(ApiEndpointTest.status == "in_progress")
+            ).all()
+        )
         now = datetime.now(_UTC)
         for cell in cells:
             cell.status = "covered"
             cell.last_updated = now
             s.add(cell)
         s.commit()
-    log.info("mark_in_progress_to_covered: api_run_id=%s promoted=%d", api_run_id, len(cells))
+    log.info(
+        "mark_in_progress_to_covered: api_run_id=%s promoted=%d", api_run_id, len(cells)
+    )
 
 
 # ── Enforce coverage mode (Slice 8) ───────────────────────────────────────────
@@ -326,18 +360,24 @@ _UNCOVERED_STATES = ("not_started", "in_progress")
 def _uncovered_cells(api_run_id: int) -> list[tuple[ApiEndpoint, str, str]]:
     """Return ``[(endpoint, category, current_status)]`` for non-terminal cells."""
     with Session(get_engine(), expire_on_commit=False) as s:
-        cells = list(s.exec(
-            select(ApiEndpointTest)
-            .where(ApiEndpointTest.api_test_run_id == api_run_id)
-            .where(ApiEndpointTest.status.in_(_UNCOVERED_STATES))  # type: ignore[attr-defined]
-        ).all())
-        ep_ids = {c.endpoint_id for c in cells}
-        endpoints = {
-            ep.id: ep
-            for ep in s.exec(
-                select(ApiEndpoint).where(ApiEndpoint.id.in_(ep_ids))  # type: ignore[attr-defined]
+        cells = list(
+            s.exec(
+                select(ApiEndpointTest)
+                .where(ApiEndpointTest.api_test_run_id == api_run_id)
+                .where(ApiEndpointTest.status.in_(_UNCOVERED_STATES))  # type: ignore[attr-defined]
             ).all()
-        } if ep_ids else {}
+        )
+        ep_ids = {c.endpoint_id for c in cells}
+        endpoints = (
+            {
+                ep.id: ep
+                for ep in s.exec(
+                    select(ApiEndpoint).where(ApiEndpoint.id.in_(ep_ids))  # type: ignore[attr-defined]
+                ).all()
+            }
+            if ep_ids
+            else {}
+        )
     out: list[tuple[ApiEndpoint, str, str]] = []
     for c in cells:
         ep = endpoints.get(c.endpoint_id)
@@ -403,24 +443,35 @@ async def _enforce_coverage_loop(
     reason "coverage budget exhausted". Returns a stats dict.
     """
     import time as _time
+
     now_fn = now_fn or _time.monotonic
     if stop_check is None:
+
         def stop_check() -> bool:
             return api_run_id in _stop_requested
 
     deadline = now_fn() + max(0.0, time_budget_s)
     stats: dict[str, Any] = {
-        "attempted": 0, "covered": 0, "finding": 0, "skipped": 0,
-        "budget_exhausted": False, "remaining": 0,
+        "attempted": 0,
+        "covered": 0,
+        "finding": 0,
+        "skipped": 0,
+        "budget_exhausted": False,
+        "remaining": 0,
     }
 
     cells = _uncovered_cells(api_run_id)
     total = len(cells)
-    events_svc.emit(api_run_id, {
-        "type": "enforce_progress", "phase": "start",
-        "remaining": total, "total": total,
-        "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
-    })
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "enforce_progress",
+            "phase": "start",
+            "remaining": total,
+            "total": total,
+            "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+        },
+    )
 
     for idx, (endpoint, category, current_status) in enumerate(cells):
         if stop_check() or stats["attempted"] >= max_attempts or now_fn() >= deadline:
@@ -430,38 +481,58 @@ async def _enforce_coverage_loop(
         try:
             status, reason = await prober(endpoint, category, current_status)
         except Exception as exc:  # a failing prober must not abort the whole loop
-            log.warning("enforce prober error ep=%s cat=%s: %s", endpoint.id, category, exc)
+            log.warning(
+                "enforce prober error ep=%s cat=%s: %s", endpoint.id, category, exc
+            )
             status, reason = "skipped", f"prober error: {exc}"
         if status not in ("covered", "finding", "skipped"):
             status, reason = "skipped", reason or "prober returned no decision"
         update_coverage_cell(
-            api_run_id, endpoint.id, category, status,
+            api_run_id,
+            endpoint.id,
+            category,
+            status,
             skip_reason=reason if status == "skipped" else None,
         )
         stats[status] += 1
         if (idx + 1) % 5 == 0 or idx + 1 == total:
-            events_svc.emit(api_run_id, {
-                "type": "enforce_progress", "phase": "progress",
-                "remaining": total - (idx + 1), "total": total, "resolved": idx + 1,
-            })
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "enforce_progress",
+                    "phase": "progress",
+                    "remaining": total - (idx + 1),
+                    "total": total,
+                    "resolved": idx + 1,
+                },
+            )
 
     # Close out anything not reached within budget so no cell is left dangling.
     for endpoint, category, _status in _uncovered_cells(api_run_id):
         update_coverage_cell(
-            api_run_id, endpoint.id, category, "skipped",
+            api_run_id,
+            endpoint.id,
+            category,
+            "skipped",
             skip_reason="coverage budget exhausted",
         )
         stats["skipped"] += 1
 
-    events_svc.emit(api_run_id, {
-        "type": "enforce_progress", "phase": "complete",
-        "covered": stats["covered"], "finding": stats["finding"],
-        "skipped": stats["skipped"], "budget_exhausted": stats["budget_exhausted"],
-        "message": (
-            f"Enforce complete: {stats['covered']} covered, "
-            f"{stats['finding']} finding, {stats['skipped']} skipped."
-        ),
-    })
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "enforce_progress",
+            "phase": "complete",
+            "covered": stats["covered"],
+            "finding": stats["finding"],
+            "skipped": stats["skipped"],
+            "budget_exhausted": stats["budget_exhausted"],
+            "message": (
+                f"Enforce complete: {stats['covered']} covered, "
+                f"{stats['finding']} finding, {stats['skipped']} skipped."
+            ),
+        },
+    )
     log.info("enforce_coverage_loop: api_run_id=%s stats=%s", api_run_id, stats)
     return stats
 
@@ -484,6 +555,7 @@ def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
 
     async def _classify_endpoint(endpoint: ApiEndpoint) -> dict[str, tuple[str, str]]:
         import re
+
         cats = _applicable_categories(endpoint)
         cat_lines = "\n".join(f"  - {c} ({OWASP_API_LABELS.get(c, c)})" for c in cats)
         prompt = (
@@ -496,7 +568,7 @@ def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
             f"Summary: {endpoint.summary or '(none)'}\n\n"
             f"Categories to triage:\n{cat_lines}\n\n"
             "Reply with ONLY a JSON object mapping each category id to "
-            '{\"applicable\": true|false, \"reason\": \"one short sentence\"}. '
+            '{"applicable": true|false, "reason": "one short sentence"}. '
             "Mark applicable=false only when the category cannot meaningfully apply "
             "to this endpoint (e.g. SSRF on an endpoint that takes no URL-like "
             "input). No prose, no markdown fences."
@@ -504,7 +576,9 @@ def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
         decisions: dict[str, tuple[str, str]] = {}
         try:
             raw = await llm_svc.plain_completion(llm_cfg, prompt)
-            cleaned = re.sub(r"^```(?:json)?\s*", "", (raw or "").strip(), flags=re.IGNORECASE)
+            cleaned = re.sub(
+                r"^```(?:json)?\s*", "", (raw or "").strip(), flags=re.IGNORECASE
+            )
             cleaned = re.sub(r"\s*```$", "", cleaned.strip())
             m = re.search(r"\{.*\}", cleaned, re.DOTALL)
             parsed = json.loads(m.group(0)) if m else {}
@@ -515,7 +589,10 @@ def _make_enforce_prober(api_run_id: int, llm_cfg, base_url: str):
             d = parsed.get(cat) if isinstance(parsed, dict) else None
             reason = (d or {}).get("reason", "") if isinstance(d, dict) else ""
             if isinstance(d, dict) and d.get("applicable") is False:
-                decisions[cat] = ("skipped", f"not applicable: {reason}".strip().rstrip(":"))
+                decisions[cat] = (
+                    "skipped",
+                    f"not applicable: {reason}".strip().rstrip(":"),
+                )
             else:
                 note = reason or "applicable but not reached by the scan"
                 decisions[cat] = ("skipped", f"not covered within scan budget — {note}")
@@ -540,20 +617,26 @@ def get_coverage_matrix(api_run_id: int) -> dict:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             return {}
-        endpoints = list(s.exec(
-            select(ApiEndpoint)
-            .where(ApiEndpoint.collection_id == run.collection_id)
-            .where(ApiEndpoint.in_scope == True)  # noqa: E712
-            .order_by(ApiEndpoint.path, ApiEndpoint.method)
-        ).all())
-        cells = list(s.exec(
-            select(ApiEndpointTest)
-            .where(ApiEndpointTest.api_test_run_id == api_run_id)
-        ).all())
-        findings = list(s.exec(
-            select(ScanFinding)
-            .where(ScanFinding.api_test_run_id == api_run_id)
-        ).all())
+        endpoints = list(
+            s.exec(
+                select(ApiEndpoint)
+                .where(ApiEndpoint.collection_id == run.collection_id)
+                .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                .order_by(ApiEndpoint.path, ApiEndpoint.method)
+            ).all()
+        )
+        cells = list(
+            s.exec(
+                select(ApiEndpointTest).where(
+                    ApiEndpointTest.api_test_run_id == api_run_id
+                )
+            ).all()
+        )
+        findings = list(
+            s.exec(
+                select(ScanFinding).where(ScanFinding.api_test_run_id == api_run_id)
+            ).all()
+        )
 
     # Build a lookup: (endpoint_id, category) → cell
     cell_lookup: dict[tuple[int, str], ApiEndpointTest] = {
@@ -573,7 +656,9 @@ def get_coverage_matrix(api_run_id: int) -> dict:
         if f.id is not None
     }
 
-    totals: dict[str, int] = {s: 0 for s in ("not_started", "in_progress", "covered", "skipped", "finding")}
+    totals: dict[str, int] = {
+        s: 0 for s in ("not_started", "in_progress", "covered", "skipped", "finding")
+    }
     endpoint_rows: list[dict] = []
     for ep in endpoints:
         ep_cats = _applicable_categories(ep)
@@ -596,16 +681,18 @@ def get_coverage_matrix(api_run_id: int) -> dict:
             }
             totals[cell_status] = totals.get(cell_status, 0) + 1
 
-        endpoint_rows.append({
-            "endpoint_id": ep.id,
-            "method": ep.method,
-            "path": ep.path,
-            "auth_required": ep.auth_required,
-            "prereq_can_test": ep.prereq_can_test,
-            "prereq_can_test_auth": ep.prereq_can_test_auth,
-            "prereq_notes": ep.prereq_notes,
-            "cells": ep_cells,
-        })
+        endpoint_rows.append(
+            {
+                "endpoint_id": ep.id,
+                "method": ep.method,
+                "path": ep.path,
+                "auth_required": ep.auth_required,
+                "prereq_can_test": ep.prereq_can_test,
+                "prereq_can_test_auth": ep.prereq_can_test_auth,
+                "prereq_notes": ep.prereq_notes,
+                "cells": ep_cells,
+            }
+        )
 
     return {
         "run_id": api_run_id,
@@ -643,7 +730,11 @@ def _match_endpoint_for_url(
     for ep in endpoints:
         ep_path = ep.path.rstrip("/") or "/"
         # Convert {param} → a regex segment
-        pattern = _re.sub(r"\{[^}]+\}", r"[^/]+", _re.escape(ep_path).replace(r"\{", "{").replace(r"\}", "}"))
+        pattern = _re.sub(
+            r"\{[^}]+\}",
+            r"[^/]+",
+            _re.escape(ep_path).replace(r"\{", "{").replace(r"\}", "}"),
+        )
         try:
             if _re.fullmatch(pattern, url_path) and len(ep_path) > best_len:
                 best = ep
@@ -655,6 +746,7 @@ def _match_endpoint_for_url(
 
 
 # ── Scope helpers ─────────────────────────────────────────────────────────────
+
 
 def _scope_hosts_for_run(api_run_id: int) -> list[str]:
     with Session(get_engine()) as s:
@@ -676,6 +768,7 @@ def _api_check_scope(url: str, api_run_id: int) -> str | None:
     if not hosts:
         return None  # no scope restriction
     from urllib.parse import urlparse
+
     host = urlparse(url).hostname or ""
     if not any(host == h or host.endswith("." + h) for h in hosts):
         return f"Out of scope: {url} (allowed: {hosts})"
@@ -683,6 +776,7 @@ def _api_check_scope(url: str, api_run_id: int) -> str | None:
 
 
 # ── Session seeding ───────────────────────────────────────────────────────────
+
 
 def seed_sessions_from_credentials(api_run_id: int) -> int:
     """Create ``ScannerSession`` rows from ``ApiCredential`` rows for this run.
@@ -693,12 +787,18 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             return 0
-        creds = list(s.exec(
-            select(ApiCredential).where(ApiCredential.collection_id == run.collection_id)
-        ).all())
+        creds = list(
+            s.exec(
+                select(ApiCredential).where(
+                    ApiCredential.collection_id == run.collection_id
+                )
+            ).all()
+        )
 
     seeded = 0
-    scanner_sessions.ensure_anonymous_session(api_run_id, source="api_scanner", run_kind="api")
+    scanner_sessions.ensure_anonymous_session(
+        api_run_id, source="api_scanner", run_kind="api"
+    )
     seeded += 1
 
     for cred in creds:
@@ -709,20 +809,28 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
         scheme = (cred.scheme or "bearer").lower()
         if scheme in ("bearer", "apikey", "header"):
             extra_headers[cred.name or "Authorization"] = (
-                f"Bearer {cred.value}" if scheme == "bearer" and not cred.value.lower().startswith("bearer ")
+                f"Bearer {cred.value}"
+                if scheme == "bearer" and not cred.value.lower().startswith("bearer ")
                 else cred.value
             )
         elif scheme == "cookie":
             parts = cred.value.split("=", 1)
-            cookie_name = parts[0].strip() if len(parts) == 2 else cred.name or "session"
+            cookie_name = (
+                parts[0].strip() if len(parts) == 2 else cred.name or "session"
+            )
             cookie_val = parts[1].strip() if len(parts) == 2 else cred.value
             cookies[cookie_name] = cookie_val
         elif scheme == "basic":
             import base64 as _b64
+
             encoded = _b64.b64encode(cred.value.encode()).decode()
             extra_headers["Authorization"] = f"Basic {encoded}"
 
-        kind = "bearer" if scheme == "bearer" else ("cookie" if scheme == "cookie" else "mixed")
+        kind = (
+            "bearer"
+            if scheme == "bearer"
+            else ("cookie" if scheme == "cookie" else "mixed")
+        )
         scanner_sessions.upsert_session(
             api_run_id,
             label=label,
@@ -743,15 +851,27 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
 # ── Context tool override ─────────────────────────────────────────────────────
 
 # API-specific sub-commands routed to the alice context tool.
-_API_CONTEXT_COMMANDS = frozenset({
-    "endpoint_list", "endpoint_detail", "collection_info", "finding_list",
-})
+_API_CONTEXT_COMMANDS = frozenset(
+    {
+        "endpoint_list",
+        "endpoint_detail",
+        "collection_info",
+        "finding_list",
+    }
+)
 
 # Sub-commands that must fall through to the shared scanner context tool.
-_SHARED_CONTEXT_COMMANDS = frozenset({
-    "history_search", "target_inventory", "search_assets", "traffic_search",
-    "compare_responses", "mutate_request", "extract_entities",
-})
+_SHARED_CONTEXT_COMMANDS = frozenset(
+    {
+        "history_search",
+        "target_inventory",
+        "search_assets",
+        "traffic_search",
+        "compare_responses",
+        "mutate_request",
+        "extract_entities",
+    }
+)
 
 
 def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
@@ -778,12 +898,15 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
             return {
                 "tool": tool_name,
                 "note": "This is an API test run. Use endpoint_list / endpoint_detail instead.",
-                "redirect": _run_api_context_tool(collection_id, api_run_id, "endpoint_list", args),
+                "redirect": _run_api_context_tool(
+                    collection_id, api_run_id, "endpoint_list", args
+                ),
             }
 
         # Shared tools (history, traffic, entities, …)
         return _run_thinking_context_tool(
-            tool_name, args,
+            tool_name,
+            args,
             pages_snapshot=pages_snapshot or [],
             findings_snapshot=findings_snapshot or [],
             history=history or [],
@@ -799,16 +922,16 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
 # Maps common OWASP Web Top 10 categories (used by write_finding) to the
 # best-fit OWASP API Top 10 category.
 _OWASP_WEB_TO_API: dict[str, str] = {
-    "A01": "API5",   # Broken Access Control → BFLA
-    "A02": "API2",   # Cryptographic Failures → Broken Authentication
+    "A01": "API5",  # Broken Access Control → BFLA
+    "A02": "API2",  # Cryptographic Failures → Broken Authentication
     "A03": "API10",  # Injection → Unsafe Consumption
-    "A04": "API8",   # Insecure Design → Misconfiguration
-    "A05": "API8",   # Security Misconfiguration
-    "A06": "API9",   # Vulnerable Components → Improper Inventory
-    "A07": "API2",   # Identification & Authentication → Broken Auth
-    "A08": "API3",   # Software & Data Integrity → Mass Assignment
-    "A09": "API8",   # Security Logging → Misconfiguration
-    "A10": "API7",   # SSRF
+    "A04": "API8",  # Insecure Design → Misconfiguration
+    "A05": "API8",  # Security Misconfiguration
+    "A06": "API9",  # Supply Chain → Improper Inventory
+    "A07": "API2",  # Identification & Authentication → Broken Auth
+    "A08": "API3",  # Software & Data Integrity → Mass Assignment
+    "A09": "API8",  # Security Logging → Misconfiguration
+    "A10": "API7",  # SSRF
 }
 
 
@@ -843,11 +966,13 @@ def _make_post_finding_fn(api_run_id: int):
             with Session(get_engine()) as s:
                 run = s.get(ApiTestRun, api_run_id)
                 if run is not None:
-                    endpoints = list(s.exec(
-                        select(ApiEndpoint)
-                        .where(ApiEndpoint.collection_id == run.collection_id)
-                        .where(ApiEndpoint.in_scope == True)  # noqa: E712
-                    ).all())
+                    endpoints = list(
+                        s.exec(
+                            select(ApiEndpoint)
+                            .where(ApiEndpoint.collection_id == run.collection_id)
+                            .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                        ).all()
+                    )
                     coll = s.get(ApiCollection, run.collection_id)
                     base_url = (coll.base_url if coll else "").rstrip("/")
 
@@ -865,6 +990,7 @@ def _make_post_finding_fn(api_run_id: int):
 
 
 # ── Discovered-credential persistence ─────────────────────────────────────────
+
 
 def _make_persist_credential_fn(collection_id: int, api_run_id: int):
     """Return a hook that saves a credential discovered mid-scan to the API
@@ -904,22 +1030,27 @@ def _make_persist_credential_fn(collection_id: int, api_run_id: int):
 
         log.info(
             "Discovered API credential saved: username=%r collection_id=%s",
-            username, collection_id,
+            username,
+            collection_id,
         )
-        events_svc.emit(api_run_id, {
-            "type": "credential_discovered",
-            "username": username,
-            "login_url": login_url,
-            "message": (
-                f"Valid credential discovered: {username!r}. "
-                "Saved to the API collection's credential store as a login account."
-            ),
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "credential_discovered",
+                "username": username,
+                "login_url": login_url,
+                "message": (
+                    f"Valid credential discovered: {username!r}. "
+                    "Saved to the API collection's credential store as a login account."
+                ),
+            },
+        )
 
     return _fn
 
 
 # ── Crawl context builder ─────────────────────────────────────────────────────
+
 
 def _build_api_crawl_context(api_run_id: int) -> str:
     """Build the initial LLM context string from the API collection + endpoints."""
@@ -930,15 +1061,19 @@ def _build_api_crawl_context(api_run_id: int) -> str:
         coll = s.get(ApiCollection, run.collection_id)
         if coll is None:
             return ""
-        endpoints = list(s.exec(
-            select(ApiEndpoint)
-            .where(ApiEndpoint.collection_id == coll.id)
-            .where(ApiEndpoint.in_scope == True)  # noqa: E712
-            .order_by(ApiEndpoint.path, ApiEndpoint.method)
-        ).all())
-        creds = list(s.exec(
-            select(ApiCredential).where(ApiCredential.collection_id == coll.id)
-        ).all())
+        endpoints = list(
+            s.exec(
+                select(ApiEndpoint)
+                .where(ApiEndpoint.collection_id == coll.id)
+                .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                .order_by(ApiEndpoint.path, ApiEndpoint.method)
+            ).all()
+        )
+        creds = list(
+            s.exec(
+                select(ApiCredential).where(ApiCredential.collection_id == coll.id)
+            ).all()
+        )
 
     lines: list[str] = [
         f"API Collection: {coll.name}",
@@ -949,7 +1084,9 @@ def _build_api_crawl_context(api_run_id: int) -> str:
 
     auth_notes: list[str] = []
     for cred in creds:
-        auth_notes.append(f"  - [{cred.scheme}] label={cred.label or cred.scheme}  scope={cred.scope}")
+        auth_notes.append(
+            f"  - [{cred.scheme}] label={cred.label or cred.scheme}  scope={cred.scope}"
+        )
     if auth_notes:
         lines.append("Credentials available:\n" + "\n".join(auth_notes))
 
@@ -964,7 +1101,9 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     if len(endpoints) > 80:
         ep_summary.append(f"  … and {len(endpoints) - 80} more (use endpoint_list)")
     if ep_summary:
-        lines.append(f"In-scope endpoints ({len(endpoints)} total):\n" + "\n".join(ep_summary))
+        lines.append(
+            f"In-scope endpoints ({len(endpoints)} total):\n" + "\n".join(ep_summary)
+        )
 
     try:
         readiness = json.loads(coll.readiness_json or "{}")
@@ -976,6 +1115,7 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     # Append any open SAST leads so the dynamic scanner can investigate them.
     try:
         from aespa.services.scan_leads import format_leads_for_context
+
         leads_block = format_leads_for_context(coll.id)
         if leads_block:
             lines.append(leads_block)
@@ -986,6 +1126,7 @@ def _build_api_crawl_context(api_run_id: int) -> str:
 
 
 # ── Main scan entry points ────────────────────────────────────────────────────
+
 
 async def _do_api_thinking_scan(api_run_id: int) -> None:
     """Full Test-Lead + Specialist + Validator scan for an ApiTestRun.
@@ -1026,19 +1167,27 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         for obj in [run, llm_cfg]:
             s.expunge(obj)
 
-    scanner_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+    scanner_proxy_url = (
+        upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+    )
     llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
 
     global_http_header: dict[str, str] = {}
     if global_header_cfg.header_name and global_header_cfg.header_value:
-        global_http_header = {global_header_cfg.header_name: global_header_cfg.header_value}
+        global_http_header = {
+            global_header_cfg.header_name: global_header_cfg.header_value
+        }
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
     llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
 
-    log.info("=== API thinking scan start: api_run_id=%s base_url=%s ===", api_run_id, base_url)
+    log.info(
+        "=== API thinking scan start: api_run_id=%s base_url=%s ===",
+        api_run_id,
+        base_url,
+    )
 
     # ── SAST pre-phase (best-effort, awaited before dynamic loop) ─────────────
     # Auto-create a linked SastRun when the collection has a source_zip and no
@@ -1057,12 +1206,15 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             ).first()
 
         if source_doc is not None and needs_fresh_sast(collection_id):
-            events_svc.emit(api_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_prephase",
-                "status": "start",
-                "message": "Static analysis (SAST) pre-phase starting…",
-            })
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_prephase",
+                    "status": "start",
+                    "message": "Static analysis (SAST) pre-phase starting…",
+                },
+            )
             sast_run = sast_svc.create_sast_run(
                 collection_id=collection_id,
                 name=f"SAST for API run #{api_run_id}",
@@ -1082,16 +1234,20 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                     s.commit()
             # Await the SAST scan to completion so leads are ready.
             await sast_svc.run_sast_scan(sast_run_id_for_phase)
-            events_svc.emit(api_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_prephase",
-                "status": "complete",
-                "message": "SAST pre-phase complete. Proceeding with dynamic scan.",
-            })
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_prephase",
+                    "status": "complete",
+                    "message": "SAST pre-phase complete. Proceeding with dynamic scan.",
+                },
+            )
     except Exception as _sast_exc:
         log.warning(
             "SAST pre-phase failed or skipped for api_run_id=%s: %s",
-            api_run_id, _sast_exc,
+            api_run_id,
+            _sast_exc,
         )
         # Best-effort: always continue with the dynamic scan.
 
@@ -1116,11 +1272,15 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     with Session(get_engine()) as s:
         run2 = s.get(ApiTestRun, api_run_id)
         coll2 = s.get(ApiCollection, run2.collection_id) if run2 else None
-        creds_raw = list(s.exec(
-            select(ApiCredential).where(
-                ApiCredential.collection_id == coll2.id
+        creds_raw = (
+            list(
+                s.exec(
+                    select(ApiCredential).where(ApiCredential.collection_id == coll2.id)
+                ).all()
             )
-        ).all()) if coll2 else []
+            if coll2
+            else []
+        )
         collection_id = coll2.id if coll2 else 0
 
     creds_for_llm = []
@@ -1131,11 +1291,13 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             uname, _, pword = c.value.partition(":")
         else:
             uname, pword = (c.label or c.scheme), c.value
-        creds_for_llm.append({
-            "username": uname,
-            "password": pword,
-            "login_url": c.auth_endpoint or "",
-        })
+        creds_for_llm.append(
+            {
+                "username": uname,
+                "password": pword,
+                "login_url": c.auth_endpoint or "",
+            }
+        )
 
     # Pre-existing findings snapshot.
     findings_snapshot = _load_findings_snapshot(api_run_id, is_api_run=True)
@@ -1145,24 +1307,32 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     post_finding_fn = _make_post_finding_fn(api_run_id)
     persist_credential_fn = _make_persist_credential_fn(collection_id, api_run_id)
 
-    events_svc.emit(api_run_id, {
-        "type": "scanner_phase",
-        "phase": "thinking_scan",
-        "status": "start",
-        "message": "API security scan started.",
-    })
-    events_svc.emit(api_run_id, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "active",
-        "current_task": "API security audit starting…",
-        "outcome": None,
-        "_persist": True,
-    })
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "thinking_scan",
+            "status": "start",
+            "message": "API security scan started.",
+        },
+    )
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "active",
+            "current_task": "API security audit starting…",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
 
     # Run the agentic loop — no browser_ctx/pw_page needed for REST APIs.
-    async with _make_scanner_client(run_id=None, api_run_id=api_run_id, verify=False) as hx:
+    async with _make_scanner_client(
+        run_id=None, api_run_id=api_run_id, verify=False
+    ) as hx:
         finding_count = await _do_agentic_thinking_loop(
             run_id=api_run_id,
             is_api_run=True,
@@ -1171,12 +1341,12 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             crawl_context=crawl_context,
             creds_for_llm=creds_for_llm,
             session_vault=session_vault,
-            pages_snapshot=[],         # no crawled pages
+            pages_snapshot=[],  # no crawled pages
             findings_snapshot=list(findings_snapshot),
             first_page_id=None,
             scanner_policy=scanner_policy,
             hx=hx,
-            browser_ctx=None,          # no browser
+            browser_ctx=None,  # no browser
             pw_page=None,
             history=[],
             all_results=[],
@@ -1194,20 +1364,27 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             persist_credential_fn=persist_credential_fn,
         )
 
-    log.info("API thinking scan complete: api_run_id=%s findings=%d", api_run_id, finding_count)
+    log.info(
+        "API thinking scan complete: api_run_id=%s findings=%d",
+        api_run_id,
+        finding_count,
+    )
 
     # Resolve the coverage matrix to a terminal state.
     if coverage_mode == "enforce" and api_run_id not in _stop_requested:
         # Drive every still-uncovered cell to covered / skipped-with-reason.
-        events_svc.emit(api_run_id, {
-            "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
-            "status": "active",
-            "current_task": "Enforcing coverage — resolving remaining cells…",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "active",
+                "current_task": "Enforcing coverage — resolving remaining cells…",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
         prober = _make_enforce_prober(api_run_id, llm_cfg, base_url)
         await _enforce_coverage_loop(api_run_id, prober)
     else:
@@ -1226,21 +1403,27 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             s.add(r)
             s.commit()
 
-    events_svc.emit(api_run_id, {
-        "type": "scanner_phase",
-        "phase": "scan_stopped",
-        "status": "complete",
-        "message": f"API scan complete. {finding_count} finding(s) recorded.",
-    })
-    events_svc.emit(api_run_id, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "complete",
-        "current_task": "Scan complete",
-        "outcome": f"{finding_count} finding(s) recorded",
-        "_persist": True,
-    })
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "scan_stopped",
+            "status": "complete",
+            "message": f"API scan complete. {finding_count} finding(s) recorded.",
+        },
+    )
+    events_svc.emit(
+        api_run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "complete",
+            "current_task": "Scan complete",
+            "outcome": f"{finding_count} finding(s) recorded",
+            "_persist": True,
+        },
+    )
     llm_svc.clear_run_context()
 
 
@@ -1250,6 +1433,7 @@ async def _api_scan_task(api_run_id: int) -> None:
     # exit immediately on the very first iteration.
     try:
         from aespa.services.scanner import _thinking_stop_requested
+
         _thinking_stop_requested.discard(api_run_id)
     except Exception:
         pass
@@ -1258,30 +1442,39 @@ async def _api_scan_task(api_run_id: int) -> None:
     except asyncio.CancelledError:
         log.info("API scan cancelled: api_run_id=%s", api_run_id)
         _update_run_status(api_run_id, "cancelled")
-        events_svc.emit(api_run_id, {
-            "type": "scanner_phase",
-            "phase": "scan_stopped",
-            "status": "warning",
-            "message": "API scan stopped by user.",
-        })
-        events_svc.emit(api_run_id, {
-            "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
-            "status": "stopped",
-            "current_task": "Scan stopped",
-            "outcome": "cancelled",
-            "_persist": True,
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "scan_stopped",
+                "status": "warning",
+                "message": "API scan stopped by user.",
+            },
+        )
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "stopped",
+                "current_task": "Scan stopped",
+                "outcome": "cancelled",
+                "_persist": True,
+            },
+        )
     except Exception as exc:
         log.exception("API scan error: api_run_id=%s", api_run_id)
         _update_run_status(api_run_id, "failed", str(exc))
-        events_svc.emit(api_run_id, {
-            "type": "scanner_phase",
-            "phase": "scan_stopped",
-            "status": "error",
-            "message": f"API scan failed: {exc}",
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "scan_stopped",
+                "status": "error",
+                "message": f"API scan failed: {exc}",
+            },
+        )
     finally:
         _scan_tasks.pop(api_run_id, None)
         _stop_requested.discard(api_run_id)
@@ -1333,15 +1526,18 @@ async def start_api_scan(api_run_id: int) -> None:
         seed_coverage_matrix(api_run_id)
 
         # Emit an immediate agent_status row so the Agents sidebar is non-empty.
-        events_svc.emit(api_run_id, {
-            "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
-            "status": "active",
-            "current_task": "API security scan starting…",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "active",
+                "current_task": "API security scan starting…",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
 
         task = asyncio.create_task(
             _api_scan_task(api_run_id),
@@ -1359,14 +1555,17 @@ async def stop_api_scan(api_run_id: int) -> bool:
         # Also register a stop request with the scanner's stop mechanism.
         try:
             from aespa.services.scanner import _thinking_stop_requested
+
             _thinking_stop_requested.add(api_run_id)
         except Exception:
             pass
         # Cancel any linked SAST pre-phase that may still be running.
         try:
             from aespa.services import sast_scanner as sast_svc
+
             with Session(get_engine()) as s:
                 from aespa.models import ApiTestRun as _ATR
+
                 api_run = s.get(_ATR, api_run_id)
                 if api_run is not None and api_run.sast_run_id:
                     await sast_svc.stop_sast_scan(api_run.sast_run_id)
@@ -1374,15 +1573,18 @@ async def stop_api_scan(api_run_id: int) -> bool:
             pass
         _update_run_status(api_run_id, "cancelled")
         with events_svc.run_kind_scope("api"):
-            events_svc.emit(api_run_id, {
-                "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
-                "status": "idle",
-                "current_task": "Scan stopped",
-                "outcome": "stopped",
-                "_persist": True,
-            })
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "scanner",
+                    "role": "Test Lead",
+                    "status": "idle",
+                    "current_task": "Scan stopped",
+                    "outcome": "stopped",
+                    "_persist": True,
+                },
+            )
         return True
     return False
 

@@ -22,11 +22,24 @@ logging.basicConfig(
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import AuthMode, CrawledPage, PageCredentialView, PageLink, TargetIntelItem, TestRun, TestRunStatus
+from aespa.models import (
+    AuthMode,
+    CrawledPage,
+    PageCredentialView,
+    PageLink,
+    TargetIntelItem,
+    TestRun,
+    TestRunStatus,
+)
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.settings import get_global_http_header_config, get_llm_config, get_llm_config_for_run, get_upstream_proxy_config
+from aespa.services.settings import (
+    get_global_http_header_config,
+    get_llm_config,
+    get_llm_config_for_run,
+    get_upstream_proxy_config,
+)
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -71,6 +84,7 @@ def _login_url_for_credential(default_login_url: str, cred) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
@@ -80,6 +94,7 @@ async def start_crawl(run_id: int) -> None:
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
+
 
 async def _crawl_task(run_id: int) -> None:
     try:
@@ -110,6 +125,7 @@ async def _crawl_task(run_id: int) -> None:
 
 # ── Shared state for parallel crawlers ───────────────────────────────────────
 
+
 class _CrawlShared:
     def __init__(self, crawled_norms: dict, pages_done: int) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
@@ -118,6 +134,7 @@ class _CrawlShared:
 
 
 # ── Core orchestrator ─────────────────────────────────────────────────────────
+
 
 async def _do_crawl(run_id: int) -> None:
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
@@ -133,13 +150,18 @@ async def _do_crawl_inner(run_id: int) -> None:
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         from aespa.models import Site
+
         site = s.get(Site, run.site_id)
         llm_cfg = get_llm_config_for_run(s, run)
         if llm_cfg is None:
-            raise RuntimeError("No LLM configuration found. Configure it in Settings first.")
+            raise RuntimeError(
+                "No LLM configuration found. Configure it in Settings first."
+            )
         creds = list(site.credentials)
         upstream_proxy = get_upstream_proxy_config(s)
-        crawl_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        crawl_proxy_url = (
+            upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+        )
         global_header_cfg = get_global_http_header_config(s)
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
@@ -147,22 +169,32 @@ async def _do_crawl_inner(run_id: int) -> None:
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
     _global_http_header: dict[str, str] = {}
     if global_header_cfg.header_name and global_header_cfg.header_value:
-        _global_http_header = {global_header_cfg.header_name: global_header_cfg.header_value}
-    base_url      = _site_base_url(site.base_url)
-    login_url     = site.login_url or ""
+        _global_http_header = {
+            global_header_cfg.header_name: global_header_cfg.header_value
+        }
+    base_url = _site_base_url(site.base_url)
+    login_url = site.login_url or ""
     requires_auth = site.requires_auth
-    max_depth     = run.max_depth
-    max_pages     = run.max_pages
-    _parsed       = urlparse(base_url)
-    base_netloc   = _parsed.netloc
-    _bp           = _parsed.path
+    max_depth = run.max_depth
+    max_pages = run.max_pages
+    _parsed = urlparse(base_url)
+    base_netloc = _parsed.netloc
+    _bp = _parsed.path
     base_path: str = (_bp if _bp.endswith("/") else _bp + "/") if _bp else "/"
 
-    log.info("=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s creds=%d ===",
-             run_id, base_url, max_depth, max_pages, len(creds))
+    log.info(
+        "=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s creds=%d ===",
+        run_id,
+        base_url,
+        max_depth,
+        max_pages,
+        len(creds),
+    )
 
     with Session(get_engine()) as s:
-        existing = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+        existing = s.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+        ).all()
         for ep in existing:
             s.expunge(ep)
 
@@ -171,31 +203,47 @@ async def _do_crawl_inner(run_id: int) -> None:
         pages_done=len(existing),
     )
 
-    _update_run(run_id, status=TestRunStatus.running, started_at=_utcnow(),
-                completed_at=None, error_message=None,
-                pages_discovered=shared.pages_done, current_url=base_url,
-                per_user_progress=None)
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": "crawler",
-        "role": "Crawler",
-        "status": "active",
-        "current_task": "Crawling application…",
-        "outcome": None,
-        "_persist": True,
-    })
+    _update_run(
+        run_id,
+        status=TestRunStatus.running,
+        started_at=_utcnow(),
+        completed_at=None,
+        error_message=None,
+        pages_discovered=shared.pages_done,
+        current_url=base_url,
+        per_user_progress=None,
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": "Crawling application…",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
     tasks = [
         asyncio.create_task(
             _crawl_as_credential(
-                run_id=run_id, cred=cred, shared=shared,
-                base_url=base_url, login_url=login_url,
-                requires_auth=requires_auth, max_depth=max_depth,
-                max_pages=max_pages, llm_cfg=llm_cfg,
-                base_netloc=base_netloc, base_path=base_path,
-                phase_idx=idx, total_phases=len(phases),
+                run_id=run_id,
+                cred=cred,
+                shared=shared,
+                base_url=base_url,
+                login_url=login_url,
+                requires_auth=requires_auth,
+                max_depth=max_depth,
+                max_pages=max_pages,
+                llm_cfg=llm_cfg,
+                base_netloc=base_netloc,
+                base_path=base_path,
+                phase_idx=idx,
+                total_phases=len(phases),
                 pw_proxy=_pw_proxy,
                 global_http_header=_global_http_header,
             ),
@@ -225,37 +273,64 @@ async def _do_crawl_inner(run_id: int) -> None:
 
     # Seed the workprogram now that we have the full page list + OWASP categories.
     if run_id not in _stop_requested:
-        from aespa.services.web_workprogram import seed_web_workprogram  # ponytail: local import avoids circular
+        from aespa.services.web_workprogram import (
+            seed_web_workprogram,
+        )  # ponytail: local import avoids circular
+
         try:
             seeded = seed_web_workprogram(run_id)
-            log.info("workprogram seeded after crawl: run_id=%s cells=%d", run_id, seeded)
+            log.info(
+                "workprogram seeded after crawl: run_id=%s cells=%d", run_id, seeded
+            )
         except Exception:
-            log.warning("workprogram seed failed after crawl (non-fatal)", exc_info=True)
+            log.warning(
+                "workprogram seed failed after crawl (non-fatal)", exc_info=True
+            )
 
-    final_status = TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
-    log.info("=== Crawl done: run_id=%s status=%s pages=%d ===",
-             run_id, final_status, shared.pages_done)
-    _update_run(run_id, status=final_status, completed_at=_utcnow(),
-                current_url=None, pages_discovered=shared.pages_done)
+    final_status = (
+        TestRunStatus.stopped if run_id in _stop_requested else TestRunStatus.complete
+    )
+    log.info(
+        "=== Crawl done: run_id=%s status=%s pages=%d ===",
+        run_id,
+        final_status,
+        shared.pages_done,
+    )
+    _update_run(
+        run_id,
+        status=final_status,
+        completed_at=_utcnow(),
+        current_url=None,
+        pages_discovered=shared.pages_done,
+    )
     # Clean up the per-run lock (small object). The session cache is intentionally
     # kept alive so the dynamic scan phase (same run_id) can reuse guided sessions.
     _guided_locks.pop(run_id, None)
-    events_svc.emit(run_id, {
-        "type": "run_update", "status": final_status,
-        "pages_discovered": shared.pages_done, "current_url": None,
-    })
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": "crawler",
-        "role": "Crawler",
-        "status": "complete",
-        "current_task": "Crawl complete",
-        "outcome": f"{shared.pages_done} page(s) discovered",
-        "_persist": True,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "run_update",
+            "status": final_status,
+            "pages_discovered": shared.pages_done,
+            "current_url": None,
+        },
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "complete",
+            "current_task": "Crawl complete",
+            "outcome": f"{shared.pages_done} page(s) discovered",
+            "_persist": True,
+        },
+    )
 
 
 # ── Per-credential BFS ────────────────────────────────────────────────────────
+
 
 async def _crawl_as_credential(
     *,
@@ -277,17 +352,25 @@ async def _crawl_as_credential(
 ) -> None:
     from playwright.async_api import async_playwright
 
-    username      = cred.username if cred else "unauthenticated"
+    username = cred.username if cred else "unauthenticated"
     credential_id = cred.id if cred else None
     credential_login_url = _login_url_for_credential(login_url, cred)
 
-    log.info("=== Phase %d/%d: user=%s ===", phase_idx + 1, total_phases, username or "anonymous")
-    events_svc.emit(run_id, {
-        "type": "crawl_phase",
-        "phase": phase_idx + 1,
-        "total_phases": total_phases,
-        "username": username,
-    })
+    log.info(
+        "=== Phase %d/%d: user=%s ===",
+        phase_idx + 1,
+        total_phases,
+        username or "anonymous",
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "crawl_phase",
+            "phase": phase_idx + 1,
+            "total_phases": total_phases,
+            "username": username,
+        },
+    )
 
     local_pages = 0  # pages actually navigated to by this credential
 
@@ -311,7 +394,9 @@ async def _crawl_as_credential(
                     return
                 resource_type = response.request.resource_type
                 content_type = response.headers.get("content-type", "")
-                if not _is_api_response_candidate(response.url, resource_type, content_type):
+                if not _is_api_response_candidate(
+                    response.url, resource_type, content_type
+                ):
                     return
                 body = ""
                 if _response_body_is_text(content_type):
@@ -327,16 +412,18 @@ async def _crawl_as_credential(
                     response_headers = dict(response.headers)
                 except Exception:
                     response_headers = {}
-                observed_api_calls.append({
-                    "url": response.url,
-                    "method": response.request.method,
-                    "request_headers": request_headers,
-                    "request_body": response.request.post_data,
-                    "status": response.status,
-                    "content_type": content_type,
-                    "response_headers": response_headers,
-                    "body": body,
-                })
+                observed_api_calls.append(
+                    {
+                        "url": response.url,
+                        "method": response.request.method,
+                        "request_headers": request_headers,
+                        "request_body": response.request.post_data,
+                        "status": response.status,
+                        "content_type": content_type,
+                        "response_headers": response_headers,
+                        "body": body,
+                    }
+                )
             except Exception as exc:
                 log.debug("API response collection failed: %s", exc)
 
@@ -396,17 +483,21 @@ async def _crawl_as_credential(
             # Write the intended URL into per_user_progress immediately so the
             # polling API response reflects what the crawler is currently visiting.
             _update_credential_progress(run_id, username, url, local_pages)
-            events_svc.emit(run_id, {
-                "type": "crawl_progress",
-                "username": username,
-                "pages_visited": local_pages,
-                "current_url": url,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "crawl_progress",
+                    "username": username,
+                    "pages_visited": local_pages,
+                    "current_url": url,
+                },
+            )
 
             # ── Navigate ──────────────────────────────────────────────────────
             try:
                 resp = await _goto_with_auth_recovery(
-                    page, url,
+                    page,
+                    url,
                     requires_auth=requires_auth,
                     credential=cred,
                     login_url=credential_login_url,
@@ -416,18 +507,23 @@ async def _crawl_as_credential(
                 )
             except Exception as nav_err:
                 if is_first:
-                    _update_page(page_id, status="failed", error_message=str(nav_err)[:500])
+                    _update_page(
+                        page_id, status="failed", error_message=str(nav_err)[:500]
+                    )
                 continue
 
             if resp is not None and resp.status >= 400:
                 if is_first:
-                    _update_page(page_id, status="failed",
-                                 error_message=f"HTTP {resp.status}")
+                    _update_page(
+                        page_id, status="failed", error_message=f"HTTP {resp.status}"
+                    )
                 continue
 
             # ── SPA URL guard + redirect deduplication ────────────────────────
             raw_final = page.url
-            if _same_domain(raw_final, base_netloc) and not _in_base_scope(raw_final, base_netloc, base_path):
+            if _same_domain(raw_final, base_netloc) and not _in_base_scope(
+                raw_final, base_netloc, base_path
+            ):
                 final_url = url
             else:
                 final_url = raw_final
@@ -453,7 +549,9 @@ async def _crawl_as_credential(
             if on_login:
                 if is_first:
                     _update_page(page_id, status="crawled")
-                log.debug("  Login form for %s (user=%s) — inaccessible", final_url, username)
+                log.debug(
+                    "  Login form for %s (user=%s) — inaccessible", final_url, username
+                )
                 continue
 
             # ── Content extraction ────────────────────────────────────────────
@@ -498,8 +596,10 @@ async def _crawl_as_credential(
 
             # ── LLM analysis ──────────────────────────────────────────────────
             cats: dict = {
-                "req_auth": None, "takes_input": None,
-                "has_object_ref": None, "has_business_logic": None,
+                "req_auth": None,
+                "takes_input": None,
+                "has_object_ref": None,
+                "has_business_logic": None,
             }
             context = ""
             suggested: list[str] = []
@@ -510,33 +610,53 @@ async def _crawl_as_credential(
                     context, suggested, cats = await llm_svc.analyse_page(
                         llm_cfg, final_url, title, text[:8000], screenshot_b64
                     )
-                    log.info("  LLM ok for %s (user=%s) cats=%s", final_url, username, cats)
+                    log.info(
+                        "  LLM ok for %s (user=%s) cats=%s", final_url, username, cats
+                    )
                 except Exception as e:
                     log.warning("  LLM failed for %s: %s", final_url, e)
                     context = f"[LLM failed: {e}]"
 
             # ── Persist per-credential view ───────────────────────────────────
             _save_credential_view(
-                page_id, run_id, credential_id, username,
-                screenshot_b64, context, text[:10_000], cats,
+                page_id,
+                run_id,
+                credential_id,
+                username,
+                screenshot_b64,
+                context,
+                text[:10_000],
+                cats,
             )
             _update_accessible_by(page_id, credential_id)
 
             # ── Update main CrawledPage if first to fill it ───────────────────
             with Session(get_engine()) as s:
                 cp = s.get(CrawledPage, page_id)
-                fill_main = cp is not None and cp.status in ("processing", "crawled") and not cp.title
+                fill_main = (
+                    cp is not None
+                    and cp.status in ("processing", "crawled")
+                    and not cp.title
+                )
                 first_success = cp is not None and cp.status == "processing"
 
             if is_first or fill_main:
                 _update_page(
-                    page_id, url=final_url, title=title,
-                    page_text=text[:10_000], screenshot_b64=screenshot_b64,
-                    llm_context=context, status="crawled", depth=depth,
-                    req_auth=cats["req_auth"], takes_input=cats["takes_input"],
+                    page_id,
+                    url=final_url,
+                    title=title,
+                    page_text=text[:10_000],
+                    screenshot_b64=screenshot_b64,
+                    llm_context=context,
+                    status="crawled",
+                    depth=depth,
+                    req_auth=cats["req_auth"],
+                    takes_input=cats["takes_input"],
                     has_object_ref=cats["has_object_ref"],
                     has_business_logic=cats["has_business_logic"],
-                    owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
+                    owasp_applicable_json=json.dumps(
+                        cats.get("owasp_applicable") or {}
+                    ),
                 )
                 if is_first:
                     _save_link(run_id, parent_id, page_id, final_url)
@@ -547,29 +667,51 @@ async def _crawl_as_credential(
                 ab = json.loads(cp.accessible_by if cp else "[]")
 
             if is_first or first_success:
-                events_svc.emit(run_id, {
-                    "type": "page_added",
-                    "username": username,
-                    "node": {
-                        "id": page_id, "url": final_url, "title": title,
-                        "depth": depth, "status": "crawled",
-                        "context": context, "in_scope": True,
-                        "scan_status": "pending", "accessible_by": ab,
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "page_added",
+                        "username": username,
+                        "node": {
+                            "id": page_id,
+                            "url": final_url,
+                            "title": title,
+                            "depth": depth,
+                            "status": "crawled",
+                            "context": context,
+                            "in_scope": True,
+                            "scan_status": "pending",
+                            "accessible_by": ab,
+                        },
+                        "link": {
+                            "source": parent_id,
+                            "target": page_id,
+                            "link_text": None,
+                        }
+                        if parent_id
+                        else None,
                     },
-                    "link": {"source": parent_id, "target": page_id, "link_text": None}
-                            if parent_id else None,
-                })
+                )
             else:
-                events_svc.emit(run_id, {
-                    "type": "node_accessible_by",
-                    "page_id": page_id, "username": username,
-                })
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "node_accessible_by",
+                        "page_id": page_id,
+                        "username": username,
+                    },
+                )
 
-            events_svc.emit(run_id, {
-                "type": "run_update", "status": "running",
-                "pages_discovered": shared.pages_done,
-                "current_url": final_url, "username": username,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "run_update",
+                    "status": "running",
+                    "pages_discovered": shared.pages_done,
+                    "current_url": final_url,
+                    "username": username,
+                },
+            )
 
             # ── Enqueue links ─────────────────────────────────────────────────
             await _promote_api_calls(
@@ -586,44 +728,63 @@ async def _crawl_as_credential(
             observed_api_calls.clear()
 
             if depth < max_depth:
-                filtered_suggested = _filter_suggested_links(suggested, same_domain_links, base_netloc)
+                filtered_suggested = _filter_suggested_links(
+                    suggested, same_domain_links, base_netloc
+                )
                 if len(filtered_suggested) < len(suggested):
                     log.info(
                         "Dropped %d LLM-suggested crawl URL(s) that were not observed as page links for %s",
-                        len(suggested) - len(filtered_suggested), final_url,
+                        len(suggested) - len(filtered_suggested),
+                        final_url,
                     )
                 for sugg_url in reversed(filtered_suggested):
                     n = _norm(sugg_url)
-                    if n not in queued and _same_domain(sugg_url, base_netloc) and not _is_session_ending_url(sugg_url):
+                    if (
+                        n not in queued
+                        and _same_domain(sugg_url, base_netloc)
+                        and not _is_session_ending_url(sugg_url)
+                    ):
                         queued.add(n)
                         queue.appendleft((sugg_url, depth + 1, page_id))
                 for link_url, link_text in same_domain_links:
                     n = _norm(link_url)
-                    if n not in queued and _same_domain(link_url, base_netloc) and not _is_session_ending_url(link_url, link_text):
+                    if (
+                        n not in queued
+                        and _same_domain(link_url, base_netloc)
+                        and not _is_session_ending_url(link_url, link_text)
+                    ):
                         queued.add(n)
                         queue.append((link_url, depth + 1, page_id))
 
         await browser.close()
 
     _update_credential_progress(run_id, username, None, local_pages, done=True)
-    events_svc.emit(run_id, {
-        "type": "crawl_progress",
-        "username": username,
-        "pages_visited": local_pages,
-        "current_url": None,
-        "done": True,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "crawl_progress",
+            "username": username,
+            "pages_visited": local_pages,
+            "current_url": None,
+            "done": True,
+        },
+    )
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+
 def _save_page_placeholder(run_id: int, url: str, depth: int) -> int:
     """Atomically create a stub CrawledPage and return its ID."""
     from aespa.services.scope import register_scope_host_for_run
+
     with Session(get_engine()) as s:
         cp = CrawledPage(
-            test_run_id=run_id, url=url, depth=depth,
-            status="processing", accessible_by="[]",
+            test_run_id=run_id,
+            url=url,
+            depth=depth,
+            status="processing",
+            accessible_by="[]",
         )
         s.add(cp)
         s.commit()
@@ -749,9 +910,18 @@ _PUBLIC_ASSET_PATHS = (
     "/status",
     "/api/status",
 )
-_ADMIN_PATH_RE = re.compile(r"/(?:admin|manage|management|moderator|staff|backoffice|internal|superuser)(?:[/?.#-]|$)", re.IGNORECASE)
-_VALIDATION_PATH_RE = re.compile(r"/(?:validate|verify|verification|check|preflight|csrf|captcha|otp|mfa|2fa)(?:[/?.#-]|$)", re.IGNORECASE)
-_AUTH_PATH_RE = re.compile(r"/(?:login|logout|signup|register|auth|token|session|password|reset)(?:[/?.#-]|$)", re.IGNORECASE)
+_ADMIN_PATH_RE = re.compile(
+    r"/(?:admin|manage|management|moderator|staff|backoffice|internal|superuser)(?:[/?.#-]|$)",
+    re.IGNORECASE,
+)
+_VALIDATION_PATH_RE = re.compile(
+    r"/(?:validate|verify|verification|check|preflight|csrf|captcha|otp|mfa|2fa)(?:[/?.#-]|$)",
+    re.IGNORECASE,
+)
+_AUTH_PATH_RE = re.compile(
+    r"/(?:login|logout|signup|register|auth|token|session|password|reset)(?:[/?.#-]|$)",
+    re.IGNORECASE,
+)
 
 
 def _save_intel_item(
@@ -771,7 +941,9 @@ def _save_intel_item(
     value = str(value or "")[:2000]
     evidence = str(evidence or "")[:2000]
     method = method.upper() if method else None
-    metadata_text = json.dumps(metadata or {}, separators=(",", ":"), default=str)[:4000]
+    metadata_text = json.dumps(metadata or {}, separators=(",", ":"), default=str)[
+        :4000
+    ]
     with Session(get_engine()) as s:
         existing = s.exec(
             select(TargetIntelItem)
@@ -785,18 +957,20 @@ def _save_intel_item(
         ).first()
         if existing:
             return
-        s.add(TargetIntelItem(
-            test_run_id=run_id,
-            kind=kind,
-            key=key,
-            value=value,
-            url=url,
-            method=method,
-            source=source,
-            confidence=max(0.0, min(1.0, float(confidence))),
-            evidence=evidence,
-            item_metadata=metadata_text,
-        ))
+        s.add(
+            TargetIntelItem(
+                test_run_id=run_id,
+                kind=kind,
+                key=key,
+                value=value,
+                url=url,
+                method=method,
+                source=source,
+                confidence=max(0.0, min(1.0, float(confidence))),
+                evidence=evidence,
+                item_metadata=metadata_text,
+            )
+        )
         s.commit()
 
 
@@ -880,11 +1054,16 @@ async def _record_page_intelligence(
             url=form_url,
             method=method,
             source="dom_form",
-            evidence=", ".join(f.get("name") or f.get("id") or f.get("type") or "field" for f in fields[:12]),
+            evidence=", ".join(
+                f.get("name") or f.get("id") or f.get("type") or "field"
+                for f in fields[:12]
+            ),
             metadata={"page_url": page_url, "fields": fields, "username": username},
         )
         for field in fields:
-            field_key = str(field.get("name") or field.get("id") or field.get("selector") or "")
+            field_key = str(
+                field.get("name") or field.get("id") or field.get("selector") or ""
+            )
             if not field_key:
                 continue
             _save_intel_item(
@@ -895,7 +1074,11 @@ async def _record_page_intelligence(
                 url=form_url,
                 method=method,
                 source="dom_form",
-                metadata={"page_url": page_url, "form_selector": form.get("selector"), "username": username},
+                metadata={
+                    "page_url": page_url,
+                    "form_selector": form.get("selector"),
+                    "username": username,
+                },
             )
 
     for key in dom["storage_keys"]:
@@ -971,7 +1154,11 @@ async def _mine_script_intelligence(
 ) -> None:
     seen: set[str] = set()
     for script_url in script_urls[:20]:
-        if not script_url or script_url in seen or not _same_domain(script_url, base_netloc):
+        if (
+            not script_url
+            or script_url in seen
+            or not _same_domain(script_url, base_netloc)
+        ):
             continue
         seen.add(script_url)
         try:
@@ -1035,7 +1222,9 @@ async def _mine_public_assets(
             status = getattr(resp, "status", None)
             if status is None or status >= 400:
                 continue
-            content_type = str((getattr(resp, "headers", {}) or {}).get("content-type", ""))
+            content_type = str(
+                (getattr(resp, "headers", {}) or {}).get("content-type", "")
+            )
             body = (await resp.text())[:500_000]
         except Exception as exc:
             log.debug("Public asset mining failed for %s: %s", asset_url, exc)
@@ -1093,7 +1282,11 @@ def _mine_asset_text(
             source=source,
             confidence=0.92,
             evidence=call.get("evidence") or call["url"],
-            metadata={"page_url": page_url, "discovery": "js_api_call", **call.get("metadata", {})},
+            metadata={
+                "page_url": page_url,
+                "discovery": "js_api_call",
+                **call.get("metadata", {}),
+            },
         )
         for field in call.get("body_fields", [])[:30]:
             _save_intel_item(
@@ -1105,7 +1298,11 @@ def _mine_asset_text(
                 method=call.get("method") or "GET",
                 source=source,
                 confidence=0.8,
-                metadata={"page_url": page_url, "asset_url": asset_url, "discovery": "js_api_call"},
+                metadata={
+                    "page_url": page_url,
+                    "asset_url": asset_url,
+                    "discovery": "js_api_call",
+                },
             )
     for route in _extract_js_route_paths(body)[:150]:
         resolved = _resolve_asset_reference(asset_url, route["path"])
@@ -1119,7 +1316,11 @@ def _mine_asset_text(
             source=source,
             confidence=route.get("confidence", 0.75),
             evidence=route.get("evidence") or route["path"],
-            metadata={"page_url": page_url, "discovery": route.get("discovery", "js_route"), "category": route.get("category")},
+            metadata={
+                "page_url": page_url,
+                "discovery": route.get("discovery", "js_route"),
+                "category": route.get("category"),
+            },
         )
     for lead in _extract_js_path_leads(body)[:120]:
         resolved = _resolve_asset_reference(asset_url, lead["path"])
@@ -1133,7 +1334,11 @@ def _mine_asset_text(
             source=source,
             confidence=lead.get("confidence", 0.82),
             evidence=lead.get("evidence") or lead["path"],
-            metadata={"page_url": page_url, "discovery": "js_path_lead", "category": lead.get("category")},
+            metadata={
+                "page_url": page_url,
+                "discovery": "js_path_lead",
+                "category": lead.get("category"),
+            },
         )
     for endpoint in _extract_sitemap_locations(body)[:200]:
         _save_intel_item(
@@ -1291,24 +1496,39 @@ def _extract_js_api_calls(text: str) -> list[dict]:
     for match in _FETCH_CALL_RE.finditer(body[:500_000]):
         url = match.group("url").strip()
         args = match.group("args") or ""
-        method = (match.group("axios_method") or _extract_method_from_js_options(args) or "GET").upper()
+        method = (
+            match.group("axios_method")
+            or _extract_method_from_js_options(args)
+            or "GET"
+        ).upper()
         key = (method, url)
         if key in seen:
             continue
         seen.add(key)
-        calls.append({
-            "url": url,
-            "method": method,
-            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
-            "body_fields": _dedupe_strings([*_extract_jsonish_keys(args), *_extract_js_shorthand_object_keys(args)]),
-            "metadata": {"call": "fetch_or_axios"},
-        })
+        calls.append(
+            {
+                "url": url,
+                "method": method,
+                "evidence": body[
+                    max(0, match.start() - 80) : min(len(body), match.end() + 120)
+                ],
+                "body_fields": _dedupe_strings(
+                    [
+                        *_extract_jsonish_keys(args),
+                        *_extract_js_shorthand_object_keys(args),
+                    ]
+                ),
+                "metadata": {"call": "fetch_or_axios"},
+            }
+        )
         if len(calls) >= 200:
             return calls
 
     for match in _AXIOS_OBJECT_RE.finditer(body[:500_000]):
         obj = match.group("object") or ""
-        url_match = re.search(r"\burl\s*:\s*(['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)\1", obj)
+        url_match = re.search(
+            r"\burl\s*:\s*(['\"`])(?P<url>https?://[^'\"`\s<>]+|/[^'\"`\s<>]+)\1", obj
+        )
         if not url_match:
             continue
         method_match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>[A-Za-z]+)\1", obj)
@@ -1318,20 +1538,33 @@ def _extract_js_api_calls(text: str) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        calls.append({
-            "url": url,
-            "method": method,
-            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 120)],
-            "body_fields": _dedupe_strings([*_extract_jsonish_keys(obj), *_extract_js_shorthand_object_keys(obj)]),
-            "metadata": {"call": "axios_object"},
-        })
+        calls.append(
+            {
+                "url": url,
+                "method": method,
+                "evidence": body[
+                    max(0, match.start() - 80) : min(len(body), match.end() + 120)
+                ],
+                "body_fields": _dedupe_strings(
+                    [
+                        *_extract_jsonish_keys(obj),
+                        *_extract_js_shorthand_object_keys(obj),
+                    ]
+                ),
+                "metadata": {"call": "axios_object"},
+            }
+        )
         if len(calls) >= 200:
             break
     return calls
 
 
 def _extract_method_from_js_options(text: str) -> str | None:
-    match = re.search(r"\bmethod\s*:\s*(['\"`])(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\1", text or "", re.IGNORECASE)
+    match = re.search(
+        r"\bmethod\s*:\s*(['\"`])(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\1",
+        text or "",
+        re.IGNORECASE,
+    )
     return match.group("method") if match else None
 
 
@@ -1340,7 +1573,10 @@ def _extract_js_shorthand_object_keys(text: str) -> list[str]:
     for match in re.finditer(r"\{(?P<body>[^{}]{1,500})\}", text or ""):
         for token in re.split(r"\s*,\s*", match.group("body")):
             token = token.strip()
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{1,80}", token) and token not in keys:
+            if (
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{1,80}", token)
+                and token not in keys
+            ):
                 keys.append(token)
     return keys
 
@@ -1362,13 +1598,17 @@ def _extract_js_route_paths(text: str) -> list[dict]:
         if not _looks_like_route_path(path) or path in seen:
             continue
         seen.add(path)
-        routes.append({
-            "path": path,
-            "category": _path_category(path),
-            "confidence": 0.86 if _path_category(path) else 0.72,
-            "discovery": "route_literal",
-            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
-        })
+        routes.append(
+            {
+                "path": path,
+                "category": _path_category(path),
+                "confidence": 0.86 if _path_category(path) else 0.72,
+                "discovery": "route_literal",
+                "evidence": body[
+                    max(0, match.start() - 80) : min(len(body), match.end() + 80)
+                ],
+            }
+        )
         if len(routes) >= 200:
             break
     return routes
@@ -1382,13 +1622,24 @@ def _extract_js_path_leads(text: str) -> list[dict]:
         if not category or path in seen:
             continue
         seen.add(path)
-        leads.append({
-            "path": path,
-            "category": category,
-            "method": "POST" if category in {"auth", "validation"} and re.search(r"/(?:login|register|signup|verify|validate|check|preflight)", path, re.IGNORECASE) else "GET",
-            "confidence": 0.9 if category in {"admin", "validation", "auth"} else 0.82,
-            "evidence": path,
-        })
+        leads.append(
+            {
+                "path": path,
+                "category": category,
+                "method": "POST"
+                if category in {"auth", "validation"}
+                and re.search(
+                    r"/(?:login|register|signup|verify|validate|check|preflight)",
+                    path,
+                    re.IGNORECASE,
+                )
+                else "GET",
+                "confidence": 0.9
+                if category in {"admin", "validation", "auth"}
+                else 0.82,
+                "evidence": path,
+            }
+        )
     return leads
 
 
@@ -1413,11 +1664,15 @@ def _extract_feature_flags(text: str) -> list[dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        flags.append({
-            "key": key,
-            "value": value,
-            "evidence": body[max(0, match.start() - 80):min(len(body), match.end() + 80)],
-        })
+        flags.append(
+            {
+                "key": key,
+                "value": value,
+                "evidence": body[
+                    max(0, match.start() - 80) : min(len(body), match.end() + 80)
+                ],
+            }
+        )
         if len(flags) >= 120:
             break
     return flags
@@ -1438,7 +1693,9 @@ def _path_category(path: str) -> str | None:
         return "validation"
     if _AUTH_PATH_RE.search(path):
         return "auth"
-    if re.search(r"/(?:feature|flag|beta|experiment|config)(?:[/?.#-]|$)", path, re.IGNORECASE):
+    if re.search(
+        r"/(?:feature|flag|beta|experiment|config)(?:[/?.#-]|$)", path, re.IGNORECASE
+    ):
         return "feature"
     return None
 
@@ -1449,7 +1706,9 @@ def _public_asset_candidates(base_url: str) -> list[str]:
     prefixes = {origin}
     app_path = parsed.path
     if app_path and app_path != "/":
-        app_prefix = app_path if app_path.endswith("/") else app_path.rsplit("/", 1)[0] + "/"
+        app_prefix = (
+            app_path if app_path.endswith("/") else app_path.rsplit("/", 1)[0] + "/"
+        )
         prefixes.add(urljoin(origin + "/", app_prefix.lstrip("/")))
 
     candidates: list[str] = []
@@ -1469,7 +1728,9 @@ def _resolve_asset_reference(asset_url: str, reference: str) -> str:
 
 def _extract_sitemap_locations(text: str) -> list[str]:
     locations: list[str] = []
-    for match in re.finditer(r"<loc>\s*([^<\s]+)\s*</loc>", text or "", flags=re.IGNORECASE):
+    for match in re.finditer(
+        r"<loc>\s*([^<\s]+)\s*</loc>", text or "", flags=re.IGNORECASE
+    ):
         url = match.group(1).strip()
         if url and url not in locations:
             locations.append(url)
@@ -1515,6 +1776,7 @@ def _extract_jsonish_keys(text: str) -> list[str]:
     except Exception:
         data = None
     if data is not None:
+
         def _walk(value):
             if isinstance(value, dict):
                 for k, v in value.items():
@@ -1524,6 +1786,7 @@ def _extract_jsonish_keys(text: str) -> list[str]:
             elif isinstance(value, list):
                 for child in value:
                     _walk(child)
+
         _walk(data)
         return keys
     for key in re.findall(r'"([A-Za-z_][A-Za-z0-9_-]{1,80})"\s*:', text):
@@ -1565,7 +1828,9 @@ def _extract_interesting_response_fields(text: str) -> list[dict[str, str]]:
         if not _INTERESTING_FIELD_RE.search(key):
             continue
         value = ""
-        match = re.search(rf'"{re.escape(key)}"\s*:\s*(".*?"|[^,\n\r}}]+)', text[:50_000])
+        match = re.search(
+            rf'"{re.escape(key)}"\s*:\s*(".*?"|[^,\n\r}}]+)', text[:50_000]
+        )
         if match:
             value = match.group(1).strip().strip('"')[:200]
             evidence = match.group(0)[:500]
@@ -1601,7 +1866,9 @@ async def _promote_api_calls(
         url = call.get("url") or ""
         if not url:
             continue
-        api_title, api_context, api_categories = await _analyse_api_call(llm_cfg, call, credential_id)
+        api_title, api_context, api_categories = await _analyse_api_call(
+            llm_cfg, call, credential_id
+        )
         norm = _norm(url)
         async with shared.lock:
             if norm in shared.crawled_norms:
@@ -1611,8 +1878,13 @@ async def _promote_api_calls(
                 continue
             else:
                 page_id = _save_api_page(
-                    run_id, call, source_depth + 1, credential_id,
-                    title=api_title, context=api_context, categories=api_categories,
+                    run_id,
+                    call,
+                    source_depth + 1,
+                    credential_id,
+                    title=api_title,
+                    context=api_context,
+                    categories=api_categories,
                 )
                 shared.crawled_norms[norm] = page_id
                 shared.pages_done += 1
@@ -1633,28 +1905,40 @@ async def _promote_api_calls(
 
         if is_new:
             _update_run(run_id, pages_discovered=shared.pages_done)
-            events_svc.emit(run_id, {
-                "type": "page_added",
-                "username": username,
-                "node": {
-                    "id": page_id,
-                    "url": url,
-                    "title": api_title,
-                    "depth": source_depth + 1,
-                    "status": "crawled",
-                    "context": api_context,
-                    "in_scope": True,
-                    "scan_status": "pending",
-                    "accessible_by": [credential_id] if credential_id is not None else [],
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "page_added",
+                    "username": username,
+                    "node": {
+                        "id": page_id,
+                        "url": url,
+                        "title": api_title,
+                        "depth": source_depth + 1,
+                        "status": "crawled",
+                        "context": api_context,
+                        "in_scope": True,
+                        "scan_status": "pending",
+                        "accessible_by": [credential_id]
+                        if credential_id is not None
+                        else [],
+                    },
+                    "link": {
+                        "source": source_page_id,
+                        "target": page_id,
+                        "link_text": "API call",
+                    },
                 },
-                "link": {"source": source_page_id, "target": page_id, "link_text": "API call"},
-            })
+            )
         else:
-            events_svc.emit(run_id, {
-                "type": "node_accessible_by",
-                "page_id": page_id,
-                "username": username,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "node_accessible_by",
+                    "page_id": page_id,
+                    "username": username,
+                },
+            )
 
         _record_api_intelligence(
             run_id=run_id,
@@ -1668,7 +1952,10 @@ def _dedupe_api_calls(calls: list[dict]) -> list[dict]:
     seen: set[tuple[str, str]] = set()
     result: list[dict] = []
     for call in calls:
-        key = (str(call.get("method") or "GET").upper(), _norm(str(call.get("url") or "")))
+        key = (
+            str(call.get("method") or "GET").upper(),
+            _norm(str(call.get("url") or "")),
+        )
         if not key[1] or key in seen:
             continue
         seen.add(key)
@@ -1676,7 +1963,9 @@ def _dedupe_api_calls(calls: list[dict]) -> list[dict]:
     return result
 
 
-async def _analyse_api_call(llm_cfg, call: dict, credential_id: Optional[int]) -> tuple[str, str, dict]:
+async def _analyse_api_call(
+    llm_cfg, call: dict, credential_id: Optional[int]
+) -> tuple[str, str, dict]:
     title = _api_title(call)
     fallback_context = _api_context(call)
     fallback_categories = _api_categories(call, credential_id)
@@ -1688,7 +1977,11 @@ async def _analyse_api_call(llm_cfg, call: dict, credential_id: Optional[int]) -
             _api_analysis_text(call),
             None,
         )
-        return title, _combine_api_context(fallback_context, context), _merge_api_categories(fallback_categories, cats)
+        return (
+            title,
+            _combine_api_context(fallback_context, context),
+            _merge_api_categories(fallback_categories, cats),
+        )
     except Exception as exc:
         log.warning("  LLM API analysis failed for %s: %s", call.get("url"), exc)
         return title, fallback_context, fallback_categories
@@ -1719,7 +2012,9 @@ def _save_api_page(
             has_object_ref=categories.get("has_object_ref"),
             has_business_logic=categories.get("has_business_logic"),
             owasp_applicable_json=json.dumps(categories.get("owasp_applicable") or {}),
-            accessible_by=json.dumps([credential_id] if credential_id is not None else []),
+            accessible_by=json.dumps(
+                [credential_id] if credential_id is not None else []
+            ),
         )
         s.add(cp)
         s.commit()
@@ -1812,21 +2107,46 @@ def _api_categories(call: dict, credential_id: Optional[int]) -> dict:
     body_lower = request_body.lower()
     is_mutating = method in ("POST", "PUT", "PATCH", "DELETE")
     has_id = _url_has_object_ref(url) or _body_has_object_ref(request_body)
-    is_auth_endpoint = any(kw in url_lower for kw in ("/login", "/logout", "/auth", "/token", "/session", "/password", "/reset", "/register", "/signup", "/oauth"))
-    has_url_param = bool(re.search(r'[?&](?:url|uri|href|src|redirect|callback|proxy|fetch|target)=', url_lower)) or \
-        bool(re.search(r'"(?:url|uri|href|src|redirect|callback|proxy|fetch|target)"\s*:', body_lower))
+    is_auth_endpoint = any(
+        kw in url_lower
+        for kw in (
+            "/login",
+            "/logout",
+            "/auth",
+            "/token",
+            "/session",
+            "/password",
+            "/reset",
+            "/register",
+            "/signup",
+            "/oauth",
+        )
+    )
+    has_url_param = bool(
+        re.search(
+            r"[?&](?:url|uri|href|src|redirect|callback|proxy|fetch|target)=", url_lower
+        )
+    ) or bool(
+        re.search(
+            r'"(?:url|uri|href|src|redirect|callback|proxy|fetch|target)"\s*:',
+            body_lower,
+        )
+    )
 
     owasp_applicable = {
-        "A01": has_id or credential_id is not None,                              # Broken Access Control
-        "A02": is_auth_endpoint or bool(re.search(r'password|secret|token|key|credential', body_lower)),  # Cryptographic Failures
-        "A03": is_mutating or bool(request_body),                                # Injection
-        "A04": is_mutating,                                                      # Insecure Design
-        "A05": True,                                                             # Security Misconfiguration (headers etc.)
-        "A06": False,                                                            # Vulnerable Components (can't tell from request)
-        "A07": is_auth_endpoint or credential_id is not None,                   # Auth Failures
-        "A08": is_mutating,                                                      # Software & Data Integrity
-        "A09": is_mutating,                                                      # Logging & Monitoring
-        "A10": has_url_param,                                                    # SSRF
+        "A01": has_id or credential_id is not None,  # Broken Access Control
+        "A02": is_auth_endpoint
+        or bool(
+            re.search(r"password|secret|token|key|credential", body_lower)
+        ),  # Cryptographic Failures
+        "A03": is_mutating or bool(request_body),  # Injection
+        "A04": is_mutating,  # Insecure Design
+        "A05": True,  # Security Misconfiguration (headers etc.)
+        "A06": False,  # Supply Chain — can't tell from request alone
+        "A07": is_auth_endpoint or credential_id is not None,  # Auth Failures
+        "A08": is_mutating,  # Software & Data Integrity
+        "A09": is_mutating,  # Logging & Monitoring
+        "A10": has_url_param,  # SSRF
     }
     return {
         "req_auth": credential_id is not None,
@@ -1842,9 +2162,15 @@ def _body_has_object_ref(body: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    if re.search(r'"(?:id|[a-z0-9_]*(?:id|account|user|customer|order)[a-z0-9_]*)"\s*:\s*"?\d+', lowered):
+    if re.search(
+        r'"(?:id|[a-z0-9_]*(?:id|account|user|customer|order)[a-z0-9_]*)"\s*:\s*"?\d+',
+        lowered,
+    ):
         return True
-    if re.search(r'(?:^|[&?])(?:id|account|accountid|user|userid|customer|customerid|order|orderid)=\d+', lowered):
+    if re.search(
+        r"(?:^|[&?])(?:id|account|accountid|user|userid|customer|customerid|order|orderid)=\d+",
+        lowered,
+    ):
         return True
     return False
 
@@ -1899,7 +2225,13 @@ async def _reconcile_direct_access(
             .where(CrawledPage.status == "crawled")
         ).all()
         page_rows = [
-            (p.id, p.url, p.title or "", p.page_text or "", json.loads(p.accessible_by or "[]"))
+            (
+                p.id,
+                p.url,
+                p.title or "",
+                p.page_text or "",
+                json.loads(p.accessible_by or "[]"),
+            )
             for p in pages
             if p.id is not None and p.url
         ]
@@ -1915,14 +2247,20 @@ async def _reconcile_direct_access(
                 if run_id in _stop_requested:
                     break
                 credential_login_url = _login_url_for_credential(login_url, cred)
-                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **pw_proxy)
+                ctx = await browser.new_context(
+                    user_agent=_UA, ignore_https_errors=True, **pw_proxy
+                )
                 if global_http_header:
                     await ctx.set_extra_http_headers(global_http_header)
-                traffic_svc.setup_playwright_logging(ctx, run_id, username=cred.username)
+                traffic_svc.setup_playwright_logging(
+                    ctx, run_id, username=cred.username
+                )
                 page = await ctx.new_page()
                 try:
                     try:
-                        await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+                        await page.goto(
+                            base_url, wait_until="domcontentloaded", timeout=20_000
+                        )
                     except Exception:
                         pass
                     await _authenticate(page, credential_login_url, cred, run_id)
@@ -1930,14 +2268,25 @@ async def _reconcile_direct_access(
                         page, credential_login_url
                     )
 
-                    for page_id, page_url, page_title, page_text, accessible_by in page_rows:
+                    for (
+                        page_id,
+                        page_url,
+                        page_title,
+                        page_text,
+                        accessible_by,
+                    ) in page_rows:
                         if run_id in _stop_requested:
                             break
                         if cred.id in accessible_by:
                             continue
                         if _is_session_ending_url(page_url):
                             continue
-                        accessible, title, text, screenshot_b64 = await _direct_load_accessible(
+                        (
+                            accessible,
+                            title,
+                            text,
+                            screenshot_b64,
+                        ) = await _direct_load_accessible(
                             page,
                             page_url,
                             requires_auth=requires_auth,
@@ -1963,12 +2312,21 @@ async def _reconcile_direct_access(
                         if not access_ok:
                             log.info(
                                 "  Direct access rejected: user=%s page=%s reason=%s",
-                                cred.username, page_url, access_reason,
+                                cred.username,
+                                page_url,
+                                access_reason,
                             )
                             continue
-                        log.info("  Direct access confirmed: user=%s page=%s", cred.username, page_url)
+                        log.info(
+                            "  Direct access confirmed: user=%s page=%s",
+                            cred.username,
+                            page_url,
+                        )
                         _save_credential_view(
-                            page_id, run_id, cred.id, cred.username,
+                            page_id,
+                            run_id,
+                            cred.id,
+                            cred.username,
                             screenshot_b64,
                             f"[Direct access reconciliation] {access_reason}",
                             text[:10_000],
@@ -1976,11 +2334,14 @@ async def _reconcile_direct_access(
                         )
                         _update_accessible_by(page_id, cred.id)
                         accessible_by.append(cred.id)
-                        events_svc.emit(run_id, {
-                            "type": "node_accessible_by",
-                            "page_id": page_id,
-                            "username": cred.username,
-                        })
+                        events_svc.emit(
+                            run_id,
+                            {
+                                "type": "node_accessible_by",
+                                "page_id": page_id,
+                                "username": cred.username,
+                            },
+                        )
                 finally:
                     await ctx.close()
         finally:
@@ -2057,7 +2418,10 @@ async def _confirm_direct_page_access(
     screenshot_b64: Optional[str],
 ) -> tuple[bool, str]:
     if _looks_like_access_failure_text(candidate_text):
-        return False, "The direct-load response contains an access failure or loading error message."
+        return (
+            False,
+            "The direct-load response contains an access failure or loading error message.",
+        )
     if not candidate_text.strip():
         return False, "The direct-load response did not contain meaningful page text."
     try:
@@ -2072,7 +2436,12 @@ async def _confirm_direct_page_access(
             screenshot_b64=screenshot_b64,
         )
     except Exception as exc:
-        log.warning("  LLM access reconciliation failed for %s as %s: %s", url, candidate_username, exc)
+        log.warning(
+            "  LLM access reconciliation failed for %s as %s: %s",
+            url,
+            candidate_username,
+            exc,
+        )
         return False, "Access reconciliation could not get a reliable LLM judgement."
 
     accessible = bool(verdict.get("accessible"))
@@ -2083,11 +2452,13 @@ async def _confirm_direct_page_access(
 def _looks_like_login_text(text: str) -> bool:
     body = (text or "").lower()[:3000]
     login_hits = sum(
-        1 for marker in ("login", "log in", "sign in", "password", "forgot password")
+        1
+        for marker in ("login", "log in", "sign in", "password", "forgot password")
         if marker in body
     )
     denied_hits = sum(
-        1 for marker in ("access denied", "forbidden", "unauthorized", "unauthorised")
+        1
+        for marker in ("access denied", "forbidden", "unauthorized", "unauthorised")
         if marker in body
     )
     return login_hits >= 2 or denied_hits >= 1
@@ -2095,30 +2466,57 @@ def _looks_like_login_text(text: str) -> bool:
 
 def _looks_like_access_failure_text(text: str) -> bool:
     body = (text or "").lower()[:5000]
-    return any(marker in body for marker in (
-        "could not load", "couldn't load", "failed to load", "unable to load",
-        "cannot load", "can't load", "not authorized", "not authorised",
-        "unauthorized", "unauthorised", "access denied", "forbidden",
-        "permission denied", "does not have access", "no access", "not found",
-        "account not found", "details unavailable", "details could not be loaded",
-    ))
+    return any(
+        marker in body
+        for marker in (
+            "could not load",
+            "couldn't load",
+            "failed to load",
+            "unable to load",
+            "cannot load",
+            "can't load",
+            "not authorized",
+            "not authorised",
+            "unauthorized",
+            "unauthorised",
+            "access denied",
+            "forbidden",
+            "permission denied",
+            "does not have access",
+            "no access",
+            "not found",
+            "account not found",
+            "details unavailable",
+            "details could not be loaded",
+        )
+    )
 
 
 def _looks_like_denied_or_login_wall_text(text: str) -> bool:
     body = (text or "").lower()[:3000]
     denied_hits = sum(
-        1 for marker in (
-            "access denied", "forbidden", "unauthorized", "unauthorised",
-            "session expired", "session has expired",
+        1
+        for marker in (
+            "access denied",
+            "forbidden",
+            "unauthorized",
+            "unauthorised",
+            "session expired",
+            "session has expired",
         )
         if marker in body
     )
     if denied_hits:
         return True
     login_wall_hits = sum(
-        1 for marker in (
-            "login required", "please log in", "please sign in",
-            "you must log in", "you must sign in", "authentication required",
+        1
+        for marker in (
+            "login required",
+            "please log in",
+            "please sign in",
+            "you must log in",
+            "you must sign in",
+            "authentication required",
         )
         if marker in body
     )
@@ -2139,7 +2537,12 @@ def _merge_all_categories(run_id: int) -> None:
             ).all()
             if not views:
                 continue
-            for attr in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
+            for attr in (
+                "req_auth",
+                "takes_input",
+                "has_object_ref",
+                "has_business_logic",
+            ):
                 vals = [getattr(v, attr) for v in views if getattr(v, attr) is not None]
                 if vals:
                     setattr(cp, attr, any(vals))
@@ -2173,7 +2576,9 @@ def _update_accessible_by(page_id: int, credential_id: Optional[int]) -> None:
             s.commit()
 
 
-def _save_link(run_id: int, source_id: Optional[int], target_id: int, target_url: str) -> None:
+def _save_link(
+    run_id: int, source_id: Optional[int], target_id: int, target_url: str
+) -> None:
     if source_id is None:
         return
     with Session(get_engine()) as s:
@@ -2244,7 +2649,9 @@ def _clear_pages(run_id: int) -> None:
         ).all()
         for v in views:
             s.delete(v)
-        pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+        pages = s.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+        ).all()
         for p in pages:
             s.delete(p)
         s.commit()
@@ -2252,12 +2659,15 @@ def _clear_pages(run_id: int) -> None:
 
 # ── URL utilities ─────────────────────────────────────────────────────────────
 
+
 def _norm(url: str) -> str:
     try:
         p = urlparse(url)
         path = p.path.rstrip("/") or "/"
         frag = p.fragment if p.fragment.startswith("/") else ""
-        return urlunparse((p.scheme.lower(), p.netloc.lower(), path, p.params, p.query, frag))
+        return urlunparse(
+            (p.scheme.lower(), p.netloc.lower(), path, p.params, p.query, frag)
+        )
     except Exception:
         return url
 
@@ -2265,7 +2675,10 @@ def _norm(url: str) -> str:
 def _same_domain(url: str, base_netloc: str) -> bool:
     try:
         parsed = urlparse(url)
-        return parsed.scheme in ("http", "https") and parsed.netloc.lower() == base_netloc.lower()
+        return (
+            parsed.scheme in ("http", "https")
+            and parsed.netloc.lower() == base_netloc.lower()
+        )
     except Exception:
         return False
 
@@ -2301,7 +2714,19 @@ def _in_base_scope(url: str, base_netloc: str, base_path: str) -> bool:
 
 def _is_api_page(url: str, text: str) -> bool:
     path = urlparse(url).path.lower()
-    if any(pat in path for pat in ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql", "/swagger", "/openapi")):
+    if any(
+        pat in path
+        for pat in (
+            "/api/",
+            "/v1/",
+            "/v2/",
+            "/v3/",
+            "/rest/",
+            "/graphql",
+            "/swagger",
+            "/openapi",
+        )
+    ):
         return True
     stripped = (text or "").lstrip()
     return len(stripped) > 2 and stripped[0] in ("{", "[")
@@ -2309,7 +2734,19 @@ def _is_api_page(url: str, text: str) -> bool:
 
 def _is_api_response_candidate(url: str, resource_type: str, content_type: str) -> bool:
     path = urlparse(url).path.lower()
-    if any(pat in path for pat in ("/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql", "/swagger", "/openapi")):
+    if any(
+        pat in path
+        for pat in (
+            "/api/",
+            "/v1/",
+            "/v2/",
+            "/v3/",
+            "/rest/",
+            "/graphql",
+            "/swagger",
+            "/openapi",
+        )
+    ):
         return True
     if resource_type in ("fetch", "xhr"):
         return True
@@ -2319,7 +2756,10 @@ def _is_api_response_candidate(url: str, resource_type: str, content_type: str) 
 
 def _response_body_is_text(content_type: str) -> bool:
     ctype = (content_type or "").lower()
-    return any(token in ctype for token in ("text", "json", "xml", "html", "javascript", "graphql"))
+    return any(
+        token in ctype
+        for token in ("text", "json", "xml", "html", "javascript", "graphql")
+    )
 
 
 def _url_has_object_ref(url: str) -> bool:
@@ -2328,7 +2768,10 @@ def _url_has_object_ref(url: str) -> bool:
     if any(part.isdigit() for part in path_parts):
         return True
     query = parsed.query.lower()
-    return any(marker in query for marker in ("id=", "account=", "user=", "customer=", "order="))
+    return any(
+        marker in query
+        for marker in ("id=", "account=", "user=", "customer=", "order=")
+    )
 
 
 def _is_session_ending_url(url: str, link_text: str | None = None) -> bool:
@@ -2336,16 +2779,26 @@ def _is_session_ending_url(url: str, link_text: str | None = None) -> bool:
         parsed = urlparse(url)
     except Exception:
         parsed = None
-    haystack = " ".join([
-        (parsed.path if parsed else url) or "",
-        (parsed.query if parsed else "") or "",
-        link_text or "",
-    ]).lower()
+    haystack = " ".join(
+        [
+            (parsed.path if parsed else url) or "",
+            (parsed.query if parsed else "") or "",
+            link_text or "",
+        ]
+    ).lower()
     compact = "".join(ch for ch in haystack if ch.isalnum())
-    return any(marker in compact for marker in (
-        "logout", "signout", "signoff", "logoff",
-        "endsession", "destroysession", "invalidatesession",
-    ))
+    return any(
+        marker in compact
+        for marker in (
+            "logout",
+            "signout",
+            "signoff",
+            "logoff",
+            "endsession",
+            "destroysession",
+            "invalidatesession",
+        )
+    )
 
 
 def _same_url_without_fragment(left: str, right: str) -> bool:
@@ -2353,9 +2806,15 @@ def _same_url_without_fragment(left: str, right: str) -> bool:
         l = urlparse(left)
         r = urlparse(right)
         return (
-            l.scheme.lower(), l.netloc.lower(), l.path.rstrip("/") or "/", l.query,
+            l.scheme.lower(),
+            l.netloc.lower(),
+            l.path.rstrip("/") or "/",
+            l.query,
         ) == (
-            r.scheme.lower(), r.netloc.lower(), r.path.rstrip("/") or "/", r.query,
+            r.scheme.lower(),
+            r.netloc.lower(),
+            r.path.rstrip("/") or "/",
+            r.query,
         )
     except Exception:
         return False
@@ -2400,7 +2859,9 @@ async def _goto_with_auth_recovery(
             pass
         if not requires_auth or credential is None or not login_url:
             return response
-        session_dropped = _response_suggests_session_dropped(response) or await _page_requires_login(page, login_url)
+        session_dropped = _response_suggests_session_dropped(
+            response
+        ) or await _page_requires_login(page, login_url)
         if not session_dropped:
             return response
         if attempt == 0:
@@ -2411,7 +2872,9 @@ async def _goto_with_auth_recovery(
                     url,
                 )
                 return response
-            if await _auth_check_still_authenticated(page, auth_check_snapshot, login_url, username):
+            if await _auth_check_still_authenticated(
+                page, auth_check_snapshot, login_url, username
+            ):
                 log.info(
                     "Session-drop signal was false for user=%s at %s; known-good page still loads",
                     username,
@@ -2425,10 +2888,18 @@ async def _goto_with_auth_recovery(
                     url,
                 )
                 return response
-            log.info("Session appears to have dropped for user=%s at %s; re-authenticating and retrying", username, url)
+            log.info(
+                "Session appears to have dropped for user=%s at %s; re-authenticating and retrying",
+                username,
+                url,
+            )
             await _authenticate(page, login_url, credential, run_id)
             continue
-        log.warning("Session still appears unauthenticated after retry for user=%s at %s", username, url)
+        log.warning(
+            "Session still appears unauthenticated after retry for user=%s at %s",
+            username,
+            url,
+        )
         return response
     return response
 
@@ -2507,12 +2978,16 @@ async def _auth_check_still_authenticated(
     check_page = None
     try:
         check_page = await page.context.new_page()
-        response = await check_page.goto(snapshot["url"], wait_until="domcontentloaded", timeout=15_000)
+        response = await check_page.goto(
+            snapshot["url"], wait_until="domcontentloaded", timeout=15_000
+        )
         try:
             await check_page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
             pass
-        if _response_suggests_session_dropped(response) or await _page_requires_login(check_page, login_url):
+        if _response_suggests_session_dropped(response) or await _page_requires_login(
+            check_page, login_url
+        ):
             return False
         try:
             title = await check_page.title()
@@ -2553,8 +3028,25 @@ def _auth_check_matches_snapshot(snapshot: dict, title: str, text: str) -> bool:
 
 def _meaningful_text_tokens(text: str) -> set[str]:
     stop = {
-        "the", "and", "for", "you", "your", "are", "this", "that", "with", "from",
-        "login", "logout", "sign", "menu", "home", "page", "click", "submit", "cancel",
+        "the",
+        "and",
+        "for",
+        "you",
+        "your",
+        "are",
+        "this",
+        "that",
+        "with",
+        "from",
+        "login",
+        "logout",
+        "sign",
+        "menu",
+        "home",
+        "page",
+        "click",
+        "submit",
+        "cancel",
     }
     return {
         token
@@ -2571,11 +3063,16 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 async def _detect_mfa_prompt(page) -> bool:
     """Return True if the page shows an MFA / OTP input field."""
     otp_selectors = [
-        "input[name*='otp' i]", "input[id*='otp' i]",
-        "input[name*='mfa' i]", "input[id*='mfa' i]",
-        "input[name*='2fa' i]", "input[id*='2fa' i]",
-        "input[name*='code' i]", "input[id*='code' i]",
-        "input[placeholder*='code' i]", "input[placeholder*='otp' i]",
+        "input[name*='otp' i]",
+        "input[id*='otp' i]",
+        "input[name*='mfa' i]",
+        "input[id*='mfa' i]",
+        "input[name*='2fa' i]",
+        "input[id*='2fa' i]",
+        "input[name*='code' i]",
+        "input[id*='code' i]",
+        "input[placeholder*='code' i]",
+        "input[placeholder*='otp' i]",
         "input[placeholder*='authenticator' i]",
         "input[autocomplete='one-time-code']",
     ]
@@ -2594,10 +3091,14 @@ async def _fill_totp_if_prompted(page, credential) -> None:
     if not await _detect_mfa_prompt(page):
         return
     if not credential.totp_seed:
-        log.warning("  _fill_totp: MFA prompt detected but no totp_seed set for %s", credential.username)
+        log.warning(
+            "  _fill_totp: MFA prompt detected but no totp_seed set for %s",
+            credential.username,
+        )
         return
     try:
         import pyotp
+
         code = pyotp.TOTP(credential.totp_seed).now()
     except Exception as exc:
         log.warning("  _fill_totp: could not generate TOTP code: %s", exc)
@@ -2605,9 +3106,12 @@ async def _fill_totp_if_prompted(page, credential) -> None:
 
     otp_selectors = [
         "input[autocomplete='one-time-code']",
-        "input[name*='otp' i]", "input[id*='otp' i]",
-        "input[name*='code' i]", "input[id*='code' i]",
-        "input[name*='mfa' i]", "input[id*='mfa' i]",
+        "input[name*='otp' i]",
+        "input[id*='otp' i]",
+        "input[name*='code' i]",
+        "input[id*='code' i]",
+        "input[name*='mfa' i]",
+        "input[id*='mfa' i]",
         "input[placeholder*='code' i]",
     ]
     filled = False
@@ -2622,13 +3126,20 @@ async def _fill_totp_if_prompted(page, credential) -> None:
             pass
 
     if not filled:
-        log.warning("  _fill_totp: could not locate OTP input field for %s", credential.username)
+        log.warning(
+            "  _fill_totp: could not locate OTP input field for %s", credential.username
+        )
         return
 
     # Submit the MFA form
-    for sel in ["button[type='submit']", "input[type='submit']",
-                "button:has-text('Verify')", "button:has-text('Submit')",
-                "button:has-text('Next')", "button:has-text('Sign in')"]:
+    for sel in [
+        "button[type='submit']",
+        "input[type='submit']",
+        "button:has-text('Verify')",
+        "button:has-text('Submit')",
+        "button:has-text('Next')",
+        "button:has-text('Sign in')",
+    ]:
         try:
             loc = page.locator(sel).first
             if await loc.count() > 0 and await loc.is_visible():
@@ -2664,19 +3175,23 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         or bool(os.environ.get("WAYLAND_DISPLAY"))
     )
     if not has_display:
-        events_svc.emit(run_id, {
-            "type": "guided_login_failed",
-            "credential_id": credential.id,
-            "username": credential.username,
-            "message": (
-                f"Guided login for '{credential.username}' requires a graphical display. "
-                "This scanner appears to be running on a headless host. "
-                "Guided browser login only works when the scanner is running locally with a GUI."
-            ),
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "guided_login_failed",
+                "credential_id": credential.id,
+                "username": credential.username,
+                "message": (
+                    f"Guided login for '{credential.username}' requires a graphical display. "
+                    "This scanner appears to be running on a headless host. "
+                    "Guided browser login only works when the scanner is running locally with a GUI."
+                ),
+            },
+        )
         log.warning(
             "  _authenticate_guided: no display available for '%s' (cred_id=%s) — skipping",
-            credential.username, credential.id,
+            credential.username,
+            credential.id,
         )
         return
 
@@ -2690,47 +3205,65 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         _guided_registry[credential.id] = done_event
 
         # Phase 1: notify the UI — browser is NOT yet open; user must click "I'm Ready" first
-        events_svc.emit(run_id, {
-            "type": "guided_login_required",
-            "credential_id": credential.id,
-            "username": credential.username,
-            "message": (
-                f"Login required for '{credential.username}'. "
-                "Click \"I'm Ready\" in the UI when you are ready to log in."
-            ),
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "guided_login_required",
+                "credential_id": credential.id,
+                "username": credential.username,
+                "message": (
+                    f"Login required for '{credential.username}'. "
+                    'Click "I\'m Ready" in the UI when you are ready to log in.'
+                ),
+            },
+        )
 
-        log.info("  _authenticate_guided: waiting for ready signal from UI for %s (cred_id=%s)",
-                 credential.username, credential.id)
+        log.info(
+            "  _authenticate_guided: waiting for ready signal from UI for %s (cred_id=%s)",
+            credential.username,
+            credential.id,
+        )
 
         # Wait for user to click "I'm Ready" (5 min timeout)
         try:
             await asyncio.wait_for(ready_event.wait(), timeout=300)
         except asyncio.TimeoutError:
-            log.warning("  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)", credential.id)
+            log.warning(
+                "  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)",
+                credential.id,
+            )
             _guided_ready_registry.pop(credential.id, None)
             _guided_registry.pop(credential.id, None)
             return
         _guided_ready_registry.pop(credential.id, None)
 
         # Phase 2: open the browser and let the user log in
-        events_svc.emit(run_id, {
-            "type": "guided_login_browser_open",
-            "credential_id": credential.id,
-            "username": credential.username,
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "guided_login_browser_open",
+                "credential_id": credential.id,
+                "username": credential.username,
+            },
+        )
 
-        log.info("  _authenticate_guided: opening browser for %s (cred_id=%s)",
-                 credential.username, credential.id)
+        log.info(
+            "  _authenticate_guided: opening browser for %s (cred_id=%s)",
+            credential.username,
+            credential.id,
+        )
 
         captured_cookies: list = []
         captured_headers: dict[str, str] = {}
 
         from playwright.async_api import async_playwright
+
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=False)
             try:
-                ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True)
+                ctx = await browser.new_context(
+                    user_agent=_UA, ignore_https_errors=True
+                )
 
                 # Capture any Authorization headers sent during navigation
                 async def _capture_auth_header(request) -> None:
@@ -2742,15 +3275,22 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
                 guided_page = await ctx.new_page()
                 try:
-                    await guided_page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
+                    await guided_page.goto(
+                        login_url, wait_until="domcontentloaded", timeout=15_000
+                    )
                 except Exception as nav_err:
-                    log.warning("  _authenticate_guided: initial navigation error: %s", nav_err)
+                    log.warning(
+                        "  _authenticate_guided: initial navigation error: %s", nav_err
+                    )
 
                 # Wait for user to confirm (5 min timeout)
                 try:
                     await asyncio.wait_for(done_event.wait(), timeout=300)
                 except asyncio.TimeoutError:
-                    log.warning("  _authenticate_guided: timed out waiting for user confirmation (cred_id=%s)", credential.id)
+                    log.warning(
+                        "  _authenticate_guided: timed out waiting for user confirmation (cred_id=%s)",
+                        credential.id,
+                    )
 
                 # Brief pause so any in-flight auth redirects / cookie-sets finish
                 # before we snapshot the context's cookies.
@@ -2758,7 +3298,8 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 captured_cookies = await ctx.cookies()
                 log.info(
                     "  _authenticate_guided: captured %d cookie(s) for %s",
-                    len(captured_cookies), credential.username,
+                    len(captured_cookies),
+                    credential.username,
                 )
 
                 # Capture ALL localStorage and sessionStorage from every open page
@@ -2767,29 +3308,43 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 captured_local_storage: dict[str, str] = {}
                 captured_session_storage: dict[str, str] = {}
                 try:
-                    captured_local_storage = await guided_page.evaluate(
-                        "() => Object.fromEntries(Object.entries(localStorage))"
-                    ) or {}
+                    captured_local_storage = (
+                        await guided_page.evaluate(
+                            "() => Object.fromEntries(Object.entries(localStorage))"
+                        )
+                        or {}
+                    )
                 except Exception:
                     pass
                 try:
-                    captured_session_storage = await guided_page.evaluate(
-                        "() => Object.fromEntries(Object.entries(sessionStorage))"
-                    ) or {}
+                    captured_session_storage = (
+                        await guided_page.evaluate(
+                            "() => Object.fromEntries(Object.entries(sessionStorage))"
+                        )
+                        or {}
+                    )
                 except Exception:
                     pass
                 log.info(
                     "  _authenticate_guided: captured %d localStorage + %d sessionStorage "
                     "entries for %s",
-                    len(captured_local_storage), len(captured_session_storage),
+                    len(captured_local_storage),
+                    len(captured_session_storage),
                     credential.username,
                 )
 
                 # Heuristic: pick the most likely bearer token from storage to use
                 # as an Authorization header for httpx / non-browser requests.
                 _bearer_keys = [
-                    "access_token", "accessToken", "token", "jwt", "id_token",
-                    "idToken", "auth_token", "authToken", "bearer_token",
+                    "access_token",
+                    "accessToken",
+                    "token",
+                    "jwt",
+                    "id_token",
+                    "idToken",
+                    "auth_token",
+                    "authToken",
+                    "bearer_token",
                 ]
                 _all_storage = {**captured_session_storage, **captured_local_storage}
                 for _sk in _bearer_keys:
@@ -2798,17 +3353,23 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                         captured_headers["Authorization"] = f"Bearer {_sv}"
                         log.info(
                             "  _authenticate_guided: found token in storage key '%s' for %s",
-                            _sk, credential.username,
+                            _sk,
+                            credential.username,
                         )
                         break
                 # If no known key matched, fall back to any value that looks like a JWT
                 if not captured_headers.get("Authorization"):
                     for _sk, _sv in _all_storage.items():
-                        if isinstance(_sv, str) and _sv.startswith("eyJ") and _sv.count(".") >= 2:
+                        if (
+                            isinstance(_sv, str)
+                            and _sv.startswith("eyJ")
+                            and _sv.count(".") >= 2
+                        ):
                             captured_headers["Authorization"] = f"Bearer {_sv}"
                             log.info(
                                 "  _authenticate_guided: JWT-shaped value found in storage key '%s' for %s",
-                                _sk, credential.username,
+                                _sk,
+                                credential.username,
                             )
                             break
             finally:
@@ -2844,7 +3405,9 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
             injectable.append(entry)
         log.info(
             "  _authenticate_guided: built %d injectable cookie(s) from %d captured for %s",
-            len(injectable), len(captured_cookies), credential.username,
+            len(injectable),
+            len(captured_cookies),
+            credential.username,
         )
 
         if not injectable and not captured_headers.get("Authorization"):
@@ -2854,17 +3417,20 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 "unauthenticated for this credential.",
                 credential.username,
             )
-            events_svc.emit(run_id, {
-                "type": "scanner_phase",
-                "phase": "guided_login_warning",
-                "status": "warning",
-                "message": (
-                    f"No session cookies were captured for '{credential.username}' "
-                    "after guided login. The crawl for this credential may be "
-                    "unauthenticated. Try again or use 'guided' mode and complete the "
-                    "login fully before clicking I'm Done."
-                ),
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "guided_login_warning",
+                    "status": "warning",
+                    "message": (
+                        f"No session cookies were captured for '{credential.username}' "
+                        "after guided login. The crawl for this credential may be "
+                        "unauthenticated. Try again or use 'guided' mode and complete the "
+                        "login fully before clicking I'm Done."
+                    ),
+                },
+            )
 
         if injectable:
             try:
@@ -2877,21 +3443,30 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 if _missing:
                     log.warning(
                         "  _authenticate_guided: %d cookie(s) missing after injection for %s: %s",
-                        len(_missing), credential.username, _missing,
+                        len(_missing),
+                        credential.username,
+                        _missing,
                     )
                 else:
                     log.info(
                         "  _authenticate_guided: verified %d cookie(s) in context for %s",
-                        len(_injected_names & _expected_names), credential.username,
+                        len(_injected_names & _expected_names),
+                        credential.username,
                     )
             except Exception as exc:
-                log.warning("  _authenticate_guided: add_cookies failed for %s: %s", credential.username, exc)
+                log.warning(
+                    "  _authenticate_guided: add_cookies failed for %s: %s",
+                    credential.username,
+                    exc,
+                )
 
         if captured_headers:
             try:
                 await page.context.set_extra_http_headers(captured_headers)
             except Exception as exc:
-                log.warning("  _authenticate_guided: could not set extra headers: %s", exc)
+                log.warning(
+                    "  _authenticate_guided: could not set extra headers: %s", exc
+                )
 
         # Reload so the headless context picks up the injected cookies,
         # then restore localStorage and sessionStorage from the headed session.
@@ -2909,10 +3484,13 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 )
                 log.info(
                     "  _authenticate_guided: restored %d localStorage entries for %s",
-                    len(captured_local_storage), credential.username,
+                    len(captured_local_storage),
+                    credential.username,
                 )
             except Exception as exc:
-                log.warning("  _authenticate_guided: localStorage restore failed: %s", exc)
+                log.warning(
+                    "  _authenticate_guided: localStorage restore failed: %s", exc
+                )
         if captured_session_storage:
             try:
                 await page.evaluate(
@@ -2922,20 +3500,30 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 )
                 log.info(
                     "  _authenticate_guided: restored %d sessionStorage entries for %s",
-                    len(captured_session_storage), credential.username,
+                    len(captured_session_storage),
+                    credential.username,
                 )
             except Exception as exc:
-                log.warning("  _authenticate_guided: sessionStorage restore failed: %s", exc)
+                log.warning(
+                    "  _authenticate_guided: sessionStorage restore failed: %s", exc
+                )
 
-        events_svc.emit(run_id, {
-            "type": "guided_login_confirmed",
-            "credential_id": credential.id,
-            "username": credential.username,
-            "cookie_count": len(injectable),
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "guided_login_confirmed",
+                "credential_id": credential.id,
+                "username": credential.username,
+                "cookie_count": len(injectable),
+            },
+        )
         # Cache the captured session so reconcile and the dynamic scan can reuse it without a second window
         _guided_session_cache[(run_id, credential.id)] = {
-            "cookies": {c["name"]: c["value"] for c in captured_cookies if "name" in c and "value" in c},
+            "cookies": {
+                c["name"]: c["value"]
+                for c in captured_cookies
+                if "name" in c and "value" in c
+            },
             "headers": captured_headers,
             "injectable": injectable,
             "local_storage": captured_local_storage,
@@ -2944,6 +3532,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         # Persist to session vault DB so the dynamic scan phase can load it via load_session_vault()
         try:
             from aespa.services import scanner_sessions as _ss
+
             _ss.upsert_session(
                 run_id,
                 label=f"guided_{credential.id}",
@@ -2955,7 +3544,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 extra_headers=captured_headers or None,
             )
         except Exception as _vs_exc:
-            log.warning("  _authenticate_guided: could not persist session to vault: %s", _vs_exc)
+            log.warning(
+                "  _authenticate_guided: could not persist session to vault: %s",
+                _vs_exc,
+            )
 
 
 async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> None:
@@ -2976,7 +3568,8 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
         if cached:
             log.info(
                 "  _authenticate: reusing cached guided session for %s (cred_id=%s)",
-                credential.username, credential.id,
+                credential.username,
+                credential.id,
             )
             # Re-build from the flat cookies dict using url-based format (most reliable)
             cookies_dict = cached.get("cookies") or {}
@@ -2989,15 +3582,20 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
                     await page.context.add_cookies(cookie_list)
                     log.info(
                         "  _authenticate: injected %d cached cookie(s) for %s",
-                        len(cookie_list), credential.username,
+                        len(cookie_list),
+                        credential.username,
                     )
                 except Exception as exc:
-                    log.warning("  _authenticate: could not inject cached cookies: %s", exc)
+                    log.warning(
+                        "  _authenticate: could not inject cached cookies: %s", exc
+                    )
             if cached.get("headers"):
                 try:
                     await page.context.set_extra_http_headers(cached["headers"])
                 except Exception as exc:
-                    log.warning("  _authenticate: could not set cached headers: %s", exc)
+                    log.warning(
+                        "  _authenticate: could not set cached headers: %s", exc
+                    )
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=12_000)
                 await page.wait_for_load_state("networkidle", timeout=8_000)
@@ -3021,7 +3619,9 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
                         cached["session_storage"],
                     )
                 except Exception as exc:
-                    log.warning("  _authenticate: sessionStorage restore failed: %s", exc)
+                    log.warning(
+                        "  _authenticate: sessionStorage restore failed: %s", exc
+                    )
             return
 
     if mode == AuthMode.totp:
@@ -3046,9 +3646,14 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         # Fill username
         username_filled = False
         for sel in [
-            "input[autocomplete='username']", "input[autocomplete='email']",
-            "input[type='email']", "input[name*='user' i]", "input[name*='email' i]",
-            "input[id*='user' i]", "input[id*='email' i]", "input[type='text']",
+            "input[autocomplete='username']",
+            "input[autocomplete='email']",
+            "input[type='email']",
+            "input[name*='user' i]",
+            "input[name*='email' i]",
+            "input[id*='user' i]",
+            "input[id*='email' i]",
+            "input[type='text']",
         ]:
             try:
                 loc = page.locator(sel).first
@@ -3066,7 +3671,11 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         # Reveal password field if hidden
         pass_loc = page.locator("input[type='password']").first
         if not (await pass_loc.count() > 0 and await pass_loc.is_visible()):
-            for sel in ["button:has-text('Next')", "button:has-text('Continue')", "button[type='submit']"]:
+            for sel in [
+                "button:has-text('Next')",
+                "button:has-text('Continue')",
+                "button[type='submit']",
+            ]:
                 try:
                     loc = page.locator(sel).first
                     if await loc.count() > 0 and await loc.is_visible():
@@ -3087,9 +3696,12 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         # Submit
         submitted = False
         for sel in [
-            "button[type='submit']", "input[type='submit']",
-            "button:has-text('Log in')", "button:has-text('Login')",
-            "button:has-text('Sign in')", "button:has-text('Submit')",
+            "button[type='submit']",
+            "input[type='submit']",
+            "button:has-text('Log in')",
+            "button:has-text('Login')",
+            "button:has-text('Sign in')",
+            "button:has-text('Submit')",
             "button:has-text('Continue')",
         ]:
             try:
@@ -3119,9 +3731,14 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
             pw_visible = False
 
         if pw_visible:
-            log.warning("  _authenticate: password field still visible — auth likely failed. page.url=%s", page.url)
+            log.warning(
+                "  _authenticate: password field still visible — auth likely failed. page.url=%s",
+                page.url,
+            )
         else:
-            log.info("  _authenticate: success — login form gone. page.url=%s", page.url)
+            log.info(
+                "  _authenticate: success — login form gone. page.url=%s", page.url
+            )
 
     except Exception as auth_err:
         log.warning("  _authenticate: exception: %s", auth_err)
