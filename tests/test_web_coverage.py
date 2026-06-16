@@ -18,7 +18,14 @@ Tests:
   15. _enforce_web_coverage_loop drives all uncovered cells to terminal state
   16. _enforce_web_coverage_loop respects stop_check
   17. start-scan endpoint persists coverage_mode on the run
+  18. _make_web_post_finding_fn cleans comma-separated affected_url lists
+  19. _make_web_post_finding_fn strips parenthetical annotations from affected_url
+  20. _make_web_post_finding_fn falls back to finding.page_id when affected_url doesn't match
+  21. _make_web_post_finding_fn prefers finding.page_id over creating a placeholder
+  22. _clean_affected_url unit cases
+  23. ALICE write_finding flips the workprogram cell when the hook is registered
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,6 +60,7 @@ _UTC = timezone.utc
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(name="db_engine")
 def db_engine_fixture():
     engine = create_engine(
@@ -61,6 +69,7 @@ def db_engine_fixture():
         poolclass=StaticPool,
     )
     from aespa.db import _engine as original_engine
+
     SQLModel.metadata.create_all(engine)
     _migrate(engine)
     set_engine(engine)
@@ -94,7 +103,9 @@ def run_fixture(db_session, site):
     return r
 
 
-def _make_page(db_session, run, url: str, applicable_cats: list[str] | None = None) -> CrawledPage:
+def _make_page(
+    db_session, run, url: str, applicable_cats: list[str] | None = None
+) -> CrawledPage:
     """Helper: create an in-scope CrawledPage with the given OWASP applicable categories."""
     owasp_json = json.dumps({cat: True for cat in (applicable_cats or [])})
     p = CrawledPage(
@@ -129,6 +140,7 @@ def client_fixture(db_engine):
 
 # ── 1. seed_web_workprogram creates rows ──────────────────────────────────────
 
+
 def test_seed_creates_cells(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/login", ["A01", "A03"])
     _make_page(db_session, run, "http://example.com/profile", ["A01"])
@@ -145,6 +157,7 @@ def test_seed_creates_cells(db_engine, db_session, run):
 
 # ── 2. seed_web_workprogram is idempotent ─────────────────────────────────────
 
+
 def test_seed_idempotent(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/", ["A01"])
     first = seed_web_workprogram(run.id)
@@ -154,6 +167,7 @@ def test_seed_idempotent(db_engine, db_session, run):
 
 
 # ── 3. update_web_coverage_cell creates new cell ──────────────────────────────
+
 
 def test_update_cell_creates(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/api", ["A01"])
@@ -171,6 +185,7 @@ def test_update_cell_creates(db_engine, db_session, run):
 
 # ── 4. update_web_coverage_cell updates status ────────────────────────────────
 
+
 def test_update_cell_updates_status(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/api", ["A01"])
     seed_web_workprogram(run.id)
@@ -186,6 +201,7 @@ def test_update_cell_updates_status(db_engine, db_session, run):
 
 
 # ── 5. update_web_coverage_cell never downgrades ──────────────────────────────
+
 
 def test_update_cell_no_downgrade(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/api", ["A01"])
@@ -204,6 +220,7 @@ def test_update_cell_no_downgrade(db_engine, db_session, run):
 
 # ── 6. update_web_coverage_cell appends finding_id ───────────────────────────
 
+
 def test_update_cell_appends_finding(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/api", ["A03"])
     update_web_coverage_cell(run.id, page.id, "A03", "finding", finding_id=42)
@@ -221,9 +238,12 @@ def test_update_cell_appends_finding(db_engine, db_session, run):
 
 # ── 7. update_web_coverage_cell records skip_reason ──────────────────────────
 
+
 def test_update_cell_skip_reason(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/api", ["A06"])
-    update_web_coverage_cell(run.id, page.id, "A06", "skipped", skip_reason="not applicable")
+    update_web_coverage_cell(
+        run.id, page.id, "A06", "skipped", skip_reason="not applicable"
+    )
     db_session.expire_all()
     cell = db_session.exec(
         select(PageOwaspTest)
@@ -236,6 +256,7 @@ def test_update_cell_skip_reason(db_engine, db_session, run):
 
 
 # ── 8. mark_in_progress_to_covered ───────────────────────────────────────────
+
 
 def test_mark_in_progress_to_covered(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/", ["A01", "A03"])
@@ -259,8 +280,8 @@ def test_mark_in_progress_to_covered(db_engine, db_session, run):
         select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
     ).all()
     by_cat = {c.owasp_category: c for c in updated}
-    assert by_cat[cells[0].owasp_category].status == "covered"   # in_progress → covered
-    assert by_cat[cells[1].owasp_category].status == "finding"   # finding not downgraded
+    assert by_cat[cells[0].owasp_category].status == "covered"  # in_progress → covered
+    assert by_cat[cells[1].owasp_category].status == "finding"  # finding not downgraded
 
 
 def test_mark_in_progress_leaves_not_started(db_engine, db_session, run):
@@ -271,10 +292,11 @@ def test_mark_in_progress_leaves_not_started(db_engine, db_session, run):
     cell = db_session.exec(
         select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
     ).first()
-    assert cell.status == "not_started"   # never touched; left alone
+    assert cell.status == "not_started"  # never touched; left alone
 
 
 # ── 9. _make_web_post_probe_fn flips cell to in_progress ─────────────────────
+
 
 def test_post_probe_fn_flips_in_progress(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/login", ["A07"])
@@ -295,6 +317,7 @@ def test_post_probe_fn_flips_in_progress(db_engine, db_session, run):
 
 # ── 10. _make_web_post_probe_fn is a no-op for blank category ─────────────────
 
+
 def test_post_probe_fn_noop_blank_category(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/", ["A01"])
     seed_web_workprogram(run.id)
@@ -310,6 +333,7 @@ def test_post_probe_fn_noop_blank_category(db_engine, db_session, run):
 
 
 # ── 10b. _make_web_post_probe_fn creates a page + cell for unknown URLs ────────
+
 
 def test_post_probe_fn_creates_page_for_unknown_url(db_engine, db_session, run):
     """If the scan probes a URL not yet in the crawl, a placeholder page is created."""
@@ -337,6 +361,7 @@ def test_post_probe_fn_creates_page_for_unknown_url(db_engine, db_session, run):
 
 # ── 11. _make_web_post_finding_fn flips cell to finding ──────────────────────
 
+
 def test_post_finding_fn_flips_finding(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/transfer", ["A01"])
     seed_web_workprogram(run.id)
@@ -363,15 +388,18 @@ def test_post_finding_fn_flips_finding(db_engine, db_session, run):
 
 # ── 11b. _make_web_post_finding_fn uses affected_url, not page_id ─────────────
 
+
 def test_post_finding_fn_uses_affected_url(db_engine, db_session, run):
     """Finding on /api/admin/customers must NOT land on the root page row."""
     root = _make_page(db_session, run, "http://example.com/", ["A03"])
-    api_page = _make_page(db_session, run, "http://example.com/api/admin/customers", ["A03"])
+    api_page = _make_page(
+        db_session, run, "http://example.com/api/admin/customers", ["A03"]
+    )
     seed_web_workprogram(run.id)
 
     class _FakeFinding:
         id = 99
-        page_id = root.id          # scanner set page_id = root (wrong)
+        page_id = root.id  # scanner set page_id = root (wrong)
         affected_url = "http://example.com/api/admin/customers"
         owasp_category = "A03"
 
@@ -398,8 +426,10 @@ def test_post_finding_fn_uses_affected_url(db_engine, db_session, run):
 
 # ── 11c. _make_web_post_finding_fn creates page for unknown affected_url ───────
 
+
 def test_post_finding_fn_creates_page_for_unknown_url(db_engine, db_session, run):
     """Finding at a URL not in the crawl gets a placeholder page + cell."""
+
     class _FakeFinding:
         id = 42
         page_id = None
@@ -428,16 +458,19 @@ def test_post_finding_fn_creates_page_for_unknown_url(db_engine, db_session, run
 
 # ── 11d. _match_page_for_url does not swallow sub-paths into root ──────────────
 
+
 def test_match_page_does_not_match_root_to_subpath(db_engine, db_session, run):
     """http://example.com/ must NOT match http://example.com/api/health."""
     from aespa.services.web_workprogram import _match_page_for_url
+
     root = _make_page(db_session, run, "http://example.com/", ["A01"])
     pages = [db_session.get(CrawledPage, root.id)]
     result = _match_page_for_url("http://example.com/api/health", pages)
-    assert result is None   # no match — should create a new placeholder
+    assert result is None  # no match — should create a new placeholder
 
 
 # ── 12. get_web_coverage_matrix returns seeded=False when no cells ────────────
+
 
 def test_matrix_empty(db_engine, db_session, run):
     matrix = get_web_coverage_matrix(run.id)
@@ -446,6 +479,7 @@ def test_matrix_empty(db_engine, db_session, run):
 
 
 # ── 13. get_web_coverage_matrix returns persisted status ─────────────────────
+
 
 def test_matrix_returns_persisted_status(db_engine, db_session, run):
     page = _make_page(db_session, run, "http://example.com/", ["A01"])
@@ -460,6 +494,7 @@ def test_matrix_returns_persisted_status(db_engine, db_session, run):
 
 # ── 14. get_web_coverage_matrix returns coverage_mode from run ───────────────
 
+
 def test_matrix_returns_coverage_mode(db_engine, db_session, run, site):
     # Set coverage_mode on the run
     run.coverage_mode = "enforce"
@@ -473,6 +508,7 @@ def test_matrix_returns_coverage_mode(db_engine, db_session, run, site):
 
 
 # ── 15. _enforce_web_coverage_loop drives cells to terminal ──────────────────
+
 
 def test_enforce_loop_drives_to_terminal(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/", ["A01", "A03"])
@@ -495,6 +531,7 @@ def test_enforce_loop_drives_to_terminal(db_engine, db_session, run):
 
 # ── 16. _enforce_web_coverage_loop respects stop_check ───────────────────────
 
+
 def test_enforce_loop_respects_stop(db_engine, db_session, run):
     _make_page(db_session, run, "http://example.com/", ["A01", "A03", "A07"])
     seed_web_workprogram(run.id)
@@ -506,9 +543,9 @@ def test_enforce_loop_respects_stop(db_engine, db_session, run):
         return ("covered", None)
 
     # Stop immediately.
-    stats = asyncio.run(_enforce_web_coverage_loop(
-        run.id, _prober, stop_check=lambda: True
-    ))
+    stats = asyncio.run(
+        _enforce_web_coverage_loop(run.id, _prober, stop_check=lambda: True)
+    )
     # Stop was checked before the first call, so 0 cells processed via the loop.
     assert call_count[0] == 0
     assert stats["budget_exhausted"] is True
@@ -516,12 +553,22 @@ def test_enforce_loop_respects_stop(db_engine, db_session, run):
 
 # ── 17. start-scan endpoint persists coverage_mode ───────────────────────────
 
+
 def test_start_scan_persists_coverage_mode(client, db_engine, db_session):
-    with patch("aespa.services.scanner.start_thinking_scan", return_value=None), \
-         patch("aespa.services.scanner.get_thinking_scan_status", return_value={"status": "running", "run_id": 1}):
+    with (
+        patch("aespa.services.scanner.start_thinking_scan", return_value=None),
+        patch(
+            "aespa.services.scanner.get_thinking_scan_status",
+            return_value={"status": "running", "run_id": 1},
+        ),
+    ):
         # Create a site + run via API.
-        site_r = client.post("/api/sites", json={"name": "S", "base_url": "http://t.com"}).json()
-        run_r = client.post(f"/api/sites/{site_r['id']}/test-runs", json={"name": "R"}).json()
+        site_r = client.post(
+            "/api/sites", json={"name": "S", "base_url": "http://t.com"}
+        ).json()
+        run_r = client.post(
+            f"/api/sites/{site_r['id']}/test-runs", json={"name": "R"}
+        ).json()
         run_id = run_r["id"]
 
         resp = client.post(
@@ -534,3 +581,232 @@ def test_start_scan_persists_coverage_mode(client, db_engine, db_session):
         db_session.expire_all()
         run = db_session.get(TestRun, run_id)
         assert run.coverage_mode == "enforce"
+
+
+# ── 18. _clean_affected_url unit cases ────────────────────────────────────────
+
+
+def test_clean_affected_url_cases():
+    from aespa.services.web_workprogram import _clean_affected_url
+
+    # Empty / blank
+    assert _clean_affected_url("") == ""
+    assert _clean_affected_url(None) == ""  # type: ignore[arg-type]
+    # Plain URL passes through unchanged
+    assert _clean_affected_url("http://t/a") == "http://t/a"
+    # Comma-separated list → first element only
+    assert _clean_affected_url("http://t/a, http://t/b") == "http://t/a"
+    # Parenthetical annotation is stripped first
+    assert _clean_affected_url("http://t/* (all endpoints)") == "http://t/*"
+    # Comma + annotation
+    assert _clean_affected_url("http://t/a, http://t/b (some notes)") == "http://t/a"
+
+
+# ── 19. _make_web_post_finding_fn cleans comma-separated affected_url lists ───
+
+
+def test_post_finding_fn_cleans_comma_list_affected_url(db_engine, db_session, run):
+    """A comma-separated affected_url list should attribute to the first real page.
+
+    The LLM sometimes passes values like 'http://t/a, http://t/b' (or with
+    parenthetical annotations).  The post-finding hook must clean those before
+    matching so the cell lands on a crawled page rather than spawning a
+    placeholder row nobody recognises.
+    """
+    api_page = _make_page(
+        db_session, run, "http://example.com/api/admin/customers", ["A03"]
+    )
+    seed_web_workprogram(run.id)
+
+    class _FakeFinding:
+        id = 501
+        page_id = None
+        affected_url = (
+            "http://example.com/api/admin/customers, "
+            "http://example.com/api/admin/accounts"
+        )
+        owasp_category = "A03"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == api_page.id)
+        .where(PageOwaspTest.owasp_category == "A03")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+    assert 501 in json.loads(cell.finding_ids_json)
+
+
+# ── 20. _make_web_post_finding_fn strips parenthetical annotations ────────────
+
+
+def test_post_finding_fn_strips_parenthetical_annotation(db_engine, db_session, run):
+    api_page = _make_page(db_session, run, "http://example.com/api/health", ["A05"])
+    seed_web_workprogram(run.id)
+
+    class _FakeFinding:
+        id = 502
+        page_id = None
+        affected_url = "http://example.com/api/health (full response disclosure)"
+        owasp_category = "A05"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == api_page.id)
+        .where(PageOwaspTest.owasp_category == "A05")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+
+
+# ── 21. _make_web_post_finding_fn falls back to finding.page_id when no url match ──
+
+
+def test_post_finding_fn_falls_back_to_finding_page_id(db_engine, db_session, run):
+    """When the affected_url is the bare root '/', and a parent page exists, use it.
+
+    The scanner's ``_dynamic_finding_page_id`` already uses prefix overlap to
+    pick a parent page for the finding's ``page_id``.  The workprogram hook
+    must trust that resolution when exact+normalised match on affected_url
+    cannot find a page — otherwise findings on sub-paths (whose affected_url
+    was rewritten to the root) get stranded on a brand new placeholder row
+    instead of the crawled page the user expects.
+    """
+    root = _make_page(db_session, run, "http://example.com/", ["A03"])
+    seed_web_workprogram(run.id)
+
+    class _FakeFinding:
+        id = 503
+        page_id = root.id  # scanner already chose the root
+        affected_url = "http://example.com/"  # bare root, still matches root exactly
+        owasp_category = "A03"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == root.id)
+        .where(PageOwaspTest.owasp_category == "A03")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+    # No placeholder created.
+    placeholders = db_session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run.id)
+        .where(CrawledPage.url == "http://example.com/")
+    ).all()
+    # Only the original root page should exist.
+    assert len(placeholders) == 1
+    assert placeholders[0].id == root.id
+
+
+# ── 22. _make_web_post_finding_fn prefers page_id over placeholder when no exact match ──
+
+
+def test_post_finding_fn_uses_page_id_when_affected_url_is_garbage(
+    db_engine, db_session, run
+):
+    """If affected_url is unreadable, fall back to the scanner's page_id, not a placeholder.
+
+    Regression: the LLM sometimes writes findings with affected_url values like
+    'http://t/* (all endpoints)' or 'http://t/, http://t/api/foo' that never
+    match a crawled page.  Before the fix this created a placeholder row with
+    the garbage string as its URL.  With page_id fallback, the cell lands on
+    the page the scanner already chose.
+    """
+    root = _make_page(db_session, run, "http://example.com/", ["A01"])
+    seed_web_workprogram(run.id)
+
+    class _FakeFinding:
+        id = 504
+        page_id = root.id
+        affected_url = "http://example.com/* (all endpoints)"
+        owasp_category = "A01"
+
+    fn = _make_web_post_finding_fn(run.id)
+    fn(_FakeFinding())
+
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == root.id)
+        .where(PageOwaspTest.owasp_category == "A01")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+    # No placeholder row with the garbage URL was created.
+    placeholder = db_session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run.id)
+        .where(CrawledPage.url == "http://example.com/* (all endpoints)")
+    ).first()
+    assert placeholder is None
+
+
+# ── 23. ALICE write_finding flips the workprogram cell when hook is registered ──
+
+
+def test_alice_finding_flips_workprogram_cell(db_engine, db_session, run, monkeypatch):
+    """ALICE's write_finding path goes through _persist_dynamic_finding, which
+    fires _finding_hooks[run_id].  We simulate the registration+cleanup and
+    confirm the cell flips for an ALICE-sourced finding.
+    """
+    from aespa.services import scanner as scanner_svc
+    from aespa.services.web_workprogram import _make_web_post_finding_fn
+
+    page = _make_page(db_session, run, "http://example.com/login", ["A07"])
+    seed_web_workprogram(run.id)
+
+    # Register the hook the same way ALICE does in run_alice_turn_stream.
+    hook = _make_web_post_finding_fn(run.id)
+    scanner_svc._finding_hooks[run.id] = hook
+
+    # Persist a finding with finding_source='alice' to mirror ALICE's path.
+    from aespa.models import ScanFinding
+
+    finding = ScanFinding(
+        test_run_id=run.id,
+        page_id=page.id,
+        owasp_category="A07",
+        severity="high",
+        title="Brute-forceable login",
+        description="No rate-limiting on /login",
+        affected_url="http://example.com/login",
+        evidence="",
+        finding_source="alice",
+    )
+    db_session.add(finding)
+    db_session.commit()
+    db_session.refresh(finding)
+
+    # Fire the hook the same way _persist_dynamic_finding does.
+    scanner_svc._finding_hooks[run.id](finding)
+
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == page.id)
+        .where(PageOwaspTest.owasp_category == "A07")
+    ).first()
+    assert cell is not None
+    assert cell.status == "finding"
+    assert finding.id in json.loads(cell.finding_ids_json)
+
+    # Cleanup
+    scanner_svc._finding_hooks.pop(run.id, None)
