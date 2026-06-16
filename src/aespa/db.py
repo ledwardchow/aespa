@@ -167,6 +167,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_llm_provider_config_migration(engine)
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(engine, "crawled_page", "accessible_by", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "crawled_page", "owasp_applicable_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(engine, "page_credential_view", "owasp_applicable_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
@@ -181,6 +183,25 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _backfill_run_kind(engine)
     _reset_orphaned_validating_findings(engine)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS page_owasp_test (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
+                page_id INTEGER NOT NULL REFERENCES crawled_page(id),
+                owasp_category TEXT NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_page_owasp_test_test_run_id ON page_owasp_test (test_run_id)"
+        ))
+        conn.commit()
+    _ensure_column(engine, "page_owasp_test", "status", "TEXT NOT NULL DEFAULT 'not_started'")
+    _ensure_column(engine, "page_owasp_test", "skip_reason", "TEXT")
+    _ensure_column(engine, "page_owasp_test", "finding_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "page_owasp_test", "last_updated", "DATETIME")  # nullable for existing rows; new rows use model default_factory
+    _ensure_column(engine, "test_run", "coverage_mode", "TEXT NOT NULL DEFAULT 'track'")
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS reporting_debug_config (
