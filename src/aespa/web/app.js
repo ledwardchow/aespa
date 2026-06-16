@@ -4830,6 +4830,7 @@ function TestRunDetail({ runId, initialTab }) {
   const [thinkingStatus, setThinkingStatus]         = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [coverageMode, setCoverageMode]             = useState("track");
+  const [wpReloadKey, setWpReloadKey]               = useState(0);  // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus]     = useState(null);
   const [validateStatus, setValidateStatus] = useState(null);
   const [validateBusy, setValidateBusy]     = useState(false);
@@ -5756,6 +5757,7 @@ function TestRunDetail({ runId, initialTab }) {
       setCheckpointStatus(null);
       const s = await api.startThinkingScan(runId, coverageMode);
       setThinkingStatus(s);
+      setWpReloadKey(k => k + 1);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -5765,6 +5767,7 @@ function TestRunDetail({ runId, initialTab }) {
       setThinkingStatus({ status: "running" });
       const s = await api.resumeThinkingScan(runId);
       setThinkingStatus(s);
+      setWpReloadKey(k => k + 1);
     } catch(e) { setThinkingStopReq(false); setError(e.message); }
   };
 
@@ -7160,7 +7163,7 @@ function TestRunDetail({ runId, initialTab }) {
         </div>`}
       ${activeTab==="workprogram" && html`
         <div className="content scroll-content" style=${{padding:0}}>
-          <${WebRunWorkProgramTab} runId=${runId} run=${run} scanRunning=${isDynamicScanActive(thinkingStatus?.status)||run?.status==="crawling"||run?.status==="crawled"}/>
+          <${WebRunWorkProgramTab} runId=${runId} run=${run} reloadKey=${wpReloadKey} scanRunning=${isDynamicScanActive(thinkingStatus?.status)||run?.status==="crawling"||run?.status==="crawled"}/>
         </div>`}
     </div>`;
 }
@@ -7169,7 +7172,7 @@ function TestRunDetail({ runId, initialTab }) {
 
 const OWASP_WEB_CATEGORIES = ["A01","A02","A03","A04","A05","A06","A07","A08","A09","A10"];
 
-function WebRunWorkProgramTab({ runId, run, scanRunning }) {
+function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
   const [matrix, setMatrix] = useState(null);
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
@@ -7184,6 +7187,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning }) {
       .catch(() => setLoading(false));
 
   useEffect(() => { loadMatrix(); }, [runId]);
+  useEffect(() => { if (reloadKey > 0) loadMatrix(); }, [reloadKey]);
 
   // Poll during scan.
   useEffect(() => {
