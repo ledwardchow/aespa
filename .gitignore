@@ -16,3 +16,4 @@ docs/images/.DS_Store
 saml.b64
 aespa.db-journal
 *.backup
+*.db-backup
