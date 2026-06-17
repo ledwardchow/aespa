@@ -59,6 +59,70 @@ _ALICE_TOOL_NAMES = {
 }
 
 
+# Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
+# One headless browser per run, launched lazily on first browser action and closed
+# when the turn ends. ponytail: per-run global, no pooling/limits — fine for a
+# localhost single-user tool; revisit if ALICE ever runs many concurrent turns.
+_alice_browsers: dict[int, dict] = {}
+
+
+async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
+    """Return a live (page, context) for ``run_id``, launching one if needed.
+
+    Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
+    the API column (see the run-id-collision note in CLAUDE.md).
+    """
+    entry = _alice_browsers.get(run_id)
+    if entry:
+        page = entry.get("page")
+        if page is not None and not page.is_closed():
+            return page, entry["ctx"]
+        await _close_alice_browser(run_id)
+
+    from playwright.async_api import async_playwright
+
+    from aespa.services import traffic as traffic_svc
+    from aespa.services.scanner import (
+        _UA,
+        _playwright_global_headers,
+        _playwright_proxy,
+    )
+
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+    )
+    headers = _playwright_global_headers()
+    if headers:
+        await ctx.set_extra_http_headers(headers)
+    traffic_svc.setup_playwright_logging(
+        ctx,
+        None if api_run_id is not None else run_id,
+        username="alice",
+        api_run_id=api_run_id,
+    )
+    page = await ctx.new_page()
+    _alice_browsers[run_id] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+    return page, ctx
+
+
+async def _close_alice_browser(run_id: int) -> None:
+    """Tear down the live browser for ``run_id`` (best-effort)."""
+    entry = _alice_browsers.pop(run_id, None)
+    if not entry:
+        return
+    for key in ("ctx", "browser"):
+        try:
+            await entry[key].close()
+        except Exception:
+            pass
+    try:
+        await entry["pw"].stop()
+    except Exception:
+        pass
+
+
 def _extract_user_directive(history: list[dict]) -> str:
     """Find the most recent user prompt in the chat history."""
     for item in reversed(history):
@@ -114,9 +178,19 @@ async def _execute_alice_tool(
     scope_check_fn=None,  # Optional override: scope_check_fn(url) -> str | None
     context_tool_fn=None,  # Optional override: context_tool_fn(tool_name, args) -> dict
     post_probe_fn=None,  # Optional: post_probe_fn(url, method, owasp_category) -> None (API runs)
+    # Set for API-collection runs (then run_id is the ApiTestRun.id).
+    api_run_id: int | None = None,
 ) -> str:
     """Execute a single ALICE tool call and return the result string."""
-    session_vault = session_vault or {}
+    # Keep the caller's dict identity (even when empty) so session captures made
+    # here — e.g. an interactive modal login — propagate to later tool calls.
+    if session_vault is None:
+        session_vault = {}
+
+    # Traffic keying: for API runs the traffic table is keyed on the API column,
+    # with test_run_id left NULL (web/API run ids share an int space and would
+    # otherwise collide). See the run-id-collision note in CLAUDE.md.
+    _traffic_run_id = None if api_run_id is not None else run_id
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
@@ -162,7 +236,7 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             try:
                 kwargs: dict = {}
@@ -438,7 +512,7 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=False,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -522,7 +596,7 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             try:
                 if body_format == "json":
@@ -594,16 +668,28 @@ async def _execute_alice_tool(
 
     # ── browser ───────────────────────────────────────────────────────────────
     if tool_name == "browser":
-        from aespa.services.scanner import _make_scanner_client
-        from aespa.services import traffic as traffic_svc
+        from aespa.services import scanner_sessions as session_svc
+        from aespa.services.scanner import (
+            _playwright_global_headers,
+            _run_thinking_browser_action,
+        )
 
         url = str(tool_input.get("url") or base_url)
 
-        scope_err = (
-            scope_check_fn(url) if scope_check_fn else check_scope(url, site_id, run_id)
-        )
-        if scope_err:
-            return f"[SCOPE BLOCK] {scope_err}"
+        # Scope-check the entry url and every goto step before driving the browser.
+        candidate_urls = [url] + [
+            str(s.get("url"))
+            for s in (tool_input.get("steps") or [])
+            if isinstance(s, dict) and s.get("op") == "goto" and s.get("url")
+        ]
+        for _u in candidate_urls:
+            scope_err = (
+                scope_check_fn(_u)
+                if scope_check_fn
+                else check_scope(_u, site_id, run_id)
+            )
+            if scope_err:
+                return f"[SCOPE BLOCK] {scope_err}"
 
         use_session_label = (
             tool_input.get("use_session")
@@ -611,32 +697,65 @@ async def _execute_alice_tool(
             else None
         )
         selected = _select_session(session_vault, use_session_label)
-        req_cookies = (selected or {}).get("cookies") or {}
 
-        timeout = _get_alice_timeout(run_id)
-        async with _make_scanner_client(
-            cookies=req_cookies,
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                **((selected or {}).get("extra_headers") or {}),
-            },
-            timeout=timeout,
-            follow_redirects=True,
-            verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
-        ) as hx:
+        try:
+            page, ctx = await _get_alice_browser(run_id, api_run_id=api_run_id)
+        except Exception as exc:
+            return f"Browser launch failed: {exc}"
+
+        # Carry the selected session's cookies/headers onto the live context.
+        try:
+            if selected and selected.get("cookies"):
+                await ctx.add_cookies(
+                    [
+                        {"name": k, "value": v, "url": url}
+                        for k, v in selected["cookies"].items()
+                    ]
+                )
+            await ctx.set_extra_http_headers(
+                _playwright_global_headers((selected or {}).get("extra_headers") or {})
+            )
+        except Exception:
+            pass
+
+        with Session(get_engine()) as _s:
+            scanner_policy = get_scanner_policy(_s)
+        result = await _run_thinking_browser_action(
+            page, tool_input, default_url=base_url, scanner_policy=scanner_policy
+        )
+        body = str(result.get("body") or "")
+
+        # Persist the (now possibly authenticated) browser state into the vault so
+        # http_request and later browser calls reuse it. Handles modal logins with
+        # no URL route: log in interactively, then capture_session to carry the cookies.
+        capture_label = tool_input.get("capture_session")
+        if isinstance(capture_label, str) and capture_label.strip():
             try:
-                resp = await hx.get(url)
-                body = resp.text[:8192]
-                return (
-                    f"Page: {url}\n"
-                    f"Status: {resp.status_code}\n"
-                    f"Headers: {dict(resp.headers)}\n"
-                    f"Body ({len(resp.text)} chars):\n{body}"
+                cookies = {c["name"]: c["value"] for c in await ctx.cookies()}
+                extra = (selected or {}).get("extra_headers") or {}
+                rec = session_svc.upsert_session(
+                    run_id,
+                    label=capture_label.strip(),
+                    kind="browser_captured",
+                    source="alice_browser",
+                    cookies=cookies,
+                    extra_headers=extra,
+                    metadata={"captured_from": result.get("url")},
+                    run_kind="api" if api_run_id is not None else "web",
+                )
+                session_vault[rec.label] = {
+                    "label": rec.label,
+                    "kind": "browser_captured",
+                    "cookies": cookies,
+                    "extra_headers": extra,
+                }
+                body += (
+                    f"\n\n[Session captured as '{rec.label}' "
+                    f"with {len(cookies)} cookie(s). Use use_session='{rec.label}'.]"
                 )
             except Exception as exc:
-                return f"Browser fetch failed: {exc}"
+                body += f"\n\n[Session capture failed: {exc}]"
+        return body
 
     # ── update_lead ───────────────────────────────────────────────────────────
     if tool_name == "update_lead":
@@ -1158,6 +1277,9 @@ async def run_alice_turn_stream(
             _finding_hooks.pop(run_id, None)
         except Exception:
             pass
+        # Close the live browser opened for any `browser` tool calls this turn.
+        # Captured sessions persist in the vault/DB, so auth survives the teardown.
+        await _close_alice_browser(run_id)
 
     # 5. Emit done event
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
@@ -2110,6 +2232,7 @@ async def run_api_alice_turn_stream(
                         scope_check_fn=_scope_fn,
                         context_tool_fn=_ctx_fn,
                         post_probe_fn=_post_probe_fn,
+                        api_run_id=api_run_id,
                     )
                 except Exception as exc:
                     log.warning(
