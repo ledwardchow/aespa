@@ -4,7 +4,7 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aespa"
-version = "0.5.20260616.3"
+version = "0.5.20260617.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
