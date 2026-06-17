@@ -330,12 +330,16 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+# Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
+_LLM_HEADERS = {"HTTP-Referer": "https://aespa.leddytech.com", "X-Title": "AESPA"}
+
+
 def _llm_client_kwargs() -> dict:
     """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
     proxy = _llm_proxy_var.get()
     return {
         "http_client": httpx.AsyncClient(
-            verify=False, **{"proxy": proxy} if proxy else {}
+            verify=False, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
         )
     }
 
@@ -343,6 +347,7 @@ def _llm_client_kwargs() -> dict:
 def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     """Creates an httpx client for direct LLM calls, always with verify=False."""
     kwargs.setdefault("verify", False)
+    kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
     if proxy := _llm_proxy_var.get():
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
@@ -1109,7 +1114,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     if config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+        verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
     )
     client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
@@ -2934,7 +2939,7 @@ async def _call_with_tools(
         if config.base_url:
             _g_http_opts["base_url"] = config.base_url
         _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+            verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
         )
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
