@@ -3633,6 +3633,47 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
         await _authenticate_auto(page, login_url, credential)
 
 
+# Elements that open a modal/drawer login form on pages with no dedicated
+# login route. Tried in order; first visible one is clicked.
+_LOGIN_TRIGGER_SELECTORS = [
+    "a:has-text('Log in')",
+    "button:has-text('Log in')",
+    "a:has-text('Sign in')",
+    "button:has-text('Sign in')",
+    "a:has-text('Login')",
+    "button:has-text('Login')",
+    "a[href*='login' i]",
+    "[class*='login' i]",
+    "[id*='login' i]",
+]
+
+
+async def _reveal_login_form(page) -> None:
+    """Click a login trigger to reveal a modal login form, if no form is visible.
+
+    Handles sites where the login dialog has no URL route — navigating to the
+    login_url lands on an ordinary page and the form only appears after clicking
+    a "Log in"/"Sign in" control. No-op (cheap) when a form is already present.
+    """
+    try:
+        pw = page.locator("input[type='password']").first
+        if await pw.count() > 0 and await pw.is_visible():
+            return
+    except Exception:
+        return
+
+    for sel in _LOGIN_TRIGGER_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                await loc.click()
+                await page.wait_for_timeout(800)
+                log.info("  _authenticate: clicked login trigger %r", sel)
+                return
+        except Exception:
+            pass
+
+
 async def _authenticate_auto(page, login_url: str, credential) -> None:
     """Best-effort form-based login."""
     try:
@@ -3642,6 +3683,9 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         except Exception:
             log.warning("  _authenticate: no <input> visible at %s", login_url)
         await page.wait_for_timeout(300)
+
+        # Modal logins with no URL route: reveal the form before looking for fields.
+        await _reveal_login_form(page)
 
         # Fill username
         username_filled = False

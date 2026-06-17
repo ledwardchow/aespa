@@ -283,6 +283,51 @@ def test_page_requires_login_detects_explicit_login_wall_text():
     assert asyncio.run(crawler._page_requires_login(page, "https://target.local/login")) is True
 
 
+class _ModalLoginPage:
+    """Password field is hidden until a login trigger is clicked (modal login)."""
+
+    def __init__(self):
+        self._form_visible = False
+        self.clicked = None
+
+    def locator(self, selector):
+        page = self
+
+        class _Loc:
+            async def count(self):
+                if selector == "input[type='password']":
+                    return 1
+                return 1  # any trigger selector "exists"
+
+            async def is_visible(self):
+                if selector == "input[type='password']":
+                    return page._form_visible
+                return page.clicked is None  # trigger visible until clicked
+
+            async def click(self):
+                page.clicked = selector
+                page._form_visible = True
+
+        return _FakeLocatorRoot(_Loc())
+
+    async def wait_for_timeout(self, ms):  # noqa: ARG002
+        return None
+
+
+def test_reveal_login_form_clicks_trigger_when_no_form_visible():
+    page = _ModalLoginPage()
+    asyncio.run(crawler._reveal_login_form(page))
+    assert page.clicked is not None
+    assert page._form_visible is True
+
+
+def test_reveal_login_form_noop_when_form_already_visible():
+    page = _ModalLoginPage()
+    page._form_visible = True
+    asyncio.run(crawler._reveal_login_form(page))
+    assert page.clicked is None
+
+
 def test_auth_check_matches_similar_post_login_page():
     snapshot = {
         "title": "Dashboard",

@@ -859,6 +859,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "wait: state or ms."
                     ),
                 },
+                "capture_session": {
+                    "type": "string",
+                    "description": (
+                        "Optional label. After running steps, save the browser's current "
+                        "cookies as a reusable session under this label (e.g. after an "
+                        "interactive/modal login). Reuse it later via use_session."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
