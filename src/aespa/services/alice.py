@@ -1116,14 +1116,17 @@ async def run_alice_turn_stream(
                 if not text_content:
                     continue
 
-                # Parse out <thinking>...</thinking> from text if model embeds it there
+                # Parse out <think>/<thinking> reasoning if model embeds it inline
+                # (minimax m3, DeepSeek-R1, QwQ, etc. use the short <think> form).
                 think_match = _re.search(
-                    r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL
+                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
+                    text_content, _re.DOTALL | _re.IGNORECASE,
                 )
                 if think_match:
                     think_part = think_match.group(1).strip()
                     outer_text = _re.sub(
-                        r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL
+                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
+                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
                     ).strip()
                     if think_part:
                         accumulated_thought += think_part
@@ -2124,12 +2127,14 @@ async def run_api_alice_turn_stream(
                 if not text_content:
                     continue
                 think_match = _re.search(
-                    r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL
+                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
+                    text_content, _re.DOTALL | _re.IGNORECASE,
                 )
                 if think_match:
                     think_part = think_match.group(1).strip()
                     outer_text = _re.sub(
-                        r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL
+                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
+                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
                     ).strip()
                     if think_part:
                         accumulated_thought += think_part
