@@ -1307,6 +1307,14 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     post_finding_fn = _make_post_finding_fn(api_run_id)
     persist_credential_fn = _make_persist_credential_fn(collection_id, api_run_id)
 
+    # Register the post-finding coverage hook in the shared registry that
+    # _persist_dynamic_finding actually fires (covers test-lead + specialist
+    # paths). The post_finding_fn parameter alone is never invoked by the loop;
+    # without this, API findings never flip their work-program cells. Mirrors
+    # web's _do_thinking_scan. ponytail: popped in the finally below.
+    from aespa.services.scanner import _finding_hooks
+    _finding_hooks[api_run_id] = post_finding_fn
+
     events_svc.emit(
         api_run_id,
         {
@@ -1480,6 +1488,13 @@ async def _api_scan_task(api_run_id: int) -> None:
         _stop_requested.discard(api_run_id)
         # Clean up endpoint cache regardless of outcome.
         _endpoint_cache.pop(api_run_id, None)
+        # Drop the post-finding coverage hook registered in _do_api_thinking_scan.
+        try:
+            from aespa.services.scanner import _finding_hooks
+
+            _finding_hooks.pop(api_run_id, None)
+        except Exception:
+            pass
 
 
 def _update_run_status(api_run_id: int, status: str, error: str | None = None) -> None:
