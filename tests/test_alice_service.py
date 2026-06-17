@@ -448,3 +448,77 @@ async def test_alice_http_request_anonymous_when_vault_empty(db_session, test_da
 
     assert captured["cookies"] == {}
     assert "Authorization" not in captured["headers"]
+
+
+@pytest.mark.anyio
+async def test_alice_browser_captures_session_into_vault(db_session, test_data):
+    """The browser tool drives a live page and, with capture_session, persists the
+    resulting cookies into the vault + DB so later calls reuse the authenticated session."""
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services import scanner_sessions as session_svc
+
+    run = test_data["run"]
+    vault: dict = {}
+
+    fake_ctx = AsyncMock()
+    fake_ctx.cookies = AsyncMock(return_value=[{"name": "sid", "value": "abc123"}])
+    fake_page = MagicMock()
+
+    async def fake_get_browser(_run_id, api_run_id=None):
+        return fake_page, fake_ctx
+
+    async def fake_run_action(page, action, default_url, scanner_policy):  # noqa: ARG001
+        return {"body": "Final URL: http://target.local/admin\nLogged in.", "url": "http://target.local/admin"}
+
+    with patch("aespa.services.alice._get_alice_browser", fake_get_browser), \
+         patch("aespa.services.scanner._run_thinking_browser_action", fake_run_action):
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="browser",
+            tool_input={
+                "steps": [
+                    {"op": "goto", "url": "http://target.local/"},
+                    {"op": "click", "selector": "button:has-text('Log in')"},
+                    {"op": "fill", "selector": "#user", "value": "admin"},
+                    {"op": "click", "selector": "button[type=submit]"},
+                ],
+                "capture_session": "modal_admin",
+            },
+            step=1,
+            session_vault=vault,
+        )
+
+    # Cookies injected into the in-memory vault for the rest of the turn.
+    assert vault["modal_admin"]["cookies"] == {"sid": "abc123"}
+    assert "[Session captured as 'modal_admin'" in result
+    # And persisted to the DB so a fresh vault load sees it.
+    reloaded = session_svc.load_session_vault(run.id)
+    assert reloaded["modal_admin"]["cookies"] == {"sid": "abc123"}
+
+
+@pytest.mark.anyio
+async def test_alice_browser_blocks_out_of_scope_goto_step(db_session, test_data):
+    """A goto step pointing outside scope is rejected before any browser launch."""
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+
+    def _boom(_run_id, api_run_id=None):  # pragma: no cover - must never be called
+        raise AssertionError("browser must not launch for out-of-scope steps")
+
+    with patch("aespa.services.alice._get_alice_browser", _boom):
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="browser",
+            tool_input={"steps": [{"op": "goto", "url": "http://evil.example/"}]},
+            step=1,
+            session_vault={},
+        )
+
+    assert "[SCOPE BLOCK]" in result
