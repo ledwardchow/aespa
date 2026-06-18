@@ -480,11 +480,13 @@ def import_site(session: Session, bundle: dict) -> Site:
             old_pid = o.get("page_id")
             if old_pid is not None:
                 o["page_id"] = page_id_map.get(old_pid, old_pid)
-            # finding_ids_json is a JSON list of ScanFinding.id — remap each.
+            # finding_ids_json is a JSON list of ScanFinding.id — remap each,
+            # dropping ids with no exported finding (stale rows left behind by
+            # finding deletes) so the cell never points at a wrong/missing one.
             try:
                 old_fids = json.loads(o.get("finding_ids_json") or "[]")
                 o["finding_ids_json"] = json.dumps(
-                    [finding_id_map.get(fid, fid) for fid in old_fids]
+                    [finding_id_map[fid] for fid in old_fids if fid in finding_id_map]
                 )
             except Exception:
                 o["finding_ids_json"] = "[]"

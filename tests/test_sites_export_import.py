@@ -55,7 +55,8 @@ def test_roundtrip_includes_run_children(session):
 
     session.add(PageOwaspTest(
         test_run_id=run.id, page_id=page.id, owasp_category="A01",
-        status="finding", finding_ids_json=json.dumps([finding.id]),
+        # 99999 is a stale id (deleted finding) — must be dropped on import.
+        status="finding", finding_ids_json=json.dumps([finding.id, 99999]),
     ))
     session.add(ScanCheckpoint(test_run_id=run.id, step_count=7))
     session.add(AgentLog(test_run_id=run.id, run_kind="web", agent_id="scanner", role="test_lead", status="active"))
