@@ -66,7 +66,7 @@ Severity calibration:
 Severity levels: critical, high, medium, low, info
 OWASP categories: A01 (Broken Access Control), A02 (Cryptographic Failures), \
 A03 (Injection), A04 (Insecure Design), A05 (Security Misconfiguration), \
-A06 (Vulnerable Components), A07 (Auth Failures), A08 (Data Integrity), \
+A06 (Supply Chain), A07 (Auth Failures), A08 (Data Integrity), \
 A09 (Logging/Monitoring), A10 (SSRF)
 
 Be conservative — only report confirmed or highly likely issues, not theoretical ones.
