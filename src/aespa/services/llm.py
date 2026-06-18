@@ -1,4 +1,5 @@
 """Abstract LLM client wrappers for configured provider APIs."""
+
 from __future__ import annotations
 
 import asyncio
@@ -52,10 +53,12 @@ log = logging.getLogger("aespa.llm")
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
-_llm_proxy_var: ContextVar[str | None] = ContextVar('_llm_proxy', default=None)
-_run_id_var: ContextVar[int | None] = ContextVar('_run_id', default=None)
-_emit_fn_var: ContextVar[Any | None] = ContextVar('_emit_fn', default=None)
-_last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar('last_call_tokens', default=None)
+_llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
+_run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
+_emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
+_last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
+    "last_call_tokens", default=None
+)
 
 # Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
 _run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
@@ -66,21 +69,22 @@ _run_token_seeded: set[int] = set()
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
 
+
 class AsyncTokenBucketLimiter:
     def __init__(self, tpm: int, rpm: Optional[int] = None):
         self.tpm = tpm
         self.rpm = rpm
-        
+
         self.max_tokens = float(tpm)
         self.tokens_per_second = tpm / 60.0
         self.available_tokens = float(tpm)
         self.last_token_update = time.monotonic()
-        
+
         self.max_requests = float(rpm) if rpm else 0.0
         self.requests_per_second = (rpm / 60.0) if rpm else 0.0
         self.available_requests = float(rpm) if rpm else 0.0
         self.last_request_update = time.monotonic()
-        
+
         self._lock = asyncio.Lock()
 
     async def acquire(self, estimated_tokens: int) -> bool:
@@ -88,60 +92,61 @@ class AsyncTokenBucketLimiter:
         while True:
             async with self._lock:
                 now = time.monotonic()
-                
+
                 # Refill tokens
                 elapsed_tokens = now - self.last_token_update
                 self.available_tokens = min(
                     self.max_tokens,
-                    self.available_tokens + (elapsed_tokens * self.tokens_per_second)
+                    self.available_tokens + (elapsed_tokens * self.tokens_per_second),
                 )
                 self.last_token_update = now
-                
+
                 # Refill request slots
                 if self.rpm:
                     elapsed_requests = now - self.last_request_update
                     self.available_requests = min(
                         self.max_requests,
-                        self.available_requests + (elapsed_requests * self.requests_per_second)
+                        self.available_requests
+                        + (elapsed_requests * self.requests_per_second),
                     )
                     self.last_request_update = now
 
                 # Check availability
                 tokens_ready = self.available_tokens >= estimated_tokens
                 requests_ready = not self.rpm or self.available_requests >= 1.0
-                
+
                 if tokens_ready and requests_ready:
                     self.available_tokens -= estimated_tokens
                     if self.rpm:
                         self.available_requests -= 1.0
                     return slept
-                
+
                 wait_time_tokens = 0.0
                 if not tokens_ready:
                     needed_tokens = estimated_tokens - self.available_tokens
                     wait_time_tokens = needed_tokens / self.tokens_per_second
-                
+
                 wait_time_requests = 0.0
                 if self.rpm and not requests_ready:
                     needed_requests = 1.0 - self.available_requests
                     wait_time_requests = needed_requests / self.requests_per_second
-                
+
                 wait_time = max(wait_time_tokens, wait_time_requests)
                 slept = True
-                
-            await asyncio.sleep(wait_time)
 
+            await asyncio.sleep(wait_time)
 
     async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
         async with self._lock:
             difference = estimated_tokens - actual_tokens
             self.available_tokens = min(
-                self.max_tokens,
-                max(0.0, self.available_tokens + difference)
+                self.max_tokens, max(0.0, self.available_tokens + difference)
             )
 
 
-def estimate_tokens(prompt: str, screenshot_b64: Optional[str] = None, provider: str = "openai") -> int:
+def estimate_tokens(
+    prompt: str, screenshot_b64: Optional[str] = None, provider: str = "openai"
+) -> int:
     text_tokens = int((len(prompt) / 4.0) * 1.1)
     vision_tokens = 0
     if screenshot_b64:
@@ -156,34 +161,34 @@ def estimate_tokens(prompt: str, screenshot_b64: Optional[str] = None, provider:
 
 _limiters: dict[str, AsyncTokenBucketLimiter] = {}
 
+
 def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimiter]:
     if config.provider_id is None:
         return None
-    
+
     key = f"{config.provider}:{config.model}"
     try:
         from sqlmodel import Session
 
         from aespa.db import get_engine
         from aespa.models import LLMProviderConfig
-        
+
         with Session(get_engine()) as session:
             provider = session.get(LLMProviderConfig, config.provider_id)
             if not provider or (not provider.max_tpm and not provider.max_rpm):
                 _limiters.pop(key, None)
                 return None
-            
+
             tpm = provider.max_tpm or 10_000_000
             rpm = provider.max_rpm
-            
+
             limiter = _limiters.get(key)
             if not limiter or limiter.tpm != tpm or limiter.rpm != rpm:
                 _limiters[key] = AsyncTokenBucketLimiter(tpm=tpm, rpm=rpm)
     except Exception as e:
         log.warning(f"Failed to lookup rate limit for provider: {e}")
-        
-    return _limiters.get(key)
 
+    return _limiters.get(key)
 
 
 def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
@@ -193,6 +198,7 @@ def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
 
         from aespa.db import get_engine
         from aespa.models import TestRun
+
         with _Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
             if run and run.token_usage_json:
@@ -209,6 +215,7 @@ def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
 
         from aespa.db import get_engine
         from aespa.models import TestRun
+
         with _Session(get_engine()) as s:
             run = s.get(TestRun, run_id)
             if run:
@@ -234,7 +241,12 @@ def set_run_context(run_id: int, emit_fn: Any) -> None:
             bucket = _run_token_usage.setdefault(run_id, {})
             for model, counts in existing.items():
                 if model not in bucket:
-                    bucket[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+                    bucket[model] = {
+                        "input": 0,
+                        "output": 0,
+                        "cache_read": 0,
+                        "cache_write": 0,
+                    }
                 for k in ("input", "output", "cache_read", "cache_write"):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
         _run_token_seeded.add(run_id)
@@ -253,15 +265,16 @@ def _record_usage(
     cache_write_tokens: int = 0,
 ) -> None:
     """Accumulate token counts for the active run and fire a SSE event."""
-    _last_call_tokens_var.set({
-        "input": input_tokens + cache_read_tokens,
-        "output": output_tokens
-    })
+    _last_call_tokens_var.set(
+        {"input": input_tokens + cache_read_tokens, "output": output_tokens}
+    )
     run_id = _run_id_var.get()
     if run_id is None:
         return
     bucket = _run_token_usage.setdefault(run_id, {})
-    entry = bucket.setdefault(model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    entry = bucket.setdefault(
+        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    )
     entry["input"] += input_tokens
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
@@ -274,21 +287,23 @@ def _record_usage(
             total_out = sum(v["output"] for v in bucket.values())
             total_cache_read = sum(v.get("cache_read", 0) for v in bucket.values())
             total_cache_write = sum(v.get("cache_write", 0) for v in bucket.values())
-            emit_fn({
-                "type": "token_usage_update",
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read_tokens,
-                "cache_write_tokens": cache_write_tokens,
-                "totals": {
-                    "total_input": total_in,
-                    "total_output": total_out,
-                    "total_cache_read": total_cache_read,
-                    "total_cache_write": total_cache_write,
-                    "by_model": {m: dict(v) for m, v in bucket.items()},
-                },
-            })
+            emit_fn(
+                {
+                    "type": "token_usage_update",
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_write_tokens": cache_write_tokens,
+                    "totals": {
+                        "total_input": total_in,
+                        "total_output": total_out,
+                        "total_cache_read": total_cache_read,
+                        "total_cache_write": total_cache_write,
+                        "by_model": {m: dict(v) for m, v in bucket.items()},
+                    },
+                }
+            )
         except Exception:
             pass
 
@@ -315,18 +330,28 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+# Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
+_LLM_HEADERS = {"HTTP-Referer": "https://aespa.leddytech.com", "X-Title": "AESPA"}
+
+
 def _llm_client_kwargs() -> dict:
     """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
     proxy = _llm_proxy_var.get()
-    return {"http_client": httpx.AsyncClient(verify=False, **{"proxy": proxy} if proxy else {})}
+    return {
+        "http_client": httpx.AsyncClient(
+            verify=False, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
+        )
+    }
 
 
 def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     """Creates an httpx client for direct LLM calls, always with verify=False."""
     kwargs.setdefault("verify", False)
+    kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
     if proxy := _llm_proxy_var.get():
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
+
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 ANALYSE_RESULTS_TEXT_BUDGET = 80_000
@@ -345,11 +370,15 @@ def _strip_thinking_blocks(raw: str) -> str:
     text = raw
     block_tags = ("think", "thinking", "reasoning", "thought")
     for tag in block_tags:
-        text = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE
+        )
 
     # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
     # closing tag when they are interrupted near the final JSON.
-    text = re.sub(r"(?is)^\s*(?:reasoning|thinking|thought)\s*:\s*.*?(?=[\[{])", "", text)
+    text = re.sub(
+        r"(?is)^\s*(?:reasoning|thinking|thought)\s*:\s*.*?(?=[\[{])", "", text
+    )
     return text
 
 
@@ -376,14 +405,16 @@ def _extract_json(raw: str, expect: type = list) -> Any:
         pass
 
     # Find the first balanced JSON container matching `expect` that parses.
-    open_ch  = "[" if expect is list else "{"
+    open_ch = "[" if expect is list else "{"
     close_ch = "]" if expect is list else "}"
     starts = [i for i, ch in enumerate(text) if ch == open_ch]
     if not starts:
         # Stripped text has no JSON delimiters — the model may have embedded the answer
         # inside a thinking block.  Try searching the un-stripped original text so we can
         # still extract JSON that appears within <think>...</think> tags.
-        raw_no_fence = re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+        raw_no_fence = (
+            re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+        )
         alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
         if alt_starts:
             text = raw_no_fence
@@ -451,7 +482,9 @@ def _normalize_thinking_action(action: Any) -> Any:
     return normalized
 
 
-PageCategories = dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
+PageCategories = (
+    dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
+)
 
 _EMPTY_CATS: PageCategories = {
     "req_auth": None,
@@ -461,8 +494,16 @@ _EMPTY_CATS: PageCategories = {
 }
 
 OWASP_WEB_CATEGORIES: list[str] = [
-    "A01", "A02", "A03", "A04", "A05",
-    "A06", "A07", "A08", "A09", "A10",
+    "A01",
+    "A02",
+    "A03",
+    "A04",
+    "A05",
+    "A06",
+    "A07",
+    "A08",
+    "A09",
+    "A10",
 ]
 
 OWASP_WEB_LABELS: dict[str, str] = {
@@ -471,7 +512,7 @@ OWASP_WEB_LABELS: dict[str, str] = {
     "A03": "Injection",
     "A04": "Insecure Design",
     "A05": "Security Misconfiguration",
-    "A06": "Vulnerable & Outdated Components",
+    "A06": "Software & Data Supply Chain Failures",
     "A07": "Identification & Auth Failures",
     "A08": "Software & Data Integrity Failures",
     "A09": "Security Logging & Monitoring Failures",
@@ -567,7 +608,9 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         links = data.get("suggested_links") or []
         if not isinstance(links, list):
             links = []
-        safe_links = [str(l) for l in links if isinstance(l, str) and l.startswith("http")]
+        safe_links = [
+            str(l) for l in links if isinstance(l, str) and l.startswith("http")
+        ]
         # Parse categories — each value coerced to bool or None
         raw_cats = data.get("categories") or {}
         cats: PageCategories = {}
@@ -619,12 +662,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     if slept and run_id is not None:
         try:
             from aespa.services import events
-            events.emit(run_id, {
-                "type": "scanner_phase",
-                "phase": "rate_limit",
-                "status": "active",
-                "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
-            })
+
+            events.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "rate_limit",
+                    "status": "active",
+                    "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
+                },
+            )
         except Exception:
             pass
 
@@ -657,12 +704,16 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         if slept and run_id is not None:
             try:
                 from aespa.services import events
-                events.emit(run_id, {
-                    "type": "scanner_phase",
-                    "phase": "rate_limit",
-                    "status": "complete",
-                    "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
-                })
+
+                events.emit(
+                    run_id,
+                    {
+                        "type": "scanner_phase",
+                        "phase": "rate_limit",
+                        "status": "complete",
+                        "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
+                    },
+                )
             except Exception:
                 pass
 
@@ -670,8 +721,6 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     except Exception:
         await limiter.reconcile(total_estimated, 0)
         raise
-
-
 
 
 async def plain_completion(config: LLMConfig, prompt: str) -> str:
@@ -697,7 +746,11 @@ async def stream_chat_completion(
         async with client.messages.stream(
             model=config.model,
             max_tokens=config.max_tokens,
-            **({'temperature': config.temperature} if config.temperature is not None else {}),
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
+            ),
             system=[{"type": "text", "text": system_message}],
             messages=formatted_messages,
         ) as stream:
@@ -711,10 +764,9 @@ async def stream_chat_completion(
         converse_messages = []
         for m in messages:
             if m.get("role") in ("user", "assistant"):
-                converse_messages.append({
-                    "role": m["role"],
-                    "content": [{"text": m["content"]}]
-                })
+                converse_messages.append(
+                    {"role": m["role"], "content": [{"text": m["content"]}]}
+                )
         system_list = [{"text": system_message}]
 
         if config.api_key:
@@ -735,7 +787,9 @@ async def stream_chat_completion(
             }
             try:
                 async with _make_llm_http_client(timeout=120) as client:
-                    async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    async with client.stream(
+                        "POST", url, headers=headers, json=payload
+                    ) as response:
                         response.raise_for_status()
                         async for line in response.aiter_lines():
                             line = line.strip()
@@ -776,7 +830,11 @@ async def stream_chat_completion(
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+                _boto_cfg = (
+                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
+                    if _proxy_url
+                    else None
+                )
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
@@ -803,7 +861,9 @@ async def stream_chat_completion(
                             if "contentBlockDelta" in chunk:
                                 delta = chunk["contentBlockDelta"]["delta"]
                                 if "text" in delta:
-                                    loop.call_soon_threadsafe(q.put_nowait, ("text", delta["text"]))
+                                    loop.call_soon_threadsafe(
+                                        q.put_nowait, ("text", delta["text"])
+                                    )
                     loop.call_soon_threadsafe(q.put_nowait, ("done", None))
                 except Exception as e:
                     loop.call_soon_threadsafe(q.put_nowait, ("error", e))
@@ -844,16 +904,19 @@ async def stream_chat_completion(
             "messages": formatted_messages,
             "stream": True,
         }
-        
+
         try:
             response = await client.chat.completions.create(**call_kwargs)
             async for chunk in response:
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                if (
+                    chunk.choices
+                    and chunk.choices[0].delta
+                    and chunk.choices[0].delta.content
+                ):
                     yield chunk.choices[0].delta.content
         except Exception as e:
             log.exception("Error in OpenAI-compatible stream completion")
             raise RuntimeError(f"OpenAI-compatible stream failed: {e}") from e
-
 
 
 def _content_part_text(part: Any) -> str:
@@ -976,13 +1039,18 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
         retry_kwargs = dict(kwargs)
         changed = False
 
-        if "max_tokens" in retry_kwargs and ("max_tokens" in message or "max completion" in message):
+        if "max_tokens" in retry_kwargs and (
+            "max_tokens" in message or "max completion" in message
+        ):
             retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
             changed = True
         if "temperature" in retry_kwargs and "temperature" in message:
             retry_kwargs.pop("temperature", None)
             changed = True
-        if "tool_choice" in retry_kwargs and any(term in message for term in ("tool_choice", "tool choice", "thinking mode", "thinking_mode")):
+        if "tool_choice" in retry_kwargs and any(
+            term in message
+            for term in ("tool_choice", "tool choice", "thinking mode", "thinking_mode")
+        ):
             retry_kwargs.pop("tool_choice", None)
             changed = True
 
@@ -998,28 +1066,42 @@ def _extract_first_choice_text(resp: Any) -> str:
     return _extract_message_text(getattr(choices[0], "message", None))
 
 
-async def _anthropic(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _anthropic(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     import anthropic as _ant
 
     client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
     content: list = []
     if screenshot_b64:
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": screenshot_b64},
-        })
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": screenshot_b64,
+                },
+            }
+        )
     content.append({"type": "text", "text": prompt})
     resp = await client.messages.create(
         model=config.model,
         max_tokens=config.max_tokens,
-        **({'temperature': config.temperature} if config.temperature is not None else {}),
+        **(
+            {"temperature": config.temperature}
+            if config.temperature is not None
+            else {}
+        ),
         messages=[{"role": "user", "content": content}],
     )
-    _record_usage(config.model,
-                  getattr(resp.usage, "input_tokens", 0),
-                  getattr(resp.usage, "output_tokens", 0),
-                  cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-                  cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
+    _record_usage(
+        config.model,
+        getattr(resp.usage, "input_tokens", 0),
+        getattr(resp.usage, "output_tokens", 0),
+        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+    )
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
@@ -1032,15 +1114,17 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     if config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+        verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
     )
     client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
     if screenshot_b64:
-        parts.append(types.Part.from_bytes(
-            data=base64.b64decode(screenshot_b64),
-            mime_type="image/png",
-        ))
+        parts.append(
+            types.Part.from_bytes(
+                data=base64.b64decode(screenshot_b64),
+                mime_type="image/png",
+            )
+        )
     parts.append(prompt)
 
     resp = await client.aio.models.generate_content(
@@ -1048,17 +1132,25 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         contents=parts,
         config=types.GenerateContentConfig(
             max_output_tokens=config.max_tokens,
-            **({'temperature': config.temperature} if config.temperature is not None else {}),
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
+            ),
         ),
     )
     _um = getattr(resp, "usage_metadata", None)
-    _record_usage(config.model,
-                  getattr(_um, "prompt_token_count", 0) if _um else 0,
-                  getattr(_um, "candidates_token_count", 0) if _um else 0)
+    _record_usage(
+        config.model,
+        getattr(_um, "prompt_token_count", 0) if _um else 0,
+        getattr(_um, "candidates_token_count", 0) if _um else 0,
+    )
     return resp.text or ""
 
 
-async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _openai_compat(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     from openai import AsyncOpenAI
 
     kwargs: dict = {"api_key": config.api_key or "not-needed"}
@@ -1074,7 +1166,10 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
 
     if screenshot_b64:
         msg_content: object = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
             {"type": "text", "text": prompt},
         ]
     else:
@@ -1089,23 +1184,38 @@ async def _openai_compat(config: LLMConfig, prompt: str, screenshot_b64: Optiona
         ),
     )
     _u = getattr(resp, "usage", None)
-    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
-    _record_usage(config.model,
-                  getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0,
-                  cache_read_tokens=_u_cached)
+    _u_cached = (
+        getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0)
+        if _u
+        else 0
+    )
+    _record_usage(
+        config.model,
+        getattr(_u, "prompt_tokens", 0) if _u else 0,
+        getattr(_u, "completion_tokens", 0) if _u else 0,
+        cache_read_tokens=_u_cached,
+    )
     return _extract_first_choice_text(resp)
 
 
-async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _openrouter(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     from openai import AsyncOpenAI
 
-    _or_kwargs: dict = {"api_key": config.api_key, "base_url": OPENROUTER_BASE_URL, **_llm_client_kwargs()}
+    _or_kwargs: dict = {
+        "api_key": config.api_key,
+        "base_url": OPENROUTER_BASE_URL,
+        **_llm_client_kwargs(),
+    }
     client = AsyncOpenAI(**_or_kwargs)
 
     if screenshot_b64:
         msg_content: object = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
             {"type": "text", "text": prompt},
         ]
     else:
@@ -1120,15 +1230,23 @@ async def _openrouter(config: LLMConfig, prompt: str, screenshot_b64: Optional[s
         ),
     )
     _u = getattr(resp, "usage", None)
-    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
-    _record_usage(config.model,
-                  getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0,
-                  cache_read_tokens=_u_cached)
+    _u_cached = (
+        getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0)
+        if _u
+        else 0
+    )
+    _record_usage(
+        config.model,
+        getattr(_u, "prompt_tokens", 0) if _u else 0,
+        getattr(_u, "completion_tokens", 0) if _u else 0,
+        cache_read_tokens=_u_cached,
+    )
     return _extract_first_choice_text(resp)
 
 
-async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _azure_openai(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     from openai import AsyncAzureOpenAI
 
     _az_kwargs: dict = {
@@ -1141,7 +1259,10 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
 
     if screenshot_b64:
         msg_content: object = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
             {"type": "text", "text": prompt},
         ]
     else:
@@ -1156,11 +1277,17 @@ async def _azure_openai(config: LLMConfig, prompt: str, screenshot_b64: Optional
         ),
     )
     _u = getattr(resp, "usage", None)
-    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
-    _record_usage(config.model,
-                  getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0,
-                  cache_read_tokens=_u_cached)
+    _u_cached = (
+        getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0)
+        if _u
+        else 0
+    )
+    _record_usage(
+        config.model,
+        getattr(_u, "prompt_tokens", 0) if _u else 0,
+        getattr(_u, "completion_tokens", 0) if _u else 0,
+        cache_read_tokens=_u_cached,
+    )
     return _extract_first_choice_text(resp)
 
 
@@ -1190,7 +1317,10 @@ async def _azure_foundry_openai(
 
     if screenshot_b64:
         msg_content: object = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
             {"type": "text", "text": prompt},
         ]
     else:
@@ -1205,11 +1335,17 @@ async def _azure_foundry_openai(
         ),
     )
     _u = getattr(resp, "usage", None)
-    _u_cached = getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0
-    _record_usage(config.model,
-                  getattr(_u, "prompt_tokens", 0) if _u else 0,
-                  getattr(_u, "completion_tokens", 0) if _u else 0,
-                  cache_read_tokens=_u_cached)
+    _u_cached = (
+        getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0)
+        if _u
+        else 0
+    )
+    _record_usage(
+        config.model,
+        getattr(_u, "prompt_tokens", 0) if _u else 0,
+        getattr(_u, "completion_tokens", 0) if _u else 0,
+        cache_read_tokens=_u_cached,
+    )
     return _extract_first_choice_text(resp)
 
 
@@ -1234,14 +1370,16 @@ async def _azure_foundry_anthropic(
     """Azure AI Foundry Claude deployments that expose Anthropic Messages semantics."""
     content: list[dict[str, Any]] = []
     if screenshot_b64:
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": screenshot_b64,
-            },
-        })
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": screenshot_b64,
+                },
+            }
+        )
     content.append({"type": "text", "text": prompt})
 
     payload: dict[str, Any] = {
@@ -1267,17 +1405,25 @@ async def _azure_foundry_anthropic(
         resp.raise_for_status()
         data = resp.json()
     _af_u = data.get("usage", {})
-    _record_usage(config.model, _af_u.get("input_tokens", 0), _af_u.get("output_tokens", 0),
-                  cache_read_tokens=_af_u.get("cache_read_input_tokens", 0),
-                  cache_write_tokens=_af_u.get("cache_creation_input_tokens", 0))
-    return "".join(_content_part_text(block) for block in (data.get("content") or [])).strip()
+    _record_usage(
+        config.model,
+        _af_u.get("input_tokens", 0),
+        _af_u.get("output_tokens", 0),
+        cache_read_tokens=_af_u.get("cache_read_input_tokens", 0),
+        cache_write_tokens=_af_u.get("cache_creation_input_tokens", 0),
+    )
+    return "".join(
+        _content_part_text(block) for block in (data.get("content") or [])
+    ).strip()
 
 
 def _extract_bedrock_text(data: dict[str, Any]) -> str:
-    content = (((data.get("output") or {}).get("message") or {}).get("content") or [])
+    content = ((data.get("output") or {}).get("message") or {}).get("content") or []
     if not isinstance(content, list):
         return ""
-    return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+    return "".join(
+        part.get("text", "") for part in content if isinstance(part, dict)
+    ).strip()
 
 
 def _bedrock_region_from_url(base_url: str) -> str:
@@ -1285,18 +1431,24 @@ def _bedrock_region_from_url(base_url: str) -> str:
     return match.group(1) if match else "us-east-1"
 
 
-async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
+async def _bedrock(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
     if config.api_key and not config.base_url:
-        raise ValueError("Amazon Bedrock Runtime endpoint is required when using an API key")
+        raise ValueError(
+            "Amazon Bedrock Runtime endpoint is required when using an API key"
+        )
 
     content: list[dict[str, Any]] = []
     if screenshot_b64:
-        content.append({
-            "image": {
-                "format": "png",
-                "source": {"bytes": screenshot_b64},
+        content.append(
+            {
+                "image": {
+                    "format": "png",
+                    "source": {"bytes": screenshot_b64},
+                }
             }
-        })
+        )
     content.append({"text": prompt})
 
     _infer_cfg: dict[str, Any] = {"maxTokens": config.max_tokens}
@@ -1327,7 +1479,11 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         def _run_sync() -> dict:
             _session_kwargs = {"profile_name": profile} if profile else {}
             _session = boto3.Session(**_session_kwargs)
-            _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+            _boto_cfg = (
+                _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
+                if _proxy_url
+                else None
+            )
             _client = _session.client(
                 "bedrock-runtime",
                 region_name=region,
@@ -1344,9 +1500,13 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         loop = _aio.get_event_loop()
         data = await loop.run_in_executor(None, _run_sync)
         _bd_u = data.get("usage", {})
-        _record_usage(config.model, _bd_u.get("inputTokens", 0), _bd_u.get("outputTokens", 0),
-                      cache_read_tokens=_bd_u.get("cacheReadInputTokens", 0),
-                      cache_write_tokens=_bd_u.get("cacheWriteInputTokens", 0))
+        _record_usage(
+            config.model,
+            _bd_u.get("inputTokens", 0),
+            _bd_u.get("outputTokens", 0),
+            cache_read_tokens=_bd_u.get("cacheReadInputTokens", 0),
+            cache_write_tokens=_bd_u.get("cacheWriteInputTokens", 0),
+        )
         return _extract_bedrock_text(data)
 
     if not config.base_url:
@@ -1364,9 +1524,13 @@ async def _bedrock(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
         resp.raise_for_status()
         _resp_data = resp.json()
     _bd_u2 = _resp_data.get("usage", {})
-    _record_usage(config.model, _bd_u2.get("inputTokens", 0), _bd_u2.get("outputTokens", 0),
-                  cache_read_tokens=_bd_u2.get("cacheReadInputTokens", 0),
-                  cache_write_tokens=_bd_u2.get("cacheWriteInputTokens", 0))
+    _record_usage(
+        config.model,
+        _bd_u2.get("inputTokens", 0),
+        _bd_u2.get("outputTokens", 0),
+        cache_read_tokens=_bd_u2.get("cacheReadInputTokens", 0),
+        cache_write_tokens=_bd_u2.get("cacheWriteInputTokens", 0),
+    )
     return _extract_bedrock_text(_resp_data)
 
 
@@ -1378,7 +1542,7 @@ def _build_users_section(users: list[dict] | None) -> str:
         return ""
     lines = [
         "Available test users:",
-        "Use the \"as_user\" field with one of these usernames to send a probe authenticated as that user.",
+        'Use the "as_user" field with one of these usernames to send a probe authenticated as that user.',
         "This is essential for testing broken access control (A01) — e.g. accessing admin resources",
         "as a regular user, or accessing another user's data.",
         "",
@@ -1396,9 +1560,7 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
         user_note = ""
         if users:
             usernames = ", ".join(f'"{u["username"]}"' for u in users)
-            user_note = (
-                f"\n  • Set 'as_user' on IDOR probes to test cross-user access: use {usernames}."
-            )
+            user_note = f"\n  • Set 'as_user' on IDOR probes to test cross-user access: use {usernames}."
         sections.append(
             "OBJECT REFERENCE — HIGH PRIORITY (A01):\n"
             "This page contains or may use object IDs. Examine every object reference location, "
@@ -1430,7 +1592,7 @@ def _build_category_guidance(categories: dict, users: list[dict] | None = None) 
             "  • Error/union/order probes: ' UNION SELECT NULL--, 1' ORDER BY 999--\n"
             "  • Low-impact timing probes: 1 AND SLEEP(1)--, '; WAITFOR DELAY '0:0:1'--, 1); SELECT pg_sleep(1)--\n"
             "XSS coverage to include when applicable:\n"
-            "  • HTML/script contexts: <script>alert(1)</script>, \"><script>alert(1)</script>\n"
+            '  • HTML/script contexts: <script>alert(1)</script>, "><script>alert(1)</script>\n'
             "  • Attribute breakouts: \"><img src=x onerror=alert(1)>, ' autofocus onfocus=alert(1) x='\n"
             "  • SVG/event handlers: <svg onload=alert(1)>, <details open ontoggle=alert(1)>\n"
             "  • Encoded/url contexts: javascript:alert(1), %3Cscript%3Ealert(1)%3C/script%3E\n"
@@ -1519,7 +1681,9 @@ async def plan_probes(
         takes_input=categories.get("takes_input"),
         has_object_ref=categories.get("has_object_ref"),
         has_business_logic=categories.get("has_business_logic"),
-        applicable=", ".join(applicable_checks) if applicable_checks else "general checks only",
+        applicable=", ".join(applicable_checks)
+        if applicable_checks
+        else "general checks only",
         users_section=_build_users_section(users),
         category_guidance=_build_category_guidance(categories, users=users),
         xss_canary_section=xss_canary_section,
@@ -1531,7 +1695,11 @@ async def plan_probes(
             return []
         # Include "idor" probes so that as_user set by the LLM is preserved when the
         # scanner expands them into concrete HTTP requests.
-        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")]
+        return [
+            p
+            for p in probes
+            if isinstance(p, dict) and p.get("type") in ("http", "form", "idor")
+        ]
     except Exception as _exc:
         log.warning(
             "plan_probes: failed to extract probe list from LLM response (%s). "
@@ -1613,10 +1781,14 @@ async def _analyse_probe_batch(
     raw = await _call(config, prompt, None)
     try:
         findings = parse_reporting_findings(raw or "")
-        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", findings)
+        _capture_reporting_replay(
+            config, url, result_texts, prompt, raw or "", findings
+        )
         return findings
     except Exception as exc:
-        _capture_reporting_replay(config, url, result_texts, prompt, raw or "", [], parse_error=str(exc))
+        _capture_reporting_replay(
+            config, url, result_texts, prompt, raw or "", [], parse_error=str(exc)
+        )
         log.warning(
             "analyse_probes: failed to extract findings from LLM response (%s). "
             "Raw response (first 500 chars): %r",
@@ -1657,7 +1829,11 @@ def parse_reporting_findings(raw: str) -> list[dict]:
         "affected_url",
         "evidence",
     }
-    return [finding for finding in findings if isinstance(finding, dict) and required.issubset(finding)]
+    return [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and required.issubset(finding)
+    ]
 
 
 def parse_reporting_finding(raw: str) -> dict:
@@ -1729,7 +1905,9 @@ async def replay_reporting_writeup_capture(
 ) -> dict[str, Any]:
     """Replay one captured during-scan finding writeup through the reporting prompt."""
     if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
-        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+        raise ValueError(
+            f"unsupported reporting capture schema: {capture.get('schema')!r}"
+        )
     finding = capture.get("finding")
     if not isinstance(finding, dict):
         raise ValueError("writeup capture must contain finding")
@@ -1768,17 +1946,25 @@ async def replay_reporting_capture(
 ) -> dict[str, Any]:
     """Replay one captured reporting prompt payload through the configured LLM."""
     if capture.get("schema") != REPORTING_REPLAY_SCHEMA:
-        raise ValueError(f"unsupported reporting capture schema: {capture.get('schema')!r}")
+        raise ValueError(
+            f"unsupported reporting capture schema: {capture.get('schema')!r}"
+        )
     url = str(capture.get("url") or "")
     result_texts = capture.get("result_texts")
-    if not url or not isinstance(result_texts, list) or not all(isinstance(x, str) for x in result_texts):
+    if (
+        not url
+        or not isinstance(result_texts, list)
+        or not all(isinstance(x, str) for x in result_texts)
+    ):
         raise ValueError("capture must contain url and result_texts")
     if use_saved_prompt and prompt_template is None:
         prompt = str(capture.get("prompt") or "")
         if not prompt:
             raise ValueError("capture does not contain a saved prompt")
     else:
-        prompt = build_reporting_analyse_prompt(url, result_texts, prompt_template=prompt_template)
+        prompt = build_reporting_analyse_prompt(
+            url, result_texts, prompt_template=prompt_template
+        )
     raw = await _call(config, prompt, None)
     findings = parse_reporting_findings(raw or "")
     return {
@@ -1904,7 +2090,11 @@ async def plan_followup_probes(
         probes = _extract_json(raw or "", expect=list)
         if not isinstance(probes, list):
             return []
-        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+        return [
+            p
+            for p in probes
+            if isinstance(p, dict) and p.get("type") in ("http", "form")
+        ]
     except Exception:
         return []
 
@@ -1914,8 +2104,10 @@ async def plan_followup_probes(
 
 async def normalize_finding_titles(
     config: "LLMConfig",
-    existing_findings: list[dict],   # [{"title": ..., "owasp_category": ..., "severity": ...}]
-    new_findings: list[dict],        # raw finding dicts from analyse_probes
+    existing_findings: list[
+        dict
+    ],  # [{"title": ..., "owasp_category": ..., "severity": ...}]
+    new_findings: list[dict],  # raw finding dicts from analyse_probes
 ) -> list[dict]:
     """Return new_findings with titles normalised against existing ones.
 
@@ -1930,7 +2122,11 @@ async def normalize_finding_titles(
     )
     new_list = "\n".join(
         f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
-        + (f"\n     desc: {(f.get('description') or '')[:120]}" if f.get('description') else "")
+        + (
+            f"\n     desc: {(f.get('description') or '')[:120]}"
+            if f.get("description")
+            else ""
+        )
         for i, f in enumerate(new_findings)
     )
 
@@ -1958,7 +2154,6 @@ async def normalize_finding_titles(
 
 
 # ── LLM-directed (thinking) scan ─────────────────────────────────────────────
-
 
 
 def select_wstg_skills(
@@ -2008,11 +2203,7 @@ def select_wstg_skills(
     has_auth_pages = (
         requires_auth
         or any(p.get("req_auth") for p in pages)
-        or any(
-            frag in url
-            for frag in _AUTH_PATH_FRAGMENTS
-            for url in page_urls_lower
-        )
+        or any(frag in url for frag in _AUTH_PATH_FRAGMENTS for url in page_urls_lower)
         or "token_hint" in intel_kinds
     )
     if has_auth_pages:
@@ -2026,7 +2217,9 @@ def select_wstg_skills(
     # so gate this on credential-endpoint URLs — NOT the broad has_auth_pages,
     # which is true for any authenticated area (dashboards, /account, /admin).
     has_credential_endpoint = (
-        bool(login_url.strip())  # a configured login URL is itself a credential endpoint
+        bool(
+            login_url.strip()
+        )  # a configured login URL is itself a credential endpoint
         or any(
             frag in url
             for frag in _CREDENTIAL_PATH_FRAGMENTS
@@ -2042,10 +2235,7 @@ def select_wstg_skills(
         or "id" in intel_kinds
         or any("/api/" in url for url in page_urls_lower)
         or any(
-            part.isdigit()
-            for url in page_urls_lower
-            for part in url.split("/")
-            if part
+            part.isdigit() for url in page_urls_lower for part in url.split("/") if part
         )
     )
     if has_object_refs:
@@ -2056,9 +2246,23 @@ def select_wstg_skills(
     # (avatar/logo by URL, import/preview, webhook config, PDF/report export) in
     # parameter names and URLs — not just the canonical SSRF param-name list.
     _SSRF_FEATURE_FRAGMENTS = (
-        "webhook", "callback", "redirect", "proxy", "import", "fetch",
-        "preview", "unfurl", "avatar", "logo", "thumbnail", "screenshot",
-        "/pdf", "/report", "/export", "/render", "remote",
+        "webhook",
+        "callback",
+        "redirect",
+        "proxy",
+        "import",
+        "fetch",
+        "preview",
+        "unfurl",
+        "avatar",
+        "logo",
+        "thumbnail",
+        "screenshot",
+        "/pdf",
+        "/report",
+        "/export",
+        "/render",
+        "remote",
     )
     has_ssrf_params = (
         any(key in _SSRF_PARAM_NAMES for key in intel_keys_lower)
@@ -2085,14 +2289,19 @@ def select_wstg_skills(
         selected.add("cors")
 
     # ── Business logic / multi-step flows ─────────────────────────────────────
-    has_business_logic = (
-        any(p.get("has_business_logic") for p in pages)
-        or any(
-            frag in url
-            for frag in ("/checkout", "/payment", "/order", "/cart",
-                         "/transfer", "/confirm", "/submit", "/approve")
-            for url in page_urls_lower
+    has_business_logic = any(p.get("has_business_logic") for p in pages) or any(
+        frag in url
+        for frag in (
+            "/checkout",
+            "/payment",
+            "/order",
+            "/cart",
+            "/transfer",
+            "/confirm",
+            "/submit",
+            "/approve",
         )
+        for url in page_urls_lower
     )
     if has_business_logic:
         selected.add("workflow")
@@ -2138,19 +2347,20 @@ TOOL_RESULT_CHAR_LIMIT = 8_000
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
 # wire format or the Bedrock Converse toolConfig format.
-AGENTIC_LOOP_PROVIDERS = frozenset({
-    "anthropic",
-    "azure_foundry_anthropic",
-    "bedrock",
-    "openai",
-    "openai_compatible",
-    "openrouter",
-    "azure_openai",
-    "azure_foundry",
-    "azure_foundry_openai",
-    "google",
-})
-
+AGENTIC_LOOP_PROVIDERS = frozenset(
+    {
+        "anthropic",
+        "azure_foundry_anthropic",
+        "bedrock",
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+        "google",
+    }
+)
 
 
 def _with_anthropic_cache(
@@ -2173,7 +2383,10 @@ def _with_anthropic_cache(
 
         if content_list:
             # Attach cache_control to the last block in the content array
-            content_list[-1] = {**content_list[-1], "cache_control": {"type": "ephemeral"}}
+            content_list[-1] = {
+                **content_list[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
             last_msg["content"] = content_list
             cached_messages[-1] = last_msg
 
@@ -2182,7 +2395,10 @@ def _with_anthropic_cache(
         cached_tools = [dict(t) for t in tools]
         if cached_tools:
             # Attach cache_control to the last tool definition
-            cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+            cached_tools[-1] = {
+                **cached_tools[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
 
     return cached_messages, cached_tools
 
@@ -2216,8 +2432,18 @@ async def _call_with_tools(
         resp = await client.messages.create(
             model=config.model,
             max_tokens=config.max_tokens,
-            **({'temperature': config.temperature} if config.temperature is not None else {}),
-            system=[{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
+            ),
+            system=[
+                {
+                    "type": "text",
+                    "text": system_message,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             tools=cached_tools,
             messages=cached_messages,
         )
@@ -2231,11 +2457,13 @@ async def _call_with_tools(
             }
             for b in (resp.content or [])
         ]
-        _record_usage(config.model,
-                      getattr(resp.usage, "input_tokens", 0),
-                      getattr(resp.usage, "output_tokens", 0),
-                      cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-                      cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0))
+        _record_usage(
+            config.model,
+            getattr(resp.usage, "input_tokens", 0),
+            getattr(resp.usage, "output_tokens", 0),
+            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
+            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+        )
         return blocks, resp.stop_reason or "end_turn", resp.content
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
@@ -2244,7 +2472,13 @@ async def _call_with_tools(
         payload = {
             "model": config.model,
             "max_tokens": config.max_tokens,
-            "system": [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}],
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_message,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "tools": cached_tools,
             "messages": cached_messages,
         }
@@ -2276,9 +2510,13 @@ async def _call_with_tools(
             for b in content
         ]
         _cwt_u = data.get("usage", {})
-        _record_usage(config.model, _cwt_u.get("input_tokens", 0), _cwt_u.get("output_tokens", 0),
-                      cache_read_tokens=_cwt_u.get("cache_read_input_tokens", 0),
-                      cache_write_tokens=_cwt_u.get("cache_creation_input_tokens", 0))
+        _record_usage(
+            config.model,
+            _cwt_u.get("input_tokens", 0),
+            _cwt_u.get("output_tokens", 0),
+            cache_read_tokens=_cwt_u.get("cache_read_input_tokens", 0),
+            cache_write_tokens=_cwt_u.get("cache_creation_input_tokens", 0),
+        )
         return blocks, data.get("stop_reason") or "end_turn", content
 
     # ── AWS Bedrock (Converse API with toolConfig) ────────────────────────────
@@ -2291,7 +2529,9 @@ async def _call_with_tools(
                     "toolSpec": {
                         "name": t["name"],
                         "description": t.get("description", ""),
-                        "inputSchema": {"json": t.get("input_schema", {"type": "object"})},
+                        "inputSchema": {
+                            "json": t.get("input_schema", {"type": "object"})
+                        },
                     }
                 }
                 for t in _active_tools
@@ -2309,23 +2549,27 @@ async def _call_with_tools(
                 if btype == "text":
                     cvt.append({"text": blk.get("text") or ""})
                 elif btype == "tool_use":
-                    cvt.append({
-                        "toolUse": {
-                            "toolUseId": blk.get("id") or "",
-                            "name": blk.get("name") or "",
-                            "input": blk.get("input") or {},
+                    cvt.append(
+                        {
+                            "toolUse": {
+                                "toolUseId": blk.get("id") or "",
+                                "name": blk.get("name") or "",
+                                "input": blk.get("input") or {},
+                            }
                         }
-                    })
+                    )
                 elif btype == "tool_result":
                     result_content = blk.get("content") or ""
-                    cvt.append({
-                        "toolResult": {
-                            "toolUseId": blk.get("tool_use_id") or "",
-                            "content": [{"text": result_content}]
-                            if isinstance(result_content, str)
-                            else result_content,
+                    cvt.append(
+                        {
+                            "toolResult": {
+                                "toolUseId": blk.get("tool_use_id") or "",
+                                "content": [{"text": result_content}]
+                                if isinstance(result_content, str)
+                                else result_content,
+                            }
                         }
-                    })
+                    )
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
@@ -2395,7 +2639,11 @@ async def _call_with_tools(
                 profile = os.getenv("AWS_PROFILE")
                 session_kwargs = {"profile_name": profile} if profile else {}
                 session = boto3.Session(**session_kwargs)
-                _boto_cfg = _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url}) if _proxy_url else None
+                _boto_cfg = (
+                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
+                    if _proxy_url
+                    else None
+                )
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
@@ -2418,30 +2666,45 @@ async def _call_with_tools(
             data = await loop.run_in_executor(None, _run_converse)
         stop_reason_raw = data.get("stopReason") or "end_turn"
         stop_reason = "tool_use" if stop_reason_raw == "tool_use" else "end_turn"
-        out_content = (
-            ((data.get("output") or {}).get("message") or {}).get("content") or []
-        )
+        out_content = ((data.get("output") or {}).get("message") or {}).get(
+            "content"
+        ) or []
         blocks: list[dict] = []
         for blk in out_content:
             if "text" in blk:
-                blocks.append({"type": "text", "id": None, "name": None,
-                                "input": None, "text": blk["text"]})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": blk["text"],
+                    }
+                )
             elif "toolUse" in blk:
                 tu = blk["toolUse"]
-                blocks.append({"type": "tool_use", "id": tu.get("toolUseId"),
-                                "name": tu.get("name"), "input": tu.get("input") or {},
-                                "text": None})
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tu.get("toolUseId"),
+                        "name": tu.get("name"),
+                        "input": tu.get("input") or {},
+                        "text": None,
+                    }
+                )
         # Store as Anthropic-format so the messages list stays consistent
         raw_content_ant = [
-            {"type": b["type"], **{
-                k: v for k, v in b.items() if k != "type"
-            }}
+            {"type": b["type"], **{k: v for k, v in b.items() if k != "type"}}
             for b in blocks
         ]
         _bdt_u = data.get("usage", {})
-        _record_usage(config.model, _bdt_u.get("inputTokens", 0), _bdt_u.get("outputTokens", 0),
-                      cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
-                      cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0))
+        _record_usage(
+            config.model,
+            _bdt_u.get("inputTokens", 0),
+            _bdt_u.get("outputTokens", 0),
+            cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
+            cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0),
+        )
         return blocks, stop_reason, raw_content_ant
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
@@ -2471,22 +2734,30 @@ async def _call_with_tools(
                 continue
             if role == "user":
                 tool_results = [b for b in content if b.get("type") == "tool_result"]
-                text_blocks  = [b for b in content if b.get("type") == "text"]
+                text_blocks = [b for b in content if b.get("type") == "text"]
                 if tool_results:
                     for tr in tool_results:
                         rc = tr.get("content") or ""
-                        result.append({
-                            "role": "tool",
-                            "tool_call_id": tr.get("tool_use_id") or "",
-                            "content": rc if isinstance(rc, str) else json.dumps(rc),
-                        })
+                        result.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tr.get("tool_use_id") or "",
+                                "content": rc
+                                if isinstance(rc, str)
+                                else json.dumps(rc),
+                            }
+                        )
                 elif text_blocks:
-                    result.append({
-                        "role": "user",
-                        "content": " ".join(b.get("text", "") for b in text_blocks),
-                    })
+                    result.append(
+                        {
+                            "role": "user",
+                            "content": " ".join(b.get("text", "") for b in text_blocks),
+                        }
+                    )
             elif role == "assistant":
-                text_parts    = [b.get("text", "") for b in content if b.get("type") == "text"]
+                text_parts = [
+                    b.get("text", "") for b in content if b.get("type") == "text"
+                ]
                 tool_use_blks = [b for b in content if b.get("type") == "tool_use"]
                 oai_msg: dict = {
                     "role": "assistant",
@@ -2508,15 +2779,23 @@ async def _call_with_tools(
         return result
 
     if config.provider in (
-        "openai", "openai_compatible", "openrouter",
-        "azure_openai", "azure_foundry", "azure_foundry_openai",
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
     ):
         from openai import AsyncOpenAI
 
         client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
         if config.provider == "openrouter":
             client_kwargs["base_url"] = OPENROUTER_BASE_URL
-        elif config.provider in ("azure_openai", "azure_foundry", "azure_foundry_openai"):
+        elif config.provider in (
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+        ):
             base = (config.base_url or "").rstrip("/")
             client_kwargs["base_url"] = (
                 _azure_foundry_openai_base_url(base)
@@ -2542,7 +2821,11 @@ async def _call_with_tools(
         # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
         if not getattr(config, "force_tool_choice", True):
             pass
-        elif "r1" in model_lower or "reasoner" in model_lower or "thinking" in model_lower:
+        elif (
+            "r1" in model_lower
+            or "reasoner" in model_lower
+            or "thinking" in model_lower
+        ):
             # Reasoning/thinking models do not support forced tool choice
             pass
         else:
@@ -2553,27 +2836,42 @@ async def _call_with_tools(
         finish = getattr(choice, "finish_reason", None) or "stop"
         blocks = []
         if msg.content:
-            blocks.append({"type": "text", "id": None, "name": None,
-                            "input": None, "text": msg.content})
-        for tc in (getattr(msg, "tool_calls", None) or []):
+            blocks.append(
+                {
+                    "type": "text",
+                    "id": None,
+                    "name": None,
+                    "input": None,
+                    "text": msg.content,
+                }
+            )
+        for tc in getattr(msg, "tool_calls", None) or []:
             try:
                 inp = json.loads(tc.function.arguments)
             except Exception:
                 inp = {}
-            blocks.append({
-                "type": "tool_use",
-                "id": tc.id,
-                "name": tc.function.name,
-                "input": inp,
-                "text": None,
-            })
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": inp,
+                    "text": None,
+                }
+            )
         stop_reason = "tool_use" if finish == "tool_calls" else "end_turn"
         _oai_u = getattr(resp, "usage", None)
-        _oai_cached = getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0) if _oai_u else 0
-        _record_usage(config.model,
-                      getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
-                      getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
-                      cache_read_tokens=_oai_cached)
+        _oai_cached = (
+            getattr(getattr(_oai_u, "prompt_tokens_details", None), "cached_tokens", 0)
+            if _oai_u
+            else 0
+        )
+        _record_usage(
+            config.model,
+            getattr(_oai_u, "prompt_tokens", 0) if _oai_u else 0,
+            getattr(_oai_u, "completion_tokens", 0) if _oai_u else 0,
+            cache_read_tokens=_oai_cached,
+        )
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
@@ -2609,21 +2907,29 @@ async def _call_with_tools(
                             parts.append(_gtypes.Part(text=blk.get("text") or ""))
                         elif btype == "tool_use":
                             _ts = blk.get("thought_signature")
-                            parts.append(_gtypes.Part(
-                                function_call=_gtypes.FunctionCall(
-                                    name=blk.get("name") or "",
-                                    args=blk.get("input") or {},
-                                ),
-                                **({'thought_signature': _ts} if _ts is not None else {}),
-                            ))
+                            parts.append(
+                                _gtypes.Part(
+                                    function_call=_gtypes.FunctionCall(
+                                        name=blk.get("name") or "",
+                                        args=blk.get("input") or {},
+                                    ),
+                                    **(
+                                        {"thought_signature": _ts}
+                                        if _ts is not None
+                                        else {}
+                                    ),
+                                )
+                            )
                         elif btype == "tool_result":
                             rc = blk.get("content") or ""
-                            parts.append(_gtypes.Part(
-                                function_response=_gtypes.FunctionResponse(
-                                    name=blk.get("tool_use_id") or "",
-                                    response={"result": rc},
+                            parts.append(
+                                _gtypes.Part(
+                                    function_response=_gtypes.FunctionResponse(
+                                        name=blk.get("tool_use_id") or "",
+                                        response={"result": rc},
+                                    )
                                 )
-                            ))
+                            )
                 if parts:
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
@@ -2633,7 +2939,7 @@ async def _call_with_tools(
         if config.base_url:
             _g_http_opts["base_url"] = config.base_url
         _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=False, **({"proxy": _g_proxy} if _g_proxy else {})
+            verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
         )
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
@@ -2645,33 +2951,46 @@ async def _call_with_tools(
                 system_instruction=system_message,
                 tools=g_tools,
                 max_output_tokens=config.max_tokens,
-                **({'temperature': config.temperature} if config.temperature is not None else {}),
+                **(
+                    {"temperature": config.temperature}
+                    if config.temperature is not None
+                    else {}
+                ),
             ),
         )
         blocks = []
-        for part in (g_resp.candidates[0].content.parts if g_resp.candidates else []):
+        for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:
             if getattr(part, "text", None):
-                blocks.append({"type": "text", "id": None, "name": None,
-                                "input": None, "text": part.text})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": part.text,
+                    }
+                )
             elif getattr(part, "function_call", None):
                 fc = part.function_call
-                blocks.append({
-                    "type": "tool_use",
-                    "id": fc.name,   # Gemini doesn't issue call IDs; use name
-                    "name": fc.name,
-                    "input": dict(fc.args) if fc.args else {},
-                    "text": None,
-                    "thought_signature": getattr(part, "thought_signature", None),
-                })
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": fc.name,  # Gemini doesn't issue call IDs; use name
+                        "name": fc.name,
+                        "input": dict(fc.args) if fc.args else {},
+                        "text": None,
+                        "thought_signature": getattr(part, "thought_signature", None),
+                    }
+                )
         stop_reason = (
-            "tool_use"
-            if any(b["type"] == "tool_use" for b in blocks)
-            else "end_turn"
+            "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
         _g_um = getattr(g_resp, "usage_metadata", None)
-        _record_usage(config.model,
-                      getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
-                      getattr(_g_um, "candidates_token_count", 0) if _g_um else 0)
+        _record_usage(
+            config.model,
+            getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
+            getattr(_g_um, "candidates_token_count", 0) if _g_um else 0,
+        )
         return blocks, stop_reason, blocks
 
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
@@ -2716,236 +3035,281 @@ async def thinking_agentic_loop(
     consecutive_text_only_turns = 0
 
     try:
-      while True:
-        if stop_check and stop_check():
-            break
+        while True:
+            if stop_check and stop_check():
+                break
 
-        if emit_fn:
-            try:
-                emit_fn({
-                    "type": "scanner_phase",
-                    "phase": "thinking_step",
-                    "status": "deciding",
-                    "message": (
-                        f"Step {tool_call_count + 1}: "
-                        "LLM deciding next action\u2026"
-                    ),
-                    "data": {
-                        "step": tool_call_count + 1,
-                        "mode": "agentic",
-                    },
-                })
-            except Exception:
-                pass
-
-        try:
             if emit_fn:
                 try:
-                    emit_fn({
-                        "type": "scanner_phase",
-                        "phase": "llm_request",
-                        "status": "pending",
-                        "message": (
-                            f"Step {tool_call_count + 1}: sending to LLM "
-                            f"({len(messages)} messages in context)\u2026"
-                        ),
-                        "data": {
-                            "step": tool_call_count + 1,
-                            "message_count": len(messages),
-                        },
-                    })
+                    emit_fn(
+                        {
+                            "type": "scanner_phase",
+                            "phase": "thinking_step",
+                            "status": "deciding",
+                            "message": (
+                                f"Step {tool_call_count + 1}: "
+                                "LLM deciding next action\u2026"
+                            ),
+                            "data": {
+                                "step": tool_call_count + 1,
+                                "mode": "agentic",
+                            },
+                        }
+                    )
                 except Exception:
                     pass
-            _step_no = tool_call_count + 1
-            _t_llm = time.monotonic()
-            _llm_fut = asyncio.ensure_future(
-                _call_with_tools(config, system_message, messages, tools=tools)
-            )
-            while True:
-                _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
-                if _done:
-                    break
-                _elapsed = int(time.monotonic() - _t_llm)
+
+            try:
                 if emit_fn:
                     try:
-                        emit_fn({
-                            "type": "scanner_phase",
-                            "phase": "llm_heartbeat",
-                            "status": "pending",
-                            "message": (
-                                f"Step {_step_no}: waiting for LLM response "
-                                f"({_elapsed}s elapsed)\u2026"
-                            ),
-                        })
+                        emit_fn(
+                            {
+                                "type": "scanner_phase",
+                                "phase": "llm_request",
+                                "status": "pending",
+                                "message": (
+                                    f"Step {tool_call_count + 1}: sending to LLM "
+                                    f"({len(messages)} messages in context)\u2026"
+                                ),
+                                "data": {
+                                    "step": tool_call_count + 1,
+                                    "message_count": len(messages),
+                                },
+                            }
+                        )
                     except Exception:
                         pass
-            content_blocks, stop_reason, raw_content = _llm_fut.result()
-        except Exception as exc:
-            log.error(
-                "thinking_agentic_loop: API error at step %d: %s",
-                tool_call_count + 1, exc,
-            )
-            _exc_resp = getattr(exc, "response", None)
-            _exc_code = (_exc_resp.get("Error", {}).get("Code", "") if isinstance(_exc_resp, dict) else type(exc).__name__)
-            _is_expired = "ExpiredToken" in _exc_code or "ExpiredToken" in type(exc).__name__ or "expired" in str(exc).lower()
-            if emit_fn:
-                try:
-                    if _is_expired:
-                        _msg = (
-                            f"Step {tool_call_count + 1}: AWS credentials have expired. "
-                            "Please refresh your AWS credentials and resume the pentest."
+                _step_no = tool_call_count + 1
+                _t_llm = time.monotonic()
+                _llm_fut = asyncio.ensure_future(
+                    _call_with_tools(config, system_message, messages, tools=tools)
+                )
+                while True:
+                    _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
+                    if _done:
+                        break
+                    _elapsed = int(time.monotonic() - _t_llm)
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_heartbeat",
+                                    "status": "pending",
+                                    "message": (
+                                        f"Step {_step_no}: waiting for LLM response "
+                                        f"({_elapsed}s elapsed)\u2026"
+                                    ),
+                                }
+                            )
+                        except Exception:
+                            pass
+                content_blocks, stop_reason, raw_content = _llm_fut.result()
+            except Exception as exc:
+                log.error(
+                    "thinking_agentic_loop: API error at step %d: %s",
+                    tool_call_count + 1,
+                    exc,
+                )
+                _exc_resp = getattr(exc, "response", None)
+                _exc_code = (
+                    _exc_resp.get("Error", {}).get("Code", "")
+                    if isinstance(_exc_resp, dict)
+                    else type(exc).__name__
+                )
+                _is_expired = (
+                    "ExpiredToken" in _exc_code
+                    or "ExpiredToken" in type(exc).__name__
+                    or "expired" in str(exc).lower()
+                )
+                if emit_fn:
+                    try:
+                        if _is_expired:
+                            _msg = (
+                                f"Step {tool_call_count + 1}: AWS credentials have expired. "
+                                "Please refresh your AWS credentials and resume the pentest."
+                            )
+                        else:
+                            _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                        emit_fn(
+                            {
+                                "type": "scanner_phase",
+                                "phase": "llm_response",
+                                "status": "error",
+                                "message": _msg,
+                                "data": {
+                                    "step": tool_call_count + 1,
+                                    "error": str(exc),
+                                },
+                            }
                         )
-                    else:
-                        _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
-                    emit_fn({
-                        "type": "scanner_phase",
-                        "phase": "llm_response",
-                        "status": "error",
-                        "message": _msg,
-                        "data": {"step": tool_call_count + 1, "error": str(exc)},
-                    })
+                    except Exception:
+                        pass
+                break
+
+            tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+            text_blocks = [
+                b for b in content_blocks if b.get("type") == "text" and b.get("text")
+            ]
+
+            if emit_fn:
+                action_label = (
+                    ", ".join(b["name"] for b in tool_use_blocks)
+                    if tool_use_blocks
+                    else "end_turn"
+                )
+                try:
+                    emit_fn(
+                        {
+                            "type": "scanner_phase",
+                            "phase": "llm_response",
+                            "status": "complete",
+                            "message": f"Step {tool_call_count + 1}: LLM \u2192 {action_label}",
+                            "data": {
+                                "step": tool_call_count + 1,
+                                "raw_response": "\n".join(
+                                    b.get("text", "") for b in text_blocks
+                                )[:4000],
+                            },
+                        }
+                    )
                 except Exception:
                     pass
-            break
 
-        tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
-        text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
+            # Append the assistant turn to the growing conversation
+            messages.append({"role": "assistant", "content": raw_content})
 
-        if emit_fn:
-            action_label = (
-                ", ".join(b["name"] for b in tool_use_blocks)
-                if tool_use_blocks else "end_turn"
-            )
-            try:
-                emit_fn({
-                    "type": "scanner_phase",
-                    "phase": "llm_response",
-                    "status": "complete",
-                    "message": f"Step {tool_call_count + 1}: LLM \u2192 {action_label}",
-                    "data": {
-                        "step": tool_call_count + 1,
-                        "raw_response": "\n".join(
-                            b.get("text", "") for b in text_blocks
-                        )[:4000],
-                    },
-                })
-            except Exception:
-                pass
-
-        # Append the assistant turn to the growing conversation
-        messages.append({"role": "assistant", "content": raw_content})
-
-        if not tool_use_blocks:
-            # OpenAI-style reasoning models occasionally narrate the next step instead
-            # of emitting the required tool call. Treat that as a recoverable protocol
-            # slip; only the explicit `done` tool is allowed to finish the scan.
-            if text_blocks:
-                final_summary = (text_blocks[-1].get("text") or "")[:500]
-            consecutive_text_only_turns += 1
-            if consecutive_text_only_turns >= 3:
-                log.warning(
-                    "thinking_agentic_loop: model returned %d consecutive text-only "
-                    "turns; ending assessment.",
-                    consecutive_text_only_turns,
+            if not tool_use_blocks:
+                # OpenAI-style reasoning models occasionally narrate the next step instead
+                # of emitting the required tool call. Treat that as a recoverable protocol
+                # slip; only the explicit `done` tool is allowed to finish the scan.
+                if text_blocks:
+                    final_summary = (text_blocks[-1].get("text") or "")[:500]
+                consecutive_text_only_turns += 1
+                if consecutive_text_only_turns >= 3:
+                    log.warning(
+                        "thinking_agentic_loop: model returned %d consecutive text-only "
+                        "turns; ending assessment.",
+                        consecutive_text_only_turns,
+                    )
+                    break
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Your previous response did not call a tool, so no scan action "
+                                    "was executed. Continue by calling exactly one tool now. Use "
+                                    "http_request, browser, context_tool, write_finding, forge_jwt, "
+                                    "decode_jwt, credential_check, or register_account for the next "
+                                    "assessment step. Call done only if the assessment is genuinely "
+                                    "complete and key attack areas have been covered."
+                                ),
+                            }
+                        ],
+                    }
                 )
-                break
-            messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        "Your previous response did not call a tool, so no scan action "
-                        "was executed. Continue by calling exactly one tool now. Use "
-                        "http_request, browser, context_tool, write_finding, forge_jwt, "
-                        "decode_jwt, credential_check, or register_account for the next "
-                        "assessment step. Call done only if the assessment is genuinely "
-                        "complete and key attack areas have been covered."
-                    ),
-                }],
-            })
-            continue
-        consecutive_text_only_turns = 0
+                continue
+            consecutive_text_only_turns = 0
 
-        # Execute each tool call and collect results for the next user message
-        tool_results = []
-        session_done = False
+            # Execute each tool call and collect results for the next user message
+            tool_results = []
+            session_done = False
 
-        for block in tool_use_blocks:
-            tool_call_count += 1
-            tool_name = block.get("name") or ""
-            tool_input = block.get("input") or {}
-            tool_use_id = block.get("id") or ""
+            for block in tool_use_blocks:
+                tool_call_count += 1
+                tool_name = block.get("name") or ""
+                tool_input = block.get("input") or {}
+                tool_use_id = block.get("id") or ""
 
-            if stop_check and stop_check():
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": "Scan stopped by user.",
-                })
-                session_done = True
-                break
-
-            if tool_name == "done":
-                final_summary = str(tool_input.get("summary") or "")
-                if done_check:
-                    try:
-                        done_ok, done_feedback = done_check(tool_input, tool_call_count)
-                    except Exception as exc:
-                        log.warning("thinking_agentic_loop: done_check failed: %s", exc)
-                        done_ok, done_feedback = True, ""
-                    if not done_ok:
-                        tool_results.append({
+                if stop_check and stop_check():
+                    tool_results.append(
+                        {
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": (
-                                done_feedback
-                                or "Assessment is not complete. Continue with one concrete tool call."
-                            ),
-                        })
-                        session_done = False
-                        break
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": "Assessment complete.",
-                })
-                session_done = True
+                            "content": "Scan stopped by user.",
+                        }
+                    )
+                    session_done = True
+                    break
+
+                if tool_name == "done":
+                    final_summary = str(tool_input.get("summary") or "")
+                    if done_check:
+                        try:
+                            done_ok, done_feedback = done_check(
+                                tool_input, tool_call_count
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "thinking_agentic_loop: done_check failed: %s", exc
+                            )
+                            done_ok, done_feedback = True, ""
+                        if not done_ok:
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id,
+                                    "content": (
+                                        done_feedback
+                                        or "Assessment is not complete. Continue with one concrete tool call."
+                                    ),
+                                }
+                            )
+                            session_done = False
+                            break
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": "Assessment complete.",
+                        }
+                    )
+                    session_done = True
+                    break
+
+                try:
+                    result_str = await tool_executor(
+                        tool_name, tool_input, tool_call_count
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "thinking_agentic_loop: tool %r step %d error: %s",
+                        tool_name,
+                        tool_call_count,
+                        exc,
+                    )
+                    result_str = f"Tool execution error: {exc}"
+
+                limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+                if len(result_str) > limit:
+                    omitted = len(result_str) - limit
+                    result_str = (
+                        result_str[:limit]
+                        + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
+                    )
+
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_str,
+                    }
+                )
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+
+            if on_checkpoint:
+                try:
+                    await on_checkpoint(messages)
+                except Exception:
+                    pass  # checkpoint write failures must never abort the scan
+
+            if session_done:
                 break
-
-            try:
-                result_str = await tool_executor(tool_name, tool_input, tool_call_count)
-            except Exception as exc:
-                log.warning(
-                    "thinking_agentic_loop: tool %r step %d error: %s",
-                    tool_name, tool_call_count, exc,
-                )
-                result_str = f"Tool execution error: {exc}"
-
-            limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
-            if len(result_str) > limit:
-                omitted = len(result_str) - limit
-                result_str = (
-                    result_str[:limit]
-                    + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
-                )
-
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": result_str,
-            })
-
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-
-        if on_checkpoint:
-            try:
-                await on_checkpoint(messages)
-            except Exception:
-                pass  # checkpoint write failures must never abort the scan
-
-        if session_done:
-            break
 
     finally:
         # Save a final checkpoint on any exit — including CancelledError raised
@@ -2957,8 +3321,6 @@ async def thinking_agentic_loop(
                 pass
 
     return final_summary
-
-
 
 
 async def thinking_next_action(
@@ -2999,7 +3361,9 @@ async def thinking_next_action(
                 f"Earlier history: {older_count} step(s) summarized. "
                 f"Use history_search to retrieve details. "
                 f"Recent earlier URLs: "
-                + ", ".join(str(h.get("url") or "") for h in older[-8:] if h.get("url"))[:1000]
+                + ", ".join(
+                    str(h.get("url") or "") for h in older[-8:] if h.get("url")
+                )[:1000]
             )
         for h in history[-RECENT:]:
             method = str(h.get("method") or "")
@@ -3016,7 +3380,8 @@ async def thinking_next_action(
             response_headers = h.get("response_headers") or {}
             response_headers_str = (
                 json.dumps(response_headers, separators=(",", ":"), default=str)[:350]
-                if response_headers else "{}"
+                if response_headers
+                else "{}"
             )
             lines.append(
                 f"Step {h.get('step')}: {method} {h.get('url')}\n"
@@ -3041,8 +3406,7 @@ async def thinking_next_action(
             for c in credentials
         ]
         credentials_section = (
-            "Test credentials (use these to authenticate):\n"
-            + "\n".join(cred_lines)
+            "Test credentials (use these to authenticate):\n" + "\n".join(cred_lines)
         )
 
     sessions_section = ""
@@ -3071,13 +3435,15 @@ async def thinking_next_action(
     )
     if emit_fn:
         try:
-            emit_fn({
-                "type": "scanner_phase",
-                "phase": "llm_request",
-                "status": "pending",
-                "message": f"Step {current_step}: sending prompt ({len(prompt):,} chars) to LLM…",
-                "data": {"step": current_step, "prompt": prompt},
-            })
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_request",
+                    "status": "pending",
+                    "message": f"Step {current_step}: sending prompt ({len(prompt):,} chars) to LLM…",
+                    "data": {"step": current_step, "prompt": prompt},
+                }
+            )
         except Exception:
             pass
     raw = await _call(config, prompt, None)
@@ -3094,39 +3460,73 @@ async def thinking_next_action(
         try:
             # Re-send the original prompt with the correction appended so the model
             # has full context and doesn't return a generic "no task provided" done.
-            correction_with_context = (
-                prompt
-                + "\n\n---\n"
-                + _THINKING_CORRECTION_PROMPT
-            )
+            correction_with_context = prompt + "\n\n---\n" + _THINKING_CORRECTION_PROMPT
             raw2 = await _call(config, correction_with_context, None)
             action = _normalize_thinking_action(_extract_action_json(raw2 or ""))
-            log.info("thinking_next_action: correction retry succeeded — action=%r", action.get("action"))
+            log.info(
+                "thinking_next_action: correction retry succeeded — action=%r",
+                action.get("action"),
+            )
         except Exception as exc2:
-            log.warning("thinking_next_action: retry also failed (%s). Ending assessment.", exc2)
-            action = {"action": "done", "summary": "LLM did not return a valid action — assessment ended."}
+            log.warning(
+                "thinking_next_action: retry also failed (%s). Ending assessment.", exc2
+            )
+            action = {
+                "action": "done",
+                "summary": "LLM did not return a valid action — assessment ended.",
+            }
     if emit_fn:
         try:
-            emit_fn({
-                "type": "scanner_phase",
-                "phase": "llm_response",
-                "status": "complete",
-                "message": (
-                    f"Step {current_step}: LLM → {action.get('action')}"
-                    + (f" {action.get('tool','')}" if action.get('action') == 'tool' else '')
-                    + (f" {action.get('method','')} {action.get('url','')}" if action.get('action') == 'http' else '')
-                    + (f" {action.get('url','')}" if action.get('action') == 'browser' else '')
-                    + (f" {action.get('store_as','')}" if action.get('action') == 'jwt' else '')
-                    + (f" {action.get('url','')}" if action.get('action') == 'credential_check' else '')
-                    + (f" {action.get('title','')}" if action.get('action') == 'finding_write' else '')
-                    + (
-                        f": {action.get('hypothesis') or action.get('note','')}"
-                        if action.get('hypothesis') or action.get('note')
-                        else ""
-                    )
-                ),
-                "data": {"step": current_step, "raw_response": raw, "action": action},
-            })
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_response",
+                    "status": "complete",
+                    "message": (
+                        f"Step {current_step}: LLM → {action.get('action')}"
+                        + (
+                            f" {action.get('tool', '')}"
+                            if action.get("action") == "tool"
+                            else ""
+                        )
+                        + (
+                            f" {action.get('method', '')} {action.get('url', '')}"
+                            if action.get("action") == "http"
+                            else ""
+                        )
+                        + (
+                            f" {action.get('url', '')}"
+                            if action.get("action") == "browser"
+                            else ""
+                        )
+                        + (
+                            f" {action.get('store_as', '')}"
+                            if action.get("action") == "jwt"
+                            else ""
+                        )
+                        + (
+                            f" {action.get('url', '')}"
+                            if action.get("action") == "credential_check"
+                            else ""
+                        )
+                        + (
+                            f" {action.get('title', '')}"
+                            if action.get("action") == "finding_write"
+                            else ""
+                        )
+                        + (
+                            f": {action.get('hypothesis') or action.get('note', '')}"
+                            if action.get("hypothesis") or action.get("note")
+                            else ""
+                        )
+                    ),
+                    "data": {
+                        "step": current_step,
+                        "raw_response": raw,
+                        "action": action,
+                    },
+                }
+            )
         except Exception:
             pass
     return action
@@ -3176,7 +3576,11 @@ async def plan_validation_probes(
         probes = _extract_json(raw or "", expect=list)
         if not isinstance(probes, list):
             return []
-        return [p for p in probes if isinstance(p, dict) and p.get("type") in ("http", "form")]
+        return [
+            p
+            for p in probes
+            if isinstance(p, dict) and p.get("type") in ("http", "form")
+        ]
     except Exception:
         return []
 
@@ -3190,7 +3594,10 @@ async def validate_finding_result(
 ) -> dict:
     """Return {"verdict": "confirmed"|"false_positive", "reasoning": str}."""
     if not probe_results:
-        return {"verdict": "false_positive", "reasoning": "No validation probes reproduced the issue."}
+        return {
+            "verdict": "false_positive",
+            "reasoning": "No validation probes reproduced the issue.",
+        }
     results_text = "\n\n".join(
         f"--- Probe: {r.get('desc', r.get('url', '?'))} ---\n"
         f"Sent as user: {r.get('as_user') or '(primary session)'}\n"
@@ -3213,4 +3620,7 @@ async def validate_finding_result(
             verdict = "confirmed"
         return {"verdict": verdict, "reasoning": str(data.get("reasoning", ""))}
     except Exception:
-        return {"verdict": "confirmed", "reasoning": "Could not parse LLM validation response."}
+        return {
+            "verdict": "confirmed",
+            "reasoning": "Could not parse LLM validation response.",
+        }
