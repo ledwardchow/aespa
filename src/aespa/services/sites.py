@@ -5,6 +5,7 @@ these helpers directly without going through HTTP.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 
@@ -201,11 +202,16 @@ def export_site(session: Session, site_id: int) -> dict:
     model_dump(mode="json").
     """
     from aespa.models import (
+        AgentLog,
+        AliceChatMessage,
+        AliceChatSession,
         CrawledPage,
-        PageLink,
         PageCredentialView,
+        PageLink,
+        PageOwaspTest,
         PentestHypothesis,
         PentestTask,
+        ScanCheckpoint,
         ScanFinding,
         ScanLog,
         ScannerSession,
@@ -241,6 +247,20 @@ def export_site(session: Session, site_id: int) -> dict:
         logs    = list(session.exec(
             select(ScanLog).where(ScanLog.test_run_id == rid).where(ScanLog.run_kind == "web")
         ).all())
+        owasp_tests = list(session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == rid)).all())
+        checkpoints = list(session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == rid)).all())
+        agent_logs  = list(session.exec(
+            select(AgentLog).where(AgentLog.test_run_id == rid).where(AgentLog.run_kind == "web")
+        ).all())
+        alice_sessions = list(session.exec(
+            select(AliceChatSession)
+            .where(AliceChatSession.test_run_id == rid)
+            .where(AliceChatSession.run_kind == "web")
+        ).all())
+        alice_sess_ids = [s.id for s in alice_sessions]
+        alice_messages = list(session.exec(
+            select(AliceChatMessage).where(AliceChatMessage.session_id.in_(alice_sess_ids))
+        ).all()) if alice_sess_ids else []
 
         run_bundles.append({
             "test_run": _row(run),
@@ -254,6 +274,11 @@ def export_site(session: Session, site_id: int) -> dict:
             "pentest_tasks": [_row(t) for t in tasks],
             "scan_findings": [_row(f) for f in findings],
             "scan_logs": [_row(l) for l in logs],
+            "page_owasp_tests": [_row(o) for o in owasp_tests],
+            "scan_checkpoints": [_row(c) for c in checkpoints],
+            "agent_logs": [_row(a) for a in agent_logs],
+            "alice_chat_sessions": [_row(s) for s in alice_sessions],
+            "alice_chat_messages": [_row(m) for m in alice_messages],
         })
 
     return {
@@ -274,11 +299,16 @@ def import_site(session: Session, bundle: dict) -> Site:
     have a different LLM config table.
     """
     from aespa.models import (
+        AgentLog,
+        AliceChatMessage,
+        AliceChatSession,
         CrawledPage,
-        PageLink,
         PageCredentialView,
+        PageLink,
+        PageOwaspTest,
         PentestHypothesis,
         PentestTask,
+        ScanCheckpoint,
         ScanFinding,
         ScanLog,
         ScannerSession,
@@ -420,15 +450,19 @@ def import_site(session: Session, bundle: dict) -> Site:
             session.add(PentestTask(**t))
 
         # ── ScanFindings ────────────────────────────────────────────────────
+        finding_id_map: dict[int, int] = {}
         for f in rb.get("scan_findings", []):
             f = dict(f)
-            f.pop("id")
+            old_fid = f.pop("id")
             f["test_run_id"] = new_run_id
             old_pid = f.get("page_id")
             if old_pid is not None:
                 f["page_id"] = page_id_map.get(old_pid)
             _parse_datetimes(f, "created_at")
-            session.add(ScanFinding(**f))
+            finding = ScanFinding(**f)
+            session.add(finding)
+            session.flush()
+            finding_id_map[old_fid] = finding.id  # type: ignore[index]
 
         # ── ScanLogs ────────────────────────────────────────────────────────
         for sl in rb.get("scan_logs", []):
@@ -437,6 +471,64 @@ def import_site(session: Session, bundle: dict) -> Site:
             sl["test_run_id"] = new_run_id
             _parse_datetimes(sl, "created_at")
             session.add(ScanLog(**sl))
+
+        # ── PageOwaspTests (workprogram) ────────────────────────────────────
+        for o in rb.get("page_owasp_tests", []):
+            o = dict(o)
+            o.pop("id")
+            o["test_run_id"] = new_run_id
+            old_pid = o.get("page_id")
+            if old_pid is not None:
+                o["page_id"] = page_id_map.get(old_pid, old_pid)
+            # finding_ids_json is a JSON list of ScanFinding.id — remap each.
+            try:
+                old_fids = json.loads(o.get("finding_ids_json") or "[]")
+                o["finding_ids_json"] = json.dumps(
+                    [finding_id_map.get(fid, fid) for fid in old_fids]
+                )
+            except Exception:
+                o["finding_ids_json"] = "[]"
+            _parse_datetimes(o, "created_at", "last_updated")
+            session.add(PageOwaspTest(**o))
+
+        # ── ScanCheckpoints ─────────────────────────────────────────────────
+        for c in rb.get("scan_checkpoints", []):
+            c = dict(c)
+            c.pop("id")
+            c["test_run_id"] = new_run_id
+            _parse_datetimes(c, "created_at", "updated_at")
+            session.add(ScanCheckpoint(**c))
+
+        # ── AgentLogs ───────────────────────────────────────────────────────
+        for a in rb.get("agent_logs", []):
+            a = dict(a)
+            a.pop("id")
+            a["test_run_id"] = new_run_id
+            _parse_datetimes(a, "created_at")
+            session.add(AgentLog(**a))
+
+        # ── AliceChatSessions + messages ────────────────────────────────────
+        alice_sess_id_map: dict[int, int] = {}
+        for s in rb.get("alice_chat_sessions", []):
+            s = dict(s)
+            old_sid = s.pop("id")
+            s["test_run_id"] = new_run_id
+            _parse_datetimes(s, "created_at", "updated_at")
+            sess = AliceChatSession(**s)
+            session.add(sess)
+            session.flush()
+            alice_sess_id_map[old_sid] = sess.id  # type: ignore[index]
+
+        for m in rb.get("alice_chat_messages", []):
+            m = dict(m)
+            m.pop("id")
+            old_sid = m.get("session_id")
+            new_sid = alice_sess_id_map.get(old_sid)
+            if new_sid is None:
+                continue  # orphaned message — skip
+            m["session_id"] = new_sid
+            _parse_datetimes(m, "updated_at")
+            session.add(AliceChatMessage(**m))
 
     session.commit()
     session.refresh(site)
