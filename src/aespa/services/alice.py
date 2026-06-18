@@ -1592,6 +1592,15 @@ def _run_api_context_tool(
         if severity not in ("critical", "high", "medium", "low", "info"):
             severity = "info"
 
+        # Seed a representative CVSS score matching the chosen severity band.
+        # Without this, cvss_score defaults to 0.0 and the post-turn
+        # calibrate_all_findings_for_run() re-derives severity from 0.0 -> "info",
+        # silently reverting whatever severity was set here. ponytail: midpoint
+        # scores, switch to a real CVSS vector if report_finding ever takes one.
+        cvss_score = {
+            "critical": 9.5, "high": 8.0, "medium": 6.0, "low": 3.5, "info": 0.0,
+        }[severity]
+
         owasp = _as_text(
             args.get("owasp_category") or args.get("owasp_api_category")
         ).strip()
@@ -1605,6 +1614,7 @@ def _run_api_context_tool(
             owasp_category=owasp or "A00",
             owasp_api_category=owasp or None,
             severity=severity,
+            cvss_score=cvss_score,
             title=_as_text(args.get("title")) or "Untitled Finding",
             description=_as_text(args.get("description")),
             impact=_as_text(args.get("impact")),
