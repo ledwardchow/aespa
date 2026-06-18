@@ -3354,6 +3354,11 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
   const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
   const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
 
+  const onExportMarkdown = () => {
+    const md = workProgramToMarkdown(matrix, { cats, labels: OWASP_LABELS, kind: "api", runName: run?.name, generatedAt: new Date() });
+    downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+  };
+
   return html`
     <div style=${{padding:16}}>
       <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
@@ -3371,6 +3376,8 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
           <span className="badge success" title=${enforce.message||""}>
             Enforce done · ${enforce.covered||0} covered, ${enforce.skipped||0} skipped${enforce.budget_exhausted?" (budget hit)":""}
           </span>`}
+        <div style=${{flex:1}}></div>
+        <button className="btn sm" onClick=${onExportMarkdown}>Export Markdown</button>
       </div>
 
       <div style=${{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",fontSize:11}}>
@@ -7290,6 +7297,11 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
     finally { setSeeding(false); }
   };
 
+  const onExportMarkdown = () => {
+    const md = workProgramToMarkdown(matrix, { cats: OWASP_WEB_CATEGORIES, labels: OWASP_WEB_LABELS, kind: "web", runName: run?.name, generatedAt: new Date() });
+    downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+  };
+
   if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading workprogram…</div>`;
 
   const cats = OWASP_WEB_CATEGORIES;
@@ -7317,6 +7329,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
             Enforce done · ${enforce.covered||0} covered, ${enforce.skipped||0} skipped${enforce.budget_exhausted?" (budget hit)":""}
           </span>`}
         <div style=${{flex:1}}></div>
+        ${matrix?.pages?.length > 0 && html`<button className="btn sm" onClick=${onExportMarkdown}>Export Markdown</button>`}
         <button className="btn sm" disabled=${seeding} onClick=${onSeed}>
           ${seeding ? "Populating…" : "Populate from Site Map"}
         </button>
@@ -9661,6 +9674,54 @@ function findingsToMarkdown(findings, meta = {}) {
       lines.push("");
     }
   });
+
+  return lines.join("\n");
+}
+
+const WP_STATUS_MARK = { not_started:"·", in_progress:"~", covered:"✓", finding:"⚠", skipped:"s" };
+
+// Render a work-program coverage matrix (web pages or API endpoints) as Markdown.
+function workProgramToMarkdown(matrix, { cats, labels = {}, kind = "web", runName, generatedAt } = {}) {
+  const rows = kind === "api" ? (matrix?.endpoints || []) : (matrix?.pages || []);
+  const totals = matrix?.totals || {};
+  const totalCells = Object.values(totals).reduce((a, b) => a + b, 0);
+  const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
+  const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
+
+  const lines = [`# Work Program${runName ? `: ${runName}` : ""} (${kind === "api" ? "API" : "Web"})`, ""];
+  if (generatedAt) lines.push(`- Exported: ${generatedAt.toLocaleString()}`);
+  lines.push(`- Coverage: ${pct}% (${coveredCount}/${totalCells} cells)`);
+  lines.push("- Status counts: " + ["not_started","in_progress","covered","finding","skipped"].map(s => `${s} ${totals[s]||0}`).join(", "));
+  lines.push("");
+  lines.push("Legend: ✓ covered · ~ in progress · ⚠N finding(s) · s skipped · · not started · — n/a", "");
+  lines.push("Categories: " + cats.map(c => `${c} ${labels[c]||""}`.trim()).join(" · "), "");
+
+  const header = [kind === "api" ? "Endpoint" : "Page", ...cats];
+  lines.push("| " + header.join(" | ") + " |");
+  lines.push("| " + header.map(() => "---").join(" | ") + " |");
+  rows.forEach(row => {
+    const label = kind === "api" ? `\`${row.method} ${row.path}\`` : `\`${row.url}\``;
+    const cells = cats.map(cat => {
+      const cell = row.cells?.[cat];
+      if (!cell) return "—";
+      if (cell.status === "finding") return `⚠${(cell.finding_ids||[]).length || ""}`;
+      return WP_STATUS_MARK[cell.status] || cell.status;
+    });
+    lines.push("| " + [label, ...cells].join(" | ") + " |");
+  });
+  lines.push("");
+
+  const findingRows = [];
+  rows.forEach(row => cats.forEach(cat => {
+    (row.cells?.[cat]?.findings || []).forEach(f =>
+      findingRows.push({ loc: kind === "api" ? `${row.method} ${row.path}` : row.url, cat, f }));
+  }));
+  if (findingRows.length) {
+    lines.push("## Findings by cell", "");
+    findingRows.forEach(({ loc, cat, f }) =>
+      lines.push(`- **${cat}** \`${loc}\` — [${f.severity||"info"}] ${f.title} (#${f.id}${f.validation_status ? `, ${f.validation_status}` : ""})`));
+    lines.push("");
+  }
 
   return lines.join("\n");
 }
