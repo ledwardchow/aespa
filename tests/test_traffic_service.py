@@ -247,3 +247,34 @@ async def test_playwright_logging_request_failed(monkeypatch):
         assert "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]" in entry.response_body
         assert entry.username == "pw_user"
 
+
+
+@pytest.mark.anyio
+async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
+    """ALICE/API traffic must land on api_test_run_id (not test_run_id) so it
+    shows in the API traffic panel and doesn't collide with web run ids."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    hooks = traffic.make_httpx_hooks(None, username="alice", api_run_id=7)
+    req = httpx.Request("GET", "https://api.target.local/v1/users")
+    resp = httpx.Response(200, headers={"Content-Type": "application/json"}, text="[]", request=req)
+    for h in hooks["request"]:
+        await h(req)
+    for h in hooks["response"]:
+        await h(resp)
+
+    with Session(engine) as session:
+        entry = session.exec(select(TrafficEntry)).one()
+        assert entry.api_test_run_id == 7
+        assert entry.test_run_id == 0  # sentinel — no real TestRun row for API runs
+        assert entry.username == "alice"
+
+    # API traffic panel query (api_run_id) sees it; web query does not.
+    assert len(traffic.get_traffic(0, api_run_id=7)) == 1
+    assert traffic.get_traffic(7) == []
