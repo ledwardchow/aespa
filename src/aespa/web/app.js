@@ -3005,6 +3005,18 @@ function ApiRunSessionsTab({ runId, scanRunning }) {
   />`;
 }
 
+// The directive sent to A.L.I.C.E. when the user clicks "AI Review Issues".
+// Shared by the web scan (TestRunDetail) and the API scan (ApiRunFindingsTab) so
+// both buttons behave identically.
+const ALICE_DEDUP_DIRECTIVE =
+  "Review all of the findings recorded for this scan and remove duplicates. " +
+  "Use the finding_list context tool to load every finding, then identify the ones that " +
+  "describe the same vulnerability on the same endpoint or target, and remove the duplicates. " +
+  "If multiple findings describe the same underlying issue but with somewhat different details, " +
+  "you can consolidate them into a single finding by re-writing it (write a new issue then delete the " +
+  "superseded ones). Do not run any new HTTP requests, browser actions, or probes — this is a " +
+  "findings cleanup task only. When you finish, briefly summarize the changes made.";
+
 // ── ApiRunFindingsTab ──────────────────────────────────────────────────────────
 
 function ApiRunFindingsTab({ runId, scanRunning, run }) {
@@ -3013,6 +3025,7 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
   const [clearBusy, setClearBusy] = useState(false);
+  const [dedupeBusy, setDedupeBusy] = useState(false);
   const issueImportInputRef = useRef(null);
 
   const load = async () => {
@@ -3065,6 +3078,49 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
     } catch(e) { setError(e.message); }
   };
 
+  // Seed the dedup directive into ALICE and run it — the API analogue of the web
+  // scan's "AI Review Issues" button. Because the ALICE chat lives in a separate
+  // tab here, we persist the prompt into the active session (so it shows up when
+  // the user opens the Agents tab), start the run, poll to completion, then reload.
+  const onDeduplicateFindings = async () => {
+    if (dedupeBusy) return;
+    try {
+      const st = await api.getApiAliceStatus(runId);
+      if (st?.running) { setError("A.L.I.C.E. is already running — wait for it to finish."); return; }
+    } catch {}
+    setDedupeBusy(true); setError(null);
+    try {
+      const data = await api.getApiAliceSessions(runId);
+      const chats = (data.chats && data.chats.length) ? data.chats
+                    : [{ id:"tab-default", title:"Session 1", messages:[] }];
+      const tabId = data.active_tab_id || chats[0].id;
+      const target = chats.find(c => c.id === tabId) || chats[0];
+      const history = target.messages.map(m => ({ sender:m.sender, text:m.text }));
+      const now = Date.now();
+      const thinkId = `think-${now}`, replyId = `reply-${now+1}`;
+      const ts = new Date().toLocaleTimeString("en-US", { hour12:false, hour:"2-digit", minute:"2-digit" });
+      target.messages.push(
+        { id:`u-${now}`, sender:"user",  type:"message",  text:ALICE_DEDUP_DIRECTIVE, ts },
+        { id:thinkId,    sender:"alice", type:"thinking", text:"", ts },
+        { id:replyId,    sender:"alice", type:"message",  text:"", ts },
+      );
+      await api.saveApiAliceSessions(runId, { chats, active_tab_id: tabId });
+      await api.startApiAliceRun(runId, {
+        message: ALICE_DEDUP_DIRECTIVE, history, tab_id: tabId,
+        think_msg_id: thinkId, reply_msg_id: replyId,
+      });
+      await new Promise(resolve => {
+        const t = setInterval(async () => {
+          try { const s = await api.getApiAliceStatus(runId); if (!s?.running) { clearInterval(t); resolve(); } }
+          catch { clearInterval(t); resolve(); }
+        }, 3000);
+      });
+      await load();
+      setExpanded(new Set());
+    } catch(e) { setError(e.message); }
+    finally { setDedupeBusy(false); }
+  };
+
   const onClearFindings = async () => {
     if (!confirm("Clear all findings for this API test run?")) return;
     setClearBusy(true); setError(null);
@@ -3099,6 +3155,12 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
         <button className="btn sm" onClick=${onImportFindingsClick}>Import Issues</button>
         <input ref=${issueImportInputRef} type="file" accept=".md,text/markdown,text/plain"
           style=${{display:"none"}} onChange=${onImportFindingsFile}/>
+        ${findings.length>0 && html`
+          <button className="btn sm" disabled=${dedupeBusy||scanRunning}
+            onClick=${onDeduplicateFindings}>
+            ${dedupeBusy && html`<span className="inline-spinner"></span>`}
+            ${dedupeBusy ? "Reviewing…" : "AI Review Issues"}
+          </button>`}
         ${findings.length>0 && html`
           <button className="btn danger-outline sm" disabled=${clearBusy}
             onClick=${onClearFindings}>${clearBusy?"Clearing…":"Clear all"}</button>`}
@@ -3209,14 +3271,14 @@ const COVERAGE_CATEGORIES = ["API1","API2","API3","API4","API5","API6","API7","A
 const OWASP_WEB_LABELS = {
   A01:"Broken Access Control", A02:"Cryptographic Failures", A03:"Injection",
   A04:"Insecure Design", A05:"Security Misconfiguration",
-  A06:"Vulnerable & Outdated Components", A07:"Identification & Auth Failures",
+  A06:"Software & Data Supply Chain Failures", A07:"Identification & Auth Failures",
   A08:"Software & Data Integrity Failures", A09:"Logging & Monitoring Failures",
   A10:"SSRF",
 };
 const OWASP_WEB_SHORT = {
   A01:"Access Control", A02:"Crypto Failures", A03:"Injection",
   A04:"Insecure Design", A05:"Misconfig",
-  A06:"Vuln Components", A07:"Auth Failures",
+  A06:"Supply Chain", A07:"Auth Failures",
   A08:"Data Integrity", A09:"Logging & Mon.",
   A10:"SSRF",
 };
@@ -5665,18 +5727,6 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(err) { setError(err.message); setValidateBusy(false); }
   };
 
-  // The directive sent to A.L.I.C.E. when the user clicks "De-duplicate Issues".
-  // Clicking the button is equivalent to typing this into the A.L.I.C.E. chat, so
-  // the results match what users get when they ask A.L.I.C.E. to deduplicate.
-  const ALICE_DEDUP_DIRECTIVE =
-    "Review all of the findings recorded for this scan and remove duplicates. " +
-    "Use the finding_list context tool to load every finding, then identify the ones that " +
-    "describe the same vulnerability on the same endpoint or target, and remove the duplicates. " +
-    "If multiple findings describe the same underlying issue but with somewhat different details, " +
-    "you can consolidate them into a single finding by re-writing it (write a new issue then delete the " +
-    "superseded ones). Do not run any new HTTP requests, browser actions, or probes — this is a " +
-    "findings cleanup task only. When you finish, briefly summarize the changes made.";
-
   const onDeduplicateFindings = () => {
     if (dedupeBusy || aliceIsThinking) return;
     setDedupeBusy(true);
@@ -6330,13 +6380,13 @@ function TestRunDetail({ runId, initialTab }) {
                       <td colSpan="5">
                         <div className="finding-description">
                           <div><strong>Description</strong></div>
-                          <div>${markdownText(f.description) || "—"}</div>
+                          <div>${renderMarkdown(f.description) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Impact</strong></div>
-                          <div>${markdownText(f.impact) || "—"}</div>
+                          <div>${renderMarkdown(f.impact) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
-                          <div>${markdownText(f.likelihood) || "—"}</div>
+                          <div>${renderMarkdown(f.likelihood) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
-                          <div>${markdownText(f.recommendation) || "—"}</div>
+                          <div>${renderMarkdown(f.recommendation) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                           <div>
                             ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
@@ -9416,10 +9466,10 @@ function DebugFindingsTable({ findings }) {
               <tr className="finding-evidence-row">
                 <td colSpan="2">
                   <div className="finding-description">
-                    <div><strong>Description</strong></div><div>${markdownText(f.description) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${markdownText(f.impact) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${markdownText(f.likelihood) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${markdownText(f.recommendation) || "—"}</div>
+                    <div><strong>Description</strong></div><div>${renderMarkdown(f.description) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${renderMarkdown(f.impact) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${renderMarkdown(f.likelihood) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${renderMarkdown(f.recommendation) || "—"}</div>
                     <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                     <div>${f.cvss_score ?? "—"} ${f.cvss_vector && html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>`}</div>
                   </div>

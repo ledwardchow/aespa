@@ -141,4 +141,6 @@ API Scan Findings
 ![Screenshot](docs/images/apifindings.png)
 
 ## Recommended models
-* Claude Sonnet 4.6 - set output token cap to 60000
+* Claude Sonnet 4.6 - Output token cap 70000
+* Minimax M3 - Output token cap 70000, turn off force tool call
+* GLM 5.2 - Output token cap 70000, turn off force tool call
