@@ -19,6 +19,7 @@ const api = {
   createApiCollection: (b)        => req("/api/api-collections",       { method:"POST",   body:b }),
   updateApiCollection: (id,b)     => req(`/api/api-collections/${id}`, { method:"PUT",    body:b }),
   deleteApiCollection: (id)       => req(`/api/api-collections/${id}`, { method:"DELETE" }),
+  importApiCollection: (text)     => fetch("/api/api-collections/import", { method:"POST", headers:{"Content-Type":"application/json"}, body:text }).then(async r => { if (!r.ok) throw new Error(`Import failed: ${r.status}`); return r.json(); }),
   listApiDocuments:    (id)       => req(`/api/api-collections/${id}/documents`),
   uploadApiDocuments:  (id,files) => {
     const fd = new FormData();
@@ -1461,6 +1462,8 @@ function SitesList() {
 function ApiCollectionsList() {
   const [collections, setCollections] = useState(null);
   const [error, setError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
   const load = useCallback(async () => {
     try { setCollections(await api.listApiCollections()); } catch(e) { setError(e.message); }
   }, []);
@@ -1469,10 +1472,22 @@ function ApiCollectionsList() {
     if (!confirm(`Delete "${c.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
     try { await api.deleteApiCollection(c.id); await load(); } catch(e) { setError(e.message); }
   };
+  const onExport = (c) => { window.location.href = `/api/api-collections/${c.id}/export`; };
+  const onImportFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setImporting(true); setError(null);
+    try { await api.importApiCollection(await file.text()); await load(); }
+    catch(err) { setError(err.message); }
+    finally { setImporting(false); }
+  };
   return html`
     <div className="topbar">
       <div className="topbar-title">APIs</div>
       <div className="topbar-actions">
+        <input ref=${importRef} type="file" accept=".json" style=${{display:"none"}} onChange=${onImportFile}/>
+        <button className="btn secondary" onClick=${()=>importRef.current.click()} disabled=${importing}>${importing?"Importing…":"Import API"}</button>
         <button className="btn" onClick=${()=>nav("#/apis/new")}><${IconPlus}/> New API collection</button>
       </div>
     </div>
@@ -1502,6 +1517,7 @@ function ApiCollectionsList() {
                 <td>
                   <div className="row" style=${{justifyContent:"flex-end"}}>
                     <button className="btn secondary sm" onClick=${()=>nav(`#/apis/${c.id}`)}>Open</button>
+                    <button className="btn secondary sm" onClick=${()=>onExport(c)}>Export</button>
                     <button className="btn danger-outline sm" onClick=${()=>onDelete(c)}>Delete</button>
                   </div>
                 </td>
