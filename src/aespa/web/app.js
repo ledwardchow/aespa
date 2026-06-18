@@ -6380,13 +6380,13 @@ function TestRunDetail({ runId, initialTab }) {
                       <td colSpan="5">
                         <div className="finding-description">
                           <div><strong>Description</strong></div>
-                          <div>${markdownText(f.description) || "—"}</div>
+                          <div>${renderMarkdown(f.description) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Impact</strong></div>
-                          <div>${markdownText(f.impact) || "—"}</div>
+                          <div>${renderMarkdown(f.impact) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Likelihood</strong></div>
-                          <div>${markdownText(f.likelihood) || "—"}</div>
+                          <div>${renderMarkdown(f.likelihood) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>Recommendation</strong></div>
-                          <div>${markdownText(f.recommendation) || "—"}</div>
+                          <div>${renderMarkdown(f.recommendation) || "—"}</div>
                           <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                           <div>
                             ${f.cvss_score !== undefined && f.cvss_score !== null ? `${Number(f.cvss_score).toFixed(1)} (${f.severity})` : "—"}
@@ -9466,10 +9466,10 @@ function DebugFindingsTable({ findings }) {
               <tr className="finding-evidence-row">
                 <td colSpan="2">
                   <div className="finding-description">
-                    <div><strong>Description</strong></div><div>${markdownText(f.description) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${markdownText(f.impact) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${markdownText(f.likelihood) || "—"}</div>
-                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${markdownText(f.recommendation) || "—"}</div>
+                    <div><strong>Description</strong></div><div>${renderMarkdown(f.description) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Impact</strong></div><div>${renderMarkdown(f.impact) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Likelihood</strong></div><div>${renderMarkdown(f.likelihood) || "—"}</div>
+                    <div style=${{marginTop:8}}><strong>Recommendation</strong></div><div>${renderMarkdown(f.recommendation) || "—"}</div>
                     <div style=${{marginTop:8}}><strong>CVSS 3.1</strong></div>
                     <div>${f.cvss_score ?? "—"} ${f.cvss_vector && html`<span className="mono" style=${{marginLeft:8,fontSize:11}}>${f.cvss_vector}</span>`}</div>
                   </div>
