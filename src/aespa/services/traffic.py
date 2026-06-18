@@ -213,8 +213,18 @@ class LoggingAsyncClient(httpx.AsyncClient):
 
 # ── httpx event hooks (Legacy fallback) ───────────────────────────────────────
 
-def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
-    """Return an httpx event_hooks dict that logs every request/response."""
+def make_httpx_hooks(
+    run_id: Optional[int],
+    username: Optional[str] = None,
+    api_run_id: Optional[int] = None,
+) -> dict:
+    """Return an httpx event_hooks dict that logs every request/response.
+
+    Pass ``api_run_id`` (with ``run_id=None``) for API-collection runs so traffic
+    is keyed on the API column and shows up in the API traffic panel.
+    """
+    # API runs have no real TestRun row; test_run_id is NOT NULL, so use sentinel 0.
+    effective_run_id = run_id if run_id is not None else _API_SENTINEL_RUN_ID
     _pending: dict[int, float] = {}  # id(request) → monotonic start time
 
     async def on_request(request) -> None:
@@ -241,7 +251,7 @@ def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
 
         await asyncio.to_thread(
             _write,
-            run_id,
+            effective_run_id,
             "httpx",
             req.method,
             str(req.url),
@@ -252,6 +262,7 @@ def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
             resp_body,
             duration_ms,
             username,
+            api_run_id,
         )
 
     return {"request": [on_request], "response": [on_response]}
@@ -259,8 +270,19 @@ def make_httpx_hooks(run_id: int, username: Optional[str] = None) -> dict:
 
 # ── Playwright BrowserContext handler ─────────────────────────────────────────
 
-def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -> None:
-    """Register request/response listeners on a Playwright BrowserContext."""
+def setup_playwright_logging(
+    ctx,
+    run_id: Optional[int],
+    username: Optional[str] = None,
+    api_run_id: Optional[int] = None,
+) -> None:
+    """Register request/response listeners on a Playwright BrowserContext.
+
+    Pass ``api_run_id`` (with ``run_id=None``) for API-collection runs so traffic
+    is keyed on the API column and shows up in the API traffic panel.
+    """
+    # API runs have no real TestRun row; test_run_id is NOT NULL, so use sentinel 0.
+    effective_run_id = run_id if run_id is not None else _API_SENTINEL_RUN_ID
     _pending: dict[int, float] = {}
     _req_data: dict[int, dict] = {}
 
@@ -339,7 +361,7 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
 
         await asyncio.to_thread(
             _write,
-            run_id,
+            effective_run_id,
             "playwright",
             req_data.get("method", response.request.method),
             response.url,
@@ -350,6 +372,7 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             resp_body,
             duration_ms,
             username,
+            api_run_id,
         )
 
     async def on_request_failed(request) -> None:
@@ -384,7 +407,7 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
 
         await asyncio.to_thread(
             _write,
-            run_id,
+            effective_run_id,
             "playwright",
             req_data.get("method", request.method),
             request.url,
@@ -395,6 +418,7 @@ def setup_playwright_logging(ctx, run_id: int, username: Optional[str] = None) -
             f"[Browser Request Failed: {error_text}]",
             duration_ms,
             username,
+            api_run_id,
         )
 
     ctx.on("request", on_request)

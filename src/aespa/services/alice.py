@@ -1,4 +1,5 @@
 """A.L.I.C.E. chat coordinator service."""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,10 @@ from aespa.services.settings import (
     get_scanner_policy,
 )
 from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT, ALICE_API_SYSTEM_PROMPT
-from aespa.services.prompts.specialist import get_specialist_tools, SPECIALIST_AGENT_TOOLS
+from aespa.services.prompts.specialist import (
+    get_specialist_tools,
+    SPECIALIST_AGENT_TOOLS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +31,7 @@ log = logging.getLogger(__name__)
 def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
     """Return the configured request timeout, falling back to the scanner default."""
     from aespa.services.scanner import REQUEST_TIMEOUT
+
     try:
         with Session(get_engine()) as _s:
             return get_scanner_policy(_s).request_timeout_s
@@ -39,11 +44,83 @@ ALICE_MAX_STEPS = 40
 
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
-    "http_request", "browser", "context_tool",
-    "write_finding", "update_lead", "forge_jwt", "decode_jwt",
-    "credential_check", "register_account", "agent_dispatch", "done",
+    "http_request",
+    "browser",
+    "context_tool",
+    "write_finding",
+    "update_lead",
+    "forge_jwt",
+    "decode_jwt",
+    "credential_check",
+    "register_account",
+    "agent_dispatch",
+    "done",
     "remove_finding",
 }
+
+
+# Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
+# One headless browser per run, launched lazily on first browser action and closed
+# when the turn ends. ponytail: per-run global, no pooling/limits — fine for a
+# localhost single-user tool; revisit if ALICE ever runs many concurrent turns.
+_alice_browsers: dict[int, dict] = {}
+
+
+async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
+    """Return a live (page, context) for ``run_id``, launching one if needed.
+
+    Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
+    the API column (see the run-id-collision note in CLAUDE.md).
+    """
+    entry = _alice_browsers.get(run_id)
+    if entry:
+        page = entry.get("page")
+        if page is not None and not page.is_closed():
+            return page, entry["ctx"]
+        await _close_alice_browser(run_id)
+
+    from playwright.async_api import async_playwright
+
+    from aespa.services import traffic as traffic_svc
+    from aespa.services.scanner import (
+        _UA,
+        _playwright_global_headers,
+        _playwright_proxy,
+    )
+
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(headless=True)
+    ctx = await browser.new_context(
+        user_agent=_UA, ignore_https_errors=True, **_playwright_proxy()
+    )
+    headers = _playwright_global_headers()
+    if headers:
+        await ctx.set_extra_http_headers(headers)
+    traffic_svc.setup_playwright_logging(
+        ctx,
+        None if api_run_id is not None else run_id,
+        username="alice",
+        api_run_id=api_run_id,
+    )
+    page = await ctx.new_page()
+    _alice_browsers[run_id] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+    return page, ctx
+
+
+async def _close_alice_browser(run_id: int) -> None:
+    """Tear down the live browser for ``run_id`` (best-effort)."""
+    entry = _alice_browsers.pop(run_id, None)
+    if not entry:
+        return
+    for key in ("ctx", "browser"):
+        try:
+            await entry[key].close()
+        except Exception:
+            pass
+    try:
+        await entry["pw"].stop()
+    except Exception:
+        pass
 
 
 def _extract_user_directive(history: list[dict]) -> str:
@@ -62,6 +139,7 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     ``report_finding`` context_tool instead.
     """
     from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
+
     allowed = _ALICE_TOOL_NAMES - (exclude or set())
     return [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
 
@@ -97,12 +175,22 @@ async def _execute_alice_tool(
     tool_input: dict,
     step: int,
     session_vault: dict[str, dict] | None = None,
-    scope_check_fn=None,    # Optional override: scope_check_fn(url) -> str | None
-    context_tool_fn=None,   # Optional override: context_tool_fn(tool_name, args) -> dict
-    post_probe_fn=None,     # Optional: post_probe_fn(url, method, owasp_category) -> None (API runs)
+    scope_check_fn=None,  # Optional override: scope_check_fn(url) -> str | None
+    context_tool_fn=None,  # Optional override: context_tool_fn(tool_name, args) -> dict
+    post_probe_fn=None,  # Optional: post_probe_fn(url, method, owasp_category) -> None (API runs)
+    # Set for API-collection runs (then run_id is the ApiTestRun.id).
+    api_run_id: int | None = None,
 ) -> str:
     """Execute a single ALICE tool call and return the result string."""
-    session_vault = session_vault or {}
+    # Keep the caller's dict identity (even when empty) so session captures made
+    # here — e.g. an interactive modal login — propagate to later tool calls.
+    if session_vault is None:
+        session_vault = {}
+
+    # Traffic keying: for API runs the traffic table is keyed on the API column,
+    # with test_run_id left NULL (web/API run ids share an int space and would
+    # otherwise collide). See the run-id-collision note in CLAUDE.md.
+    _traffic_run_id = None if api_run_id is not None else run_id
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
@@ -113,7 +201,11 @@ async def _execute_alice_tool(
         from aespa.services import traffic as traffic_svc
 
         _url = str(tool_input.get("url") or base_url)
-        scope_err = scope_check_fn(_url) if scope_check_fn else check_scope(_url, site_id, run_id)
+        scope_err = (
+            scope_check_fn(_url)
+            if scope_check_fn
+            else check_scope(_url, site_id, run_id)
+        )
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -123,7 +215,11 @@ async def _execute_alice_tool(
 
         # Carry the run's stored authenticated session by default; an explicit
         # use_session label (e.g. "anonymous") overrides the selection.
-        use_session_label = tool_input.get("use_session") if isinstance(tool_input.get("use_session"), str) else None
+        use_session_label = (
+            tool_input.get("use_session")
+            if isinstance(tool_input.get("use_session"), str)
+            else None
+        )
         selected = _select_session(session_vault, use_session_label)
         req_cookies = (selected or {}).get("cookies") or {}
         req_headers = {
@@ -140,7 +236,7 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             try:
                 kwargs: dict = {}
@@ -174,7 +270,9 @@ async def _execute_alice_tool(
     # ── context_tool ─────────────────────────────────────────────────────────
     if tool_name == "context_tool":
         ctx_tool = str(tool_input.get("tool") or "")
-        ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+        ctx_args = (
+            tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+        )
         try:
             if context_tool_fn is not None:
                 output = context_tool_fn(ctx_tool, ctx_args)
@@ -183,11 +281,15 @@ async def _execute_alice_tool(
                     _load_findings_snapshot,
                     _run_thinking_context_tool,
                 )
+
                 with Session(get_engine()) as s:
-                    pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+                    pages = s.exec(
+                        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+                    ).all()
                     pages_snapshot = [p.model_dump() for p in pages]
                 output = _run_thinking_context_tool(
-                    ctx_tool, ctx_args,
+                    ctx_tool,
+                    ctx_args,
                     pages_snapshot=pages_snapshot,
                     findings_snapshot=_load_findings_snapshot(run_id),
                     history=[],
@@ -212,19 +314,24 @@ async def _execute_alice_tool(
         affected = (finding_raw.get("affected_url") or base_url).strip() or base_url
 
         with Session(get_engine()) as s:
-            pages = s.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all()
+            pages = s.exec(
+                select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+            ).all()
             pages_snapshot = [p.model_dump() for p in pages]
             first_page_id = pages[0].id if pages else None
 
-        events_svc.emit(run_id, {
-            "type": "agent_status",
-            "agent_id": "reporting",
-            "role": "Reporting",
-            "status": "active",
-            "current_task": f"A.L.I.C.E. Writing: {finding_raw.get('title', 'Untitled')}",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "reporting",
+                "role": "Reporting",
+                "status": "active",
+                "current_task": f"A.L.I.C.E. Writing: {finding_raw.get('title', 'Untitled')}",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
 
         fw_result = {
             "source": "finding_write",
@@ -249,9 +356,14 @@ async def _execute_alice_tool(
                 writeup_source="test_lead",
                 skip_normalize=True,
             )
-            log.info("A.L.I.C.E. write_finding run_id=%s title=%r", run_id, finding_raw.get("title"))
+            log.info(
+                "A.L.I.C.E. write_finding run_id=%s title=%r",
+                run_id,
+                finding_raw.get("title"),
+            )
             if saved is not None:
                 from aespa.services import validator as _validator_svc
+
                 asyncio.create_task(
                     _validator_svc.validate_finding_inline(
                         run_id,
@@ -259,41 +371,60 @@ async def _execute_alice_tool(
                         llm_cfg=llm_cfg,
                     )
                 )
-            events_svc.emit(run_id, {
-                "type": "agent_status",
-                "agent_id": "reporting",
-                "role": "Reporting",
-                "status": "idle",
-                "current_task": f"A.L.I.C.E. Wrote: {finding_raw.get('title', 'Untitled')}",
-                "outcome": (
-                    f"Saved [{finding_raw.get('severity', '?')}] {finding_raw.get('title', 'Untitled')} (ID: {saved.id})"
-                    if saved else
-                    f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
-                ),
-                "_persist": True,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "idle",
+                    "current_task": f"A.L.I.C.E. Wrote: {finding_raw.get('title', 'Untitled')}",
+                    "outcome": (
+                        f"Saved [{finding_raw.get('severity', '?')}] {finding_raw.get('title', 'Untitled')} (ID: {saved.id})"
+                        if saved
+                        else f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                    ),
+                    "_persist": True,
+                },
+            )
             return f"Finding '{finding_raw.get('title')}' recorded successfully."
         except Exception as exc:
             log.warning("A.L.I.C.E. write_finding failed: %s", exc)
-            events_svc.emit(run_id, {
-                "type": "agent_status",
-                "agent_id": "reporting",
-                "role": "Reporting",
-                "status": "idle",
-                "current_task": "A.L.I.C.E. Write failed",
-                "outcome": f"Error: {exc}",
-                "_persist": True,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "idle",
+                    "current_task": "A.L.I.C.E. Write failed",
+                    "outcome": f"Error: {exc}",
+                    "_persist": True,
+                },
+            )
             return f"write_finding failed: {exc}"
 
     # ── forge_jwt ─────────────────────────────────────────────────────────────
     if tool_name == "forge_jwt":
-        from aespa.services.scanner import _sign_hs256_jwt, _record_session, _session_label, _mark_session_pending
+        from aespa.services.scanner import (
+            _sign_hs256_jwt,
+            _record_session,
+            _session_label,
+            _mark_session_pending,
+        )
         import time
 
         jwt_secret = str(tool_input.get("secret") or "")
-        jwt_claims = tool_input.get("claims") if isinstance(tool_input.get("claims"), dict) else {}
-        jwt_header = tool_input.get("header") if isinstance(tool_input.get("header"), dict) else None
+        jwt_claims = (
+            tool_input.get("claims")
+            if isinstance(tool_input.get("claims"), dict)
+            else {}
+        )
+        jwt_header = (
+            tool_input.get("header")
+            if isinstance(tool_input.get("header"), dict)
+            else None
+        )
         store_as = tool_input.get("store_as")
 
         try:
@@ -305,13 +436,18 @@ async def _execute_alice_tool(
                 session_data={
                     "label": label,
                     "kind": "bearer",
-                    "username": f"sub:{jwt_claims.get('sub')}" if jwt_claims.get("sub") is not None else None,
+                    "username": f"sub:{jwt_claims.get('sub')}"
+                    if jwt_claims.get("sub") is not None
+                    else None,
                     "source": "forge_jwt tool",
                     "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
                     "cookies": {},
                 },
                 source="alice_jwt_action",
-                metadata={"claims": jwt_claims, "header": jwt_header or {"typ": "JWT", "alg": "HS256"}},
+                metadata={
+                    "claims": jwt_claims,
+                    "header": jwt_header or {"typ": "JWT", "alg": "HS256"},
+                },
             )
             _mark_session_pending(label)
             # Surface the new session to later steps in this same turn.
@@ -321,7 +457,13 @@ async def _execute_alice_tool(
                 "cookies": {},
                 "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
             }
-            return json.dumps({"store_as": label, "claims": jwt_claims, "token": jwt_token[:80] + "..."})
+            return json.dumps(
+                {
+                    "store_as": label,
+                    "claims": jwt_claims,
+                    "token": jwt_token[:80] + "...",
+                }
+            )
         except Exception as exc:
             return f"JWT signing failed: {exc}"
 
@@ -337,7 +479,9 @@ async def _execute_alice_tool(
         for i, part_name in enumerate(["header", "payload"]):
             try:
                 padding = "=" * (-len(parts[i]) % 4)
-                decoded[part_name] = json.loads(_b64.urlsafe_b64decode(parts[i] + padding))
+                decoded[part_name] = json.loads(
+                    _b64.urlsafe_b64decode(parts[i] + padding)
+                )
             except Exception as exc:
                 decoded[part_name] = f"decode error: {exc}"
         return json.dumps(decoded)
@@ -368,7 +512,7 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=False,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -377,21 +521,29 @@ async def _execute_alice_tool(
                 }
                 try:
                     if "application/json" in req_headers.get("Content-Type", ""):
-                        resp = await hx.request(method, cred_url, json=body, headers=req_headers)
+                        resp = await hx.request(
+                            method, cred_url, json=body, headers=req_headers
+                        )
                     else:
-                        resp = await hx.request(method, cred_url, data=body, headers=req_headers)
+                        resp = await hx.request(
+                            method, cred_url, data=body, headers=req_headers
+                        )
                     success = resp.status_code in success_statuses
-                    results.append({
-                        "username": cand.get("username"),
-                        "password": cand.get("password"),
-                        "status": resp.status_code,
-                        "success": success,
-                        "location": resp.headers.get("location", ""),
-                        "set_cookie": resp.headers.get("set-cookie", "")[:200],
-                        "body_excerpt": resp.text[:300],
-                    })
+                    results.append(
+                        {
+                            "username": cand.get("username"),
+                            "password": cand.get("password"),
+                            "status": resp.status_code,
+                            "success": success,
+                            "location": resp.headers.get("location", ""),
+                            "set_cookie": resp.headers.get("set-cookie", "")[:200],
+                            "body_excerpt": resp.text[:300],
+                        }
+                    )
                 except Exception as exc:
-                    results.append({"username": cand.get("username"), "error": str(exc)})
+                    results.append(
+                        {"username": cand.get("username"), "error": str(exc)}
+                    )
 
         hits = [r for r in results if r.get("success")]
         summary = f"{len(hits)}/{len(results)} succeeded"
@@ -400,14 +552,21 @@ async def _execute_alice_tool(
     # ── register_account ──────────────────────────────────────────────────────
     if tool_name == "register_account":
         from aespa.services.scanner import (
-            _make_scanner_client, REQUEST_TIMEOUT,
-            _session_label, _record_session, _mark_session_pending,
+            _make_scanner_client,
+            REQUEST_TIMEOUT,
+            _session_label,
+            _record_session,
+            _mark_session_pending,
         )
         from aespa.services import traffic as traffic_svc
         import secrets as _secrets
 
         reg_url = str(tool_input.get("url") or base_url)
-        scope_err = scope_check_fn(reg_url) if scope_check_fn else check_scope(reg_url, site_id, run_id)
+        scope_err = (
+            scope_check_fn(reg_url)
+            if scope_check_fn
+            else check_scope(reg_url, site_id, run_id)
+        )
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -437,13 +596,17 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
+            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             try:
                 if body_format == "json":
-                    resp = await hx.request(method, reg_url, json=body, headers=req_headers)
+                    resp = await hx.request(
+                        method, reg_url, json=body, headers=req_headers
+                    )
                 else:
-                    resp = await hx.request(method, reg_url, data=body, headers=req_headers)
+                    resp = await hx.request(
+                        method, reg_url, data=body, headers=req_headers
+                    )
                 success = resp.status_code in success_statuses
                 session_data: dict = {
                     "label": store_as,
@@ -454,7 +617,12 @@ async def _execute_alice_tool(
                     "cookies": dict(resp.cookies),
                 }
                 if success:
-                    _record_session(run_id, label=store_as, session_data=session_data, source="alice_register")
+                    _record_session(
+                        run_id,
+                        label=store_as,
+                        session_data=session_data,
+                        source="alice_register",
+                    )
                     _mark_session_pending(store_as)
                     # Surface the new session to later steps in this same turn.
                     session_vault[store_as] = {
@@ -463,12 +631,15 @@ async def _execute_alice_tool(
                         "cookies": dict(resp.cookies),
                         "extra_headers": {},
                     }
-                return json.dumps({
-                    "success": success,
-                    "status": resp.status_code,
-                    "store_as": store_as if success else None,
-                    "body_excerpt": resp.text[:500],
-                }, default=str)
+                return json.dumps(
+                    {
+                        "success": success,
+                        "status": resp.status_code,
+                        "store_as": store_as if success else None,
+                        "body_excerpt": resp.text[:500],
+                    },
+                    default=str,
+                )
             except Exception as exc:
                 return f"Registration failed: {exc}"
 
@@ -497,43 +668,94 @@ async def _execute_alice_tool(
 
     # ── browser ───────────────────────────────────────────────────────────────
     if tool_name == "browser":
-        from aespa.services.scanner import _make_scanner_client
-        from aespa.services import traffic as traffic_svc
+        from aespa.services import scanner_sessions as session_svc
+        from aespa.services.scanner import (
+            _playwright_global_headers,
+            _run_thinking_browser_action,
+        )
 
         url = str(tool_input.get("url") or base_url)
 
-        scope_err = scope_check_fn(url) if scope_check_fn else check_scope(url, site_id, run_id)
-        if scope_err:
-            return f"[SCOPE BLOCK] {scope_err}"
+        # Scope-check the entry url and every goto step before driving the browser.
+        candidate_urls = [url] + [
+            str(s.get("url"))
+            for s in (tool_input.get("steps") or [])
+            if isinstance(s, dict) and s.get("op") == "goto" and s.get("url")
+        ]
+        for _u in candidate_urls:
+            scope_err = (
+                scope_check_fn(_u)
+                if scope_check_fn
+                else check_scope(_u, site_id, run_id)
+            )
+            if scope_err:
+                return f"[SCOPE BLOCK] {scope_err}"
 
-        use_session_label = tool_input.get("use_session") if isinstance(tool_input.get("use_session"), str) else None
+        use_session_label = (
+            tool_input.get("use_session")
+            if isinstance(tool_input.get("use_session"), str)
+            else None
+        )
         selected = _select_session(session_vault, use_session_label)
-        req_cookies = (selected or {}).get("cookies") or {}
 
-        timeout = _get_alice_timeout(run_id)
-        async with _make_scanner_client(
-            cookies=req_cookies,
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                **((selected or {}).get("extra_headers") or {}),
-            },
-            timeout=timeout,
-            follow_redirects=True,
-            verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(run_id, username="alice"),
-        ) as hx:
+        try:
+            page, ctx = await _get_alice_browser(run_id, api_run_id=api_run_id)
+        except Exception as exc:
+            return f"Browser launch failed: {exc}"
+
+        # Carry the selected session's cookies/headers onto the live context.
+        try:
+            if selected and selected.get("cookies"):
+                await ctx.add_cookies(
+                    [
+                        {"name": k, "value": v, "url": url}
+                        for k, v in selected["cookies"].items()
+                    ]
+                )
+            await ctx.set_extra_http_headers(
+                _playwright_global_headers((selected or {}).get("extra_headers") or {})
+            )
+        except Exception:
+            pass
+
+        with Session(get_engine()) as _s:
+            scanner_policy = get_scanner_policy(_s)
+        result = await _run_thinking_browser_action(
+            page, tool_input, default_url=base_url, scanner_policy=scanner_policy
+        )
+        body = str(result.get("body") or "")
+
+        # Persist the (now possibly authenticated) browser state into the vault so
+        # http_request and later browser calls reuse it. Handles modal logins with
+        # no URL route: log in interactively, then capture_session to carry the cookies.
+        capture_label = tool_input.get("capture_session")
+        if isinstance(capture_label, str) and capture_label.strip():
             try:
-                resp = await hx.get(url)
-                body = resp.text[:8192]
-                return (
-                    f"Page: {url}\n"
-                    f"Status: {resp.status_code}\n"
-                    f"Headers: {dict(resp.headers)}\n"
-                    f"Body ({len(resp.text)} chars):\n{body}"
+                cookies = {c["name"]: c["value"] for c in await ctx.cookies()}
+                extra = (selected or {}).get("extra_headers") or {}
+                rec = session_svc.upsert_session(
+                    run_id,
+                    label=capture_label.strip(),
+                    kind="browser_captured",
+                    source="alice_browser",
+                    cookies=cookies,
+                    extra_headers=extra,
+                    metadata={"captured_from": result.get("url")},
+                    run_kind="api" if api_run_id is not None else "web",
+                )
+                session_vault[rec.label] = {
+                    "label": rec.label,
+                    "kind": "browser_captured",
+                    "cookies": cookies,
+                    "extra_headers": extra,
+                }
+                body += (
+                    f"\n\n[Session captured as '{rec.label}' "
+                    f"with {len(cookies)} cookie(s). Use use_session='{rec.label}'.]"
                 )
             except Exception as exc:
-                return f"Browser fetch failed: {exc}"
+                body += f"\n\n[Session capture failed: {exc}]"
+        return body
 
     # ── update_lead ───────────────────────────────────────────────────────────
     if tool_name == "update_lead":
@@ -548,7 +770,11 @@ async def _execute_alice_tool(
             return "update_lead requires lead_id and outcome."
 
         # Map outcome → status (same mapping as scanner.py)
-        status_map = {"confirmed": "confirmed", "dismissed": "dismissed", "inconclusive": "inconclusive"}
+        status_map = {
+            "confirmed": "confirmed",
+            "dismissed": "dismissed",
+            "inconclusive": "inconclusive",
+        }
         status = status_map.get(outcome.lower())
         if status is None:
             return f"Invalid outcome '{outcome}'. Must be confirmed, dismissed, or inconclusive."
@@ -564,12 +790,14 @@ async def _execute_alice_tool(
             )
             if updated is None:
                 return f"Lead #{lead_id} not found."
-            return json.dumps({
-                "ok": True,
-                "lead_id": updated.id,
-                "status": updated.status,
-                "note": updated.note,
-            })
+            return json.dumps(
+                {
+                    "ok": True,
+                    "lead_id": updated.id,
+                    "status": updated.status,
+                    "note": updated.note,
+                }
+            )
         except Exception as exc:
             log.warning("ALICE update_lead error: %s", exc)
             return f"update_lead failed: {exc}"
@@ -594,8 +822,7 @@ async def _execute_alice_tool(
             # recorded against the web-scan (test_run_id) or API-scan
             # (api_test_run_id) — run_id is the same value in both contexts.
             if finding is None or (
-                finding.test_run_id != run_id
-                and finding.api_test_run_id != run_id
+                finding.test_run_id != run_id and finding.api_test_run_id != run_id
             ):
                 return f"remove_finding: finding #{finding_id} not found for this run."
             title = finding.title
@@ -604,7 +831,10 @@ async def _execute_alice_tool(
 
         log.info(
             "ALICE remove_finding run_id=%s finding_id=%s title=%r reason=%r",
-            run_id, finding_id, title, reason,
+            run_id,
+            finding_id,
+            title,
+            reason,
         )
         return f"Finding #{finding_id} '{title}' deleted successfully."
 
@@ -614,7 +844,11 @@ async def _execute_alice_tool(
 def _summarize_content(content: object, max_len: int = 600) -> str:
     """Return a JSON-serializable, truncated text representation of a message content value."""
     if isinstance(content, str):
-        return (content[:max_len] + f"\n…[{len(content) - max_len} more chars]") if len(content) > max_len else content
+        return (
+            (content[:max_len] + f"\n…[{len(content) - max_len} more chars]")
+            if len(content) > max_len
+            else content
+        )
 
     if not isinstance(content, list):
         try:
@@ -625,29 +859,58 @@ def _summarize_content(content: object, max_len: int = 600) -> str:
 
     parts: list[str] = []
     for item in content:
-        t = item.get("type", "unknown") if isinstance(item, dict) else getattr(item, "type", "unknown")
+        t = (
+            item.get("type", "unknown")
+            if isinstance(item, dict)
+            else getattr(item, "type", "unknown")
+        )
         if t == "text":
-            text = (item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "")) or ""
+            text = (
+                item.get("text", "")
+                if isinstance(item, dict)
+                else getattr(item, "text", "")
+            ) or ""
             if text:
                 parts.append(str(text)[:300])
         elif t == "tool_use":
-            name = (item.get("name", "") if isinstance(item, dict) else getattr(item, "name", "")) or ""
-            inp = (item.get("input", {}) if isinstance(item, dict) else getattr(item, "input", {})) or {}
+            name = (
+                item.get("name", "")
+                if isinstance(item, dict)
+                else getattr(item, "name", "")
+            ) or ""
+            inp = (
+                item.get("input", {})
+                if isinstance(item, dict)
+                else getattr(item, "input", {})
+            ) or {}
             try:
                 inp_str = json.dumps(inp)[:200]
             except Exception:
                 inp_str = str(inp)[:200]
             parts.append(f"[tool_call: {name}] {inp_str}")
         elif t == "tool_result":
-            tc = (item.get("content", "") if isinstance(item, dict) else getattr(item, "content", "")) or ""
+            tc = (
+                item.get("content", "")
+                if isinstance(item, dict)
+                else getattr(item, "content", "")
+            ) or ""
             if isinstance(tc, list):
                 tc = " ".join(
-                    (c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "")) or ""
+                    (
+                        c.get("text", "")
+                        if isinstance(c, dict)
+                        else getattr(c, "text", "")
+                    )
+                    or ""
                     for c in tc
                 )
             parts.append(f"[tool_result] {str(tc)[:300]}")
         elif t == "thinking":
-            think = (item.get("thinking", "") if isinstance(item, dict) else getattr(item, "thinking", "")) or ""
+            think = (
+                item.get("thinking", "")
+                if isinstance(item, dict)
+                else getattr(item, "thinking", "")
+            ) or ""
             if think:
                 parts.append(f"[thinking] {str(think)[:100]}…")
         else:
@@ -658,7 +921,9 @@ def _summarize_content(content: object, max_len: int = 600) -> str:
                 parts.append(f"[{t}]")
 
     combined = "\n".join(parts)
-    return (combined[:max_len] + "\n…[truncated]") if len(combined) > max_len else combined
+    return (
+        (combined[:max_len] + "\n…[truncated]") if len(combined) > max_len else combined
+    )
 
 
 def _build_step_messages(messages: list[dict], max_msgs: int = 4) -> list[dict]:
@@ -684,7 +949,11 @@ async def run_alice_turn_stream(
     events.  The loop terminates when the model calls `done`, when ALICE_MAX_STEPS
     is reached, or when a scope violation is detected.
     """
-    log.info("ALICE streaming turn started for run_id=%s instruction=%r", run_id, user_instruction)
+    log.info(
+        "ALICE streaming turn started for run_id=%s instruction=%r",
+        run_id,
+        user_instruction,
+    )
 
     # 1. Establish configuration and site parameters
     with Session(get_engine()) as s:
@@ -703,10 +972,13 @@ async def run_alice_turn_stream(
     # sessions (configured credentials, registered/forged tokens) instead of
     # probing anonymously. Keyed by label for use_session selection.
     from aespa.services import scanner_sessions as session_svc
+
     try:
         session_vault = session_svc.load_session_vault(run_id)
     except Exception:
-        log.warning("ALICE: failed to load session vault for run_id=%s", run_id, exc_info=True)
+        log.warning(
+            "ALICE: failed to load session vault for run_id=%s", run_id, exc_info=True
+        )
         session_vault = {}
 
     # Register run context so LLM calls attribute token usage to this run.
@@ -714,7 +986,20 @@ async def run_alice_turn_stream(
 
     # Build web workprogram probe hook so ALICE populates the coverage matrix.
     from aespa.services.web_workprogram import _make_web_post_probe_fn as _wp_probe_fn
+
     _web_post_probe_fn = _wp_probe_fn(run_id)
+
+    # Register the workprogram finding hook so write_finding tool calls also
+    # flip Work Program cells.  This mirrors the pattern in scanner._do_thinking_scan
+    # (see scanner.py: _finding_hooks[run_id] = _web_post_finding_fn).  Cleared
+    # in the finally block below so the hook never leaks past this turn.
+    from aespa.services.scanner import _finding_hooks
+    from aespa.services.web_workprogram import (
+        _make_web_post_finding_fn as _wp_finding_fn,
+    )
+
+    _web_post_finding_fn = _wp_finding_fn(run_id)
+    _finding_hooks[run_id] = _web_post_finding_fn
 
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
@@ -781,11 +1066,17 @@ async def run_alice_turn_stream(
                 pass
 
             try:
-                content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
+                (
+                    content_blocks,
+                    stop_reason,
+                    raw_content,
+                ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
             except Exception as exc:
-                log.exception("ALICE agentic loop: LLM call failed at step %d", step_count)
+                log.exception(
+                    "ALICE agentic loop: LLM call failed at step %d", step_count
+                )
                 err = f"LLM error at step {step_count}: {exc}"
                 yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\n\n⚠️ {err}'})}\n\n"
                 break
@@ -795,8 +1086,14 @@ async def run_alice_turn_stream(
 
             # Extract text and tool blocks
             tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
-            text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
-            thinking_blocks = [b for b in content_blocks if b.get("type") == "thinking" and b.get("thinking")]
+            text_blocks = [
+                b for b in content_blocks if b.get("type") == "text" and b.get("text")
+            ]
+            thinking_blocks = [
+                b
+                for b in content_blocks
+                if b.get("type") == "thinking" and b.get("thinking")
+            ]
 
             # Stream thinking blocks (Claude extended thinking)
             for tb in thinking_blocks:
@@ -812,17 +1109,25 @@ async def run_alice_turn_stream(
             # into a box-above / box-below. The final tool-less turn's text and
             # the done summary become the prominent reply bubble.
             import re as _re
+
             has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
                     continue
 
-                # Parse out <thinking>...</thinking> from text if model embeds it there
-                think_match = _re.search(r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL)
+                # Parse out <think>/<thinking> reasoning if model embeds it inline
+                # (minimax m3, DeepSeek-R1, QwQ, etc. use the short <think> form).
+                think_match = _re.search(
+                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
+                    text_content, _re.DOTALL | _re.IGNORECASE,
+                )
                 if think_match:
                     think_part = think_match.group(1).strip()
-                    outer_text = _re.sub(r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL).strip()
+                    outer_text = _re.sub(
+                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
+                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
+                    ).strip()
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
@@ -851,21 +1156,28 @@ async def run_alice_turn_stream(
             if not tool_use_blocks:
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
-                    log.warning("ALICE: %d consecutive text-only turns; ending loop", consecutive_text_only)
+                    log.warning(
+                        "ALICE: %d consecutive text-only turns; ending loop",
+                        consecutive_text_only,
+                    )
                     break
                 # Nudge the model back to using tools
-                messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "text",
-                        "text": (
-                            "Your previous response did not call a tool. "
-                            "Please continue by calling exactly one tool now — "
-                            "http_request, context_tool, write_finding, forge_jwt, "
-                            "decode_jwt, credential_check, browser, agent_dispatch, or done."
-                        ),
-                    }],
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Your previous response did not call a tool. "
+                                    "Please continue by calling exactly one tool now — "
+                                    "http_request, context_tool, write_finding, forge_jwt, "
+                                    "decode_jwt, credential_check, browser, agent_dispatch, or done."
+                                ),
+                            }
+                        ],
+                    }
+                )
                 continue
 
             consecutive_text_only = 0
@@ -883,16 +1195,20 @@ async def run_alice_turn_stream(
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE done at step %d: %s", step_count, summary[:200])
                     if summary:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
+                        if accumulated_message and not accumulated_message.endswith(
+                            "\n"
+                        ):
                             accumulated_message += "\n\n"
                             yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
                         accumulated_message += summary
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": "Assessment complete.",
-                    })
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": "Assessment complete.",
+                        }
+                    )
                     session_done = True
                     break
 
@@ -916,7 +1232,9 @@ async def run_alice_turn_stream(
                         post_probe_fn=_web_post_probe_fn,
                     )
                 except Exception as exc:
-                    log.warning("ALICE tool %r step %d failed: %s", tool_name, step_count, exc)
+                    log.warning(
+                        "ALICE tool %r step %d failed: %s", tool_name, step_count, exc
+                    )
                     result_str = f"Tool execution error: {exc}"
 
                 # Cap result length to avoid blowing up context
@@ -927,16 +1245,22 @@ async def run_alice_turn_stream(
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
-                    result_preview = result_str[:3000] + (f"\n…[{len(result_str) - 3000} more chars]" if len(result_str) > 3000 else "")
+                    result_preview = result_str[:3000] + (
+                        f"\n…[{len(result_str) - 3000} more chars]"
+                        if len(result_str) > 3000
+                        else ""
+                    )
                     yield f"data: {json.dumps({'type': 'step_tool_result', 'step': step_count, 'tool': tool_name, 'result': result_preview})}\n\n"
                 except Exception:
                     pass
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": result_str,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_str,
+                    }
+                )
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
@@ -949,13 +1273,25 @@ async def run_alice_turn_stream(
         err_msg = f"I encountered an error in the agentic loop: {exc}"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
+    finally:
+        # Always unregister the workprogram finding hook, even on early exit
+        # or exception — mirrors scanner._do_thinking_scan cleanup.
+        try:
+            _finding_hooks.pop(run_id, None)
+        except Exception:
+            pass
+        # Close the live browser opened for any `browser` tool calls this turn.
+        # Captured sessions persist in the vault/DB, so auth survives the teardown.
+        await _close_alice_browser(run_id)
 
     # 5. Emit done event
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
     llm_svc.clear_run_context()
 
 
-async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]) -> dict[str, Any]:
+async def run_alice_turn(
+    run_id: int, user_instruction: str, history: list[dict]
+) -> dict[str, Any]:
     """Execute a single interactive penetration testing turn for A.L.I.C.E.
 
     Backwards-compatible wrapper that consumes run_alice_turn_stream and returns
@@ -978,13 +1314,15 @@ async def run_alice_turn(run_id: int, user_instruction: str, history: list[dict]
                 pass
 
     return {
-        "thought_process": thought or "[ALICE Pentest Coordinator Turn Summary]\nCompleted Turn.",
+        "thought_process": thought
+        or "[ALICE Pentest Coordinator Turn Summary]\nCompleted Turn.",
         "message": message or "I have completed the assessment step.",
         "status": status,
     }
 
 
 # ── API-collection ALICE helpers ──────────────────────────────────────────────
+
 
 def _check_api_scope(url: str, collection) -> str | None:
     """Host-level scope check for API collections (no DB read needed).
@@ -1062,9 +1400,9 @@ def _run_api_context_tool(
                 query = query.where(ApiEndpoint.auth_required == bool(auth_filter))
             if scope_filter is not False:
                 query = query.where(ApiEndpoint.in_scope == True)  # noqa: E712
-            endpoints = list(s.exec(
-                query.order_by(ApiEndpoint.path, ApiEndpoint.method)
-            ).all())
+            endpoints = list(
+                s.exec(query.order_by(ApiEndpoint.path, ApiEndpoint.method)).all()
+            )
 
         matches = []
         for ep in endpoints:
@@ -1076,18 +1414,20 @@ def _run_api_context_tool(
                 tags = json.loads(ep.tags_json or "[]")
             except Exception:
                 tags = []
-            matches.append({
-                "id": ep.id,
-                "method": ep.method,
-                "path": ep.path,
-                "base_url": ep.base_url,
-                "operation_id": ep.operation_id,
-                "summary": ep.summary,
-                "auth_required": ep.auth_required,
-                "tags": tags,
-                "can_test": ep.prereq_can_test,
-                "can_test_auth": ep.prereq_can_test_auth,
-            })
+            matches.append(
+                {
+                    "id": ep.id,
+                    "method": ep.method,
+                    "path": ep.path,
+                    "base_url": ep.base_url,
+                    "operation_id": ep.operation_id,
+                    "summary": ep.summary,
+                    "auth_required": ep.auth_required,
+                    "tags": tags,
+                    "can_test": ep.prereq_can_test,
+                    "can_test_auth": ep.prereq_can_test_auth,
+                }
+            )
 
         return {
             "tool": "endpoint_list",
@@ -1155,9 +1495,13 @@ def _run_api_context_tool(
             coll = s.get(ApiCollection, collection_id)
             if coll is None:
                 return {"tool": "collection_info", "error": "collection not found"}
-            creds = list(s.exec(
-                _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
-            ).all())
+            creds = list(
+                s.exec(
+                    _sel(ApiCredential).where(
+                        ApiCredential.collection_id == collection_id
+                    )
+                ).all()
+            )
 
         def _safe_json(val, default):
             try:
@@ -1189,6 +1533,7 @@ def _run_api_context_tool(
     # ── lead_list ─────────────────────────────────────────────────────────────
     if tool_name == "lead_list":
         from aespa.services.scan_leads import get_open_leads_for_collection
+
         try:
             cap = max(1, min(50, int(args.get("limit") or 20)))
         except (TypeError, ValueError):
@@ -1216,6 +1561,7 @@ def _run_api_context_tool(
     # ── finding_list ──────────────────────────────────────────────────────────
     if tool_name == "finding_list":
         from aespa.services.scanner import _load_findings_snapshot
+
         # _run_api_context_tool is the API dispatcher: run_id is an ApiTestRun id.
         findings = _load_findings_snapshot(run_id, is_api_run=True)
         severity = str(args.get("severity") or "").lower()
@@ -1228,7 +1574,11 @@ def _run_api_context_tool(
                 if search not in haystack:
                     continue
             matches.append(f)
-        return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
+        return {
+            "tool": "finding_list",
+            "count": len(matches),
+            "findings": matches[:limit],
+        }
 
     # ── report_finding ────────────────────────────────────────────────────────
     if tool_name == "report_finding":
@@ -1242,7 +1592,18 @@ def _run_api_context_tool(
         if severity not in ("critical", "high", "medium", "low", "info"):
             severity = "info"
 
-        owasp = _as_text(args.get("owasp_category") or args.get("owasp_api_category")).strip()
+        # Seed a representative CVSS score matching the chosen severity band.
+        # Without this, cvss_score defaults to 0.0 and the post-turn
+        # calibrate_all_findings_for_run() re-derives severity from 0.0 -> "info",
+        # silently reverting whatever severity was set here. ponytail: midpoint
+        # scores, switch to a real CVSS vector if report_finding ever takes one.
+        cvss_score = {
+            "critical": 9.5, "high": 8.0, "medium": 6.0, "low": 3.5, "info": 0.0,
+        }[severity]
+
+        owasp = _as_text(
+            args.get("owasp_category") or args.get("owasp_api_category")
+        ).strip()
 
         finding = _SF(
             # API findings key on api_test_run_id only; test_run_id stays NULL so
@@ -1253,6 +1614,7 @@ def _run_api_context_tool(
             owasp_category=owasp or "A00",
             owasp_api_category=owasp or None,
             severity=severity,
+            cvss_score=cvss_score,
             title=_as_text(args.get("title")) or "Untitled Finding",
             description=_as_text(args.get("description")),
             impact=_as_text(args.get("impact")),
@@ -1286,14 +1648,18 @@ def _run_api_context_tool(
                 cat = owasp.upper()
                 if cat in OWASP_API_CATEGORIES and finding.id is not None:
                     with Session(get_engine()) as s2:
-                        endpoints = list(s2.exec(
-                            select(_AE)
-                            .where(_AE.collection_id == collection_id)
-                            .where(_AE.in_scope == True)  # noqa: E712
-                        ).all())
+                        endpoints = list(
+                            s2.exec(
+                                select(_AE)
+                                .where(_AE.collection_id == collection_id)
+                                .where(_AE.in_scope == True)  # noqa: E712
+                            ).all()
+                        )
                         coll = s2.get(_AC, collection_id)
                         base = (coll.base_url if coll else "").rstrip("/")
-                    ep = _match_endpoint_for_url(finding.affected_url or "", endpoints, base)
+                    ep = _match_endpoint_for_url(
+                        finding.affected_url or "", endpoints, base
+                    )
                     if ep is not None:
                         update_coverage_cell(
                             run_id, ep.id, cat, "finding", finding_id=finding.id
@@ -1319,13 +1685,20 @@ def _run_api_context_tool(
 
         status_filter = str(args.get("status") or "").strip().lower()
         try:
-            ep_filter = int(args["endpoint_id"]) if args.get("endpoint_id") is not None else None
+            ep_filter = (
+                int(args["endpoint_id"])
+                if args.get("endpoint_id") is not None
+                else None
+            )
         except (TypeError, ValueError):
             ep_filter = None
 
         matrix = get_coverage_matrix(run_id)
         if not matrix:
-            return {"tool": "coverage_matrix", "error": "no coverage matrix for this run"}
+            return {
+                "tool": "coverage_matrix",
+                "error": "no coverage matrix for this run",
+            }
 
         cells_out = []
         for ep in matrix.get("endpoints", []):
@@ -1334,14 +1707,16 @@ def _run_api_context_tool(
             for cat, cell in (ep.get("cells") or {}).items():
                 if status_filter and cell.get("status") != status_filter:
                     continue
-                cells_out.append({
-                    "endpoint_id": ep.get("endpoint_id"),
-                    "method": ep.get("method"),
-                    "path": ep.get("path"),
-                    "owasp_api_category": cat,
-                    "status": cell.get("status"),
-                    "finding_ids": cell.get("finding_ids") or [],
-                })
+                cells_out.append(
+                    {
+                        "endpoint_id": ep.get("endpoint_id"),
+                        "method": ep.get("method"),
+                        "path": ep.get("path"),
+                        "owasp_api_category": cat,
+                        "status": cell.get("status"),
+                        "finding_ids": cell.get("finding_ids") or [],
+                    }
+                )
 
         return {
             "tool": "coverage_matrix",
@@ -1374,9 +1749,11 @@ def _run_api_context_tool(
                 "hint": "Cells never downgrade — not_started is the seeded default and cannot be set.",
             }
 
-        category = str(
-            args.get("owasp_api_category") or args.get("category") or ""
-        ).strip().upper()
+        category = (
+            str(args.get("owasp_api_category") or args.get("category") or "")
+            .strip()
+            .upper()
+        )
         if category not in OWASP_API_CATEGORIES:
             return {
                 "tool": "set_coverage",
@@ -1387,7 +1764,10 @@ def _run_api_context_tool(
         try:
             endpoint_id = int(args["endpoint_id"])
         except (KeyError, TypeError, ValueError):
-            return {"tool": "set_coverage", "error": "endpoint_id (integer) is required"}
+            return {
+                "tool": "set_coverage",
+                "error": "endpoint_id (integer) is required",
+            }
 
         skip_reason = str(args.get("skip_reason") or "").strip() or None
         finding_id = args.get("finding_id")
@@ -1408,7 +1788,10 @@ def _run_api_context_tool(
                     "hint": "Call endpoint_list or coverage_matrix for valid endpoint_id values.",
                 }
             if not ep.in_scope:
-                return {"tool": "set_coverage", "error": f"endpoint {endpoint_id} is out of scope"}
+                return {
+                    "tool": "set_coverage",
+                    "error": f"endpoint {endpoint_id} is out of scope",
+                }
             applicable = _applicable_categories(ep)
             if category not in applicable:
                 return {
@@ -1418,8 +1801,12 @@ def _run_api_context_tool(
                 }
 
         update_coverage_cell(
-            run_id, endpoint_id, category, status,
-            finding_id=finding_id, skip_reason=skip_reason,
+            run_id,
+            endpoint_id,
+            category,
+            status,
+            finding_id=finding_id,
+            skip_reason=skip_reason,
         )
 
         # Re-read so ALICE sees the *actual* resulting status. update_coverage_cell
@@ -1448,9 +1835,14 @@ def _run_api_context_tool(
         "tool": tool_name,
         "error": "unknown tool",
         "available_tools": [
-            "endpoint_list", "endpoint_detail", "collection_info",
-            "finding_list", "report_finding", "lead_list",
-            "coverage_matrix", "set_coverage",
+            "endpoint_list",
+            "endpoint_detail",
+            "collection_info",
+            "finding_list",
+            "report_finding",
+            "lead_list",
+            "coverage_matrix",
+            "set_coverage",
         ],
     }
 
@@ -1466,7 +1858,11 @@ async def run_api_alice_turn_stream(
     ``ApiCollection`` instead of a ``TestRun`` / ``Site``.  The context_tool
     exposes the parsed endpoint inventory rather than crawled pages.
     """
-    log.info("ALICE API turn started for api_run_id=%s instruction=%r", api_run_id, user_instruction)
+    log.info(
+        "ALICE API turn started for api_run_id=%s instruction=%r",
+        api_run_id,
+        user_instruction,
+    )
 
     # Tag this id as an API run so persisted agent_log / scan_log rows are
     # written with run_kind='api' (see events.register_api_run).
@@ -1500,12 +1896,15 @@ async def run_api_alice_turn_stream(
     # can perform the login step itself using http_request.
     from aespa.models import ApiCredential
     from sqlmodel import select as _sel
+
     session_vault: dict[str, dict] = {}
     login_creds_for_llm: list[dict] = []
     with Session(get_engine()) as s:
-        creds = list(s.exec(
-            _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
-        ).all())
+        creds = list(
+            s.exec(
+                _sel(ApiCredential).where(ApiCredential.collection_id == collection_id)
+            ).all()
+        )
     for cred in creds:
         scheme = (cred.scheme or "").lower()
         label = cred.label or cred.scheme
@@ -1515,19 +1914,27 @@ async def run_api_alice_turn_stream(
                 uname, _, pword = cred.value.partition(":")
             else:
                 uname, pword = label, cred.value
-            login_creds_for_llm.append({
-                "username": uname,
-                "password": pword,
-                "login_url": cred.auth_endpoint or "",
-                "label": label,
-            })
+            login_creds_for_llm.append(
+                {
+                    "username": uname,
+                    "password": pword,
+                    "login_url": cred.auth_endpoint or "",
+                    "label": label,
+                }
+            )
             continue
-        entry: dict = {"label": label, "kind": scheme, "cookies": {}, "extra_headers": {}}
+        entry: dict = {
+            "label": label,
+            "kind": scheme,
+            "cookies": {},
+            "extra_headers": {},
+        }
         if scheme in ("bearer", "apikey"):
             header_name = cred.name or "Authorization"
             header_val = (
                 f"Bearer {cred.value}"
-                if scheme == "bearer" and not (cred.value or "").lower().startswith("bearer ")
+                if scheme == "bearer"
+                and not (cred.value or "").lower().startswith("bearer ")
                 else cred.value
             )
             entry["extra_headers"] = {header_name: header_val}
@@ -1535,11 +1942,14 @@ async def run_api_alice_turn_stream(
             entry["extra_headers"] = {cred.name: cred.value}
         elif scheme == "cookie":
             parts = (cred.value or "").split("=", 1)
-            cookie_name = parts[0].strip() if len(parts) == 2 else cred.name or "session"
+            cookie_name = (
+                parts[0].strip() if len(parts) == 2 else cred.name or "session"
+            )
             cookie_val = parts[1].strip() if len(parts) == 2 else cred.value
             entry["cookies"] = {cookie_name: cookie_val}
         elif scheme == "basic":
             import base64 as _b64
+
             encoded = _b64.b64encode((cred.value or "").encode()).decode()
             entry["extra_headers"] = {"Authorization": f"Basic {encoded}"}
         session_vault[label] = entry
@@ -1560,7 +1970,9 @@ async def run_api_alice_turn_stream(
 
     _coll_proxy = _CollProxy()
     _scope_fn = lambda url: _check_api_scope(url, _coll_proxy)  # noqa: E731
-    _ctx_fn = lambda tool_name, args: _run_api_context_tool(collection_id, api_run_id, tool_name, args)  # noqa: E731
+    _ctx_fn = lambda tool_name, args: _run_api_context_tool(
+        collection_id, api_run_id, tool_name, args
+    )  # noqa: E731
 
     def _post_probe_fn(url: str, method: str, owasp_category: str) -> None:
         """Flip the endpoint × category work-program cell to in_progress when
@@ -1577,11 +1989,13 @@ async def run_api_alice_turn_stream(
         if cat not in OWASP_API_CATEGORIES:
             return
         with Session(get_engine()) as s:
-            endpoints = list(s.exec(
-                select(_AE)
-                .where(_AE.collection_id == collection_id)
-                .where(_AE.in_scope == True)  # noqa: E712
-            ).all())
+            endpoints = list(
+                s.exec(
+                    select(_AE)
+                    .where(_AE.collection_id == collection_id)
+                    .where(_AE.in_scope == True)  # noqa: E712
+                ).all()
+            )
         ep = _match_endpoint_for_url(url, endpoints, base_url.rstrip("/"))
         if ep is None:
             return
@@ -1631,18 +2045,22 @@ async def run_api_alice_turn_stream(
     leads_block = ""
     try:
         from aespa.services.scan_leads import format_leads_for_context
+
         leads_block = format_leads_for_context(collection_id)
     except Exception:
         pass
 
     # Build the initial user message, mirroring the scanner's pattern.
-    initial_parts = filter(None, [
-        f"Target: {base_url}",
-        creds_text,
-        sessions_text,
-        leads_block,
-        user_instruction,
-    ])
+    initial_parts = filter(
+        None,
+        [
+            f"Target: {base_url}",
+            creds_text,
+            sessions_text,
+            leads_block,
+            user_instruction,
+        ],
+    )
     initial_user_message = "\n\n".join(initial_parts)
 
     # Convert history to Anthropic-format messages.
@@ -1676,7 +2094,11 @@ async def run_api_alice_turn_stream(
                 pass
 
             try:
-                content_blocks, stop_reason, raw_content = await llm_svc._call_with_tools(
+                (
+                    content_blocks,
+                    stop_reason,
+                    raw_content,
+                ) = await llm_svc._call_with_tools(
                     llm_cfg, system_message, messages, tools=alice_tools
                 )
             except Exception as exc:
@@ -1688,8 +2110,14 @@ async def run_api_alice_turn_stream(
             messages.append({"role": "assistant", "content": raw_content})
 
             tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
-            text_blocks = [b for b in content_blocks if b.get("type") == "text" and b.get("text")]
-            thinking_blocks = [b for b in content_blocks if b.get("type") == "thinking" and b.get("thinking")]
+            text_blocks = [
+                b for b in content_blocks if b.get("type") == "text" and b.get("text")
+            ]
+            thinking_blocks = [
+                b
+                for b in content_blocks
+                if b.get("type") == "thinking" and b.get("thinking")
+            ]
 
             for tb in thinking_blocks:
                 think_text = tb.get("thinking") or ""
@@ -1702,15 +2130,22 @@ async def run_api_alice_turn_stream(
             # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
             # markers in the thinking stream) so it breaks the collapsed trace.
             import re as _re
+
             has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
                     continue
-                think_match = _re.search(r"<thinking>(.*?)</thinking>", text_content, _re.DOTALL)
+                think_match = _re.search(
+                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
+                    text_content, _re.DOTALL | _re.IGNORECASE,
+                )
                 if think_match:
                     think_part = think_match.group(1).strip()
-                    outer_text = _re.sub(r"<thinking>.*?</thinking>", "", text_content, flags=_re.DOTALL).strip()
+                    outer_text = _re.sub(
+                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
+                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
+                    ).strip()
                     if think_part:
                         accumulated_thought += think_part
                         yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
@@ -1738,21 +2173,28 @@ async def run_api_alice_turn_stream(
             if not tool_use_blocks:
                 consecutive_text_only += 1
                 if consecutive_text_only >= 3:
-                    log.warning("ALICE API: %d consecutive text-only turns; ending loop", consecutive_text_only)
+                    log.warning(
+                        "ALICE API: %d consecutive text-only turns; ending loop",
+                        consecutive_text_only,
+                    )
                     break
-                messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "text",
-                        "text": (
-                            "Your previous response did not call a tool. "
-                            "Please continue by calling exactly one tool now — "
-                            "http_request, context_tool (use report_finding to record a finding), "
-                            "forge_jwt, decode_jwt, credential_check, register_account, "
-                            "agent_dispatch, or done."
-                        ),
-                    }],
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Your previous response did not call a tool. "
+                                    "Please continue by calling exactly one tool now — "
+                                    "http_request, context_tool (use report_finding to record a finding), "
+                                    "forge_jwt, decode_jwt, credential_check, register_account, "
+                                    "agent_dispatch, or done."
+                                ),
+                            }
+                        ],
+                    }
+                )
                 continue
 
             consecutive_text_only = 0
@@ -1768,16 +2210,20 @@ async def run_api_alice_turn_stream(
                     summary = str(tool_input.get("summary") or "Assessment complete.")
                     log.info("ALICE API done at step %d: %s", step_count, summary[:200])
                     if summary:
-                        if accumulated_message and not accumulated_message.endswith("\n"):
+                        if accumulated_message and not accumulated_message.endswith(
+                            "\n"
+                        ):
                             accumulated_message += "\n\n"
                             yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
                         accumulated_message += summary
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': summary})}\n\n"
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": "Assessment complete.",
-                    })
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": "Assessment complete.",
+                        }
+                    )
                     session_done = True
                     break
 
@@ -1793,7 +2239,7 @@ async def run_api_alice_turn_stream(
                         run_id=api_run_id,
                         llm_cfg=llm_cfg,
                         base_url=base_url,
-                        site_id=-1,             # unused — scope_check_fn overrides
+                        site_id=-1,  # unused — scope_check_fn overrides
                         tool_name=tool_name,
                         tool_input=tool_input,
                         step=step_count,
@@ -1801,9 +2247,15 @@ async def run_api_alice_turn_stream(
                         scope_check_fn=_scope_fn,
                         context_tool_fn=_ctx_fn,
                         post_probe_fn=_post_probe_fn,
+                        api_run_id=api_run_id,
                     )
                 except Exception as exc:
-                    log.warning("ALICE API tool %r step %d failed: %s", tool_name, step_count, exc)
+                    log.warning(
+                        "ALICE API tool %r step %d failed: %s",
+                        tool_name,
+                        step_count,
+                        exc,
+                    )
                     result_str = f"Tool execution error: {exc}"
 
                 limit = 30000 if tool_name == "context_tool" else 16000
@@ -1813,16 +2265,22 @@ async def run_api_alice_turn_stream(
 
                 yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': f'[Step {step_count}] Tool result ({len(result_str)} chars)\n'})}\n\n"
                 try:
-                    result_preview = result_str[:3000] + (f"\n…[{len(result_str) - 3000} more chars]" if len(result_str) > 3000 else "")
+                    result_preview = result_str[:3000] + (
+                        f"\n…[{len(result_str) - 3000} more chars]"
+                        if len(result_str) > 3000
+                        else ""
+                    )
                     yield f"data: {json.dumps({'type': 'step_tool_result', 'step': step_count, 'tool': tool_name, 'result': result_preview})}\n\n"
                 except Exception:
                     pass
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": result_str,
-                })
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_str,
+                    }
+                )
 
             if tool_results:
                 messages.append({"role": "user", "content": tool_results})
