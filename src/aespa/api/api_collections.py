@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel as _BaseModel
 from sqlmodel import Session, select
 
@@ -127,6 +127,44 @@ def delete_collection(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
+
+
+# ── Export / Import ──────────────────────────────────────────────────────────
+
+
+@router.get("/{collection_id}/export")
+def export_collection(
+    collection_id: int, session: Session = Depends(get_session)
+) -> JSONResponse:
+    """Download a portable JSON bundle for the collection and all its data."""
+    try:
+        bundle = api_collections_service.export_collection(session, collection_id)
+    except api_collections_service.ApiCollectionNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    name = bundle["collection"]["name"]
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    headers = {"Content-Disposition": f'attachment; filename="{safe}.aespa-api.json"'}
+    return JSONResponse(content=bundle, headers=headers)
+
+
+@router.post("/import", response_model=ApiCollectionDetail, status_code=status.HTTP_201_CREATED)
+async def import_collection(
+    request: Request, session: Session = Depends(get_session)
+) -> ApiCollectionDetail:
+    """Create a collection from a bundle produced by the export endpoint."""
+    try:
+        bundle = json.loads(await request.body())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON body: {exc}"
+        ) from exc
+    try:
+        collection = api_collections_service.import_collection(session, bundle)
+    except api_collections_service.ApiCollectionServiceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return _to_detail(collection)
 
 
 class _ScopeHostsPayload(_BaseModel):

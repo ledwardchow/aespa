@@ -17,19 +17,21 @@ You will need to provide:
 
 ## Performance
 
-Here's are [two](docs/juice-shop-results.md) [comparisons](docs/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
-* AESPA + Sonnet 4.6 (AWS Bedrock - account NOT in Cyber Verification Program)
-* Claude Code + Sonnet 4.6 (account in Cyber Verification Program)
-* Codex + GPT 5.5 (account in Trusted Access for Cyber Program)
-* Claude Code + Qwen3.6-35b-A3b (Abliterated)
+Here's are [two](docs/results/juice-shop-results.md) [comparisons](docs/results/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
+* AESPA + Sonnet 4.6 
+* Claude Code + Sonnet 4.6
+* Codex + GPT 5.5 
+* Claude Code + Qwen3.6-35b-A3b 
 
-And a [comparison](docs/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+And a [comparison](docs/results/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
 
-## How does it work?
+## Documentation
 
-See [Architecture](docs/architecture.md).
+The [Architecture](docs/architecture.md).
 
-Also, the [changelog](CHANGELOG.md).
+The [changelog](CHANGELOG.md).
+
+The [User Guide](docs/guide/index.md)!
 
 ## Requirements
 
@@ -141,4 +143,6 @@ API Scan Findings
 ![Screenshot](docs/images/apifindings.png)
 
 ## Recommended models
-* Claude Sonnet 4.6 - set output token cap to 60000
+* Claude Sonnet 4.6 - Output token cap 70000
+* Minimax M3 - Output token cap 70000, turn off force tool call
+* GLM 5.2 - Output token cap 70000, turn off force tool call

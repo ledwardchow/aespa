@@ -58,7 +58,7 @@ page is a realistic test target for that vulnerability class. Use these criteria
 - A03 Injection: page accepts user input passed to a backend query, command, or template
 - A04 Insecure Design: page implements business logic that could be abused (rate limits, workflows, trust assumptions)
 - A05 Security Misconfiguration: page exposes error details, debug info, default credentials, or permissive CORS/headers
-- A06 Vulnerable & Outdated Components: page loads identifiable third-party libraries or frameworks with version hints
+- A06 Software & Data Supply Chain Failures: page loads third-party libraries, frameworks, build/CI artefacts, or runs code from external sources where compromise would affect this application
 - A07 Identification & Authentication Failures: page handles login, session management, password reset, or MFA
 - A08 Software & Data Integrity Failures: page loads scripts/plugins from external sources, or processes unsigned data
 - A09 Security Logging & Monitoring Failures: page performs significant actions that should produce audit logs
@@ -398,7 +398,6 @@ Post-confirmation escalation (after injection is proven — read-only, no PII bu
   MySQL file-read: `UNION SELECT LOAD_FILE('/etc/passwd'),NULL--` → High if content returned
   PostgreSQL OS exec: `; COPY (SELECT 1) TO PROGRAM 'echo aespa_rce_probe'--` → CRITICAL if confirmed
 Constraint: never DROP/INSERT/UPDATE/DELETE; read-only escalation probes only; no bulk PII dump.""",
-
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
 Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
   and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
@@ -418,14 +417,12 @@ Step 2 — identify rendering context, then use a context-matched payload:
 Filter bypass: case variation <ScRiPt>, HTML entities &#x3C;script&#x3E;,
   tag alternatives <details open ontoggle=alert(1)>, double-encode %253C.
 Stored XSS: submit payload → navigate to every related rendering page → confirm.""",
-
     "idor": r"""─── IDOR / AUTHORIZATION (WSTG-ATHZ-04) ────────────────────────────────────────
 Object references: URL path `/api/users/123`, query `?id=123`, POST body `{"user_id":123}`.
 Horizontal escalation: access own resource → swap ID to adjacent (+1/-1) or another user's.
 Vertical escalation: use low-privilege session on admin-only endpoints.
 Manipulation: sequential IDs, `?id=*`, `?id[]=100&id[]=101`, base64/hex IDs.
 Response comparison: same data = IDOR; same structure different data = partial; error = check msg.""",
-
     "auth_bypass": r"""─── AUTHENTICATION BYPASS (WSTG-ATHN-04) ────────────────────────────────────────
 Forced browsing: send protected endpoint request without any auth headers.
 Bypass headers to add on protected endpoints:
@@ -435,7 +432,6 @@ Path variation: /Admin, /ADMIN, /admin/, /admin/., /admin%2fpanel, /admin;foo=ba
   /%61dmin (URL-encoded 'a'), /admin..
 Method override: try HEAD, OPTIONS; add X-HTTP-Method-Override: GET header.
 Parameter tampering: flip hidden `isAdmin=false` → true, `role=user` → admin in cookie/param.""",
-
     "ssrf": r"""─── SSRF (WSTG-INPV-19) ──────────────────────────────────────────────────────────
 Candidate parameter names: url, uri, link, href, src, dest, redirect, target, path,
   file, page, next, callback, feed, fetch, load, resource, proxy, imageurl, webhook,
@@ -461,7 +457,6 @@ Blind SSRF (no content reflected — the common case): use a differential, not a
 Filter bypass: hex IP `http://0x7f000001/`, octal `http://0177.0.0.1/`, decimal `http://2130706433/`,
   short form `http://127.1/`, `http://evil.com@127.0.0.1/`, redirect chain via external 302.
 Constraint: if cloud credentials are found, report CRITICAL but do NOT use them.""",
-
     "csrf": r"""─── CSRF (WSTG-SESS-05) ──────────────────────────────────────────────────────────
 Focus on state-changing endpoints (POST/PUT/DELETE): profile update, password/email change,
   transactions, admin actions.
@@ -471,7 +466,6 @@ Token validation tests (do each in turn):
   4. Reuse token from a previous session.
 SameSite bypass: Lax permits top-level GET navigations; test if action works via GET/method-override.
 Referer bypass: omit header entirely; `Referer: https://evil.target.com`.""",
-
     "cmdi": r"""─── COMMAND INJECTION (WSTG-INPV-12) ────────────────────────────────────────────
 Separators (prefix with valid value): `; echo CANARY` | `| echo CANARY` | `&& echo CANARY`
   `` `echo CANARY` `` | `$(echo CANARY)` | `\necho CANARY`
@@ -479,7 +473,6 @@ Time-based blind: Unix `; sleep 5` / `$(sleep 5)` | Windows `& timeout /T 5 /NOB
   — measure baseline, inject, confirm with a different delay (3s) to rule out jitter.
 Filter bypass: `{echo,CANARY}`, `echo$IFS CANARY`, base64 decode `$(echo Y2F0|base64 -d)`.
 Constraint: limit to echo/sleep/id/whoami — no reverse shells, no rm/del.""",
-
     "cors": r"""─── CORS (WSTG-CLNT-07) ─────────────────────────────────────────────────────────
 Test on every API endpoint that returns user data. Add `Origin: https://evil.com` to the request.
 Vulnerable: response contains `Access-Control-Allow-Origin: https://evil.com`.
@@ -488,7 +481,6 @@ Escalate only with browser-enforceable proof that sensitive authenticated data i
 cross-origin, or when the permissive policy directly enables a confirmed account-impacting flow.
 Also test: `Origin: null` (sandbox), `Origin: https://evil.target.com` (subdomain trust),
   `Origin: http://target.com` (scheme downgrade on HTTPS site).""",
-
     "headers": r"""─── SECURITY HEADERS (WSTG-CONF-07) ──────────────────────────────────────────────
 Check main page, login page, API endpoints, and error pages. Expected values:
   Strict-Transport-Security: max-age=31536000; includeSubDomains
@@ -498,21 +490,18 @@ Check main page, login page, API endpoints, and error pages. Expected values:
   Referrer-Policy: strict-origin-when-cross-origin
 Should be absent: Server (with version), X-Powered-By, X-AspNet-Version.
 CSP weak patterns: unsafe-inline in script-src, *, data: in script-src, CDN hosting user content.""",
-
     "sessions": r"""─── SESSION MANAGEMENT (WSTG-SESS-01/02/03/07) ────────────────────────────────────
 Cookie attributes — every session cookie must have: Secure (HTTPS), HttpOnly, SameSite=Strict|Lax.
 Session fixation: capture token before login → log in → compare token. If unchanged: fixation vuln.
 Logout invalidation: after clicking logout, re-send the old session cookie — if still valid, server
   does not invalidate tokens.
 Token entropy: collect several tokens and check for sequential or timestamp-correlated patterns.""",
-
     "workflow": r"""─── WORKFLOW BYPASS (WSTG-BUSL-06) ────────────────────────────────────────────────
 Multi-step flows: registration, checkout, password-reset, approval, onboarding wizards.
 Step skipping: jump directly to the final confirmation/submit step without completing earlier steps.
 Parameter tampering: modify hidden `step=3`, `status=approved`, `verified=true` fields.
 Price/quantity manipulation: change `price=0.01`, `qty=-1`, modify discount values in POST body.
 Race conditions: send the same state-changing request twice simultaneously.""",
-
     "file_upload": r"""─── UNRESTRICTED FILE UPLOAD (WSTG-UPLD-01) ─────────────────────────────────────
 Goal: achieve RCE by uploading and executing a server-side script via an unrestricted upload endpoint.
 Step 1 — baseline: upload a harmless .txt file; note stored URL from response.
@@ -531,7 +520,6 @@ Step 5 — canary webshell payloads:
 Step 6 — fetch stored URL; if aespa_rce_ appears in response body → CRITICAL RCE finding.
 Step 7 — if file stored but not executed: try path traversal in filename: ../../webroot/shell.php
 Severity: CRITICAL if RCE confirmed; HIGH if dangerous extension stored but not executed.""",
-
     "auth_robustness": r"""─── AUTHENTICATION ROBUSTNESS (WSTG-ATHN-03/07, WSTG-IDNT-05) ─────────────────────
 These checks are explicitly authorized and strictly bounded — do them, do not skip them as
 "brute-force". Each test below uses only a few requests; that is the intended, safe scope.
@@ -561,36 +549,117 @@ Constraint: never exceed 6 login attempts per user; use disposable/test accounts
 }
 
 # SSRF-indicative parameter names used by the WSTG skill selector.
-_SSRF_PARAM_NAMES: frozenset[str] = frozenset({
-    "url", "uri", "link", "href", "src", "dest", "destination", "redirect",
-    "redirecturl", "target", "path", "file", "page", "next", "return",
-    "returnurl", "callback", "feed", "fetch", "load", "resource", "proxy",
-    "imageurl", "image_url", "webhook", "webhookurl", "endpoint", "host", "site",
-    "avatar", "avatarurl", "avatar_url", "logo", "logourl", "icon", "iconurl",
-    "import", "importurl", "import_url", "source", "sourceurl", "document",
-    "documenturl", "pdf", "pdfurl", "report", "reporturl", "preview",
-    "previewurl", "thumbnail", "thumbnailurl", "remote", "remoteurl",
-})
+_SSRF_PARAM_NAMES: frozenset[str] = frozenset(
+    {
+        "url",
+        "uri",
+        "link",
+        "href",
+        "src",
+        "dest",
+        "destination",
+        "redirect",
+        "redirecturl",
+        "target",
+        "path",
+        "file",
+        "page",
+        "next",
+        "return",
+        "returnurl",
+        "callback",
+        "feed",
+        "fetch",
+        "load",
+        "resource",
+        "proxy",
+        "imageurl",
+        "image_url",
+        "webhook",
+        "webhookurl",
+        "endpoint",
+        "host",
+        "site",
+        "avatar",
+        "avatarurl",
+        "avatar_url",
+        "logo",
+        "logourl",
+        "icon",
+        "iconurl",
+        "import",
+        "importurl",
+        "import_url",
+        "source",
+        "sourceurl",
+        "document",
+        "documenturl",
+        "pdf",
+        "pdfurl",
+        "report",
+        "reporturl",
+        "preview",
+        "previewurl",
+        "thumbnail",
+        "thumbnailurl",
+        "remote",
+        "remoteurl",
+    }
+)
 
 # URL path fragments that imply auth-related pages (broad: any authenticated surface).
-_AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset({
-    "/login", "/signin", "/sign-in", "/auth", "/authenticate",
-    "/register", "/signup", "/sign-up", "/logout", "/password",
-    "/account", "/profile", "/admin",
-})
+_AUTH_PATH_FRAGMENTS: frozenset[str] = frozenset(
+    {
+        "/login",
+        "/signin",
+        "/sign-in",
+        "/auth",
+        "/authenticate",
+        "/register",
+        "/signup",
+        "/sign-up",
+        "/logout",
+        "/password",
+        "/account",
+        "/profile",
+        "/admin",
+    }
+)
 
 # Narrow subset: URL fragments that imply an actual credential-submission endpoint
 # (a login / registration / password form). Used to gate auth-robustness checks
 # — weak password policy, rate-limiting, and lockout are only testable where
 # credentials are submitted, NOT on merely-authenticated areas like /account.
-_CREDENTIAL_PATH_FRAGMENTS: frozenset[str] = frozenset({
-    "/login", "/signin", "/sign-in", "/register", "/signup", "/sign-up",
-    "/password", "/forgot", "/reset", "/auth", "/authenticate",
-})
+_CREDENTIAL_PATH_FRAGMENTS: frozenset[str] = frozenset(
+    {
+        "/login",
+        "/signin",
+        "/sign-in",
+        "/register",
+        "/signup",
+        "/sign-up",
+        "/password",
+        "/forgot",
+        "/reset",
+        "/auth",
+        "/authenticate",
+    }
+)
 
 _SKILL_ORDER = (
-    "sqli", "xss", "cmdi", "ssrf", "idor", "auth_bypass",
-    "csrf", "sessions", "auth_robustness", "cors", "headers", "workflow", "file_upload",
+    "sqli",
+    "xss",
+    "cmdi",
+    "ssrf",
+    "idor",
+    "auth_bypass",
+    "csrf",
+    "sessions",
+    "auth_robustness",
+    "cors",
+    "headers",
+    "workflow",
+    "file_upload",
 )
 
 
@@ -606,7 +675,6 @@ _API_THINKING_AGENT_SYSTEM = (
     "You do NOT need reconstructed summaries — read your actual prior tool_result "
     "messages to find tokens, customer IDs, object IDs, and response bodies you "
     "captured earlier. When you reference a prior response, quote the exact text.\n\n"
-
     "OWASP API Top 10 — test all applicable categories:\n"
     "  API1  Broken Object Level Authorization (BOLA/IDOR): access another user's\n"
     "        resources by swapping object IDs in path/query/body.\n"
@@ -628,7 +696,6 @@ _API_THINKING_AGENT_SYSTEM = (
     "        endpoints, internal/staging URLs in responses.\n"
     "  API10 Unsafe Consumption of APIs: injection through fields that flow to backend\n"
     "        DB or system calls (SQLi, CMDi, SSTI in integrated third-party data).\n\n"
-
     "Assessment strategy:\n"
     "1. Use context_tool (endpoint_list / endpoint_detail / collection_info / finding_list)\n"
     "   to map the API surface before probing. After 3 consecutive context_tool calls,\n"
@@ -656,7 +723,6 @@ _API_THINKING_AGENT_SYSTEM = (
     "   owasp_category to the most relevant OWASP API Top 10 code (API1–API10).\n"
     "10. Call done only when all in-scope endpoints, auth flows, object references, and\n"
     "   business-logic paths have been tested.\n\n"
-
     "Tool rules:\n"
     "- http_request: direct HTTP probes against API endpoints. No browser needed for REST.\n"
     "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
@@ -697,6 +763,8 @@ _THINKING_AGENT_SYSTEM = (
     + _THINKING_PENTEST_PLAYBOOK
     + "\n\nTool rules:\n"
     "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
+    "  ALWAYS set owasp_category to the OWASP Top 10 2025 code you are testing for (A01–A10).\n"
+    "  This drives the Work Program matrix — do not omit it.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required.\n"
     "- context_tool: look up crawl data, history, findings, or traffic without hitting "
@@ -727,6 +795,13 @@ _THINKING_AGENT_SYSTEM = (
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
     "attack surface.\n"
     "- If a browser fill/click fails, immediately fall back to http_request with POST body.\n"
+    "\n"
+    "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
+    "so the Work Program matrix fills accurately. Probe each applicable page × category pair\n"
+    "with a distinct targeted request — do not batch multiple categories into one generic probe.\n"
+    "When you write a finding, pass a SINGLE specific affected_url — not a comma-separated\n"
+    "list, not a wildcard, not an annotation like '(all endpoints)'. For multi-endpoint\n"
+    "issues, write one finding per endpoint so each is attributed to the right Work Program cell.\n"
 )
 
 
@@ -751,7 +826,9 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "string",
                     "description": (
                         "The OWASP category this probe is testing for "
-                        "(e.g. API1, API2, A01, A07). Required for API runs."
+                        "(A01–A10 for web, API1–API10 for API). "
+                        "Required for both surfaces — drives the Work Program "
+                        "matrix; do not omit."
                     ),
                 },
                 "observation": {"type": "string"},
@@ -780,6 +857,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot, ...}. "
                         "fill: selector+value. click: selector. press: selector+key. "
                         "wait: state or ms."
+                    ),
+                },
+                "capture_session": {
+                    "type": "string",
+                    "description": (
+                        "Optional label. After running steps, save the browser's current "
+                        "cookies as a reusable session under this label (e.g. after an "
+                        "interactive/modal login). Reuse it later via use_session."
                     ),
                 },
                 "observation": {"type": "string"},
@@ -853,7 +938,12 @@ THINKING_AGENT_TOOLS: list[dict] = [
         "name": "write_finding",
         "description": (
             "Record a confirmed security finding. Only call with concrete evidence "
-            "from prior tool results. Do not re-write confirmed findings."
+            "from prior tool results. Do not re-write confirmed findings. "
+            "affected_url must be a SINGLE specific URL where the issue was observed "
+            "— not a comma-separated list, not a wildcard, not annotated with "
+            "parentheticals like '(all endpoints)'. For multi-endpoint issues, call "
+            "write_finding once per endpoint so each is attributed to the right "
+            "Work Program cell."
         ),
         "input_schema": {
             "type": "object",
@@ -870,7 +960,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "string",
                     "enum": ["critical", "high", "medium", "low", "info"],
                 },
-                "affected_url": {"type": "string"},
+                "affected_url": {
+                    "type": "string",
+                    "description": (
+                        "Single specific URL where the issue was observed. "
+                        "Must be a string, not a list. Example: 'https://target.com/api/users/42'."
+                    ),
+                },
                 "evidence": {"type": "string"},
                 "request_evidence": {"type": "string"},
                 "response_evidence": {"type": "string"},
@@ -906,8 +1002,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "token": {"type": "string", "description": "The raw JWT string to decode."},
-                "secret": {"type": "string", "description": "HMAC secret to verify the HS256 signature (optional)."},
+                "token": {
+                    "type": "string",
+                    "description": "The raw JWT string to decode.",
+                },
+                "secret": {
+                    "type": "string",
+                    "description": "HMAC secret to verify the HS256 signature (optional).",
+                },
                 "note": {"type": "string"},
             },
             "required": ["token"],
