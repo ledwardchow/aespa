@@ -52,4 +52,4 @@ Vision support is optional; tick the box to send captured screenshots to the mod
 Note the following model restrictions:
 - Haiku 4.5 supports a maximum of 64000 output tokens.
 - Opus 4.8 does not support the **temperature** setting; turn it off for this model.
-- Many models that aren't from OpenAI or Anthropic don't support forcing tool execution; turn it off. 
+- Many models that aren't from OpenAI or Anthropic don't support forcing tool execution.
