@@ -4,6 +4,35 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #197] June 18 Update — Export/Import, ALICE modal logins, OWASP 2025 fix
+**Opened:** 2026-06-18 | Branch: `develop → main`
+
+Adds export/import for API collections, sites/web runs, and the web workprogram; teaches ALICE (and the scanner) to handle JS modal logins via a live Playwright browser; fixes the web workprogram progress regression and the OWASP version mismatch; and ships a full user guide under `docs/guide/`. 19 commits across ~30 files.
+
+### Docs
+
+- Full user guide added under `docs/guide/` (LLM config, settings, web scan screens, API scans, running scans) with screenshots, plus VAMPi result writeups under `docs/results/vampi/` and a `docs/results/` reorganisation. README refreshed. Claude GitHub Actions workflows added (`.github/workflows/`).
+
+### Export / Import
+
+- **API collections** (`services/api_collections.py`, `api/api_collections.py`): New `export_collection` serialises a collection (endpoints, documents, settings) to a JSON bundle; `import_collection` rebuilds it. New `GET /api/api-collections/{id}/export` and `POST /api/api-collections/import` endpoints, with Export/Import buttons in the collections UI (`web/app.js`). Round-trip tests in `tests/test_api_collections_export_import.py`.
+
+- **Sites / web runs + workprogram** (`services/sites.py`): A site/run can be exported and re-imported as a JSON bundle including findings and `PageOwaspTest` workprogram cells. `finding_ids_json` on each cell is remapped to the newly-inserted finding ids on import, dropping stale ids that have no exported finding. Tests in `tests/test_sites_export_import.py`.
+
+### ALICE + Scanner: modal / JS logins (#178)
+
+- **Live Playwright browser for ALICE** (`services/alice.py`): ALICE's `browser` tool now drives a real per-run Playwright browser (keyed by run_id), so it can complete JS-based login modals that have no URL route. Session state established by a login (cookies/headers) propagates to later `http_request` and `browser` tool calls. Crawler/scanner auto-login paths adjusted to match (`services/crawler.py`).
+
+- **Reasoning display fix** (`services/alice.py`): Inline `<think>` / `<thinking>` blocks emitted by some models are now parsed out of ALICE's chat output.
+
+### Bug fixes
+
+- **Web workprogram progress regression (#190)**: Workprogram coverage cells weren't filling during web scans — fixed so progress updates live again.
+- **OWASP 2025 vs 2021 (#189)**: `write_finding` and prompts (`services/prompts/test_lead.py`, `reporting.py`) now consistently target OWASP Top-10 2025 instead of mixing in a 2021 reference.
+- **API findings not logged in workprogram**: API scan findings now auto-fire the workprogram coverage hook (`services/api_scanner.py`).
+- **Import/export + findings rendering** (`web/app.js`, `services/traffic.py`): affected-URL cleanup (`_clean_affected_url`) and rendering fixes.
+
+
 ## [PR #186] 16th June Update — OWASP Web Workprogram, even more bug fixes
 **Opened:**  2026-06-16 | Branch: `develop → main`
 
