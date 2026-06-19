@@ -35,13 +35,16 @@ so it cannot execute", "the SQL error text is hardcoded in the application templ
 • You cannot write new findings. Your only output is a verdict via done().
 
 Proof-of-concept (only when you confirm)
-────────────────────────────────────────
+───────────────────────────────────────
 When you call done(verdict="confirmed"), also supply a reproducible proof so a human can
 re-verify the finding from a terminal:
 • poc_request: the SINGLE decisive request you already ran that demonstrates the issue.
-  Strongly prefer a safe, idempotent GET/HEAD. If the only proof is a state-changing
-  request (POST/PUT/PATCH/DELETE), OMIT poc_request — a missing PoC is better than one
-  that mutates data.
+  GET, HEAD, or POST are accepted. For POST, include the body in poc_request.body
+  (a raw string for form-encoded/JSON, or a JSON object that the server will serialise
+  with Content-Type: application/json) and prefer a payload the server treats as a
+  near-no-op for repeated runs.
+  If the only proof requires PUT/PATCH/DELETE, OMIT poc_request — a missing PoC is
+  better than one that mutates state in ways you cannot undo.
 • poc_expect: the assertion that proves it (an HTTP status and/or a distinctive
   body_contains substring such as a reflected marker or another user's data). Avoid
   generic substrings that would also appear in a benign response.
@@ -52,7 +55,8 @@ re-verify the finding from a terminal:
   Never put real passwords or live tokens in any field; the server injects credentials at
   verification time and the human supplies their own at run time.
 The server independently re-runs your poc_request and only keeps the PoC if it actually
-reproduces, so make it precise.
+reproduces, so make it precise. If the server cannot verify it, the PoC is dropped and
+a reason is recorded in the scan log.
 """
 
 
@@ -229,15 +233,26 @@ _VALIDATOR_DONE_TOOL: dict = {
                 "description": (
                     "Only for verdict=confirmed. The SINGLE decisive HTTP request that "
                     "reproduces this finding — copy it from the request you actually ran "
-                    "and confirmed. Prefer a safe, idempotent GET/HEAD. Omit entirely for "
-                    "state-changing requests (POST/PUT/PATCH/DELETE) or when no single "
+                    "and confirmed. Accepted methods: GET, HEAD, POST. For POST, set the "
+                    "`body` field (a raw string or a JSON object). Omit entirely for "
+                    "state-changing requests (PUT/PATCH/DELETE) or when no single "
                     "request proves the issue; a missing PoC is better than a wrong one."
                 ),
                 "properties": {
-                    "method": {"type": "string"},
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "HEAD", "POST"],
+                        "description": "HTTP method. Only GET/HEAD/POST are accepted.",
+                    },
                     "url": {"type": "string"},
                     "headers": {"type": "object"},
-                    "body": {},
+                    "body": {
+                        "description": (
+                            "Request body for POST. A raw string is sent verbatim; a "
+                            "JSON object is serialised as application/json. Omit for "
+                            "GET/HEAD."
+                        ),
+                    },
                     "use_session": {
                         "type": "string",
                         "description": (
