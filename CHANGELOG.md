@@ -4,6 +4,65 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #TBA] June 19 Update — SAST on web scans
+**Opened:** 2026-06-19 | Branch: `web-sast → main`
+
+Extends SAST beyond the API-scan pre-phase: SAST runs can now be created standalone (upload a ZIP, no collection), and a web scan can import a *copy* of any completed SAST run's leads to investigate dynamically. Leads are copied — never linked — so the source SAST run's originals stay untouched. Also lands the leads export and a validator fix.
+
+### SAST on web scans
+
+- **Standalone SAST runs** (`models.py`, `db.py`, `services/sast_scanner.py`, `api/sast_runs.py`): `SastRun.collection_id` is now nullable and runs can carry their own archive via new `source_archive_path` / `source_filename` columns. `_sast_scan_task` resolves the archive from the source-zip `ApiDocument` (API pre-phase, unchanged) **or** the standalone archive, and tolerates no collection / no parsed endpoints. New `POST /api/sast-runs` (multipart) uploads a ZIP and creates a standalone run. Migration: `_ensure_sast_run_collection_id_nullable` rebuilds the table to drop the `NOT NULL`, plus idempotent `_ensure_column`s (verified on an old-schema DB).
+
+- **Copy-into-web-run lead model** (`services/scan_leads.py`, `models.py`): `ScanLead` gains indexed `imported_into_run_type` / `imported_into_run_id`. `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates a run's *original* leads into new rows owned by the web run (idempotent per source run, reset to `open`); `get_leads_for_run` / `format_leads_for_run` consume them. SAST-run lead listings now exclude copies (`imported_into_run_id IS NULL`).
+
+- **Web dynamic scan wiring** (`services/scanner.py`): `_do_thinking_scan` injects imported leads into the opening context via `format_leads_for_run("web", run_id)`; the shared `update_lead` tool now records `investigated_by_run_type="web"` for web runs (was hardcoded `"api"`), so confirmed web leads auto-promote to a finding keyed on `test_run_id`.
+
+- **API** (`api/test_runs.py`): `GET /sast-runs/available` (completed runs with leads), `POST /import-leads`, `GET /leads`, `DELETE /leads` (clear all), `DELETE /leads/{lead_id}` (single, scoped to this run). Web-run delete and SAST-run delete each clean up only their own rows (`services/run_cleanup.py` also removes a standalone run's stored archive file).
+
+- **Frontend** (`web/app.js`): SAST screen gets a **New SAST Scan** upload button. Web run gains a **SAST Leads** tab styled like the Findings screen (full-width table, sticky header) with an import dropdown, per-row delete, clear-all, and markdown export.
+
+- **Leads export**: `leadsToMarkdown` exports leads (no source ZIP) from the SAST run view, API run leads, and web SAST Leads tab; embeds a hidden JSON block for future re-import.
+
+- **Tests**: new `tests/test_web_sast_leads.py` (standalone upload, import flow, clear/delete, API-shape regression) and extended `tests/test_scan_leads.py` (copy semantics, idempotency, web→`test_run_id` promotion).
+
+### Bug fixes
+
+- **Validator runs on POST requests too** (`services/validator.py`, `services/prompts/validator.py`): the adversarial validator no longer skips POST-based findings; PoC validation coverage added in `tests/test_poc_validation.py`.
+
+### Docs
+
+- `docs/architecture.md` updated for web SAST (§17 rewrite + standalone/import lead model), the web OWASP work program (#179), run-id collision / `run_kind` handling (#169/#173), and assorted entity/field corrections.
+
+
+## [PR #197] June 18 Update — Export/Import, ALICE modal logins, OWASP 2025 fix
+**Opened:** 2026-06-18 | Branch: `develop → main`
+
+Adds export/import for API collections, sites/web runs, and the web workprogram; teaches ALICE (and the scanner) to handle JS modal logins via a live Playwright browser; fixes the web workprogram progress regression and the OWASP version mismatch; and ships a full user guide under `docs/guide/`. 19 commits across ~30 files.
+
+### Docs
+
+- Full user guide added under `docs/guide/` (LLM config, settings, web scan screens, API scans, running scans) with screenshots, plus VAMPi result writeups under `docs/results/vampi/` and a `docs/results/` reorganisation. README refreshed. Claude GitHub Actions workflows added (`.github/workflows/`).
+
+### Export / Import
+
+- **API collections** (`services/api_collections.py`, `api/api_collections.py`): New `export_collection` serialises a collection (endpoints, documents, settings) to a JSON bundle; `import_collection` rebuilds it. New `GET /api/api-collections/{id}/export` and `POST /api/api-collections/import` endpoints, with Export/Import buttons in the collections UI (`web/app.js`). Round-trip tests in `tests/test_api_collections_export_import.py`.
+
+- **Sites / web runs + workprogram** (`services/sites.py`): A site/run can be exported and re-imported as a JSON bundle including findings and `PageOwaspTest` workprogram cells. `finding_ids_json` on each cell is remapped to the newly-inserted finding ids on import, dropping stale ids that have no exported finding. Tests in `tests/test_sites_export_import.py`.
+
+### ALICE + Scanner: modal / JS logins (#178)
+
+- **Live Playwright browser for ALICE** (`services/alice.py`): ALICE's `browser` tool now drives a real per-run Playwright browser (keyed by run_id), so it can complete JS-based login modals that have no URL route. Session state established by a login (cookies/headers) propagates to later `http_request` and `browser` tool calls. Crawler/scanner auto-login paths adjusted to match (`services/crawler.py`).
+
+- **Reasoning display fix** (`services/alice.py`): Inline `<think>` / `<thinking>` blocks emitted by some models are now parsed out of ALICE's chat output.
+
+### Bug fixes
+
+- **Web workprogram progress regression (#190)**: Workprogram coverage cells weren't filling during web scans — fixed so progress updates live again.
+- **OWASP 2025 vs 2021 (#189)**: `write_finding` and prompts (`services/prompts/test_lead.py`, `reporting.py`) now consistently target OWASP Top-10 2025 instead of mixing in a 2021 reference.
+- **API findings not logged in workprogram**: API scan findings now auto-fire the workprogram coverage hook (`services/api_scanner.py`).
+- **Import/export + findings rendering** (`web/app.js`, `services/traffic.py`): affected-URL cleanup (`_clean_affected_url`) and rendering fixes.
+
+
 ## [PR #186] 16th June Update — OWASP Web Workprogram, even more bug fixes
 **Opened:**  2026-06-16 | Branch: `develop → main`
 
