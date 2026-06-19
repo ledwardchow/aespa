@@ -756,8 +756,15 @@ class SastRun(SQLModel, table=True):
     __tablename__ = "sast_run"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    # Nullable: API SAST runs key on a collection; standalone (web-oriented) runs
+    # have no collection and carry their own uploaded archive instead.
+    collection_id: Optional[int] = Field(
+        default=None, foreign_key="api_collection.id", index=True
+    )
     document_id: Optional[int] = Field(default=None, index=True)  # the source_zip analysed
+    # Standalone runs store the uploaded archive directly (no ApiDocument).
+    source_archive_path: Optional[str] = Field(default=None)  # absolute path to stored zip
+    source_filename: Optional[str] = Field(default=None)      # original upload filename
     name: str
     status: str = Field(default="pending")  # pending|scanning|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
@@ -795,6 +802,11 @@ class ScanLead(SQLModel, table=True):
     investigated_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     investigated_by_run_id: Optional[int] = Field(default=None)
     linked_finding_id: Optional[int] = Field(default=None)  # set when promoted to a finding
+    # Set on a *copy* imported into a dynamic run (e.g. a web TestRun). Originals
+    # leave these NULL; producer_run_id on a copy still points at the source SAST
+    # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
+    imported_into_run_type: Optional[str] = Field(default=None, index=True)  # "web"
+    imported_into_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
