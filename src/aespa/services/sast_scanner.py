@@ -393,12 +393,20 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
 # ── SAST scan task ─────────────────────────────────────────────────────────────
 
 def _build_initial_message(
-    collection: ApiCollection, endpoints: list[ApiEndpoint], zip_filename: str
+    collection: ApiCollection | None,
+    endpoints: list[ApiEndpoint],
+    zip_filename: str,
 ) -> str:
-    lines = [
-        f"Source archive: {zip_filename}",
-        f"API collection: {collection.name}",
-        f"Base URL: {collection.base_url}",
+    lines = [f"Source archive: {zip_filename}"]
+    if collection is not None:
+        lines.append(f"API collection: {collection.name}")
+        lines.append(f"Base URL: {collection.base_url}")
+    else:
+        lines.append(
+            "This is a standalone source review (no API collection or known "
+            "endpoints). Discover the application's entry points yourself."
+        )
+    lines += [
         "",
         "You have read-only access to the extracted source tree via the file tools "
         "(list_files, glob, read_file, grep). Start by exploring the project "
@@ -443,13 +451,15 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             run = s.get(SastRun, sast_run_id)
             if run is None:
                 raise ValueError(f"SastRun {sast_run_id} not found")
-            coll = s.get(ApiCollection, run.collection_id)
-            if coll is None:
-                raise ValueError(f"ApiCollection {run.collection_id} not found")
+            # Collection is optional: API SAST runs key on a collection; standalone
+            # (web-oriented) runs have none and carry their own uploaded archive.
+            coll = s.get(ApiCollection, run.collection_id) if run.collection_id else None
+            # Resolve the source archive. Prefer the ApiDocument (the API path);
+            # fall back to the standalone archive stored on the run itself.
             doc: ApiDocument | None = None
             if run.document_id:
                 doc = s.get(ApiDocument, run.document_id)
-            else:
+            elif run.collection_id:
                 # Find the most recent source_zip for this collection.
                 doc = s.exec(
                     select(ApiDocument)
@@ -457,8 +467,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     .where(ApiDocument.doc_type == "source_zip")
                     .order_by(ApiDocument.id.desc())  # type: ignore[attr-defined]
                 ).first()
-            if doc is None:
-                raise ValueError("No source_zip document found for this collection.")
+            if doc is not None:
+                archive_path = doc.stored_path
+                archive_name = doc.filename
+            else:
+                archive_path = run.source_archive_path
+                archive_name = run.source_filename or "source.zip"
+            if not archive_path:
+                raise ValueError("No source archive found for this SAST run.")
             llm_cfg_obj = get_llm_config_for_run(s, run)  # type: ignore[arg-type]
             if llm_cfg_obj is None:
                 raise RuntimeError("No LLM configuration. Configure it in Settings first.")
@@ -467,9 +483,10 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 .where(ApiEndpoint.collection_id == run.collection_id)
                 .where(ApiEndpoint.in_scope == True)  # noqa: E712
                 .order_by(ApiEndpoint.path, ApiEndpoint.method)
-            ).all())
+            ).all()) if run.collection_id else []
             for obj in [run, coll, doc, llm_cfg_obj]:
-                s.expunge(obj)
+                if obj is not None:
+                    s.expunge(obj)
 
         # ── Extract archive ────────────────────────────────────────────────────
         tmpdir = tempfile.mkdtemp(prefix=f"sast_{sast_run_id}_")
@@ -477,14 +494,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             "type": "scanner_phase",
             "phase": "sast_extract",
             "status": "start",
-            "message": f"Extracting source archive: {doc.filename}",
+            "message": f"Extracting source archive: {archive_name}",
         })
-        _safe_unzip(doc.stored_path, tmpdir)
+        _safe_unzip(archive_path, tmpdir)
         root = Path(tmpdir).resolve()
 
         # ── Build tool executor ────────────────────────────────────────────────
         tool_executor = _make_tool_executor(sast_run_id, root, run.collection_id)
-        initial_message = _build_initial_message(coll, endpoints, doc.filename)
+        initial_message = _build_initial_message(coll, endpoints, archive_name)
 
         # ── Configure LLM context tracking ────────────────────────────────────
         llm_svc.set_run_context(
@@ -628,18 +645,26 @@ async def _sast_scan_task(sast_run_id: int) -> None:
 
 def create_sast_run(
     *,
-    collection_id: int,
+    collection_id: int | None = None,
     name: str,
     document_id: int | None = None,
+    source_archive_path: str | None = None,
+    source_filename: str | None = None,
     llm_config_id: int | None = None,
     triggered_by_run_type: str | None = None,
     triggered_by_run_id: int | None = None,
 ) -> SastRun:
-    """Create and persist a SastRun row. Does NOT start the scan."""
+    """Create and persist a SastRun row. Does NOT start the scan.
+
+    Pass ``collection_id`` + ``document_id`` for an API-style run, or
+    ``source_archive_path`` + ``source_filename`` for a standalone run.
+    """
     run = SastRun(
         collection_id=collection_id,
         name=name,
         document_id=document_id,
+        source_archive_path=source_archive_path,
+        source_filename=source_filename,
         llm_config_id=llm_config_id,
         triggered_by_run_type=triggered_by_run_type,
         triggered_by_run_id=triggered_by_run_id,

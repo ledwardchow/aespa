@@ -74,6 +74,19 @@ const api = {
   getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
   getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
   getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
+  createStandaloneSastRun: (file, name) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (name) fd.append("name", name);
+    return fetch(`/api/sast-runs`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  // SAST leads imported into a web run
+  getRunAvailableSastRuns: (id)   => req(`/api/test-runs/${id}/sast-runs/available`),
+  importSastLeads:     (id,b)     => req(`/api/test-runs/${id}/import-leads`, { method:"POST", body:b }),
+  getRunLeads:         (id)       => req(`/api/test-runs/${id}/leads`),
+  clearRunLeads:       (id)       => req(`/api/test-runs/${id}/leads`, { method:"DELETE" }),
+  deleteRunLead:       (id,lid)   => req(`/api/test-runs/${id}/leads/${lid}`, { method:"DELETE" }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -2694,11 +2707,15 @@ function ApiTestRunDetail({ runId, initialTab }) {
 
 const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };
 
-function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
+function LeadsPanel({ leads, loading, emptyMsg, scanRunning, exportName }) {
   const [expanded, setExpanded] = useState(new Set());
   const toggle = (id) => setExpanded(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
+  const onExport = () => {
+    const md = leadsToMarkdown(leads, { runName: exportName, generatedAt: new Date() });
+    downloadTextFile(leadsExportFilename(exportName), md, "text/markdown;charset=utf-8");
+  };
 
   const sevCls  = (s) => ({high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
   const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
@@ -2713,6 +2730,8 @@ function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
     <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
       <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
       ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+      <div style=${{flex:1}}></div>
+      <button className="btn sm" onClick=${onExport}>Export leads</button>
     </div>
     ${leads.map(lead => html`
       <div key=${lead.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
@@ -2753,6 +2772,7 @@ function ApiRunLeadsTab({ runId, scanRunning }) {
   useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 6000); return () => clearInterval(t); }, [scanRunning, runId]);
 
   return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    exportName=${`api-run-${runId}`}
     emptyMsg="No scan leads for this collection yet. Run a SAST scan first."/>`;
 }
 
@@ -2769,10 +2789,25 @@ const SAST_TABS = [
 function SastRunsListPage() {
   const [runs, setRuns]   = useState(null);
   const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
   const load = useCallback(async () => {
     try { setRuns(await api.listAllSastRuns()); } catch(e) { setError(e.message); }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const onUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";  // allow re-selecting the same file
+    if (!file) return;
+    setUploading(true); setError(null);
+    try {
+      const run = await api.createStandaloneSastRun(file);
+      await api.startSastScan(run.id);
+      nav(`#/sast-runs/${run.id}/progress`);
+    } catch(err) { setError(err.message); }
+    finally { setUploading(false); }
+  };
 
   const statusBadge = (s) => {
     const cls = s==="completed"?"ok":s==="failed"?"danger":s==="scanning"?"running":"neutral";
@@ -2782,6 +2817,13 @@ function SastRunsListPage() {
   return html`
     <div className="topbar">
       <div className="topbar-title">SAST Scans</div>
+      <div className="topbar-actions">
+        <input ref=${fileInputRef} type="file" accept=".zip" style=${{display:"none"}} onChange=${onUpload}/>
+        <button className="btn primary sm" disabled=${uploading}
+          onClick=${()=>fileInputRef.current && fileInputRef.current.click()}>
+          ${uploading ? "Uploading…" : "New SAST Scan"}
+        </button>
+      </div>
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
@@ -2790,7 +2832,7 @@ function SastRunsListPage() {
         <div className="empty-state">
           <div className="empty-icon">🔍</div>
           <div className="empty-msg">No SAST scans yet</div>
-          <div className="empty-sub">Upload source code to an API collection and run a SAST scan from the Files tab.</div>
+          <div className="empty-sub">Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web scan.</div>
         </div>`}
       ${runs&&runs.length>0 && html`
         <div className="table-wrap">
@@ -2806,7 +2848,7 @@ function SastRunsListPage() {
                 <td>${r.leads_count}</td>
                 <td>${r.triggered_by_run_id
                   ? html`<a href=${`#/api-runs/${r.triggered_by_run_id}/status`}>API run #${r.triggered_by_run_id}</a>`
-                  : html`<span className="subtle">—</span>`}</td>
+                  : html`<span className="subtle">${r.source_filename || "standalone"}</span>`}</td>
                 <td>${r.started_at ? new Date(r.started_at).toLocaleString() : html`<span className="subtle">—</span>`}</td>
                 <td><a className="btn ghost sm" href=${`#/sast-runs/${r.id}/progress`}>View →</a></td>
               </tr>`)}
@@ -2871,7 +2913,7 @@ function SastRunDetail({ runId, initialTab }) {
   return html`
     <div className="topbar">
       <div className="topbar-title">
-        ${run ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : ""}
+        ${run && run.collection_id ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : (run ? html`<a href="#/sast-runs" style=${{color:"var(--muted)",fontWeight:400}}>SAST</a><span className="breadcrumb-sep"> / </span>` : "")}
         ${run ? run.name : "…"}
         ${run && html` ${statusBadge(scanRunning ? "scanning" : run.status)}`}
         ${run?.triggered_by_run_id && html`
@@ -2895,7 +2937,7 @@ function SastRunDetail({ runId, initialTab }) {
     <div className=${tab==="progress" ? "content no-padding flex-fill-noscroll" : "content scroll-content"}>
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="progress" && html`<${SastProgressTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning} runName=${run?.name}/>`}
     </div>
   `;
 }
@@ -2989,7 +3031,7 @@ function SastProgressTab({ runId, scanRunning }) {
   </div>`;
 }
 
-function SastLeadsTab({ runId, scanRunning }) {
+function SastLeadsTab({ runId, scanRunning, runName }) {
   const [leads, setLeads] = useState(null);
   const [loading, setLoading] = useState(true);
   const load = () => { setLoading(true); api.getSastLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
@@ -2997,6 +3039,7 @@ function SastLeadsTab({ runId, scanRunning }) {
   useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 5000); return () => clearInterval(t); }, [scanRunning, runId]);
 
   return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    exportName=${runName || `sast-run-${runId}`}
     emptyMsg=${scanRunning ? "SAST scan in progress — leads will appear here as they are found." : "No leads yet. Start the SAST scan to analyse the source code."}/>`;
 }
 
@@ -6029,6 +6072,10 @@ function TestRunDetail({ runId, initialTab }) {
           onClick=${()=>{ setActiveTab("workprogram"); setSelNode(null); nav(`#/runs/${runId}/workprogram`); }}>
           Workprogram
         </button>
+        <button className=${"tab-btn"+(activeTab==="leads"?" active":"")}
+          onClick=${()=>{ setActiveTab("leads"); setSelNode(null); nav(`#/runs/${runId}/leads`); }}>
+          SAST Leads
+        </button>
         <div style=${{flex:1}}></div>
         ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
         ${activeTab==="sitemap" && run?.credentials?.length > 1 && html`
@@ -6130,7 +6177,7 @@ function TestRunDetail({ runId, initialTab }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions"||activeTab==="workprogram") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions"||activeTab==="workprogram"||activeTab==="leads") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -7238,6 +7285,128 @@ function TestRunDetail({ runId, initialTab }) {
         <div className="content scroll-content" style=${{padding:0}}>
           <${WebRunWorkProgramTab} runId=${runId} run=${run} reloadKey=${wpReloadKey} scanRunning=${isDynamicScanActive(thinkingStatus?.status)||run?.status==="crawling"||run?.status==="crawled"}/>
         </div>`}
+      ${activeTab==="leads" && html`
+        <${WebRunSastLeadsTab} runId=${runId} scanRunning=${isDynamicScanActive(thinkingStatus?.status)}/>`}
+    </div>`;
+}
+
+// ── WebRunSastLeadsTab ─────────────────────────────────────────────────────────
+// Lets a web run import a copy of a completed SAST scan's leads. The copies are
+// independent rows owned by this run; the originals stay open on the SAST tab.
+
+function WebRunSastLeadsTab({ runId, scanRunning }) {
+  const [available, setAvailable] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [selected, setSelected] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const loadLeads = useCallback(() => api.getRunLeads(runId).then(setLeads).catch(()=>{}), [runId]);
+  const loadAvailable = useCallback(
+    () => api.getRunAvailableSastRuns(runId).then(setAvailable).catch(()=>{}), [runId]
+  );
+  useEffect(() => { loadLeads(); loadAvailable(); }, [loadLeads, loadAvailable]);
+  // Refresh while a dynamic scan runs so investigation outcomes show live.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadLeads, 6000);
+    return () => clearInterval(t);
+  }, [scanRunning, loadLeads]);
+
+  const onImport = async () => {
+    if (!selected) return;
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.importSastLeads(runId, { sast_run_id: +selected });
+      setMsg(r.imported > 0 ? `Imported ${r.imported} lead(s).` : "Already imported (no new leads).");
+      await loadLeads();
+    } catch(e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const onClearAll = async () => {
+    if (!confirm("Remove all imported SAST leads from this run?\nThe original SAST scan is not affected.")) return;
+    setClearBusy(true); setError(null); setMsg(null);
+    try { await api.clearRunLeads(runId); setLeads([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const onDeleteRow = async (leadId) => {
+    setError(null);
+    try { await api.deleteRunLead(runId, leadId); setLeads(prev => prev.filter(l => l.id !== leadId)); }
+    catch(e) { setError(e.message); }
+  };
+
+  const sevCls = (s) => ({high:"sev-high",critical:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
+  const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
+
+  return html`
+    <div className="findings-panel">
+      <div className="findings-status-bar">
+        <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
+        ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+        <div style=${{flex:1}}></div>
+        <div className="row" style=${{gap:8}}>
+          <select value=${selected} onChange=${e=>setSelected(e.target.value)} style=${{minWidth:240}}>
+            <option value="">Import from SAST scan…</option>
+            ${available.map(r=>html`<option key=${r.id} value=${r.id}>
+              ${r.name} (${r.leads_count} lead${r.leads_count===1?"":"s"})
+            </option>`)}
+          </select>
+          <button className="btn sm" disabled=${!selected||busy} onClick=${onImport}>
+            ${busy?"Importing…":"Import leads"}
+          </button>
+          ${leads.length>0 && html`
+            <button className="btn sm" onClick=${()=>downloadTextFile(
+              leadsExportFilename(`web-run-${runId}`),
+              leadsToMarkdown(leads, { runName:`Web run #${runId}`, generatedAt:new Date() }),
+              "text/markdown;charset=utf-8",
+            )}>Export leads</button>`}
+          ${leads.length>0 && html`
+            <button className="btn danger-outline sm" disabled=${clearBusy} onClick=${onClearAll}>
+              ${clearBusy?"Clearing…":"Clear all"}
+            </button>`}
+        </div>
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"8px 16px"}}>${error}</div>`}
+      ${msg && html`<div className="subtle" style=${{margin:"8px 16px"}}>${msg}</div>`}
+      ${leads.length===0
+        ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+            ${available.length===0
+              ? "No completed SAST scans with leads yet. Run one from the SAST tab, then import its leads here."
+              : "No leads imported into this run yet. Pick a SAST scan above and click Import leads."}
+          </div>`
+        : html`
+          <div className="findings-table-wrap">
+            <table className="findings-table">
+              <thead><tr>
+                <th style=${{width:90}}>Severity</th>
+                <th>Title</th>
+                <th style=${{width:90}}>Category</th>
+                <th style=${{width:90}}>Conf.</th>
+                <th>Location</th>
+                <th style=${{width:110}}>Status</th>
+                <th style=${{width:44}}></th>
+              </tr></thead>
+              <tbody>${leads.map(l=>html`
+                <tr key=${l.id}>
+                  <td><span className=${"sev-badge "+sevCls(l.severity)}>${l.severity||"medium"}</span></td>
+                  <td style=${{fontWeight:600}}>${l.title}</td>
+                  <td>${l.category||"—"}</td>
+                  <td>${Math.round((l.confidence||0)*100)}%</td>
+                  <td className="subtle" style=${{fontSize:"0.85em"}}>${l.location||"—"}</td>
+                  <td><span className=${"badge "+statCls(l.status)} style=${{fontSize:11}}>${l.status||"open"}</span></td>
+                  <td>
+                    <button className="btn ghost sm" title="Delete lead"
+                      onClick=${()=>onDeleteRow(l.id)}>✕</button>
+                  </td>
+                </tr>`)}
+              </tbody>
+            </table>
+          </div>`}
     </div>`;
 }
 
@@ -9589,6 +9758,61 @@ function slugForFilename(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "issues";
+}
+
+// ── SAST lead export ────────────────────────────────────────────────────────
+// Client-side markdown export of leads, mirroring findingsToMarkdown. The
+// embedded JSON comment keeps the file round-trippable for a future importer.
+
+function leadImportPayload(l) {
+  return {
+    title: l.title, severity: l.severity, category: l.category,
+    confidence: l.confidence, location: l.location, description: l.description,
+    evidence: l.evidence, status: l.status, note: l.note, source: l.source,
+  };
+}
+
+function leadsExportFilename(name, runId) {
+  const base = slugForFilename(name || `sast-run-${runId || ""}`);
+  return `${base}-leads-${new Date().toISOString().slice(0, 10)}.md`;
+}
+
+function leadsToMarkdown(leads, meta = {}) {
+  const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
+  const sorted = [...(leads || [])].sort((a, b) => {
+    const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
+    if (sev !== 0) return sev;
+    return (b.confidence || 0) - (a.confidence || 0);
+  });
+  const lines = [`# SAST Leads Export${meta.runName ? `: ${meta.runName}` : ""}`, ""];
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total leads: ${sorted.length}`, "");
+  lines.push(
+    "<!-- aespa-sast-leads-json",
+    encodeURIComponent(JSON.stringify(sorted.map(leadImportPayload))),
+    "-->",
+    "",
+  );
+  sorted.forEach((l, idx) => {
+    lines.push(
+      `## ${idx + 1}. ${markdownListValue(l.title)}`,
+      "",
+      `- Severity: ${markdownListValue(l.severity)}`,
+      `- Category: ${markdownListValue(l.category)}`,
+      `- Confidence: ${Math.round((l.confidence || 0) * 100)}%`,
+      `- Status: ${markdownListValue(l.status)}`,
+      `- Location: ${markdownListValue(l.location)}`,
+      "",
+      "### Description",
+      markdownListValue(l.description),
+      "",
+      "### Code Evidence",
+      markdownCodeBlock(l.evidence),
+      "",
+    );
+    if (l.note) lines.push("### Investigation Note", markdownListValue(l.note), "");
+  });
+  return lines.join("\n");
 }
 
 function markdownExportFilename(run, siteName) {
