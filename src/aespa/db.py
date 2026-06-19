@@ -742,6 +742,23 @@ def _migrate(engine: Engine) -> None:
         conn.commit()
     # SAST: back-reference on api_test_run
     _ensure_column(engine, "api_test_run", "sast_run_id", "INTEGER")
+    # SAST web support — additive columns (idempotent).
+    _ensure_column(engine, "sast_run", "source_archive_path", "TEXT")
+    _ensure_column(engine, "sast_run", "source_filename", "TEXT")
+    _ensure_column(engine, "scan_lead", "imported_into_run_type", "TEXT")
+    _ensure_column(engine, "scan_lead", "imported_into_run_id", "INTEGER")
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_imported_into_run_id "
+            "ON scan_lead (imported_into_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_imported_into_run_type "
+            "ON scan_lead (imported_into_run_type)"
+        ))
+        conn.commit()
+    # Standalone SAST runs have no collection — drop the NOT NULL on collection_id.
+    _ensure_sast_run_collection_id_nullable(engine)
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:
@@ -1078,6 +1095,90 @@ def _ensure_scan_finding_test_run_id_nullable(engine: Engine) -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_scan_finding_{col} "
                 f"ON scan_finding ({col})"
             ))
+        conn.commit()
+
+
+def _ensure_sast_run_collection_id_nullable(engine: Engine) -> None:
+    """Make sast_run.collection_id nullable for standalone (web) SAST runs.
+
+    The original table created collection_id as ``NOT NULL REFERENCES
+    api_collection(id)``. Standalone runs have no collection, so rebuild the
+    table to drop the NOT NULL (SQLite cannot alter a constraint in place).
+    Must run AFTER source_archive_path / source_filename are ensured so the
+    rebuild carries the full current column set. Idempotent and best-effort.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    columns = [
+        "id",
+        "collection_id",
+        "document_id",
+        "source_archive_path",
+        "source_filename",
+        "name",
+        "status",
+        "triggered_by_run_type",
+        "triggered_by_run_id",
+        "llm_config_id",
+        "leads_count",
+        "error_message",
+        "token_usage_json",
+        "started_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ]
+    column_list = ", ".join(columns)
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(sast_run)")))
+        if not rows:
+            return  # table not created yet (fresh DB handled by create_all)
+        coll_row = next((row for row in rows if row[1] == "collection_id"), None)
+        # row[3] == notnull flag; already nullable means this migration has run.
+        if coll_row is None or int(coll_row[3] or 0) == 0:
+            return
+
+        conn.execute(sql("DROP TABLE IF EXISTS sast_run_coll_migration"))
+        conn.execute(sql("""
+            CREATE TABLE sast_run_coll_migration (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER REFERENCES api_collection(id),
+                document_id INTEGER,
+                source_archive_path TEXT,
+                source_filename TEXT,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                triggered_by_run_type TEXT,
+                triggered_by_run_id INTEGER,
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                leads_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                token_usage_json TEXT,
+                started_at DATETIME,
+                completed_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(sql(f"""
+            INSERT INTO sast_run_coll_migration ({column_list})
+            SELECT {column_list}
+            FROM sast_run
+        """))
+        conn.execute(sql("DROP TABLE sast_run"))
+        conn.execute(sql(
+            "ALTER TABLE sast_run_coll_migration RENAME TO sast_run"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_collection_id "
+            "ON sast_run (collection_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_triggered_by_run_id "
+            "ON sast_run (triggered_by_run_id)"
+        ))
         conn.commit()
 
 

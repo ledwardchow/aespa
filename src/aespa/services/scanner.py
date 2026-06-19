@@ -4035,6 +4035,16 @@ async def _do_thinking_scan(run_id: int) -> None:
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
 
+    # Append any SAST leads imported into this web run so the Test Lead can
+    # investigate them (mirrors the API scan's collection-keyed lead injection).
+    try:
+        from aespa.services.scan_leads import format_leads_for_run
+        leads_block = format_leads_for_run("web", run_id)
+        if leads_block:
+            crawl_context = f"{crawl_context}\n\n{leads_block}"
+    except Exception:
+        pass
+
     # Resolve a login URL for the selector: prefer the site-level one, else fall back
     # to the first credential that carries its own login_url. A configured login URL is
     # itself a credential endpoint, so this catches login forms at non-standard paths.
@@ -5769,7 +5779,7 @@ async def _do_agentic_thinking_loop(
                     int(lead_id),
                     status=lead_status,
                     note=lead_note,
-                    investigated_by_run_type="api",
+                    investigated_by_run_type="api" if is_api_run else "web",
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
                 )
