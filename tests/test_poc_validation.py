@@ -171,3 +171,231 @@ def test_build_and_verify_poc_includes_setup_for_auth(monkeypatch):
     assert f"$(cat {_POC_AUTH_FILE})" in command
     assert "Network" in setup  # httponly fallback instructions
     assert captured["auth_file_value"] == "sid=abc"
+
+
+# ── POST acceptance + body serialisation ───────────────────────────────────────
+
+def test_post_method_is_accepted(monkeypatch):
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
+    done = _done(
+        poc_request={"method": "POST", "url": "https://target.local/api/login"},
+    )
+    finding = _finding(url="https://target.local/api/login")
+    result = asyncio.run(
+        validator._build_and_verify_poc(finding, done, {}, _Policy())
+    )
+    assert result is not None
+    command, _ = result
+    assert "-X POST" in command
+    assert "https://target.local/api/login" in command
+
+
+def test_put_method_still_suppressed(monkeypatch):
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
+    done = _done(
+        poc_request={"method": "PUT", "url": "https://target.local/api/users/2"}
+    )
+    result = asyncio.run(
+        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
+    )
+    assert result is None
+
+
+def test_patch_method_still_suppressed(monkeypatch):
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
+    done = _done(
+        poc_request={"method": "PATCH", "url": "https://target.local/api/users/2"}
+    )
+    result = asyncio.run(
+        validator._build_and_verify_poc(_finding(), done, {}, _Policy())
+    )
+    assert result is None
+
+
+def test_build_curl_command_serialises_string_body():
+    cmd = validator._build_curl_command(
+        "POST", "https://target.local/login", {},
+        insecure=True, follow_redirects=True, auth=None,
+        body="username=admin&password=admin",
+    )
+    assert "--data-raw" in cmd
+    assert "username=admin&password=admin" in cmd
+
+
+def test_build_curl_command_serialises_dict_body_as_json():
+    cmd = validator._build_curl_command(
+        "POST", "https://target.local/api/x", {},
+        insecure=True, follow_redirects=True, auth=None,
+        body={"user": "admin", "role": "superuser"},
+    )
+    assert "Content-Type: application/json" in cmd
+    assert "--data-raw" in cmd
+    assert '"user":"admin"' in cmd
+    assert '"role":"superuser"' in cmd
+
+
+def test_build_curl_command_omits_body_flag_when_no_body():
+    cmd = validator._build_curl_command(
+        "POST", "https://target.local/x", {},
+        insecure=True, follow_redirects=True, auth=None,
+    )
+    assert "--data-raw" not in cmd
+
+
+# ── Event + log emission on every branch ──────────────────────────────────────
+
+def _capture_emits(monkeypatch):
+    captured: list[dict] = []
+
+    def _fake_emit(run_id, event):
+        captured.append({"run_id": run_id, **event})
+
+    monkeypatch.setattr(validator.events_svc, "emit", _fake_emit)
+    return captured
+
+
+def test_no_poc_request_emits_no_request_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    done = {"verdict": "confirmed", "reasoning": "x"}  # no poc_request
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy(), run_id=42)
+        )
+    assert result is None
+    phase_evts = [e for e in captured if e.get("type") == "scanner_phase"]
+    agent_evts = [e for e in captured if e.get("type") == "agent_status"]
+    assert any(
+        e.get("phase") == "poc_verify" and e["data"]["poc_status"] == "no_request"
+        for e in phase_evts
+    )
+    assert any(
+        e.get("agent_id") == "reporting" and e.get("_persist") is True
+        for e in agent_evts
+    )
+    assert "PoC [no_request]" in caplog.text
+
+
+def test_out_of_scope_emits_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    done = _done(poc_request={"method": "GET", "url": "https://evil.example/x"})
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy(), run_id=42)
+        )
+    assert result is None
+    assert any(
+        e.get("phase") == "poc_verify" and e["data"]["poc_status"] == "out_of_scope"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    assert "PoC [out_of_scope]" in caplog.text
+
+
+def test_state_changing_method_emits_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    done = _done(
+        poc_request={"method": "DELETE", "url": "https://target.local/api/users/2"}
+    )
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy(), run_id=42)
+        )
+    assert result is None
+    assert any(
+        e.get("phase") == "poc_verify"
+        and e["data"]["poc_status"] == "method_suppressed"
+        and e["data"]["method"] == "DELETE"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    assert "PoC [method_suppressed]" in caplog.text
+
+
+def test_no_assertion_emits_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    done = _done(
+        poc_request={"method": "GET", "url": "https://target.local/api/users/2"}
+    )
+    done["poc_expect"] = {}  # no status, no body_contains
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy(), run_id=42)
+        )
+    assert result is None
+    assert any(
+        e.get("phase") == "poc_verify" and e["data"]["poc_status"] == "no_assertion"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    assert "PoC [no_assertion]" in caplog.text
+
+
+def test_auth_unresolved_emits_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    done = _done(
+        poc_request={
+            "method": "GET",
+            "url": "https://target.local/api/users/2",
+            "use_session": "ghost",
+        },
+        poc_auth={"mechanism": "bearer"},
+    )
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(_finding(), done, {}, _Policy(), run_id=42)
+        )
+    assert result is None
+    assert any(
+        e.get("phase") == "poc_verify" and e["data"]["poc_status"] == "auth_unresolved"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    assert "PoC [auth_unresolved]" in caplog.text
+
+
+def test_verification_failed_emits_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: False)
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(
+                _finding(), _done(), {}, _Policy(), run_id=42,
+            )
+        )
+    assert result is None
+    assert any(
+        e.get("phase") == "poc_verify"
+        and e["data"]["poc_status"] == "verification_failed"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    assert "PoC [verification_failed]" in caplog.text
+
+
+def test_verified_emits_verified_event(monkeypatch, caplog):
+    captured = _capture_emits(monkeypatch)
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
+    with caplog.at_level("INFO", logger="aespa.validator"):
+        result = asyncio.run(
+            validator._build_and_verify_poc(
+                _finding(), _done(), {}, _Policy(), run_id=42,
+            )
+        )
+    assert result is not None
+    assert any(
+        e.get("phase") == "poc_verify" and e["data"]["poc_status"] == "verified"
+        for e in captured if e.get("type") == "scanner_phase"
+    )
+    reporting = [
+        e for e in captured
+        if e.get("type") == "agent_status" and e.get("agent_id") == "reporting"
+    ]
+    assert reporting and reporting[0]["_persist"] is True
+    assert "PoC [verified]" in caplog.text
+
+
+def test_run_id_none_silently_skips_event_emit(monkeypatch):
+    """When _build_and_verify_poc is called without run_id (e.g. legacy callers),
+    no events are emitted — verification still runs, just silently."""
+    captured = _capture_emits(monkeypatch)
+    monkeypatch.setattr(validator, "_run_and_assert_curl", lambda *a: True)
+    result = asyncio.run(
+        validator._build_and_verify_poc(_finding(), _done(), {}, _Policy())
+    )
+    assert result is not None
+    assert captured == []

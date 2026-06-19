@@ -60,12 +60,90 @@ def create_lead(
 
 
 def list_leads_for_run(producer_run_id: int) -> list[ScanLead]:
-    """Return all ScanLead rows created by a specific SAST run."""
+    """Return the *original* ScanLead rows created by a specific SAST run.
+
+    Copies imported into a dynamic run (``imported_into_run_id`` set) are
+    excluded so the SAST tab only ever shows the pristine originals.
+    """
     with Session(get_engine(), expire_on_commit=False) as s:
         return list(s.exec(
             select(ScanLead)
             .where(ScanLead.producer_run_id == producer_run_id)
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
             .order_by(ScanLead.id)
+        ).all())
+
+
+def copy_leads_to_run(
+    sast_run_id: int,
+    target_run_type: str,
+    target_run_id: int,
+) -> int:
+    """Copy a SAST run's original leads into a dynamic run as independent rows.
+
+    Each copy is a fresh ScanLead owned by ``(target_run_type, target_run_id)``
+    via ``imported_into_*`` and reset to status ``open``. The copy keeps
+    ``producer_run_id`` pointing at the source SAST run for provenance. The
+    originals are left untouched so the SAST tab keeps showing them as open.
+
+    Idempotent per (target run, source SAST run): if this run already imported
+    from this SAST run, nothing new is created. Returns the number of copies made.
+    """
+    with Session(get_engine()) as s:
+        # Already imported from this SAST run into this target? Don't duplicate.
+        already = s.exec(
+            select(ScanLead)
+            .where(ScanLead.imported_into_run_type == target_run_type)
+            .where(ScanLead.imported_into_run_id == target_run_id)
+            .where(ScanLead.producer_run_id == sast_run_id)
+        ).first()
+        if already is not None:
+            return 0
+
+        originals = list(s.exec(
+            select(ScanLead)
+            .where(ScanLead.producer_run_id == sast_run_id)
+            .where(ScanLead.producer_run_type == "sast")
+            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+            .order_by(ScanLead.id)
+        ).all())
+
+        made = 0
+        now = datetime.now(_UTC)
+        for o in originals:
+            copy = ScanLead(
+                collection_id=o.collection_id,
+                producer_run_type=o.producer_run_type,
+                producer_run_id=o.producer_run_id,
+                source=o.source,
+                category=o.category,
+                severity=o.severity,
+                confidence=o.confidence,
+                title=o.title,
+                description=o.description,
+                location=o.location,
+                evidence=o.evidence,
+                status="open",
+                imported_into_run_type=target_run_type,
+                imported_into_run_id=target_run_id,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(copy)
+            made += 1
+        s.commit()
+    return made
+
+
+def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
+    """Return open leads imported into a dynamic run (consumed by that scan)."""
+    with Session(get_engine(), expire_on_commit=False) as s:
+        return list(s.exec(
+            select(ScanLead)
+            .where(ScanLead.imported_into_run_type == target_run_type)
+            .where(ScanLead.imported_into_run_id == target_run_id)
+            .where(ScanLead.status == "open")
+            .order_by(ScanLead.severity.desc(), ScanLead.confidence.desc())  # type: ignore[attr-defined]
         ).all())
 
 
@@ -310,9 +388,27 @@ def update_lead(
 def format_leads_for_context(collection_id: int, cap: int = 20) -> str:
     """Return a formatted 'Investigation leads' block for the dynamic scan context.
 
-    Returns an empty string if there are no open leads.
+    Used by API scans, keyed on the collection. Returns an empty string if there
+    are no open leads.
     """
-    leads = get_open_leads_for_collection(collection_id)[:cap]
+    return _format_leads_block(get_open_leads_for_collection(collection_id)[:cap])
+
+
+def format_leads_for_run(
+    target_run_type: str, target_run_id: int, cap: int = 20
+) -> str:
+    """Return the investigation-leads block for a dynamic run's imported leads.
+
+    Used by web scans, keyed on the run that imported the leads. Returns an empty
+    string if no open leads have been imported.
+    """
+    return _format_leads_block(
+        get_leads_for_run(target_run_type, target_run_id)[:cap]
+    )
+
+
+def _format_leads_block(leads: list[ScanLead]) -> str:
+    """Shared 'STATIC ANALYSIS INVESTIGATION LEADS' renderer for the scan context."""
     if not leads:
         return ""
 
