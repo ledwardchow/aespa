@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
 from aespa.db import get_session
@@ -39,6 +40,7 @@ from aespa.schemas import (
     ScannerSessionUpdate,
     TargetIntelItemOut,
     TargetIntelSummary,
+    ScanLeadOut,
     TestRunCreate,
     TestRunSummary,
     TestRunUpdate,
@@ -383,6 +385,15 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         session.delete(p)
     for finding in session.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all():
         session.delete(finding)
+    # SAST leads imported (copied) into this web run belong to it — remove them so
+    # they don't leak into a reused run id. Originals on the SAST run are untouched.
+    from aespa.models import ScanLead
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "web")
+        .where(ScanLead.imported_into_run_id == run_id)
+    ).all():
+        session.delete(lead)
     for log_entry in session.exec(
         select(ScanLog).where(ScanLog.test_run_id == run_id).where(ScanLog.run_kind == "web")
     ).all():
@@ -415,6 +426,108 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
             session.delete(msg)
         session.delete(sess)
     session.delete(run)
+    session.commit()
+
+
+# ── SAST leads (web run) ──────────────────────────────────────────────────────
+
+@router.get("/api/test-runs/{run_id}/sast-runs/available")
+def list_available_sast_runs(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[dict]:
+    """Completed SAST runs with leads — the dropdown source for importing leads."""
+    from aespa.models import SastRun
+    _get_run_or_404(session, run_id)
+    runs = session.exec(
+        select(SastRun)
+        .where(SastRun.status == "completed")
+        .where(SastRun.leads_count > 0)
+        .order_by(SastRun.id.desc())  # type: ignore[attr-defined]
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "leads_count": r.leads_count,
+            "source_filename": r.source_filename,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        }
+        for r in runs
+    ]
+
+
+class ImportLeadsRequest(BaseModel):
+    sast_run_id: int
+
+
+@router.post("/api/test-runs/{run_id}/import-leads")
+def import_sast_leads(
+    run_id: int,
+    body: ImportLeadsRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Copy a SAST run's leads into this web run as independent rows."""
+    from aespa.models import SastRun
+    from aespa.services.scan_leads import copy_leads_to_run
+    _get_run_or_404(session, run_id)
+    if session.get(SastRun, body.sast_run_id) is None:
+        raise HTTPException(status_code=404, detail="SAST run not found")
+    imported = copy_leads_to_run(body.sast_run_id, "web", run_id)
+    return {"imported": imported}
+
+
+@router.get("/api/test-runs/{run_id}/leads", response_model=list[ScanLeadOut])
+def get_test_run_leads(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[ScanLeadOut]:
+    """Return the SAST leads imported into this web run."""
+    from aespa.models import ScanLead
+    _get_run_or_404(session, run_id)
+    leads = session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "web")
+        .where(ScanLead.imported_into_run_id == run_id)
+        .order_by(ScanLead.id)
+    ).all()
+    return [ScanLeadOut.model_validate(lead) for lead in leads]
+
+
+@router.delete("/api/test-runs/{run_id}/leads", status_code=status.HTTP_204_NO_CONTENT)
+def clear_test_run_leads(run_id: int, session: Session = Depends(get_session)) -> None:
+    """Delete all SAST leads imported into this web run (originals are untouched)."""
+    from aespa.models import ScanLead
+    _get_run_or_404(session, run_id)
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "web")
+        .where(ScanLead.imported_into_run_id == run_id)
+    ).all():
+        session.delete(lead)
+    session.commit()
+
+
+@router.delete(
+    "/api/test-runs/{run_id}/leads/{lead_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_test_run_lead(
+    run_id: int, lead_id: int, session: Session = Depends(get_session)
+) -> None:
+    """Delete a single imported lead from this web run.
+
+    Scoped to leads owned by this run so an original SAST lead can never be
+    removed through the web-run endpoint.
+    """
+    from aespa.models import ScanLead
+    _get_run_or_404(session, run_id)
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.imported_into_run_type != "web"
+        or lead.imported_into_run_id != run_id
+    ):
+        raise HTTPException(status_code=404, detail="Lead not found for this run")
+    session.delete(lead)
     session.commit()
 
 

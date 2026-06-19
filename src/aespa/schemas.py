@@ -285,8 +285,9 @@ class SastRunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    collection_id: int
+    collection_id: int | None
     document_id: int | None
+    source_filename: str | None
     name: str
     status: str
     triggered_by_run_type: str | None
@@ -320,6 +321,8 @@ class ScanLeadOut(BaseModel):
     investigated_by_run_type: str | None
     investigated_by_run_id: int | None
     linked_finding_id: int | None
+    imported_into_run_type: str | None
+    imported_into_run_id: int | None
     created_at: datetime
     updated_at: datetime
 
