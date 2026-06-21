@@ -4,7 +4,7 @@ A run of https://github.com/erev0s/VAmPI through AESPA API scanning.
 
 
 ### Model
-Claude Sonnet 4.6 (via Bedrock Converse)
+Claude Sonnet 4.6 (via Bedrock Runtime)
 
 ### Run time
 

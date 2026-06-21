@@ -8505,7 +8505,7 @@ const API_FORMAT_LABELS = {
   openai_compatible:"OpenAI-compatible API",
   openrouter:"OpenRouter",
   google:"Google Gemini API",
-  bedrock:"Amazon Bedrock Converse",
+  bedrock:"Amazon Bedrock Runtime",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry (OpenAI API)",
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
@@ -8642,7 +8642,7 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
           <option value="openai_compatible">OpenAI-compatible API</option>
           <option value="openrouter">OpenRouter</option>
           <option value="google">Google Gemini API</option>
-          <option value="bedrock">Amazon Bedrock Converse</option>
+          <option value="bedrock">Amazon Bedrock Runtime</option>
           <option value="azure_openai">Azure OpenAI</option>
           <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
