@@ -2346,7 +2346,7 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 TOOL_RESULT_CHAR_LIMIT = 8_000
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
-# wire format or the Bedrock Converse toolConfig format.
+# wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
         "anthropic",

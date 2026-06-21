@@ -34,7 +34,8 @@
       "Bash(awk -F: '$1<=4454')",
       "Bash(awk -F: '$1<=5803')",
       "Bash(tail -n 30 src/aespa/services/../../tests/test_api_scanner.py; echo \"=== total lines ===\"; wc -l < tests/test_api_scanner.py)",
-      "Bash(python -m pytest tests/test_api_scanner.py -x -q)"
+      "Bash(python -m pytest tests/test_api_scanner.py -x -q)",
+      "Bash(xargs cat)"
     ]
   }
 }

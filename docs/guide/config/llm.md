@@ -21,13 +21,13 @@ The following providers can be selected as an API format to pre-fill the Base UR
 
 The following API format selector values will require you to input your base URL:
 - OpenAI-compatible API (select this if you are using a locally hosted model - i.e. Ollama, LM Studio)
-- Amazon Bedrock Converse (https://bedrock-runtime.REGIONNAME.amazonaws.com)
+- Amazon Bedrock Runtime (https://bedrock-runtime.REGIONNAME.amazonaws.com)
 - Azure OpenAI (https://RESOURCENAME.openai.azure.com)
 - Azure AI Foundry (OpenAI API) (https://RESOURCENAME.services.ai.azure.com/openai/v1)
 - Azure AI Foundry (Anthropic API) (https://RESOURCENAME.services.ai.azure.com/anthropic/v1)
 
 You will need to enter model names (you can obtain these from your provider) - one per line.
-For all providers (except Bedrock), you must enter an API key. If you selected Amazon Bedrock Converse, you can provide an API key OR leave it blank to use the default AWS SDK/boto3 profile installed on your machine.
+For all providers (except Bedrock), you must enter an API key. If you selected Amazon Bedrock Runtime, you can provide an API key OR leave it blank to use the default AWS SDK/boto3 profile installed on your machine.
 
 If you have a rate limit/quota on your LLM provider, enter them here and AESPA will pace LLM calls to ensure you don't exceed it. If you leave it blank, it will run as fast as it can - I've seen it consume up to ~10m TPM for a single scan in bursts. (If you have a limit and you don't fill this in, your LLM calls will fail and your scans will break. An error message will show up in the scan log if this is the case.)
 
