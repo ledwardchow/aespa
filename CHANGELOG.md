@@ -343,7 +343,7 @@ Verified proof-of-concept generation for confirmed findings, optional temperatur
 
 ### Optional Temperature Parameter
 
-- **`temperature` made nullable** (`models.py`, `schemas.py`, `db.py`): The `temperature` field on `LLMConfig` is now `Optional[float]` (defaults to `None`). A SQLite table-rebuild migration (`_ensure_llm_config_temperature_nullable`) makes the column nullable for existing databases. When `temperature` is `None`, the parameter is omitted entirely from all LLM API call sites (Anthropic, OpenAI, Bedrock Converse, Azure Foundry Anthropic, Google Gemini, and the `_chat_completion_kwargs` shared path).
+- **`temperature` made nullable** (`models.py`, `schemas.py`, `db.py`): The `temperature` field on `LLMConfig` is now `Optional[float]` (defaults to `None`). A SQLite table-rebuild migration (`_ensure_llm_config_temperature_nullable`) makes the column nullable for existing databases. When `temperature` is `None`, the parameter is omitted entirely from all LLM API call sites (Anthropic, OpenAI, Bedrock Runtime, Azure Foundry Anthropic, Google Gemini, and the `_chat_completion_kwargs` shared path).
 - **UI checkbox toggle** (`web/app.js`): The LLM profile form now shows a checkbox next to the temperature input. When unchecked, the field is disabled and `null` is sent in the save payload. The default profile form raises `max_tokens` from 4,096 to 70,000 and sets a default temperature of 0.2.
 - **Export/import schema updated**: `LLMExportProfileItem` defaults updated to `max_tokens=70000` and `temperature=None`.
 
