@@ -1,9 +1,8 @@
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
-
-import pytest
 
 from aespa import db
 

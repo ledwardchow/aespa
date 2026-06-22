@@ -23,7 +23,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -1134,21 +1133,21 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     Loads API collection data, seeds sessions, then drives
     ``_do_agentic_thinking_loop`` with API-mode overrides — no Playwright needed.
     """
+    from aespa.services import llm as llm_svc
     from aespa.services.scanner import (
         _do_agentic_thinking_loop,
-        _make_scanner_client,
-        _scanner_proxy_var,
-        _scanner_global_header_var,
         _load_findings_snapshot,
+        _make_scanner_client,
+        _scanner_global_header_var,
+        _scanner_proxy_var,
     )
     from aespa.services.settings import (
+        get_global_http_header_config,
         get_llm_config_for_run,
         get_run_scanner_policy,
         get_specialist_agent_config,
         get_upstream_proxy_config,
-        get_global_http_header_config,
     )
-    from aespa.services import llm as llm_svc
 
     with Session(get_engine()) as s:
         run = s.get(ApiTestRun, api_run_id)
@@ -1200,12 +1199,12 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         with Session(get_engine()) as s:
             source_doc = s.exec(
                 select(ApiDocument)
-                .where(ApiDocument.collection_id == collection_id)
+                .where(ApiDocument.collection_id == run.collection_id)
                 .where(ApiDocument.doc_type == "source_zip")
                 .order_by(ApiDocument.id.desc())  # type: ignore[attr-defined]
             ).first()
 
-        if source_doc is not None and needs_fresh_sast(collection_id):
+        if source_doc is not None and needs_fresh_sast(run.collection_id):
             events_svc.emit(
                 api_run_id,
                 {
@@ -1216,7 +1215,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                 },
             )
             sast_run = sast_svc.create_sast_run(
-                collection_id=collection_id,
+                collection_id=run.collection_id,
                 name=f"SAST for API run #{api_run_id}",
                 document_id=source_doc.id,
                 llm_config_id=run.llm_config_id,
@@ -1525,8 +1524,6 @@ async def start_api_scan(api_run_id: int) -> None:
     # so the scan task (and its child specialist tasks) inherit the tag even
     # after this function returns.
     with events_svc.run_kind_scope("api"):
-        events_svc.register_api_run(api_run_id)
-
         with Session(get_engine()) as s:
             run = s.get(ApiTestRun, api_run_id)
             if run is None:

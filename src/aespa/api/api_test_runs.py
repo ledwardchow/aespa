@@ -12,7 +12,8 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response as HTTPResponse, StreamingResponse
+from fastapi.responses import Response as HTTPResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -34,8 +35,7 @@ from aespa.schemas import (
     ScannerSessionSummary,
     ScannerSessionUpdate,
 )
-from aespa.services import alice_tasks
-from aespa.services import run_cleanup
+from aespa.services import alice_tasks, run_cleanup
 from aespa.services import scanner_sessions as scanner_session_svc
 
 _UTC = timezone.utc
@@ -125,7 +125,7 @@ class AliceRunRequest(BaseModel):
 
 
 def _save_api_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> None:
-    from aespa.api.alice import AliceSessionsRequest as _AReq, _save_sessions
+    from aespa.api.alice import _save_sessions
     # Delegate to the canonical implementation — same DB tables, same logic.
     _save_sessions(run_id, req, session, run_kind="api")  # type: ignore[arg-type]
 

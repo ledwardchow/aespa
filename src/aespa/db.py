@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-
 from collections.abc import Iterator
 
 from sqlalchemy.engine import Engine
@@ -112,6 +111,90 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
                 )
             )
             conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
+def _cleanup_orphaned_sast_extractions() -> None:
+    """Reconcile leaked ``<data_dir>/sast_extract/<id>/`` dirs from crashed scans.
+
+    SAST scans extract the uploaded archive into a deterministic per-run path
+    under ``<data_dir>/sast_extract/<id>/``. On a hard process crash the
+    coroutine's ``finally`` block does not run, so the dir leaks. The in-memory
+    task registry (``services.sast_scanner._sast_tasks``) is empty on a fresh
+    process, so any dir that survived a restart is orphaned.
+
+    For each numeric subdir of ``<data_dir>/sast_extract/``:
+      * no matching ``SastRun``                              → delete the dir
+      * run in a terminal state (completed/failed/cancelled) → delete the dir
+      * run is ``scanning``                                  → mark the run
+        ``failed`` (with a note that the process was interrupted), then delete
+        the dir
+      * run is ``pending``                                   → leave alone
+        (the user may still start it)
+      * subdir name is not an integer                        → leave alone
+        (e.g. ``lost+found`` or manual artefacts)
+
+    Idempotent and best-effort: any exception is swallowed so startup is
+    never blocked. Runs out of an in-memory engine context — touches the DB
+    only to flip ``SastRun.status`` for ``scanning`` orphans.
+    """
+    import logging
+    import shutil
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from sqlmodel import Session
+
+    from aespa.config import get_settings
+    from aespa.models import SastRun
+
+    _UTC = timezone.utc
+    log = logging.getLogger(__name__)
+
+    try:
+        extract_root = Path(get_settings().data_dir) / "sast_extract"
+        if not extract_root.is_dir():
+            return
+        engine = get_engine()
+        terminal = {"completed", "failed", "cancelled"}
+        for entry in extract_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                run_id = int(entry.name)
+            except ValueError:
+                continue  # non-numeric subdir (e.g. lost+found) — leave alone
+            with Session(engine) as s:
+                run = s.get(SastRun, run_id)
+                if run is None or run.status in terminal:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    log.info(
+                        "sast_extract sweep: removed orphan dir %s "
+                        "(run id=%s status=%r)",
+                        entry, run_id, None if run is None else run.status,
+                    )
+                    continue
+                if run.status == "scanning":
+                    run.status = "failed"
+                    run.error_message = (
+                        "Process was interrupted while the SAST scan was running; "
+                        "extracted source tree has been cleaned up on startup. "
+                        "Re-start the scan to retry."
+                    )
+                    run.completed_at = run.completed_at or datetime.now(_UTC)
+                    run.updated_at = datetime.now(_UTC)
+                    s.add(run)
+                    s.commit()
+                    shutil.rmtree(entry, ignore_errors=True)
+                    log.warning(
+                        "sast_extract sweep: marked run id=%s 'failed' and removed %s "
+                        "(process was interrupted mid-scan)",
+                        run_id, entry,
+                    )
+                    continue
+                # status == 'pending' — user may still start the scan, leave the
+                # dir alone (and it should not exist yet anyway).
     except Exception:
         pass  # never block startup on a best-effort cleanup
 
@@ -759,6 +842,21 @@ def _migrate(engine: Engine) -> None:
         conn.commit()
     # Standalone SAST runs have no collection — drop the NOT NULL on collection_id.
     _ensure_sast_run_collection_id_nullable(engine)
+    # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS cloudflare_access_config (
+                id INTEGER PRIMARY KEY,
+                audience TEXT,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+    # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
+    # run only after every SastRun column above has been added — otherwise the
+    # first post-upgrade startup raises "no such column" and silently skips.
+    _cleanup_orphaned_sast_extractions()
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:

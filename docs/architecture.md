@@ -290,6 +290,16 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 | `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written during a dynamic scan |
 | `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when the validator finds a concrete innocent explanation; when `false`, failure to reproduce counts as false positive |
 
+### Cloudflare Access Config (`CloudflareAccessConfig` model)
+
+Singleton row (id = 1). Edited from the Debug page. Holds the optional Cloudflare Access application **audience (AUD)** tag used when verifying the proxy-injected `Cf-Access-Jwt-Assertion` header (see §12 — `/api/version`).
+
+| Field | Default | Description |
+|---|---|---|
+| `audience` | `null` | Access application AUD tag. When set, the JWT is verified against it (`jwt.decode(..., audience=...)`), so only tokens issued for this application are accepted. When empty/null, the audience check is skipped — the legacy behaviour, in which any Cloudflare Access tenant's validly-signed token passes the issuer check. Blank input is normalised to `null` on save. |
+
+This is informational only — the app has **no auth by design** (localhost-only); the header is purely for displaying the authenticated user's email in the sidebar when fronted by a reverse proxy.
+
 ---
 
 ## 5. Data Models
@@ -307,6 +317,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScannerPolicy` | Scan behaviour policy for a test run |
 | `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
+| `CloudflareAccessConfig` | Singleton — optional Access AUD tag for verifying the proxy-injected JWT |
 | `TestRun` | A single web scan session; owns all scan artefacts |
 | `CrawledPage` | A discovered page/endpoint with LLM-assigned flags |
 | `PageLink` | Directed edge between two `CrawledPage` nodes (site map graph) |
@@ -386,6 +397,8 @@ start_crawl(run_id)
 ```
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
+
+**`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
 
 ### LLM involvement
 
@@ -635,19 +648,21 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 
 ### Upstream proxy
 
-All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. SSL verification is disabled globally when a proxy is active to support HTTPS interception setups (e.g. Burp Suite's proxy listener).
+All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. TLS certificate verification is left **on** for direct connections and is disabled **only when a proxy is active**, to support HTTPS interception setups (e.g. Burp Suite's proxy listener) — so the API key and prompt data are never sent without certificate validation in the normal (no-proxy) case.
 
 ### Rate Limiting & Pacing
 
 To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
 
 - **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
+- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` — page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so a configured `max_tpm` / `max_rpm` applies to the whole run, not just page analysis.
 - **Estimated Pre-allocation:**
-  - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider).
+  - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider). The agentic path flattens the running message history to estimate input size.
   - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.
+  - A single request's estimate is **clamped to the per-minute budget** (`max_tokens`): a call estimated larger than the whole TPM budget paces once and then proceeds, rather than waiting forever for capacity that can never exist.
   - If the bucket does not have enough capacity, the limiter sleeps until the required TPM (Tokens Per Minute) and RPM (Requests Per Minute) quotas are met.
-- **Real-Time Notification:** If pacing triggers, a `rate_limit` scanner-phase SSE event is emitted (e.g. *"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved X tokens)"*) to keep the user informed in the UI.
-- **Post-Call Reconciliation:** Once the API call returns, the exact actual token counts consumed are retrieved, and the bucket's pre-allocation is reconciled (refunding estimated but unused tokens). If the request fails, the estimated tokens are fully refunded.
+- **Real-Time Notification:** When pacing first begins to wait, an `on_wait` callback fires a `rate_limit` scanner-phase event (e.g. *"LLM rate limit reached — pacing requests… (waiting ~Ns, reserved X tokens)"*) routed to the active run's log via the context emit function (the scanner log, the API scan log, or the ALICE stream), so a rate-limited scan never looks frozen. A matching *"rate limit cleared"* event is emitted once the call proceeds.
+- **Post-Call Reconciliation:** Once the API call returns, the exact actual token counts consumed are retrieved, and the bucket's pre-allocation is reconciled (refunding the reserved-but-unused tokens). If the request fails, the reserved tokens are fully refunded.
 
 ---
 
@@ -716,6 +731,16 @@ All findings carry a `finding_source` field that records their origin:
 
 External findings can be imported via `POST /api/test-runs/{run_id}/findings/import`.
 
+### Verified proof-of-concept (PoC) commands
+
+When the validator confirms a finding, `validator.py` tries to attach a **reproducible `curl` command** (`ScanFinding.poc_command` / `poc_setup`). The pipeline is strict — "it works, or there is no PoC":
+
+- The validator must supply a `poc_request` (method, url, headers, body) and a positive `poc_expect` assertion (a status code and/or a distinctive `body_contains` substring). Without a positive assertion nothing is attached.
+- The URL is scope-locked to the finding's host; methods are restricted to an allow-list (`GET`, `HEAD`, `POST` — `POST` is permitted so a confirmed state-changing finding can be reproduced against the already-authorised target); sensitive headers (`authorization`, `cookie`, `host`, `content-length`) are stripped.
+- Auth-required PoCs resolve the live session credential and emit a shippable command that reads it from a token file (`-H "Authorization: Bearer $(cat aespa-poc-auth.txt)"`), plus `poc_setup` markdown telling the user how to capture that file. The live credential never appears in the stored command.
+- **Verification runs the request locally and shell-free**: the shipped command string is for the human, but the verification step builds a separate argv (`_build_curl_argv`) and runs it via `subprocess.run(argv)` with **no shell**, materialising the credential directly into the header. This avoids treating target-derived header/body/url values as shell syntax (a command-injection vector) and behaves identically on POSIX and Windows (POSIX `shlex` quoting is meaningless to `cmd.exe`). Only PoCs whose assertion holds on this re-run are persisted.
+- Every suppressed/failed branch emits an INFO log + scan-log + Reporting-agent event so the reason a PoC is missing is visible (`_emit_poc_outcome`).
+
 ---
 
 ## 12. API Layer
@@ -735,6 +760,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
 | `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
+| `/api/settings/cloudflare-access` | `settings.py` | Get/set the Cloudflare Access AUD verified on the proxy-injected JWT |
 | `/api/test-runs/` | `test_runs.py` | Create runs, check status, retrieve site map graph |
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
 | `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
@@ -853,7 +879,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 
 - **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
 - **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
-- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the authoritative source of an event's kind (the id-only fallback is ambiguous and only a last resort). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
+- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
 - **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
 
 ---
@@ -1077,7 +1103,9 @@ _api_scan_task(api_run_id)
 
 ### Scope enforcement
 
-`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request.
+`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request. The web dynamic scanner enforces the equivalent boundary through `scope.py::check_scope(url, site_id, run_id)` (host must be in `Site.scope_hosts` when set, and the page must not be marked `in_scope=False`).
+
+**Redirects are re-checked per hop.** The scanner HTTP client uses `follow_redirects=True`, so a pre-send `check_scope` on the requested URL alone would let a target bounce the scanner to an out-of-scope/internal host (SSRF / scope bypass). `_request_scope_checked` therefore disables auto-follow and validates every `Location` against `check_scope` before following it; an out-of-scope redirect is refused (the unfollowed 3xx is surfaced to the agent with a `[SCOPE BLOCK]` note) so the off-scope host is never contacted. The browser (`browser` tool) path re-checks the **final** post-redirect URL after navigation and refuses to load an off-scope page into the agent's context; the auth flow is exempt so legitimate external-IdP/SSO redirects still work.
 
 ### ALICE on API runs
 
@@ -1105,8 +1133,11 @@ start_sast_scan(sast_run_id)
        1. Load SastRun; resolve the archive: the source_zip ApiDocument
           (API pre-phase) OR run.source_archive_path (standalone).
           collection_id may be NULL.
-       2. _safe_unzip — extract archive into sandboxed temp directory
-          (path-jailed: entries that would escape the root are rejected)
+       2. _safe_unzip - extract archive into a deterministic per-run
+          directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
+          entries that would escape the root are rejected). A startup
+          sweep (db._cleanup_orphaned_sast_extractions) reconciles any
+          dirs leaked by a previous hard crash.
        3. _build_initial_message — construct LLM opening context. When a
           collection exists, seed it with the parsed ApiEndpoint rows;
           for standalone runs there are no endpoints, so the agent

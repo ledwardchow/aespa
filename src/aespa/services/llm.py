@@ -12,7 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
 
 import httpx
@@ -23,6 +23,9 @@ from aespa.services.prompts.reporting import (
     _NORMALIZE_TITLES_PROMPT,
     _WRITEUP_REPLAY_PROMPT,
 )
+
+# Re-exported for consumers that import this from aespa.services.llm.
+from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS  # noqa: F401
 from aespa.services.prompts.test_lead import (
     _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
@@ -38,15 +41,12 @@ from aespa.services.prompts.test_lead import (
     THINKING_AGENT_TOOLS,
     WSTG_SKILLS,
 )
-from aespa.services.prompts.specialist import (
-    SPECIALIST_AGENT_TOOLS,
-)
 from aespa.services.prompts.validator import (
-    _ADVERSARIAL_VALIDATOR_SYSTEM,
+    _ADVERSARIAL_VALIDATOR_SYSTEM,  # noqa: F401 — re-exported via aespa.services.llm
     _DISPROOF_HINTS,
     _VALIDATION_PLAN_PROMPT,
     _VALIDATION_VERDICT_PROMPT,
-    VALIDATOR_AGENT_TOOLS,
+    VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
 
 log = logging.getLogger("aespa.llm")
@@ -87,8 +87,14 @@ class AsyncTokenBucketLimiter:
 
         self._lock = asyncio.Lock()
 
-    async def acquire(self, estimated_tokens: int) -> bool:
+    async def acquire(self, estimated_tokens: int, on_wait=None) -> bool:
+        # A single request can never need more than the entire per-minute budget;
+        # without this clamp an estimate larger than ``max_tokens`` could never be
+        # satisfied (refill caps at ``max_tokens``) and ``acquire`` would loop and
+        # sleep forever. Clamp so an over-budget call paces once, then proceeds.
+        estimated_tokens = min(float(estimated_tokens), self.max_tokens)
         slept = False
+        notified = False
         while True:
             async with self._lock:
                 now = time.monotonic()
@@ -134,11 +140,23 @@ class AsyncTokenBucketLimiter:
                 wait_time = max(wait_time_tokens, wait_time_requests)
                 slept = True
 
+            # Fire the wait notice once, before the first sleep, so the caller can
+            # tell the user it is pacing (not stuck) the moment it starts waiting.
+            if on_wait is not None and not notified:
+                notified = True
+                try:
+                    on_wait(wait_time)
+                except Exception:
+                    pass
+
             await asyncio.sleep(wait_time)
 
     async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
         async with self._lock:
-            difference = estimated_tokens - actual_tokens
+            # Mirror the clamp in acquire(): only ``min(estimated, max_tokens)`` was
+            # ever reserved, so only that much can be credited back.
+            reserved = min(float(estimated_tokens), self.max_tokens)
+            difference = reserved - actual_tokens
             self.available_tokens = min(
                 self.max_tokens, max(0.0, self.available_tokens + difference)
             )
@@ -330,25 +348,90 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+def _emit_run_event(event: dict) -> None:
+    """Emit an event to whatever log is wired for the active run.
+
+    Routes through the context ``emit_fn`` set by ``set_run_context`` (the scanner
+    log, the API scan log, the ALICE event/chat stream, …), falling back to
+    ``events.emit(run_id)``.  Best-effort — never raises into an LLM call.
+    """
+    emit_fn = _emit_fn_var.get()
+    if emit_fn is not None:
+        try:
+            emit_fn(event)
+            return
+        except Exception:
+            pass
+    run_id = _run_id_var.get()
+    if run_id is not None:
+        try:
+            from aespa.services import events as _events
+
+            _events.emit(run_id, event)
+        except Exception:
+            pass
+
+
+def _emit_rate_limit_waiting(model: str, reserved_tokens: float, wait_time: float) -> None:
+    """Tell the user the scan is pacing for the rate limit (not stuck)."""
+    _emit_run_event(
+        {
+            "type": "scanner_phase",
+            "phase": "rate_limit",
+            "status": "active",
+            "message": (
+                f"LLM rate limit reached — pacing requests to stay within the "
+                f"configured limit (waiting ~{wait_time:.0f}s, reserved "
+                f"{int(reserved_tokens):,} tokens for {model})…"
+            ),
+        }
+    )
+
+
+def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
+    _emit_run_event(
+        {
+            "type": "scanner_phase",
+            "phase": "rate_limit",
+            "status": "complete",
+            "message": (
+                f"LLM rate limit cleared — resuming "
+                f"(used {used_tokens:,} tokens for {model})."
+            ),
+        }
+    )
+
+
 # Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
 _LLM_HEADERS = {"HTTP-Referer": "https://aespa.leddytech.com", "X-Title": "AESPA"}
 
 
 def _llm_client_kwargs() -> dict:
-    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
+    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI).
+
+    TLS verification is left ON for direct connections and only disabled when an
+    upstream proxy is configured (to support HTTPS interception, e.g. Burp) —
+    mirroring the Bedrock path. Disabling it unconditionally would expose the API
+    key and prompt data to MITM even with no proxy in play.
+    """
     proxy = _llm_proxy_var.get()
     return {
         "http_client": httpx.AsyncClient(
-            verify=False, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
+            verify=proxy is None, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
         )
     }
 
 
 def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
-    """Creates an httpx client for direct LLM calls, always with verify=False."""
-    kwargs.setdefault("verify", False)
+    """Creates an httpx client for direct LLM calls.
+
+    Verifies TLS by default; only disables verification when an upstream proxy is
+    configured (HTTPS interception). See ``_llm_client_kwargs`` for rationale.
+    """
+    proxy = _llm_proxy_var.get()
+    kwargs.setdefault("verify", proxy is None)
     kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
-    if proxy := _llm_proxy_var.get():
+    if proxy:
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
 
@@ -656,24 +739,12 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     total_estimated = estimated_input + estimated_output
 
     _last_call_tokens_var.set(None)
-    slept = await limiter.acquire(total_estimated)
-
-    run_id = _run_id_var.get()
-    if slept and run_id is not None:
-        try:
-            from aespa.services import events
-
-            events.emit(
-                run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "rate_limit",
-                    "status": "active",
-                    "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
-                },
-            )
-        except Exception:
-            pass
+    # Notify the user the moment pacing starts (on_wait fires before the sleep),
+    # so a rate-limited scan never looks frozen.
+    slept = await limiter.acquire(
+        total_estimated,
+        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(total_estimated, limiter.max_tokens), wt),
+    )
 
     try:
         if config.provider == "anthropic":
@@ -701,21 +772,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             actual_total = total_estimated
             await limiter.reconcile(total_estimated, total_estimated)
 
-        if slept and run_id is not None:
-            try:
-                from aespa.services import events
-
-                events.emit(
-                    run_id,
-                    {
-                        "type": "scanner_phase",
-                        "phase": "rate_limit",
-                        "status": "complete",
-                        "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
-                    },
-                )
-            except Exception:
-                pass
+        if slept:
+            _emit_rate_limit_cleared(config.model, actual_total)
 
         return resp
     except Exception:
@@ -1114,7 +1172,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     if config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+        verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
     )
     client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
@@ -2346,7 +2404,7 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 TOOL_RESULT_CHAR_LIMIT = 8_000
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
-# wire format or the Bedrock Converse toolConfig format.
+# wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
         "anthropic",
@@ -2403,13 +2461,74 @@ def _with_anthropic_cache(
     return cached_messages, cached_tools
 
 
+def _estimate_tools_call_tokens(system_message: str, messages: list[dict]) -> int:
+    """Rough input-token estimate for an agentic (tool-using) call.
+
+    The messages list is Anthropic-format; content is either a string or a list
+    of blocks. We only need an order-of-magnitude figure to drive pacing, so flatten
+    everything to text and reuse the same ~chars/4 heuristic as ``estimate_tokens``.
+    """
+    parts: list[str] = [system_message or ""]
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    # text / tool_result content / tool_use input — stringify cheaply.
+                    parts.append(str(block.get("text") or block.get("content") or block.get("input") or ""))
+        elif content is not None:
+            parts.append(str(content))
+    return estimate_tokens("\n".join(parts))
+
+
 async def _call_with_tools(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
     tools: list[dict] | None = None,
 ) -> "tuple[list[dict], str, Any]":
-    """Call an LLM with tool definitions.
+    """Rate-limited entry point for an agentic (tool-using) LLM call.
+
+    Paces through the same per-provider token bucket as the non-agentic ``_call``
+    path so the configured ``max_tpm`` / ``max_rpm`` cover dynamic, API, SAST and
+    ALICE scans too — not just page analysis. Emits a rate-limit notice into the
+    active run's log the moment pacing begins, then dispatches to the per-provider
+    implementation.
+    """
+    limiter = get_limiter_for_config(config)
+    if limiter is None:
+        return await _call_with_tools_impl(config, system_message, messages, tools=tools)
+
+    estimated = _estimate_tools_call_tokens(system_message, messages) + (config.max_tokens or 4096)
+    _last_call_tokens_var.set(None)
+    slept = await limiter.acquire(
+        estimated,
+        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(estimated, limiter.max_tokens), wt),
+    )
+    try:
+        result = await _call_with_tools_impl(config, system_message, messages, tools=tools)
+        usage = _last_call_tokens_var.get()
+        actual_total = (usage["input"] + usage["output"]) if usage else estimated
+        await limiter.reconcile(estimated, actual_total)
+        if slept:
+            _emit_rate_limit_cleared(config.model, actual_total)
+        return result
+    except Exception:
+        await limiter.reconcile(estimated, 0)
+        raise
+
+
+async def _call_with_tools_impl(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    """Call an LLM with tool definitions (per-provider dispatch).
 
     The *messages* list is always in Anthropic format (the canonical internal
     representation used by thinking_agentic_loop).  Each provider branch
@@ -2939,7 +3058,7 @@ async def _call_with_tools(
         if config.base_url:
             _g_http_opts["base_url"] = config.base_url
         _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+            verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
         )
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()

@@ -2,20 +2,18 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, AsyncMock, MagicMock
-from urllib.parse import urlparse
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
-from fastapi.testclient import TestClient
 
-from aespa.db import set_engine, get_engine
-from aespa.models import Site, TestRun as RunModel, LLMConfig, CrawledPage, ScanFinding
-from aespa.services.alice import run_alice_turn, run_alice_turn_stream
-from aespa.services import llm as llm_svc
+from aespa.db import get_session, set_engine
 from aespa.main import create_app
-from aespa.db import get_session
+from aespa.models import LLMConfig, Site
+from aespa.models import TestRun as RunModel
+from aespa.services.alice import run_alice_turn, run_alice_turn_stream
 
 
 @pytest.fixture(name="db_engine")
@@ -235,9 +233,8 @@ def test_alice_sessions_roundtrip_and_run_token(test_client, test_data):
 @pytest.mark.anyio
 async def test_alice_write_finding_tool_persists(db_session, test_data):
     """Verify that calling write_finding via the agentic loop persists a finding."""
+
     from aespa.services.alice import _execute_alice_tool
-    from aespa.models import ScanFinding
-    from sqlmodel import select
 
     run = test_data["run"]
     llm_cfg = test_data["llm_cfg"]
@@ -356,8 +353,8 @@ async def test_alice_http_request_no_post_probe_without_category(db_session, tes
 @pytest.mark.anyio
 async def test_alice_http_request_uses_stored_primary_session(db_session, test_data):
     """http_request carries the run's stored authenticated session by default."""
-    from aespa.services.alice import _execute_alice_tool
     from aespa.services import scanner_sessions as session_svc
+    from aespa.services.alice import _execute_alice_tool
 
     run = test_data["run"]
     session_svc.upsert_session(
@@ -389,8 +386,8 @@ async def test_alice_http_request_uses_stored_primary_session(db_session, test_d
 @pytest.mark.anyio
 async def test_alice_http_request_use_session_selects_and_anonymous_opts_out(db_session, test_data):
     """use_session selects a specific stored session; "anonymous" sends no creds."""
-    from aespa.services.alice import _execute_alice_tool
     from aespa.services import scanner_sessions as session_svc
+    from aespa.services.alice import _execute_alice_tool
 
     run = test_data["run"]
     session_svc.upsert_session(
@@ -454,8 +451,8 @@ async def test_alice_http_request_anonymous_when_vault_empty(db_session, test_da
 async def test_alice_browser_captures_session_into_vault(db_session, test_data):
     """The browser tool drives a live page and, with capture_session, persists the
     resulting cookies into the vault + DB so later calls reuse the authenticated session."""
-    from aespa.services.alice import _execute_alice_tool
     from aespa.services import scanner_sessions as session_svc
+    from aespa.services.alice import _execute_alice_tool
 
     run = test_data["run"]
     vault: dict = {}

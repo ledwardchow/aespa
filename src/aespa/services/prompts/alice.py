@@ -1,7 +1,7 @@
 """Prompts and tool definitions for the A.L.I.C.E. chat coordinator agent."""
 from __future__ import annotations
 
-from aespa.services.prompts.test_lead import _THINKING_PENTEST_PLAYBOOK, WSTG_SKILLS
+from aespa.services.prompts.test_lead import _THINKING_PENTEST_PLAYBOOK
 
 ALICE_SYSTEM_PROMPT = (
     "You are A.L.I.C.E. (Automated Linked Intelligence for Cyber Exploitation), "

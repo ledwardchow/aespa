@@ -72,6 +72,24 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert data["scan_ssti"] is True
 
 
+def test_cloudflare_access_config_round_trip(client: TestClient):
+    # Defaults to no audience (legacy behaviour: audience check skipped).
+    r = client.get("/api/settings/cloudflare-access")
+    assert r.status_code == 200
+    assert r.json()["audience"] is None
+
+    r = client.put("/api/settings/cloudflare-access", json={"audience": "  abc123  "})
+    assert r.status_code == 200
+    # Whitespace is trimmed on the way in.
+    assert r.json()["audience"] == "abc123"
+    assert client.get("/api/settings/cloudflare-access").json()["audience"] == "abc123"
+
+    # Blank clears it back to None so the verifier skips the audience check.
+    r = client.put("/api/settings/cloudflare-access", json={"audience": "   "})
+    assert r.status_code == 200
+    assert r.json()["audience"] is None
+
+
 def _make_provider(client: TestClient, **overrides):
     payload = {
         "name": "Local OpenAI",
