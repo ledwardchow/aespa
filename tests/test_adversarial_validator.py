@@ -5,13 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aespa.services.llm import (
-    VALIDATOR_AGENT_TOOLS,
     _ADVERSARIAL_VALIDATOR_SYSTEM,
     _DISPROOF_HINTS,
+    VALIDATOR_AGENT_TOOLS,
     _disproof_hints_for_finding,
     severity_meets_threshold,
 )
-
 
 # ── Config defaults ────────────────────────────────────────────────────────────
 

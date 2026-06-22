@@ -16,7 +16,7 @@ import re
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import yaml
 from prance.util.resolver import RESOLVE_INTERNAL, RefResolver
@@ -259,42 +259,74 @@ def _dereference_internal(spec: dict) -> dict:
     return spec
 
 
-def _flatten_all_of(schema: dict | None) -> dict:
-    """Merge a schema's ``allOf`` members into a single object schema.
+def _resolve_schema_deep(
+    spec: dict, obj, _seen: frozenset = frozenset(), _depth: int = 0
+) -> dict:
+    """Resolve internal ``$ref``s, flatten ``allOf``, and dereference nested
+    property / item / oneOf / anyOf refs into a single concrete schema.
 
-    OpenAPI composition (``allOf``) is common for request bodies; merging the
-    members yields a flat property map that's more useful downstream than a raw
-    ``allOf`` list. Best-effort and shallow: later members win on key conflicts,
-    and ``required`` lists are unioned.
+    This is the backstop for when ``_dereference_internal`` (prance) can't resolve
+    refs: it walks the schema so ``allOf`` members and nested property refs are
+    inlined rather than left as raw ``$ref`` objects. ``allOf`` members are merged
+    (later members win on key conflicts; ``required`` lists are unioned). Only
+    internal (``#/``) refs are followed — external refs are left verbatim (SSRF
+    guard). Cycle-safe via a visited-ref set on the current path, with a depth cap
+    as a final guard.
     """
-    if not isinstance(schema, dict):
-        return {}
-    all_of = schema.get("allOf")
-    if not isinstance(all_of, list):
-        return schema
+    if not isinstance(obj, dict) or _depth > 25:
+        return obj if isinstance(obj, dict) else {}
 
-    merged: dict = {k: v for k, v in schema.items() if k != "allOf"}
-    props: dict = dict(merged.get("properties") or {})
-    required: list = list(merged.get("required") or [])
+    ref = obj.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        if ref in _seen:
+            return {}  # cyclic reference — stop expanding
+        target = _resolve_schema_ref(spec, obj)
+        if isinstance(target, dict) and target is not obj:
+            return _resolve_schema_deep(spec, target, _seen | {ref}, _depth + 1)
+        return obj  # unresolvable (external / missing) — leave the literal ref
 
-    for member in all_of:
-        member = _flatten_all_of(member) if isinstance(member, dict) else member
-        if not isinstance(member, dict):
-            continue
-        props.update(member.get("properties") or {})
-        for r in member.get("required") or []:
-            if r not in required:
-                required.append(r)
-        for k, v in member.items():
-            if k not in ("properties", "required", "allOf"):
-                merged.setdefault(k, v)
+    out: dict = {k: v for k, v in obj.items() if k != "allOf"}
 
-    if props:
-        merged["properties"] = props
-        merged.setdefault("type", "object")
-    if required:
-        merged["required"] = required
-    return merged
+    all_of = obj.get("allOf")
+    if isinstance(all_of, list):
+        props: dict = dict(out.get("properties") or {})
+        required: list = list(out.get("required") or [])
+        for member in all_of:
+            rm = _resolve_schema_deep(spec, member, _seen, _depth + 1)
+            if not isinstance(rm, dict):
+                continue
+            props.update(rm.get("properties") or {})
+            for r in rm.get("required") or []:
+                if r not in required:
+                    required.append(r)
+            for k, v in rm.items():
+                if k not in ("properties", "required", "allOf"):
+                    out.setdefault(k, v)
+        if props:
+            out["properties"] = props
+            out.setdefault("type", "object")
+        if required:
+            out["required"] = required
+
+    nested_props = out.get("properties")
+    if isinstance(nested_props, dict):
+        out["properties"] = {
+            k: _resolve_schema_deep(spec, v, _seen, _depth + 1)
+            for k, v in nested_props.items()
+        }
+
+    for list_key in ("oneOf", "anyOf"):
+        members = out.get(list_key)
+        if isinstance(members, list):
+            out[list_key] = [
+                _resolve_schema_deep(spec, m, _seen, _depth + 1) for m in members
+            ]
+
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _resolve_schema_deep(spec, items, _seen, _depth + 1)
+
+    return out
 
 
 def _resolve_schema_ref(spec: dict, obj: dict | None) -> dict:
@@ -360,8 +392,7 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
             if rb:
                 content_map = rb.get("content", {})
                 for media_type, media_obj in content_map.items():
-                    schema = _resolve_schema_ref(spec, media_obj.get("schema", {}))
-                    schema = _flatten_all_of(schema)
+                    schema = _resolve_schema_deep(spec, media_obj.get("schema", {}))
                     req_body = {"media_type": media_type, "schema": schema}
                     break
 
@@ -413,9 +444,7 @@ def _postman_method_url(item: dict) -> tuple[str, str, str | None]:
     url = req.get("url", "")
     if isinstance(url, dict):
         raw = url.get("raw", "")
-        host_parts = url.get("host", [])
         path_parts = url.get("path", [])
-        base = ".".join(host_parts) if host_parts else ""
         path = "/" + "/".join(str(p) for p in path_parts) if path_parts else "/"
         # Replace postman variables {{var}} with {var}
         path = re.sub(r"\{\{(\w+)\}\}", r"{\1}", path)
@@ -555,8 +584,8 @@ async def _parse_freetext_llm(
     spec format.  A single LLM call returns both arrays.
     """
     try:
-        from aespa.services.settings import get_llm_config
         from aespa.services import llm as llm_svc
+        from aespa.services.settings import get_llm_config
     except ImportError:
         return [], []
 

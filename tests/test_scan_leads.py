@@ -1,9 +1,9 @@
 """Tests for ScanLead auto-promotion: confirming a lead must back it with a finding."""
+import json
+
 import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
-
-import json
 
 from aespa.db import set_engine
 from aespa.models import (

@@ -8,7 +8,13 @@ from pydantic import BaseModel as _BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import ApiCollection, ApiCredential, ApiDocument, ApiEndpoint, ApiTestRun
+from aespa.models import (
+    ApiCollection,
+    ApiCredential,
+    ApiDocument,
+    ApiEndpoint,
+    ApiTestRun,
+)
 from aespa.schemas import (
     ApiCollectionCreate,
     ApiCollectionDetail,
@@ -22,10 +28,9 @@ from aespa.schemas import (
     ApiTestRunSummary,
 )
 from aespa.services import api_collections as api_collections_service
-from aespa.services import api_documents as api_documents_service
 from aespa.services import api_docs as api_docs_service
+from aespa.services import api_documents as api_documents_service
 from aespa.services import api_readiness as api_readiness_service
-
 
 router = APIRouter(prefix="/api/api-collections", tags=["api-collections"])
 
@@ -499,8 +504,7 @@ def purge_collection_data(
 
 
 def _utcnow():
-    from datetime import timezone
-    from datetime import datetime
+    from datetime import datetime, timezone
     return datetime.now(timezone.utc)
 
 
