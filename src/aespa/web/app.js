@@ -2560,7 +2560,7 @@ const API_RUN_TABS = [
   { key: "sessions",    label: "Sessions" },
   { key: "traffic",     label: "Traffic Log" },
   { key: "endpoints",   label: "Endpoints" },
-  { key: "workprogram", label: "Workprogram" },
+  { key: "workprogram", label: "OWASP Coverage" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
@@ -3405,7 +3405,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
     <div className="subtle" style=${{padding:24,textAlign:"center"}}>
       No coverage data yet.${" "}
       ${run?.status === "pending"
-        ? "Start a scan to populate the Work Program matrix."
+        ? "Start a scan to populate the OWASP Coverage matrix."
         : "The matrix will appear once a scan has started."}
     </div>`;
 
@@ -3417,13 +3417,13 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
 
   const onExportMarkdown = () => {
     const md = workProgramToMarkdown(matrix, { cats, labels: OWASP_LABELS, kind: "api", runName: run?.name, generatedAt: new Date() });
-    downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+    downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
   };
 
   return html`
     <div style=${{padding:16}}>
       <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
-        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <h3 style=${{margin:0}}>OWASP Coverage Matrix</h3>
         <span className=${"badge "+(run?.coverage_mode==="enforce"?"warning":"neutral")}>
           ${run?.coverage_mode||"track"} mode
         </span>
@@ -6072,7 +6072,7 @@ function TestRunDetail({ runId, initialTab }) {
         </button>
         <button className=${"tab-btn"+(activeTab==="workprogram"?" active":"")}
           onClick=${()=>{ setActiveTab("workprogram"); setSelNode(null); nav(`#/runs/${runId}/workprogram`); }}>
-          Workprogram
+          OWASP Coverage
         </button>
         <button className=${"tab-btn"+(activeTab==="leads"?" active":"")}
           onClick=${()=>{ setActiveTab("leads"); setSelNode(null); nav(`#/runs/${runId}/leads`); }}>
@@ -7478,7 +7478,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
     setSeeding(true); setSeedMsg(null);
     try {
       const r = await api.seedWebWorkprogram(runId);
-      setSeedMsg(r.created > 0 ? `Added ${r.created} new cell${r.created!==1?"s":""}.` : "No new cells — workprogram is up to date.");
+      setSeedMsg(r.created > 0 ? `Added ${r.created} new cell${r.created!==1?"s":""}.` : "No new cells — OWASP Coverage is up to date.");
       await loadMatrix();
     } catch(e) { setSeedMsg("Error: " + e.message); }
     finally { setSeeding(false); }
@@ -7486,10 +7486,10 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
 
   const onExportMarkdown = () => {
     const md = workProgramToMarkdown(matrix, { cats: OWASP_WEB_CATEGORIES, labels: OWASP_WEB_LABELS, kind: "web", runName: run?.name, generatedAt: new Date() });
-    downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+    downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
   };
 
-  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading workprogram…</div>`;
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading OWASP Coverage…</div>`;
 
   const cats = OWASP_WEB_CATEGORIES;
   const totals = matrix?.totals || {};
@@ -7501,7 +7501,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
   return html`
     <div style=${{padding:16}}>
       <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
-        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <h3 style=${{margin:0}}>OWASP Coverage Matrix</h3>
         <span className=${"badge "+(effectiveCoverageMode==="enforce"?"warning":"neutral")}>
           ${effectiveCoverageMode} mode
         </span>
@@ -7525,7 +7525,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
 
       ${!matrix?.seeded && html`
         <div className="subtle" style=${{padding:24,textAlign:"center"}}>
-          No workprogram data yet. Click <b>Populate from Site Map</b> to seed the matrix from crawl data.
+          No OWASP Coverage data yet. Click <b>Populate from Site Map</b> to seed the matrix from crawl data.
         </div>`}
 
       ${matrix?.seeded && !matrix?.pages?.length && html`
@@ -9972,7 +9972,7 @@ function workProgramToMarkdown(matrix, { cats, labels = {}, kind = "web", runNam
   const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
   const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
 
-  const lines = [`# Work Program${runName ? `: ${runName}` : ""} (${kind === "api" ? "API" : "Web"})`, ""];
+  const lines = [`# OWASP Coverage${runName ? `: ${runName}` : ""} (${kind === "api" ? "API" : "Web"})`, ""];
   if (generatedAt) lines.push(`- Exported: ${generatedAt.toLocaleString()}`);
   lines.push(`- Coverage: ${pct}% (${coveredCount}/${totalCells} cells)`);
   lines.push("- Status counts: " + ["not_started","in_progress","covered","finding","skipped"].map(s => `${s} ${totals[s]||0}`).join(", "));

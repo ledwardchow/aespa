@@ -2,7 +2,7 @@
 
 AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An OWASP Top-10 **work program** tracks per-page coverage with Track/Enforce modes.
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
 - **SAST assistance** — an agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. It runs three ways: as an automatic **pre-phase** before an API scan (collection-bound), as a **standalone** scan started from the SAST screen, and as a source of leads **imported into a web scan**. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 
@@ -29,7 +29,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 7. [Dynamic Scan](#7-dynamic-scan)
    - [Bootstrap](#bootstrap) · [Scan resume](#scan-resume) · [Agentic loop](#agentic-loop)
    - [Actions available to the LLM](#actions-available-to-the-llm)
-   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph) · [Web work program](#web-work-program-owasp-top-10-coverage)
+   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph) · [Web OWASP Coverage](#web-owasp-coverage-owasp-top-10-matrix)
 8. [Multi-Agent System](#8-multi-agent-system)
    - [Agent types](#agent-types) · [Specialist agents](#specialist-agents)
    - [Adversarial validator](#adversarial-validator) · [Post-scan review](#post-scan-review-reporting-agent)
@@ -327,7 +327,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
 | `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
-| `PageOwaspTest` | One cell in the web work program (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs) |
+| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
@@ -502,7 +502,7 @@ The `PentestHypothesis` / `PentestTask` graph (managed in `services/task_graph.p
 
 Hypotheses are derived from the `attack_classes` in the recon summary so the task queue is directly grounded in the attack surface analysis.
 
-### Web work program (OWASP Top-10 coverage)
+### Web OWASP Coverage (OWASP Top-10 matrix)
 
 **File**: `src/aespa/services/web_workprogram.py`
 
@@ -511,7 +511,7 @@ The web scan tracks OWASP Top-10 coverage in a per-page matrix — the web analo
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
 - `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
-- `get_web_coverage_matrix(run_id)` powers the **Work Program** UI tab (`GET /api/test-runs/{id}/coverage`).
+- `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 
 ---
 
@@ -765,7 +765,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
 | `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
 | `/api/test-runs/{id}/findings/` | `test_runs.py` | List, import, validate findings |
-| `/api/test-runs/{id}/coverage` | `test_runs.py` | Web OWASP Top-10 work program matrix (`GET`); `coverage/seed` re-seeds cells |
+| `/api/test-runs/{id}/coverage` | `test_runs.py` | Web OWASP Coverage matrix (OWASP Top-10) (`GET`); `coverage/seed` re-seeds cells |
 | `/api/test-runs/{id}/sast-runs/available` | `test_runs.py` | Completed SAST runs (with leads) available to import into this web run |
 | `/api/test-runs/{id}/import-leads` | `test_runs.py` | Copy a SAST run's leads into this web run |
 | `/api/test-runs/{id}/leads` | `test_runs.py` | List (`GET`) / clear-all (`DELETE`) leads imported into this web run; `leads/{lead_id}` deletes one |
@@ -826,7 +826,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
 | **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, validation controls, and export/import (markdown) |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |
-| **Work Program** | Web OWASP Top-10 coverage matrix (`PageOwaspTest` cells), updated live; Track/Enforce mode |
+| **OWASP Coverage** | Web OWASP Top-10 coverage matrix (`PageOwaspTest` cells), updated live; Track/Enforce mode |
 | **SAST Leads** | Import a completed SAST run's leads into this run (dropdown), then list the imported copies; per-row delete, clear-all, and export (markdown). Originals on the SAST run are untouched |
 | **A.L.I.C.E.** | Interactive chat panel; supports multiple named sessions (tabs); see §15 |
 
@@ -846,7 +846,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 | Tab | Content |
 |---|---|
 | **Status / Log** | Agent activity log, scan controls, real-time phase events |
-| **Work Program** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
+| **OWASP Coverage** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
 | **Findings** | `ScanFinding` list for this API run |
 | **Traffic** | HTTP traffic captured during the API scan |
 | **A.L.I.C.E.** | Interactive ALICE chat tab (same surface as web scans) |
