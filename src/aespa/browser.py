@@ -17,15 +17,21 @@ def _bundled() -> bool:
     return getattr(sys, "frozen", False) or os.environ.get("AESPA_BUNDLED") == "1"
 
 
-def browsers_dir() -> Path:
-    """Where Playwright should keep its browsers (per-user, persistent)."""
+def app_data_dir() -> Path:
+    """Per-user, writable, persistent dir for the packaged app (db, uploads…)."""
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "aespa"
     elif sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "aespa"
     else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "aespa"
-    return base / "ms-playwright"
+        xdg = os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")
+        base = Path(xdg) / "aespa"
+    return base
+
+
+def browsers_dir() -> Path:
+    """Where Playwright should keep its browsers (per-user, persistent)."""
+    return app_data_dir() / "ms-playwright"
 
 
 def configure_browsers_path() -> None:
@@ -60,7 +66,8 @@ def download_chromium_if_missing() -> None:
 
         exe = compute_driver_executable()
         driver = [exe] if isinstance(exe, str) else list(exe)
-        subprocess.run([*driver, "install", "chromium"], check=True, env=get_driver_env())
+        cmd = [*driver, "install", "chromium"]
+        subprocess.run(cmd, check=True, env=get_driver_env())
     else:
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"], check=True
