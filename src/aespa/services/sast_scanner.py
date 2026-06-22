@@ -6,7 +6,9 @@ archive (``ApiDocument`` with ``doc_type='source_zip'``).  Mirrors the
 SSE events via ``events_svc``, and ``AgentLog`` / ``ScanLog`` persistence.
 
 The scan:
-1. Extracts the archive into a sandboxed temp directory (path-jailed).
+1. Extracts the archive into a deterministic per-run directory
+   (``<data_dir>/sast_extract/<id>/``) that a startup sweep can reconcile
+   if the process crashes mid-scan.
 2. Builds an initial context from the collection's extracted ApiEndpoint rows.
 3. Drives ``llm.thinking_agentic_loop`` with read-only file tools + write_lead /
    filter_lead / done.
@@ -20,13 +22,13 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlmodel import Session, select
 
+from aespa.config import get_settings
 from aespa.db import get_engine
 from aespa.models import ApiCollection, ApiDocument, ApiEndpoint, SastRun
 from aespa.services import events as events_svc
@@ -61,7 +63,10 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
     with zipfile.ZipFile(archive_path, "r") as zf:
         for member in zf.namelist():
             dest = (target / member).resolve()
-            if not str(dest).startswith(str(target)):
+            # Use is_relative_to rather than string-prefix matching: a prefix
+            # check treats ``…/extract/55`` as inside ``…/extract/5`` and lets a
+            # crafted entry escape into a sibling directory.
+            if dest != target and not dest.is_relative_to(target):
                 log.warning("_safe_unzip: skipping path-traversal entry %r", member)
                 continue
             zf.extract(member, target_dir)
@@ -102,7 +107,6 @@ def _flush_unfiltered_candidates(sast_run_id: int, collection_id: int) -> int:
 
     Returns the count of newly persisted leads.
     """
-    from aespa.models import ScanLead  # local import to avoid circularity
     candidates = _candidates.get(sast_run_id, [])
     flushed = 0
     for c in candidates:
@@ -141,7 +145,9 @@ def _jail(root: Path, rel: str) -> Path:
     if not rel:
         return root
     candidate = (root / rel).resolve()
-    if not str(candidate).startswith(str(root)):
+    # is_relative_to, not a string-prefix check: ``…/extract/55`` must not be
+    # treated as living inside ``…/extract/5``.
+    if candidate != root and not candidate.is_relative_to(root):
         raise ValueError(f"Path escape attempt: {rel!r}")
     return candidate
 
@@ -489,7 +495,16 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     s.expunge(obj)
 
         # ── Extract archive ────────────────────────────────────────────────────
-        tmpdir = tempfile.mkdtemp(prefix=f"sast_{sast_run_id}_")
+        # Use a deterministic path under <data_dir>/sast_extract/<id>/ so a
+        # startup sweep can reconcile any dirs leaked by a crashed scan
+        # (see db._cleanup_orphaned_sast_extractions). A prior interrupted run
+        # for the same id may have left files behind — wipe them so we don't
+        # mix old artefacts into the new scan.
+        extract_root = Path(get_settings().data_dir) / "sast_extract"
+        extract_root.mkdir(parents=True, exist_ok=True)
+        tmpdir = str(extract_root / str(sast_run_id))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        os.makedirs(tmpdir, exist_ok=True)
         events_svc.emit(sast_run_id, {
             "type": "scanner_phase",
             "phase": "sast_extract",
@@ -692,8 +707,6 @@ async def start_sast_scan(sast_run_id: int) -> None:
     # surrounding 'api' scope when run as an API scan's SAST pre-phase, since the
     # task created below snapshots this 'sast' context.
     with events_svc.run_kind_scope("sast"):
-        events_svc.register_sast_run(sast_run_id)
-
         with Session(get_engine()) as s:
             run = s.get(SastRun, sast_run_id)
             if run is None:
@@ -746,15 +759,19 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
         _sast_stop_requested.add(sast_run_id)
         task.cancel()
         _update_sast_run_status(sast_run_id, "cancelled")
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "idle",
-            "current_task": "Scan stopped",
-            "outcome": "stopped",
-            "_persist": True,
-        })
+        # This runs from an unscoped request handler; without the scope the
+        # persisted agent_status row defaults to run_kind='web' and leaks into a
+        # colliding web run (events.py has no id-keyed fallback any more).
+        with events_svc.run_kind_scope("sast"):
+            events_svc.emit(sast_run_id, {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "idle",
+                "current_task": "Scan stopped",
+                "outcome": "stopped",
+                "_persist": True,
+            })
         return True
     return False
 

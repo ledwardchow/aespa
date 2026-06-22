@@ -15,23 +15,20 @@ Tests:
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, AsyncMock
-from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.db import set_engine, get_engine
+from aespa.db import set_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
-    ApiEndpoint,
     ApiTestRun,
     ScanFinding,
     TrafficEntry,
 )
-
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
 
@@ -99,8 +96,9 @@ def bearer_cred_fixture(db_session, collection):
 @pytest.fixture(name="client")
 def client_fixture(db_engine):
     from fastapi.testclient import TestClient
-    from aespa.main import create_app
+
     from aespa.db import get_session as gs
+    from aespa.main import create_app
 
     def _override_session():
         with Session(db_engine) as s:
@@ -431,8 +429,8 @@ def test_discovered_credential_saved_to_collection_not_site(db_engine, collectio
     which resolves run_id as a TestRun id and writes a site Credential. Because
     test_run/api_test_run ids overlap, that attached the credential to an unrelated site.
     """
-    from aespa.services.api_scanner import _make_persist_credential_fn
     from aespa.models import ApiCredential, Credential, Site, TestRun
+    from aespa.services.api_scanner import _make_persist_credential_fn
 
     # Seed a Site + TestRun whose id collides with the ApiTestRun id, to prove the
     # hook does not touch the site even when a colliding TestRun exists.
@@ -465,8 +463,8 @@ def test_discovered_credential_saved_to_collection_not_site(db_engine, collectio
 
 def test_discovered_credential_dedup(db_engine, collection, api_run):
     """Persisting the same discovered credential twice creates only one ApiCredential."""
-    from aespa.services.api_scanner import _make_persist_credential_fn
     from aespa.models import ApiCredential
+    from aespa.services.api_scanner import _make_persist_credential_fn
 
     persist = _make_persist_credential_fn(collection.id, api_run.id)
     persist(username="bob", password="pw", login_url=None)

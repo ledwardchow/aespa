@@ -19,7 +19,6 @@ from aespa.schemas import (
 )
 from aespa.services import sites as sites_service
 
-
 router = APIRouter(prefix="/api/sites", tags=["sites"])
 
 

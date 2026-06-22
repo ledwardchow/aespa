@@ -25,17 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
-from unittest.mock import patch, AsyncMock
+from datetime import timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.db import set_engine, get_engine, _migrate
+from aespa.db import _migrate, set_engine
 from aespa.models import (
     ApiCollection,
-    ApiCredential,
     ApiEndpoint,
     ApiEndpointTest,
     ApiTestRun,
@@ -52,7 +51,6 @@ from aespa.services.api_scanner import (
     mark_all_cells_covered,
     seed_coverage_matrix,
     update_coverage_cell,
-    OWASP_API_CATEGORIES,
 )
 
 _UTC = timezone.utc
@@ -153,8 +151,9 @@ def api_run_fixture(db_session, collection):
 @pytest.fixture(name="client")
 def client_fixture(db_engine):
     from fastapi.testclient import TestClient
-    from aespa.main import create_app
+
     from aespa.db import get_session as gs
+    from aespa.main import create_app
 
     def _override_session():
         with Session(db_engine) as s:
@@ -282,7 +281,6 @@ def test_mark_all_cells_covered(db_engine, db_session, collection, endpoint_simp
     # Flip some cells to in_progress (simulating traffic hits), one to finding, one to skipped.
     finding_id = cells[0].id
     skipped_id = cells[1].id
-    in_progress_ids = {c.id for c in cells[2:]}
 
     cells[0].status = "finding"
     cells[1].status = "skipped"
@@ -561,7 +559,7 @@ def test_post_probe_fn_marks_single_category(db_engine, db_session, collection, 
 
 def test_post_probe_fn_no_match_is_noop(db_engine, db_session, collection, endpoint_with_param, api_run):
     """When the URL doesn't match any endpoint, the probe fn should silently do nothing."""
-    from aespa.services.api_scanner import _make_post_probe_fn, _endpoint_cache
+    from aespa.services.api_scanner import _endpoint_cache, _make_post_probe_fn
 
     seed_coverage_matrix(api_run.id)
     _endpoint_cache[api_run.id] = (collection.id, [endpoint_with_param])

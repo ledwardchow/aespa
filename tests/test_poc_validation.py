@@ -77,26 +77,54 @@ def test_build_curl_command_uses_token_file_not_literal_credential():
     assert "-k" in cmd and "-L" in cmd
 
 
-def test_run_and_assert_curl_executes_command_and_reads_token_file():
-    cmd = f'printf "HTTP/1.1 200 OK\\n\\nWELCOME-"; cat {_POC_AUTH_FILE}'
+def test_build_curl_argv_materialises_credential_shell_free():
+    # The shipped command hides the credential behind $(cat …); the verification
+    # argv materialises it directly so subprocess.run needs no shell.
+    auth = {"file_value": "SECRET", "header_name": "Cookie", "header_prefix": ""}
+    argv = validator._build_curl_argv(
+        "GET", "https://target.local/x", {}, insecure=True, follow_redirects=True, auth=auth
+    )
+    assert isinstance(argv, list) and argv[0] == "curl"
+    assert "Cookie: SECRET" in argv  # credential inline, no $(cat …)
+    assert not any("$(cat" in a for a in argv)
+
+
+def test_run_and_assert_curl_checks_assertion_without_shell(monkeypatch):
+    import subprocess
+
+    class _Proc:
+        def __init__(self, out):
+            self.stdout = out
+
+    def _fake_run(argv, **kw):
+        assert isinstance(argv, list)  # shell-free: argv, never a string
+        assert "shell" not in kw or kw["shell"] is False
+        return _Proc("HTTP/1.1 200 OK\n\nWELCOME-s3cret")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    argv = ["curl", "https://target.local/x"]
     expect = {"status": 200, "body_contains": "WELCOME-s3cret", "body_not_contains": ""}
-    assert validator._run_and_assert_curl(cmd, expect, "s3cret") is True
+    assert validator._run_and_assert_curl(argv, expect) is True
 
     wrong = {"status": 200, "body_contains": "WELCOME-nope", "body_not_contains": ""}
-    assert validator._run_and_assert_curl(cmd, wrong, "s3cret") is False
+    assert validator._run_and_assert_curl(argv, wrong) is False
 
 
-def test_run_and_assert_curl_honours_status_mismatch():
-    cmd = 'printf "HTTP/1.1 403 Forbidden\\n\\nbody"'
-    assert validator._run_and_assert_curl(cmd, {"status": 200, "body_contains": ""}, None) is False
+def test_run_and_assert_curl_honours_status_mismatch(monkeypatch):
+    import subprocess
+
+    class _Proc:
+        stdout = "HTTP/1.1 403 Forbidden\n\nbody"
+
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: _Proc())
+    assert validator._run_and_assert_curl(["curl"], {"status": 200, "body_contains": ""}) is False
 
 
 def test_build_and_verify_poc_returns_command_when_verified(monkeypatch):
     captured = {}
 
-    def _stub(command, expect, auth_file_value):
-        captured["command"] = command
-        captured["auth_file_value"] = auth_file_value
+    def _stub(argv, expect):
+        captured["argv"] = argv
         return True
 
     monkeypatch.setattr(validator, "_run_and_assert_curl", _stub)
@@ -108,7 +136,7 @@ def test_build_and_verify_poc_returns_command_when_verified(monkeypatch):
     assert command.startswith("curl ")
     assert "https://target.local/api/users/2" in command
     assert setup == ""  # no auth needed
-    assert captured["auth_file_value"] is None
+    assert "https://target.local/api/users/2" in captured["argv"]
 
 
 def test_build_and_verify_poc_drops_when_verification_fails(monkeypatch):
@@ -153,8 +181,8 @@ def test_build_and_verify_poc_requires_session_for_auth(monkeypatch):
 def test_build_and_verify_poc_includes_setup_for_auth(monkeypatch):
     captured = {}
 
-    def _stub(command, expect, auth_file_value):
-        captured["auth_file_value"] = auth_file_value
+    def _stub(argv, expect):
+        captured["argv"] = argv
         return True
 
     monkeypatch.setattr(validator, "_run_and_assert_curl", _stub)
@@ -168,9 +196,11 @@ def test_build_and_verify_poc_includes_setup_for_auth(monkeypatch):
     )
     assert result is not None
     command, setup = result
+    # The shipped command keeps the credential behind $(cat …); the verification
+    # argv materialises it inline so the live cookie is exercised shell-free.
     assert f"$(cat {_POC_AUTH_FILE})" in command
     assert "Network" in setup  # httponly fallback instructions
-    assert captured["auth_file_value"] == "sid=abc"
+    assert "Cookie: sid=abc" in captured["argv"]
 
 
 # ── POST acceptance + body serialisation ───────────────────────────────────────

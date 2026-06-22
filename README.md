@@ -89,7 +89,7 @@ If you don't do this, it will use the values above as the default.
 
 Open the app, go to **LLM Settings**, and configure:
 
-- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and one or more model names. Built-in formats include Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Converse, Azure OpenAI, and Azure AI Foundry. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
+- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and one or more model names. Built-in formats include Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Runtime, Azure OpenAI, and Azure AI Foundry. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
 - **Profiles** — named runtime choices that select a provider and one model from that provider's configured model list. Runs can use the system default profile or a specific profile.
 
 

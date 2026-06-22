@@ -1,7 +1,7 @@
 """Tests for the WSTG skill selector (issue #98 prompt-coverage improvements)."""
 
-from aespa.services.llm import select_wstg_skills, build_wstg_skill_context
-from aespa.services.prompts.test_lead import WSTG_SKILLS, _SKILL_ORDER
+from aespa.services.llm import build_wstg_skill_context, select_wstg_skills
+from aespa.services.prompts.test_lead import _SKILL_ORDER, WSTG_SKILLS
 
 
 def test_auth_robustness_skill_is_defined_and_ordered():
