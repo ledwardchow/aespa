@@ -1,10 +1,48 @@
 import asyncio
 import sys
 from types import SimpleNamespace
+
 import pytest
 
 from aespa.models import LLMConfig
 from aespa.services import llm
+
+
+def test_limiter_oversized_estimate_does_not_hang():
+    # A single request estimated larger than the entire per-minute budget must
+    # not loop forever waiting for capacity that can never exist. Pre-fix, this
+    # spun in acquire() until the timeout.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=1000)
+    slept = asyncio.run(asyncio.wait_for(limiter.acquire(10_000), timeout=5))
+    assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
+
+
+def test_limiter_on_wait_fires_when_pacing():
+    # When the bucket is empty the next acquire must pace, and on_wait must fire
+    # (before the sleep) so callers can tell the user it is not stuck.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=6000)  # 100 tokens/sec
+    waits: list[float] = []
+
+    async def _run():
+        await limiter.acquire(6000)  # drain the bucket
+        await limiter.acquire(50, on_wait=lambda wt: waits.append(wt))  # ~0.5s pace
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=10))
+    assert waits and waits[0] > 0
+
+
+def test_limiter_reconcile_only_credits_what_was_reserved():
+    # An oversized estimate reserves at most max_tokens; reconcile must credit back
+    # only the reserved amount, not the unclamped estimate.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=1000)
+
+    async def _run():
+        await limiter.acquire(10_000)          # clamps to 1000, drains bucket to ~0
+        await limiter.reconcile(10_000, 100)   # used 100 of 1000 reserved → credit ~900
+        return limiter.available_tokens
+
+    avail = asyncio.run(_run())
+    assert 850 <= avail <= 1000
 
 
 def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):

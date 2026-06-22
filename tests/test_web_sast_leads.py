@@ -221,3 +221,41 @@ def test_api_style_sast_run_still_constructs(env):
     assert loaded.collection_id == 1
     assert loaded.document_id == 5
     assert loaded.triggered_by_run_type == "api"
+
+
+def test_jail_rejects_sibling_dir_with_shared_prefix(tmp_path):
+    """The path jail must not treat a sibling whose name shares a prefix (…/5x)
+    as living inside the run root (…/5) — a string-prefix check would."""
+    from aespa.services.sast_scanner import _jail
+
+    root = tmp_path / "5"
+    root.mkdir()
+    (tmp_path / "5x").mkdir()  # sibling sharing the "5" prefix
+    (tmp_path / "5x" / "secret.txt").write_text("nope")
+
+    # Inside the jail is fine.
+    assert _jail(root, "ok.txt") == (root / "ok.txt")
+    # Escaping into the prefixed sibling is rejected.
+    with pytest.raises(ValueError):
+        _jail(root, "../5x/secret.txt")
+    with pytest.raises(ValueError):
+        _jail(root, "../../etc/passwd")
+
+
+def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
+    """A crafted entry resolving to a prefixed sibling must not be extracted."""
+    from aespa.services.sast_scanner import _safe_unzip
+
+    target = tmp_path / "5"
+    target.mkdir()
+    (tmp_path / "5x").mkdir()
+
+    archive = tmp_path / "src.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("good.py", "print(1)")
+        zf.writestr("../5x/evil.py", "pwned")
+
+    _safe_unzip(str(archive), str(target))
+
+    assert (target / "good.py").exists()
+    assert not (tmp_path / "5x" / "evil.py").exists()  # escape blocked

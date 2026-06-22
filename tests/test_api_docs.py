@@ -8,11 +8,10 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session
 from aespa.main import create_app
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -512,7 +511,7 @@ def test_parse_source_zip_rejects_path_traversal(client, data_dir):
 
 def test_parse_source_zip_rejects_bomb(client, data_dir):
     """A zip with too many entries should fail gracefully."""
-    from aespa.services.api_docs import _safe_unzip, ParseError
+    from aespa.services.api_docs import ParseError, _safe_unzip
     # Build a zip with 5001 tiny entries
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -607,7 +606,9 @@ def test_reparse_replaces_endpoints(client, data_dir):
 
 def test_migrate_creates_api_endpoint_and_credential_tables():
     from sqlalchemy import inspect, text
-    from sqlmodel import create_engine as _ce, SQLModel
+    from sqlmodel import SQLModel
+    from sqlmodel import create_engine as _ce
+
     from aespa import db as _db
 
     engine = _ce("sqlite:///:memory:", connect_args={"check_same_thread": False})

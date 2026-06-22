@@ -262,12 +262,12 @@ def _link_promoted_finding_to_coverage(
 
     cat = (category_raw or "").strip().upper()
     try:
+        from aespa.models import ApiCollection, ApiEndpoint
         from aespa.services.api_scanner import (
             OWASP_API_CATEGORIES,
             _match_endpoint_for_url,
             update_coverage_cell,
         )
-        from aespa.models import ApiCollection, ApiEndpoint
     except Exception as exc:  # pragma: no cover - import guard
         log.debug("coverage link skipped (import failed): %s", exc)
         return None
@@ -351,8 +351,16 @@ def update_lead(
         # finding), synthesise one from the lead so confirmation never silently
         # drops a finding.
         promoted_id = None
-        run_type = investigated_by_run_type or lead.investigated_by_run_type
-        run_id = investigated_by_run_id or lead.investigated_by_run_id
+        run_type = (
+            investigated_by_run_type
+            if investigated_by_run_type is not None
+            else lead.investigated_by_run_type
+        )
+        run_id = (
+            investigated_by_run_id
+            if investigated_by_run_id is not None
+            else lead.investigated_by_run_id
+        )
         if status == "confirmed" and lead.linked_finding_id is None:
             promoted_id = _promote_lead_to_finding(s, lead, run_type, run_id)
             if promoted_id is not None:

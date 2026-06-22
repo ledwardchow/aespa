@@ -1,6 +1,5 @@
 from fastapi.testclient import TestClient
 
-
 # ---- helpers ----------------------------------------------------------------
 
 def make_site(client: TestClient, **kwargs):

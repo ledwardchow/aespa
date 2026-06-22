@@ -78,8 +78,8 @@ async def assess_readiness(session: Session, collection_id: int) -> dict:
     ep_for_prompt = [_ep_summary(ep) for ep in endpoints[:_MAX_ENDPOINTS_IN_PROMPT]]
 
     try:
-        from aespa.services.settings import get_llm_config
         from aespa.services import llm as llm_svc
+        from aespa.services.settings import get_llm_config
     except ImportError as exc:
         raise ReadinessError("LLM services not available") from exc
 
