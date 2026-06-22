@@ -116,6 +116,8 @@ const api = {
   upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
   upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getCloudflareAccessConfig: ()   => req("/api/settings/cloudflare-access"),
+  upsertCloudflareAccessConfig:(b)=> req("/api/settings/cloudflare-access", { method:"PUT", body:b }),
   getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),
   listReportingDebugPrompts:()    => req("/api/reporting-debug/prompts"),
   saveReportingDebugPrompt:(key,b)=> req(`/api/reporting-debug/prompt?key=${encodeURIComponent(key)}`, { method:"PUT", body:b }),
@@ -9143,6 +9145,11 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
   const [repSaved, setRepSaved] = useState(false);
   const [repError, setRepError] = useState(null);
 
+  const [cfAud, setCfAud] = useState("");
+  const [cfSaving, setCfSaving] = useState(false);
+  const [cfSaved, setCfSaved] = useState(false);
+  const [cfError, setCfError] = useState(null);
+
   useEffect(() => {
     (async () => {
       try { setCfg(await api.getSpecialistAgentConfig()); }
@@ -9159,7 +9166,21 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
       try { setReportingDebugCfg(await api.getReportingDebugConfig()); }
       catch(e) { setRepError(e.message); }
     })();
+    (async () => {
+      try { setCfAud((await api.getCloudflareAccessConfig()).audience || ""); }
+      catch(e) { setCfError(e.message); }
+    })();
   }, []);
+
+  const saveCloudflareAud = async (e) => {
+    e.preventDefault();
+    setCfSaved(false); setCfSaving(true); setCfError(null);
+    try {
+      const updated = await api.upsertCloudflareAccessConfig({ audience: cfAud.trim() || null });
+      setCfAud(updated.audience || "");
+      setCfSaved(true);
+    } catch(e) { setCfError(e.message); } finally { setCfSaving(false); }
+  };
 
   const toggle = async (checked) => {
     setSaved(false); setSaving(true); setError(null);
@@ -9296,6 +9317,29 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
             Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
           </div>
         `}
+        <div className="field-hint" style=${{marginTop: 16, marginBottom: 8}}>
+          <strong>Application Audience (AUD) tag.</strong> When set, the Cloudflare Access
+          JWT is verified against this AUD so only tokens issued for this application are
+          accepted. Leave empty to skip the audience check (legacy behaviour — any
+          Cloudflare Access tenant's token is accepted).
+        </div>
+        ${cfError && html`<div className="alert error">${cfError}</div>`}
+        <form onSubmit=${saveCloudflareAud}>
+          <div className="form-row">
+            <label className="form-label">Audience (AUD)</label>
+            <input className="form-input mono" type="text"
+              placeholder="e.g. 64-char hex AUD from the Access application"
+              value=${cfAud}
+              disabled=${cfSaving}
+              onInput=${e => { setCfSaved(false); setCfAud(e.target.value); }}/>
+          </div>
+          <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+            <button className="btn btn-primary" type="submit" disabled=${cfSaving}>
+              ${cfSaving ? "Saving…" : "Save"}
+            </button>
+            ${cfSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+          </div>
+        </form>
       </div>
     </div>`;
 }

@@ -383,6 +383,21 @@ class ReportingDebugConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class CloudflareAccessConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for Cloudflare Access JWT verification.
+
+    ``audience`` is the optional Access application AUD tag. When set, the
+    proxy-injected JWT is verified against it; when empty, audience checking is
+    skipped (the legacy behaviour).
+    """
+
+    __tablename__ = "cloudflare_access_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    audience: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 # ── Test runs ─────────────────────────────────────────────────────────────────
 
 class TestRunStatus(str, Enum):

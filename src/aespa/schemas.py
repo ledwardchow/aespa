@@ -771,6 +771,21 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
+# ── Cloudflare Access config schemas ─────────────────────────────────────────
+
+class CloudflareAccessConfigBase(BaseModel):
+    # Empty/blank string is treated as "no audience" → audience check skipped.
+    audience: str | None = None
+
+
+class CloudflareAccessConfigIn(CloudflareAccessConfigBase):
+    pass
+
+
+class CloudflareAccessConfigOut(CloudflareAccessConfigBase):
+    updated_at: datetime
+
+
 # ── LLM config export / import schemas ───────────────────────────────────────
 
 class LLMExportProviderItem(BaseModel):

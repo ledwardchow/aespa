@@ -63,7 +63,10 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
     with zipfile.ZipFile(archive_path, "r") as zf:
         for member in zf.namelist():
             dest = (target / member).resolve()
-            if not str(dest).startswith(str(target)):
+            # Use is_relative_to rather than string-prefix matching: a prefix
+            # check treats ``…/extract/55`` as inside ``…/extract/5`` and lets a
+            # crafted entry escape into a sibling directory.
+            if dest != target and not dest.is_relative_to(target):
                 log.warning("_safe_unzip: skipping path-traversal entry %r", member)
                 continue
             zf.extract(member, target_dir)
@@ -143,7 +146,9 @@ def _jail(root: Path, rel: str) -> Path:
     if not rel:
         return root
     candidate = (root / rel).resolve()
-    if not str(candidate).startswith(str(root)):
+    # is_relative_to, not a string-prefix check: ``…/extract/55`` must not be
+    # treated as living inside ``…/extract/5``.
+    if candidate != root and not candidate.is_relative_to(root):
         raise ValueError(f"Path escape attempt: {rel!r}")
     return candidate
 
@@ -755,15 +760,19 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
         _sast_stop_requested.add(sast_run_id)
         task.cancel()
         _update_sast_run_status(sast_run_id, "cancelled")
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "idle",
-            "current_task": "Scan stopped",
-            "outcome": "stopped",
-            "_persist": True,
-        })
+        # This runs from an unscoped request handler; without the scope the
+        # persisted agent_status row defaults to run_kind='web' and leaks into a
+        # colliding web run (events.py has no id-keyed fallback any more).
+        with events_svc.run_kind_scope("sast"):
+            events_svc.emit(sast_run_id, {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "idle",
+                "current_task": "Scan stopped",
+                "outcome": "stopped",
+                "_persist": True,
+            })
         return True
     return False
 
