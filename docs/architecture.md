@@ -853,7 +853,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 
 - **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
 - **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
-- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the authoritative source of an event's kind (the id-only fallback is ambiguous and only a last resort). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
+- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
 - **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
 
 ---
@@ -1105,8 +1105,11 @@ start_sast_scan(sast_run_id)
        1. Load SastRun; resolve the archive: the source_zip ApiDocument
           (API pre-phase) OR run.source_archive_path (standalone).
           collection_id may be NULL.
-       2. _safe_unzip — extract archive into sandboxed temp directory
-          (path-jailed: entries that would escape the root are rejected)
+       2. _safe_unzip - extract archive into a deterministic per-run
+          directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
+          entries that would escape the root are rejected). A startup
+          sweep (db._cleanup_orphaned_sast_extractions) reconciles any
+          dirs leaked by a previous hard crash.
        3. _build_initial_message — construct LLM opening context. When a
           collection exists, seed it with the parsed ApiEndpoint rows;
           for standalone runs there are no endpoints, so the agent

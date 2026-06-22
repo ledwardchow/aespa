@@ -320,33 +320,29 @@ def test_api_and_web_findings_do_not_cross():
 
 # ── Regression: API log rows must not be mis-tagged when ids collide ─────────────
 
-def test_run_kind_scope_overrides_colliding_registration():
-    """Core of issue #169.  Run ids collide across web / api / sast (independent
-    counters), so the id-keyed fallback is ambiguous — when id 1 is registered as
-    both sast and api, the fallback wrongly resolves 'sast', which made the API
-    Status page's Test Lead history and Log tab come back empty.  The
-    ``run_kind_scope`` set by the running scan is authoritative and collision-proof."""
+def test_run_kind_is_resolved_by_scope_only():
+    """Run ids collide across web / api / sast (independent counters), so the
+    run_kind cannot be inferred from the id.  ``run_kind_scope`` is the sole,
+    authoritative source; with no scope the tag deterministically defaults to
+    'web' (never routed by stale per-id global state, which is what leaked events
+    across runs — issue #169)."""
     from aespa.services import events as events_svc
 
-    events_svc.register_sast_run(1)
-    events_svc.register_api_run(1)
-    try:
-        # Ambiguous id-only fallback (the bug): sast is checked first and wins.
+    # No scope → deterministic 'web' default, regardless of the id.
+    assert events_svc._run_kind_for(1, {}) == "web"
+    # The running scan's scope makes the tag authoritative.
+    with events_svc.run_kind_scope("api"):
+        assert events_svc._run_kind_for(1, {}) == "api"
+    with events_svc.run_kind_scope("sast"):
         assert events_svc._run_kind_for(1, {}) == "sast"
-        # The API scan's scope makes the tag authoritative.
-        with events_svc.run_kind_scope("api"):
-            assert events_svc._run_kind_for(1, {}) == "api"
-        # Nested scope — a SAST pre-phase awaited inside an API scan — restores.
-        with events_svc.run_kind_scope("api"):
-            with events_svc.run_kind_scope("sast"):
-                assert events_svc._run_kind_for(1, {}) == "sast"
-            assert events_svc._run_kind_for(1, {}) == "api"
-        # An explicit per-event tag still wins over everything.
+    # Nested scope — a SAST pre-phase awaited inside an API scan — restores.
+    with events_svc.run_kind_scope("api"):
         with events_svc.run_kind_scope("sast"):
-            assert events_svc._run_kind_for(1, {"_run_kind": "api"}) == "api"
-    finally:
-        events_svc._api_run_ids.discard(1)
-        events_svc._sast_run_ids.discard(1)
+            assert events_svc._run_kind_for(1, {}) == "sast"
+        assert events_svc._run_kind_for(1, {}) == "api"
+    # An explicit per-event tag still wins over everything.
+    with events_svc.run_kind_scope("sast"):
+        assert events_svc._run_kind_for(1, {"_run_kind": "api"}) == "api"
 
 
 def test_run_kind_scope_snapshotted_by_child_task():
@@ -357,8 +353,6 @@ def test_run_kind_scope_snapshotted_by_child_task():
     import asyncio
     from aespa.services import events as events_svc
 
-    events_svc.register_sast_run(1)
-    events_svc.register_api_run(1)
     captured: dict[str, str] = {}
 
     async def _child() -> None:
@@ -371,18 +365,15 @@ def test_run_kind_scope_snapshotted_by_child_task():
         # Scope is closed in this frame, but the task snapshotted it at creation.
         await task
 
-    try:
-        asyncio.run(_main())
-        assert captured["kind"] == "api"
-    finally:
-        events_svc._api_run_ids.discard(1)
-        events_svc._sast_run_ids.discard(1)
+    asyncio.run(_main())
+    assert captured["kind"] == "api"
 
 
 def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
     """End-to-end persistence regression for issue #169.  An API run whose id
-    collides with a registered SAST run must still have its agent_log / scan_log
-    rows written with run_kind='api', so the API agent-log endpoint returns them."""
+    collides with a SAST run must still have its agent_log / scan_log rows written
+    with run_kind='api' (driven by run_kind_scope('api')), so the API agent-log
+    endpoint returns them."""
     from sqlalchemy.pool import StaticPool
     from sqlmodel import SQLModel, Session, create_engine, select
     from aespa import models
@@ -406,10 +397,6 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
         api_run = models.ApiTestRun(collection_id=coll.id, name="api")
         s.add(api_run); s.commit(); s.refresh(api_run)
         api_run_id = api_run.id
-
-    # The collision: id 1 was also registered as a SAST run in this process.
-    events_svc.register_sast_run(api_run_id)
-    events_svc.register_api_run(api_run_id)
 
     try:
         with events_svc.run_kind_scope("api"):
@@ -444,8 +431,6 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
             assert r.status_code == 200
             assert [row["current_task"] for row in r.json()] == ["Step 1: GET /api/x"]
     finally:
-        events_svc._api_run_ids.discard(api_run_id)
-        events_svc._sast_run_ids.discard(api_run_id)
         set_engine(prev_engine)
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
