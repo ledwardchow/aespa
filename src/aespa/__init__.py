@@ -1,6 +1,6 @@
 """AESPA: LLM-based pentesting agent (site configuration module)."""
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__ = version("aespa")

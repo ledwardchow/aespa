@@ -4,7 +4,8 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.models import CrawledPage, Site, TargetIntelItem
 from aespa.models import TestRun as RunModel
-from aespa.services import scanner, task_graph as task_graph_svc
+from aespa.services import scanner
+from aespa.services import task_graph as task_graph_svc
 
 
 def _make_engine():

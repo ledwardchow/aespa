@@ -12,7 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
 
 import httpx
@@ -23,6 +23,9 @@ from aespa.services.prompts.reporting import (
     _NORMALIZE_TITLES_PROMPT,
     _WRITEUP_REPLAY_PROMPT,
 )
+
+# Re-exported for consumers that import this from aespa.services.llm.
+from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS  # noqa: F401
 from aespa.services.prompts.test_lead import (
     _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
@@ -38,15 +41,12 @@ from aespa.services.prompts.test_lead import (
     THINKING_AGENT_TOOLS,
     WSTG_SKILLS,
 )
-from aespa.services.prompts.specialist import (
-    SPECIALIST_AGENT_TOOLS,
-)
 from aespa.services.prompts.validator import (
-    _ADVERSARIAL_VALIDATOR_SYSTEM,
+    _ADVERSARIAL_VALIDATOR_SYSTEM,  # noqa: F401 — re-exported via aespa.services.llm
     _DISPROOF_HINTS,
     _VALIDATION_PLAN_PROMPT,
     _VALIDATION_VERDICT_PROMPT,
-    VALIDATOR_AGENT_TOOLS,
+    VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
 
 log = logging.getLogger("aespa.llm")

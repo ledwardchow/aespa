@@ -1,10 +1,85 @@
+import asyncio
+
+import httpx
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import CrawledPage, ScanFinding, Site, TrafficEntry
-from aespa.models import TestRun as RunModel
-from aespa.services import burp_rest
-from aespa.services import scanner
+from aespa.models import ScanFinding
+from aespa.services import burp_rest, scanner
+
+# ── scope-checked redirect following ──────────────────────────────────────────
+
+class _FakeResp:
+    def __init__(self, url, status_code, headers=None):
+        self.url = httpx.URL(url)
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _FakeClient:
+    """Minimal httpx-like client returning canned responses keyed by URL."""
+
+    def __init__(self, responses):
+        self._responses = responses
+        self.calls = []  # (method, url, kwargs)
+
+    async def request(self, method, url, follow_redirects=True, **kwargs):
+        self.calls.append((method, str(url), kwargs))
+        return self._responses[str(url)]
+
+
+def test_request_scope_checked_follows_in_scope_redirect(monkeypatch):
+    monkeypatch.setattr(scanner, "check_scope", lambda url, site_id, run_id: None)
+    client = _FakeClient({
+        "https://t.local/a": _FakeResp("https://t.local/a", 302, {"location": "/b"}),
+        "https://t.local/b": _FakeResp("https://t.local/b", 200, {}),
+    })
+    resp, blocked = asyncio.run(
+        scanner._request_scope_checked(client, "GET", "https://t.local/a", site_id=1, run_id=1)
+    )
+    assert blocked is None
+    assert resp.status_code == 200
+    assert [c[:2] for c in client.calls] == [
+        ("GET", "https://t.local/a"), ("GET", "https://t.local/b"),
+    ]
+
+
+def test_request_scope_checked_blocks_out_of_scope_redirect(monkeypatch):
+    monkeypatch.setattr(
+        scanner, "check_scope",
+        lambda url, site_id, run_id: None if "t.local" in url else "Host out of scope",
+    )
+    client = _FakeClient({
+        "https://t.local/a": _FakeResp(
+            "https://t.local/a", 302, {"location": "http://169.254.169.254/meta"}
+        ),
+    })
+    resp, blocked = asyncio.run(
+        scanner._request_scope_checked(client, "GET", "https://t.local/a", site_id=1, run_id=1)
+    )
+    assert blocked is not None
+    assert blocked[0] == "http://169.254.169.254/meta"
+    assert resp.status_code == 302  # the unfollowed 3xx is returned
+    # The off-scope host must NEVER have been contacted.
+    assert all("169.254.169.254" not in url for _, url, _ in client.calls)
+    assert [c[:2] for c in client.calls] == [("GET", "https://t.local/a")]
+
+
+def test_request_scope_checked_303_downgrades_post_to_get_and_drops_body(monkeypatch):
+    monkeypatch.setattr(scanner, "check_scope", lambda url, site_id, run_id: None)
+    client = _FakeClient({
+        "https://t.local/a": _FakeResp("https://t.local/a", 303, {"location": "/done"}),
+        "https://t.local/done": _FakeResp("https://t.local/done", 200, {}),
+    })
+    resp, blocked = asyncio.run(
+        scanner._request_scope_checked(
+            client, "POST", "https://t.local/a", site_id=1, run_id=1, json={"x": 1}
+        )
+    )
+    assert blocked is None and resp.status_code == 200
+    method, url, kwargs = client.calls[-1]
+    assert (method, url) == ("GET", "https://t.local/done")
+    assert "json" not in kwargs  # body dropped on the GET follow-up
 
 
 def test_compact_thinking_context_includes_all_existing_findings():

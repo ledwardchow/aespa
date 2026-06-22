@@ -1,5 +1,4 @@
 """Tests for Phase 2: Specialist Agent Dispatch."""
-import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers / stubs
@@ -33,19 +32,16 @@ class _SpecialistConfig:
 # Import helpers under test
 # ---------------------------------------------------------------------------
 
-import importlib
-import sys
 
 # We import the private helpers directly from the scanner module.
 # They live at module scope after the 'Specialist agent dispatch' section.
 from aespa.services.scanner import (
+    _next_specialist_agent_id,
     _should_dispatch_specialist,
     _specialist_at_capacity,
-    _next_specialist_agent_id,
     _specialist_running,
     _specialist_seq,
 )
-
 
 # ---------------------------------------------------------------------------
 # _should_dispatch_specialist
