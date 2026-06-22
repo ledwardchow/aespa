@@ -2989,8 +2989,8 @@ function SastProgressTab({ runId, scanRunning }) {
   return html`<div className="activity-panel" style=${{margin:0,display:"flex",flexDirection:"column",height:"100%"}}>
     <div className="activity-log-toolbar" style=${{flexShrink:0}}>
       <div style=${{display:"flex",gap:4}}>
-        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Activity</button>
-        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Log</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agent Activity</button>
       </div>
       <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
       ${scanRunning && html`<span className="activity-mode-badge running">● Scanning</span>`}

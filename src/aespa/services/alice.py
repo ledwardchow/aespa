@@ -1864,10 +1864,8 @@ async def run_api_alice_turn_stream(
         user_instruction,
     )
 
-    # Tag this id as an API run so persisted agent_log / scan_log rows are
-    # written with run_kind='api' (see events.register_api_run).
-    events_svc.register_api_run(api_run_id)
-
+    # Persisted agent_log / scan_log rows are tagged run_kind='api' by the
+    # run_kind_scope('api') that alice_tasks._run opens around this stream.
     from aespa.models import ApiCollection, ApiTestRun
     from aespa.services.settings import get_llm_config_for_run
 

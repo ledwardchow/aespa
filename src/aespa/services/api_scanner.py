@@ -1525,8 +1525,6 @@ async def start_api_scan(api_run_id: int) -> None:
     # so the scan task (and its child specialist tasks) inherit the tag even
     # after this function returns.
     with events_svc.run_kind_scope("api"):
-        events_svc.register_api_run(api_run_id)
-
         with Session(get_engine()) as s:
             run = s.get(ApiTestRun, api_run_id)
             if run is None:

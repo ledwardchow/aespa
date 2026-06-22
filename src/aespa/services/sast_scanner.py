@@ -6,7 +6,9 @@ archive (``ApiDocument`` with ``doc_type='source_zip'``).  Mirrors the
 SSE events via ``events_svc``, and ``AgentLog`` / ``ScanLog`` persistence.
 
 The scan:
-1. Extracts the archive into a sandboxed temp directory (path-jailed).
+1. Extracts the archive into a deterministic per-run directory
+   (``<data_dir>/sast_extract/<id>/``) that a startup sweep can reconcile
+   if the process crashes mid-scan.
 2. Builds an initial context from the collection's extracted ApiEndpoint rows.
 3. Drives ``llm.thinking_agentic_loop`` with read-only file tools + write_lead /
    filter_lead / done.
@@ -20,13 +22,13 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlmodel import Session, select
 
+from aespa.config import get_settings
 from aespa.db import get_engine
 from aespa.models import ApiCollection, ApiDocument, ApiEndpoint, SastRun
 from aespa.services import events as events_svc
@@ -489,7 +491,16 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     s.expunge(obj)
 
         # ── Extract archive ────────────────────────────────────────────────────
-        tmpdir = tempfile.mkdtemp(prefix=f"sast_{sast_run_id}_")
+        # Use a deterministic path under <data_dir>/sast_extract/<id>/ so a
+        # startup sweep can reconcile any dirs leaked by a crashed scan
+        # (see db._cleanup_orphaned_sast_extractions). A prior interrupted run
+        # for the same id may have left files behind — wipe them so we don't
+        # mix old artefacts into the new scan.
+        extract_root = Path(get_settings().data_dir) / "sast_extract"
+        extract_root.mkdir(parents=True, exist_ok=True)
+        tmpdir = str(extract_root / str(sast_run_id))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        os.makedirs(tmpdir, exist_ok=True)
         events_svc.emit(sast_run_id, {
             "type": "scanner_phase",
             "phase": "sast_extract",
@@ -692,8 +703,6 @@ async def start_sast_scan(sast_run_id: int) -> None:
     # surrounding 'api' scope when run as an API scan's SAST pre-phase, since the
     # task created below snapshots this 'sast' context.
     with events_svc.run_kind_scope("sast"):
-        events_svc.register_sast_run(sast_run_id)
-
         with Session(get_engine()) as s:
             run = s.get(SastRun, sast_run_id)
             if run is None:
