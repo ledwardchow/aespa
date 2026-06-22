@@ -202,7 +202,6 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
-    _cleanup_orphaned_sast_extractions()
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
@@ -844,6 +843,21 @@ def _migrate(engine: Engine) -> None:
         conn.commit()
     # Standalone SAST runs have no collection — drop the NOT NULL on collection_id.
     _ensure_sast_run_collection_id_nullable(engine)
+    # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS cloudflare_access_config (
+                id INTEGER PRIMARY KEY,
+                audience TEXT,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+    # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
+    # run only after every SastRun column above has been added — otherwise the
+    # first post-upgrade startup raises "no such column" and silently skips.
+    _cleanup_orphaned_sast_extractions()
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:

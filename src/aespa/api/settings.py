@@ -8,6 +8,8 @@ from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    CloudflareAccessConfigIn,
+    CloudflareAccessConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -250,3 +252,18 @@ def upsert_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
     return settings_service.upsert_reporting_debug_config(session, payload)
+
+
+@router.get("/cloudflare-access", response_model=CloudflareAccessConfigOut)
+def get_cloudflare_access_config(
+    session: Session = Depends(get_session),
+) -> CloudflareAccessConfigOut:
+    return settings_service.get_cloudflare_access_config(session)
+
+
+@router.put("/cloudflare-access", response_model=CloudflareAccessConfigOut)
+def upsert_cloudflare_access_config(
+    payload: CloudflareAccessConfigIn,
+    session: Session = Depends(get_session),
+) -> CloudflareAccessConfigOut:
+    return settings_service.upsert_cloudflare_access_config(session, payload)
