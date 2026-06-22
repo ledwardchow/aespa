@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from aespa.models import (
     AdversarialValidatorConfig,
     BurpRestApiConfig,
+    CloudflareAccessConfig,
     GlobalHttpHeaderConfig,
     LLMConfig,
     LLMProviderConfig,
@@ -23,6 +24,8 @@ from aespa.models import (
 from aespa.schemas import (
     BurpRestApiConfigIn,
     BurpRestApiConfigOut,
+    CloudflareAccessConfigIn,
+    CloudflareAccessConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -549,6 +552,29 @@ def upsert_reporting_debug_config(
     session.commit()
     session.refresh(cfg)
     return get_reporting_debug_config(session)
+
+
+def get_cloudflare_access_config(session: Session) -> CloudflareAccessConfigOut:
+    cfg = session.get(CloudflareAccessConfig, _SINGLETON_ID)
+    if cfg is None:
+        return CloudflareAccessConfigOut(audience=None, updated_at=_utcnow())
+    return CloudflareAccessConfigOut(audience=cfg.audience, updated_at=cfg.updated_at)
+
+
+def upsert_cloudflare_access_config(
+    session: Session, payload: CloudflareAccessConfigIn
+) -> CloudflareAccessConfigOut:
+    cfg = session.get(CloudflareAccessConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = CloudflareAccessConfig(id=_SINGLETON_ID)
+    # Normalise blank → None so the verifier cleanly falls back to "no audience".
+    audience = (payload.audience or "").strip()
+    cfg.audience = audience or None
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_cloudflare_access_config(session)
 
 
 # ── LLM config export / import ────────────────────────────────────────────────

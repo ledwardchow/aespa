@@ -7,9 +7,10 @@ from pathlib import Path
 
 import httpx
 import jwt
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from sqlmodel import Session
 
 from aespa.api.events import router as events_router
 from aespa.api.reporting_debug import router as reporting_debug_router
@@ -23,7 +24,8 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.api.alice import router as alice_router
 from aespa.config import Settings, get_settings
-from aespa.db import init_db
+from aespa.db import get_session, init_db
+from aespa.services.settings import get_cloudflare_access_config
 
 
 @asynccontextmanager
@@ -50,7 +52,7 @@ def _get_cloudflare_jwks(issuer: str) -> dict:
     return keys
 
 
-def _verify_cloudflare_jwt(token: str) -> str | None:
+def _verify_cloudflare_jwt(token: str, audience: str | None = None) -> str | None:
     try:
         # 1. Unverified decode to extract the issuer
         unverified = jwt.decode(token, options={"verify_signature": False})
@@ -72,14 +74,25 @@ def _verify_cloudflare_jwt(token: str) -> str | None:
         if not jwk:
             return None
 
-        # 5. Decode and cryptographically verify
+        # 5. Decode and cryptographically verify. When an Access application
+        # audience (AUD) is configured, enforce it — otherwise any Cloudflare
+        # Access tenant's token would pass the issuer check. With none configured
+        # we preserve the prior behaviour and skip the audience check.
         public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwk)
-        decoded = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            options={"verify_aud": False},
-        )
+        if audience:
+            decoded = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                audience=audience,
+            )
+        else:
+            decoded = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                options={"verify_aud": False},
+            )
         return decoded.get("email")
     except Exception:
         return None
@@ -106,12 +119,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/version")
-    def version(request: Request) -> dict[str, str | None]:
+    def version(
+        request: Request, session: Session = Depends(get_session)
+    ) -> dict[str, str | None]:
         # Extract JWT assertion header if present
         jwt_token = request.headers.get("cf-access-jwt-assertion") or request.headers.get("Cf-Access-Jwt-Assertion")
         username = None
         if jwt_token:
-            username = _verify_cloudflare_jwt(jwt_token)
+            audience = get_cloudflare_access_config(session).audience
+            username = _verify_cloudflare_jwt(jwt_token, audience)
         return {"version": settings.app_version, "username": username}
 
     web_dir: Path = settings.web_dir
