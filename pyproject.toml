@@ -33,6 +33,11 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # SQLModel domain classes named `Test*` (e.g. TestRun) collide with pytest's
+    # test-class naming heuristic; they aren't tests. Pure noise.
+    "ignore:cannot collect test class:pytest.PytestCollectionWarning",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

@@ -34,14 +34,14 @@ You can kick off a scan action by doing one or more of the following:
 ## Crawler
 This will spider the site using the configured URLs and credentials (similar to Burp Spider). The crawler uses one instance of a Playwright-powered Chromium browser in the background **per authentication credential configured**; therefore, each auth cred will mean ~500MB RAM usage, if you have 4 login credentials configured it will consume ~2GB RAM during the crawl. Because it uses a browser, it is aware of SPA page navigation/popup modal boxes and will cope with functionality presented on these. 
 
-The crawler populates the Site Map, Intelligence, Task Graph, and seeds the Workprogram with the crawled pages.
+The crawler populates the Site Map, Intelligence, Task Graph, and seeds the OWASP Coverage matrix with the crawled pages.
 
 ## Site Map
 ![site map](images/sitemap.png)
 The Site Map screen shows the crawled context; all the information on this page can be retrieved by the scanner and ALICE as a tool call. 
 Clicking the **By Scope** and **By User** buttons on the top right will switch between scope view (colour page routes based on whether it is marked in scope or not) and user view (colour page routes based on what user had access to that page).
 
-You can click on each page node to view the page in the side panel, where the **Mark in/out of scope** buttons are present. The Page Categories information is used by the scanner as a hint for what to test. The OWASP Top 10:2025 is used to seed the workprogram. (Note that the scanner may choose to not follow this guidance and test a page for a category marked "No".)
+You can click on each page node to view the page in the side panel, where the **Mark in/out of scope** buttons are present. The Page Categories information is used by the scanner as a hint for what to test. The OWASP Top 10:2025 is used to seed the OWASP Coverage matrix. (Note that the scanner may choose to not follow this guidance and test a page for a category marked "No".)
 
 ## Intelligence/Task Graph
 This section is populated by the crawler; if you didn't run this, they will remain blank through the scan. If populated the information is made available as context_tool calls to both the scanner and ALICE.
@@ -62,6 +62,6 @@ The sessions screen displays authentication tokens that are captured during the 
 ## Findings
 ![web findings](images/webfindings.png)
 
-## Workprogram
-![workprogram](images/workprogram.png)
+## OWASP Coverage
+![OWASP Coverage](images/workprogram.png)
 
