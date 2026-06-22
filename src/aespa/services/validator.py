@@ -88,10 +88,16 @@ async def start_validation(run_id: int, finding_ids: list[int] | None = None) ->
     if run_id in _validation_tasks:
         return
     _stop_requested.discard(run_id)
-    task = asyncio.create_task(
-        _validation_task(run_id, finding_ids=finding_ids),
-        name=f"validate-{run_id}",
-    )
+    # The validator operates exclusively on the web TestRun pipeline (it refuses
+    # API findings), so tag its events run_kind='web'.  When invoked inline during
+    # a scan this scope is already 'web'; the manual /validate endpoints call here
+    # from an unscoped request handler, where this scope is what keeps the
+    # validator's agent_status rows from leaking into a colliding api/sast run.
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(
+            _validation_task(run_id, finding_ids=finding_ids),
+            name=f"validate-{run_id}",
+        )
     _validation_tasks[run_id] = task
     task.add_done_callback(lambda _: _validation_tasks.pop(run_id, None))
 

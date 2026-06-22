@@ -69,6 +69,7 @@ Rules:
 - All files use `from __future__ import annotations`.
 - Tests use `TestClient` with in-memory SQLite (see `tests/conftest.py`). No network, no live LLM calls — stub/mock everything.
 - No auth by design (localhost-only). Don't add features assuming multi-user deployment.
+- With every conversation turn that makes non-trivial changes or fixes a bug, update the version number in pyproject.toml. The version is `MAJOR.MINOR.DATE.REVISION` where DATE is `YYYYMMDD`. Leave MAJOR (first number) and MINOR (second number) alone. Set DATE to the current date. For REVISION (the last number): if DATE changed (the existing date is before today), reset REVISION to 1; if DATE is unchanged (already today), increment REVISION by 1. Examples: on a new day `0.5.20261224.7` → `0.5.20261225.1`; same day `0.5.20261225.5` → `0.5.20261225.6`.
 
 ## When interacting with Github
 

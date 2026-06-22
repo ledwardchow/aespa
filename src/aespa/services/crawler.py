@@ -88,7 +88,13 @@ def _login_url_for_credential(default_login_url: str, cred) -> str:
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
-    task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
+    # Tag every event this crawl emits as run_kind='web'.  Run ids collide across
+    # web / api / sast, so the scope — snapshotted by create_task below into the
+    # crawl task and any worker it spawns — is the authoritative discriminator.
+    # Without it, an unscoped agent_status emit for an id that was also a SAST/API
+    # run would be mis-tagged and leak into that run's Agents tab.
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
     _active_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
 
