@@ -21,6 +21,9 @@ from AppKit import (
     NSImage,
     NSMenu,
     NSMenuItem,
+    NSModalResponseOK,
+    NSOpenPanel,
+    NSSavePanel,
     NSStatusBar,
     NSVariableStatusItemLength,
     NSWindow,
@@ -29,8 +32,23 @@ from AppKit import (
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
 )
-from Foundation import NSURL, NSURLRequest, NSMakeRect, NSObject
+from Foundation import NSURL, NSMakeRect, NSObject, NSURLRequest
 from WebKit import WKWebView, WKWebViewConfiguration
+
+# Policy enums (cancel=0, allow=1, download=2). Import where available, else fall
+# back to the literals so older pyobjc builds still work.
+try:
+    from WebKit import (
+        WKNavigationActionPolicyAllow,
+        WKNavigationActionPolicyDownload,
+        WKNavigationResponsePolicyAllow,
+        WKNavigationResponsePolicyDownload,
+    )
+except ImportError:  # pragma: no cover
+    WKNavigationActionPolicyAllow = 1
+    WKNavigationActionPolicyDownload = 2
+    WKNavigationResponsePolicyAllow = 1
+    WKNavigationResponsePolicyDownload = 2
 
 from aespa.browser import configure_browsers_path, download_chromium_if_missing
 from aespa.config import DEFAULT_WEB_DIR
@@ -80,7 +98,9 @@ class Controller(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         bar = NSStatusBar.systemStatusBar()
         self._status = bar.statusItemWithLength_(NSVariableStatusItemLength)
-        icon = NSImage.alloc().initWithContentsOfFile_(str(DEFAULT_WEB_DIR / "icon-sm.png"))
+        icon = NSImage.alloc().initWithContentsOfFile_(
+            str(DEFAULT_WEB_DIR / "icon-sm.png")
+        )
         if icon is not None:
             icon.setSize_((18, 18))
             self._status.button().setImage_(icon)
@@ -115,6 +135,8 @@ class Controller(NSObject):
             web = WKWebView.alloc().initWithFrame_configuration_(
                 rect, WKWebViewConfiguration.alloc().init()
             )
+            web.setUIDelegate_(self)  # file-open panel (import/upload)
+            web.setNavigationDelegate_(self)  # downloads (export)
             web.setAutoresizingMask_(_VIEW_SIZABLE)
             win.contentView().addSubview_(web)
             web.loadRequest_(NSURLRequest.requestWithURL_(self._url))
@@ -134,6 +156,78 @@ class Controller(NSObject):
             NSApplicationActivationPolicyAccessory
         )
         return False
+
+    # --- File import (WKUIDelegate) ---------------------------------------
+    def webView_runOpenPanelWithParameters_initiatedByFrame_completionHandler_(
+        self, _webView, parameters, _frame, completionHandler
+    ):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(parameters.allowsMultipleSelection())
+        if panel.runModal() == NSModalResponseOK:
+            completionHandler(panel.URLs())
+        else:
+            completionHandler(None)
+
+    # --- File export (WKNavigationDelegate -> WKDownload) -----------------
+    def webView_decidePolicyForNavigationAction_decisionHandler_(
+        self, _webView, navigationAction, decisionHandler
+    ):
+        # <a download> sets shouldPerformDownload on the action.
+        if navigationAction.respondsToSelector_("shouldPerformDownload") and (
+            navigationAction.shouldPerformDownload()
+        ):
+            decisionHandler(WKNavigationActionPolicyDownload)
+        else:
+            decisionHandler(WKNavigationActionPolicyAllow)
+
+    def webView_decidePolicyForNavigationResponse_decisionHandler_(
+        self, _webView, navigationResponse, decisionHandler
+    ):
+        # Endpoints that return Content-Disposition: attachment, or any MIME the
+        # web view can't display, become downloads.
+        disposition = ""
+        resp = navigationResponse.response()
+        if resp.respondsToSelector_("allHeaderFields"):
+            headers = resp.allHeaderFields()
+            disposition = (
+                headers.get("Content-Disposition")
+                or headers.get("content-disposition")
+                or ""
+            )
+        if (
+            not navigationResponse.canShowMIMEType()
+            or "attachment" in disposition.lower()
+        ):
+            decisionHandler(WKNavigationResponsePolicyDownload)
+        else:
+            decisionHandler(WKNavigationResponsePolicyAllow)
+
+    def webView_navigationAction_didBecomeDownload_(self, _webView, _action, download):
+        download.setDelegate_(self)
+
+    def webView_navigationResponse_didBecomeDownload_(
+        self, _webView, _response, download
+    ):
+        download.setDelegate_(self)
+
+    # --- WKDownloadDelegate -----------------------------------------------
+    def download_decideDestinationUsingResponse_suggestedFilename_completionHandler_(
+        self, _download, _response, suggestedFilename, completionHandler
+    ):
+        panel = NSSavePanel.savePanel()
+        panel.setNameFieldStringValue_(suggestedFilename or "download")
+        if panel.runModal() == NSModalResponseOK:
+            completionHandler(panel.URL())
+        else:
+            completionHandler(None)
+
+    def download_didFailWithError_resumeData_(self, _download, _error, _resumeData):
+        pass
+
+    def downloadDidFinish_(self, _download):
+        pass
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, _sender):
         return False
