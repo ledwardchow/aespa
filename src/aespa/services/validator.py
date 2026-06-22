@@ -24,11 +24,21 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import AdversarialValidatorConfig, Credential, CrawledPage, ScanFinding, Site, TestRun
+from aespa.models import (
+    CrawledPage,
+    Credential,
+    ScanFinding,
+    Site,
+    TestRun,
+)
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
-from aespa.services.settings import get_adversarial_validator_config, get_llm_config, get_run_scanner_policy
+from aespa.services.settings import (
+    get_adversarial_validator_config,
+    get_llm_config,
+    get_run_scanner_policy,
+)
 
 log = logging.getLogger("aespa.validator")
 

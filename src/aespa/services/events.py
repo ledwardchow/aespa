@@ -76,9 +76,10 @@ def emit(run_id: int, event: dict) -> None:
 def _persist_phase_event(run_id: int, event: dict) -> None:
     """Write a scanner_phase event to scan_log (best-effort, never raises)."""
     try:
+        from sqlmodel import Session
+
         from aespa.db import get_engine
         from aespa.models import ScanLog
-        from sqlmodel import Session
 
         data = event.get("data")
         entry = ScanLog(
@@ -100,9 +101,10 @@ def _persist_phase_event(run_id: int, event: dict) -> None:
 def _persist_agent_status_event(run_id: int, event: dict) -> None:
     """Write an agent_status event to agent_log (best-effort, never raises)."""
     try:
+        from sqlmodel import Session
+
         from aespa.db import get_engine
         from aespa.models import AgentLog
-        from sqlmodel import Session
 
         entry = AgentLog(
             test_run_id=run_id,

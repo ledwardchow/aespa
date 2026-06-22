@@ -4,6 +4,47 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #TBA] June 22 Update — Security review hardening & cross-cutting fixes
+**Opened:** 2026-06-22 | Branch: `develop → main`
+
+A multi-file review pass over the SAST scanner, validator, multi-provider LLM client, crawler, and dynamic scanner, fixing several real correctness/security bugs surfaced along the way, plus a repo-wide lint cleanup that uncovered a latent crash.
+
+### Security
+
+- **Scope enforcement now survives HTTP redirects** (`services/scanner.py`, `services/alice.py`): the scanner/ALICE clients use `follow_redirects=True`, but scope was only validated on the initial URL — a target could redirect to an out-of-scope/internal host (SSRF / scope bypass) with no re-check. New `_request_scope_checked` disables auto-follow and validates every `Location` against the run's scope predicate before following it (also honouring 303/POST→GET body-drop semantics); an out-of-scope redirect is refused and surfaced as `[SCOPE BLOCK]`. Applied to the scanner main-loop + specialist `http_request`, and to ALICE's `http_request` and `register_account` (which captures a session from the final response). The `browser` tool (scanner and ALICE) re-checks the final post-redirect URL and refuses to load an off-scope page into context (auth/SSO flows exempt). The helper takes an optional `scope_check` callable so ALICE's API-run scope is honoured.
+- **TLS verification no longer disabled without a proxy** (`services/llm.py`): every non-Bedrock LLM client hardcoded `verify=False`, sending the provider API key and prompt data over unvalidated TLS even with no proxy configured. Now `verify=(proxy is None)` across all providers, mirroring the existing Bedrock pattern — verification is disabled only for an interception proxy.
+- **SAST path jail hardened** (`services/sast_scanner.py`): `_jail` / `_safe_unzip` used string-prefix matching, so `…/extract/5` treated `…/extract/55` as inside it; switched to `Path.is_relative_to`, closing a sibling-directory escape for the file tools and archive extraction.
+- **PoC verification is shell-free** (`services/validator.py`): PoC re-verification ran the built `curl` string via `subprocess.run(shell=True)` with POSIX `shlex` quoting — meaningless to `cmd.exe` (so nothing verified on Windows) and a command-injection vector for target-derived values. Added `_build_curl_argv` + a shell-free `_run_and_assert_curl(argv)`.
+- **Optional Cloudflare Access AUD** (`models.py`, `schemas.py`, `db.py`, `services/settings.py`, `api/settings.py`, `main.py`, `web/app.js`): new `CloudflareAccessConfig` singleton (edited on the Debug page) lets the `/api/version` JWT verifier enforce an Access application audience. When unset, behaviour is unchanged (audience check skipped) — previously any Cloudflare tenant's signed token passed the issuer check.
+
+### Bug fixes
+
+- **API-scan SAST pre-phase was silently broken** (`services/api_scanner.py`): `_do_api_thinking_scan` referenced an undefined `collection_id` (should be `run.collection_id`), so the pre-phase always raised `NameError` — swallowed by a broad `except`, logging "failed or skipped". Surfaced by the lint pass (`F821`).
+- **Rate-limiter could hang forever** (`services/llm.py`): `AsyncTokenBucketLimiter.acquire` looped indefinitely when a single request's estimate exceeded the per-minute budget (refill caps at `max_tokens`); now clamps the estimate, and `reconcile` clamps symmetrically.
+- **Rate limiting now covers the agentic path** (`services/llm.py`): pacing previously wrapped only `_call` (page analysis/reporting), not `_call_with_tools` — so dynamic/API/SAST/ALICE scan loops were unpaced. Wrapped the tool-using path too, with an `on_wait` callback that emits a `rate_limit` notice into the active run's log the moment pacing starts, so a throttled scan never looks frozen.
+- **`max_pages` now caps total site-map nodes** (`services/crawler.py`): the per-phase budget let the map grow to ~N×`max_pages` across N credential phases; new node creation is now gated on the shared `pages_done` counter (matching the API-promotion path), so distinct nodes never exceed `max_pages`.
+- **Crawler same-host detection ignores default ports** (`services/crawler.py`): `_same_domain` compared raw netlocs, so `example.com` vs `example.com:443` were treated as different hosts and same-site links dropped; added `_norm_netloc` to normalise the scheme's default port (and strip userinfo).
+- **Crawler API-call attribution** (`services/crawler.py`): a slow response body could be appended after the crawl moved on and be attributed to the next page; captured calls are now stamped with their page and only promoted to the matching page.
+- **SAST stop event mis-routed** (`services/sast_scanner.py`): `stop_sast_scan` emitted outside a `run_kind_scope`, so its persisted `agent_status` defaulted to `run_kind='web'` and leaked into a colliding web run; now wrapped in `run_kind_scope("sast")`.
+- **Startup orphan-sweep ordering** (`db.py`): `_cleanup_orphaned_sast_extractions` ran before the `SastRun` columns it queries were migrated (silently skipped on first post-upgrade boot); moved to the end of `_migrate`.
+- **Lead attribution falsy-`or` guard** (`services/scan_leads.py`): `update_lead` used `or` fallbacks that misread a `0` run id; switched to explicit `is not None`.
+- **ALICE reconnect replay dropped events** (`services/alice_tasks.py`): the per-task event buffer trims from the front at `BUFFER_LIMIT`, but `stream_events` replayed `events[cursor:]` treating the reconnect cursor as an absolute index — so a long ALICE turn (which emits many token-delta events) corrupted the rendered message for a reconnecting client. Added a `dropped` offset so replay slices at `cursor - dropped`.
+- **Playwright traffic-capture memory leak** (`services/traffic.py`): `on_request` stored per-request timing/body for *every* request, but `on_response` / `on_request_failed` `return` early for noisy `SKIP_RESOURCE_TYPES` (images/fonts/media) *before* popping that state — so each skipped static asset leaked a `_pending`/`_req_data` entry that grew unboundedly over a long browser-driven scan. `on_request` now skips the same resource types at the source.
+- **OpenAPI nested `$ref` / `allOf` resolution** (`services/api_docs.py`): when prance's dereferencer couldn't resolve a spec, the manual backstop only dereferenced the top-level schema ref — `allOf` members that were `$ref`s (losing their properties) and nested property `$ref`s were left unresolved, so request-body schemas surfaced raw `$ref` objects. Replaced `_flatten_all_of` with a recursive, cycle-safe `_resolve_schema_deep` that resolves refs inside `allOf`, `properties`, `items`, and `oneOf`/`anyOf` (internal refs only — external refs still left verbatim as an SSRF guard). Fixes the previously-failing `test_parse_openapi_resolves_nested_refs`; the full suite is now green.
+
+### Chores
+
+- **Repo-wide lint cleanup**: cleared all ruff `F`/`I` findings (unused imports, import ordering, dead locals, empty f-strings) across `src/` and `tests/`; intentional re-exports (e.g. `_ADVERSARIAL_VALIDATOR_SYSTEM` via `services/llm.py`) marked `# noqa: F401`.
+
+### Tests
+
+- New: scope-checked redirect following (`tests/test_scanner_service.py`), rate-limiter clamp/`on_wait` (`tests/test_llm_service.py`), `_same_domain`/`_norm_netloc` port handling (`tests/test_crawler_logic.py`), SAST path-jail escape (`tests/test_web_sast_leads.py`), Cloudflare AUD round-trip (`tests/test_settings_api.py`), ALICE buffer-trim/cursor replay (`tests/test_alice_tasks.py`), Playwright skip-resource no-leak (`tests/test_traffic_service.py`); updated PoC tests for the shell-free argv.
+
+### Docs
+
+- `docs/architecture.md` updated: redirect-aware scope enforcement (§16), conditional TLS + agentic-path rate limiting/pacing (§9), `max_pages` = site-map size (§6), `CloudflareAccessConfig` (§4/§5/§12), and the verified-PoC pipeline (§11).
+
+
 ## [PR #TBA] June 19 Update — SAST on web scans
 **Opened:** 2026-06-19 | Branch: `web-sast → main`
 

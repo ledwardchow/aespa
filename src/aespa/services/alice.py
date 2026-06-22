@@ -14,15 +14,11 @@ from aespa.db import get_engine
 from aespa.models import CrawledPage, LLMConfig, Site, TestRun
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
+from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT, ALICE_SYSTEM_PROMPT
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
     get_llm_config_for_run,
     get_scanner_policy,
-)
-from aespa.services.prompts.alice import ALICE_SYSTEM_PROMPT, ALICE_API_SYSTEM_PROMPT
-from aespa.services.prompts.specialist import (
-    get_specialist_tools,
-    SPECIALIST_AGENT_TOOLS,
 )
 
 log = logging.getLogger(__name__)
@@ -194,18 +190,19 @@ async def _execute_alice_tool(
 
     # ── http_request ─────────────────────────────────────────────────────────
     if tool_name == "http_request":
+        from aespa.services import traffic as traffic_svc
         from aespa.services.scanner import (
             _make_scanner_client,
-            REQUEST_TIMEOUT,
+            _request_scope_checked,
         )
-        from aespa.services import traffic as traffic_svc
 
         _url = str(tool_input.get("url") or base_url)
-        scope_err = (
-            scope_check_fn(_url)
-            if scope_check_fn
-            else check_scope(_url, site_id, run_id)
+        # Single scope predicate reused for the initial URL and every redirect hop.
+        _alice_scope = (
+            scope_check_fn if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
         )
+        scope_err = _alice_scope(_url)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -247,8 +244,18 @@ async def _execute_alice_tool(
                         kwargs["content"] = str(body).encode()
                 if headers:
                     kwargs["headers"] = headers
-                resp = await hx.request(method, _url, **kwargs)
+                # Follow redirects manually, re-checking scope on each hop so a
+                # target can't bounce ALICE to an out-of-scope/internal host.
+                resp, _redirect_blocked = await _request_scope_checked(
+                    hx, method, _url, scope_check=_alice_scope, **kwargs
+                )
                 resp_body = resp.text[:8192]
+                if _redirect_blocked is not None:
+                    resp_body = (
+                        f"[SCOPE BLOCK] Redirect to {_redirect_blocked[0]!r} was "
+                        f"out of scope and NOT followed: {_redirect_blocked[1]}\n\n"
+                        + resp_body
+                    )
                 # Coverage tracking (API runs): attribute this probe to the OWASP
                 # category ALICE declared so the endpoint × category work-program
                 # cell flips to in_progress. No-op for site runs (post_probe_fn None).
@@ -406,13 +413,13 @@ async def _execute_alice_tool(
 
     # ── forge_jwt ─────────────────────────────────────────────────────────────
     if tool_name == "forge_jwt":
+
         from aespa.services.scanner import (
-            _sign_hs256_jwt,
+            _mark_session_pending,
             _record_session,
             _session_label,
-            _mark_session_pending,
+            _sign_hs256_jwt,
         )
-        import time
 
         jwt_secret = str(tool_input.get("secret") or "")
         jwt_claims = (
@@ -488,8 +495,8 @@ async def _execute_alice_tool(
 
     # ── credential_check ──────────────────────────────────────────────────────
     if tool_name == "credential_check":
-        from aespa.services.scanner import _make_scanner_client, REQUEST_TIMEOUT
         from aespa.services import traffic as traffic_svc
+        from aespa.services.scanner import _make_scanner_client
 
         cred_url = str(tool_input.get("url") or base_url)
         scope_err = check_scope(cred_url, site_id, run_id)
@@ -551,22 +558,23 @@ async def _execute_alice_tool(
 
     # ── register_account ──────────────────────────────────────────────────────
     if tool_name == "register_account":
-        from aespa.services.scanner import (
-            _make_scanner_client,
-            REQUEST_TIMEOUT,
-            _session_label,
-            _record_session,
-            _mark_session_pending,
-        )
-        from aespa.services import traffic as traffic_svc
         import secrets as _secrets
 
-        reg_url = str(tool_input.get("url") or base_url)
-        scope_err = (
-            scope_check_fn(reg_url)
-            if scope_check_fn
-            else check_scope(reg_url, site_id, run_id)
+        from aespa.services import traffic as traffic_svc
+        from aespa.services.scanner import (
+            _make_scanner_client,
+            _mark_session_pending,
+            _record_session,
+            _request_scope_checked,
+            _session_label,
         )
+
+        reg_url = str(tool_input.get("url") or base_url)
+        _alice_scope = (
+            scope_check_fn if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
+        )
+        scope_err = _alice_scope(reg_url)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -599,13 +607,18 @@ async def _execute_alice_tool(
             event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
         ) as hx:
             try:
-                if body_format == "json":
-                    resp = await hx.request(
-                        method, reg_url, json=body, headers=req_headers
-                    )
-                else:
-                    resp = await hx.request(
-                        method, reg_url, data=body, headers=req_headers
+                _reg_kwargs = {"headers": req_headers}
+                _reg_kwargs["json" if body_format == "json" else "data"] = body
+                # Scope-checked redirect following so an off-scope redirect can't
+                # capture an out-of-scope session into the vault.
+                resp, _reg_redirect_blocked = await _request_scope_checked(
+                    hx, method, reg_url, scope_check=_alice_scope, **_reg_kwargs
+                )
+                if _reg_redirect_blocked is not None:
+                    return (
+                        f"[SCOPE BLOCK] register_account redirected to "
+                        f"{_reg_redirect_blocked[0]!r} (out of scope): "
+                        f"{_reg_redirect_blocked[1]} No session captured."
                     )
                 success = resp.status_code in success_statuses
                 session_data: dict = {
@@ -677,17 +690,17 @@ async def _execute_alice_tool(
         url = str(tool_input.get("url") or base_url)
 
         # Scope-check the entry url and every goto step before driving the browser.
+        _alice_scope = (
+            scope_check_fn if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
+        )
         candidate_urls = [url] + [
             str(s.get("url"))
             for s in (tool_input.get("steps") or [])
             if isinstance(s, dict) and s.get("op") == "goto" and s.get("url")
         ]
         for _u in candidate_urls:
-            scope_err = (
-                scope_check_fn(_u)
-                if scope_check_fn
-                else check_scope(_u, site_id, run_id)
-            )
+            scope_err = _alice_scope(_u)
             if scope_err:
                 return f"[SCOPE BLOCK] {scope_err}"
 
@@ -723,6 +736,16 @@ async def _execute_alice_tool(
         result = await _run_thinking_browser_action(
             page, tool_input, default_url=base_url, scanner_policy=scanner_policy
         )
+        # The navigation targets were scope-checked, but the page may have
+        # redirected onward. Refuse to surface / capture an off-scope final page.
+        _final_url = result.get("url") or url
+        _final_scope_err = _alice_scope(_final_url)
+        if _final_scope_err:
+            return (
+                f"[SCOPE BLOCK] Browser navigation to {url} redirected to "
+                f"out-of-scope URL {_final_url}: {_final_scope_err} The off-scope "
+                "page content was not loaded into context."
+            )
         body = str(result.get("body") or "")
 
         # Persist the (now possibly authenticated) browser state into the vault so
@@ -1330,8 +1353,8 @@ def _check_api_scope(url: str, collection) -> str | None:
     Derives allowed hosts from the collection's ``base_url`` and ``servers``
     list.  Returns a rejection message or ``None`` if the URL is in scope.
     """
-    from urllib.parse import urlparse as _up
     import json as _json
+    from urllib.parse import urlparse as _up
 
     parsed = _up(url)
     hostname = (parsed.hostname or "").lower()
@@ -1376,8 +1399,9 @@ def _run_api_context_tool(
     Exposes ``endpoint_list``, ``endpoint_detail``, ``collection_info``, and
     ``finding_list`` instead of the crawl-oriented site_map / page_detail tools.
     """
-    from aespa.models import ApiCollection, ApiCredential, ApiEndpoint
     from sqlmodel import select as _sel
+
+    from aespa.models import ApiCollection, ApiCredential, ApiEndpoint
 
     tool_name = (tool_name or "").strip()
     try:
@@ -1582,10 +1606,11 @@ def _run_api_context_tool(
 
     # ── report_finding ────────────────────────────────────────────────────────
     if tool_name == "report_finding":
-        from aespa.models import ScanFinding as _SF
-        from aespa.db import get_engine as _ge
+
         from sqlmodel import Session as _Session
-        from datetime import datetime, timezone as _tz
+
+        from aespa.db import get_engine as _ge
+        from aespa.models import ScanFinding as _SF
         from aespa.services.scanner import _as_text
 
         severity = _as_text(args.get("severity") or "info").lower()
@@ -1638,12 +1663,13 @@ def _run_api_context_tool(
         cell_linked = None
         if owasp:
             try:
+                from aespa.models import ApiCollection as _AC
+                from aespa.models import ApiEndpoint as _AE
                 from aespa.services.api_scanner import (
+                    OWASP_API_CATEGORIES,
                     _match_endpoint_for_url,
                     update_coverage_cell,
-                    OWASP_API_CATEGORIES,
                 )
-                from aespa.models import ApiCollection as _AC, ApiEndpoint as _AE
 
                 cat = owasp.upper()
                 if cat in OWASP_API_CATEGORIES and finding.id is not None:
@@ -1732,12 +1758,13 @@ def _run_api_context_tool(
     # mark a cell in_progress while testing, covered when clean, skipped (with a
     # reason) when not applicable, or finding (with the backing finding_id).
     if tool_name == "set_coverage":
+        from aespa.models import ApiEndpoint as _AE
+        from aespa.models import ApiEndpointTest as _AET
         from aespa.services.api_scanner import (
-            update_coverage_cell,
             OWASP_API_CATEGORIES,
             _applicable_categories,
+            update_coverage_cell,
         )
-        from aespa.models import ApiEndpoint as _AE, ApiEndpointTest as _AET
 
         _ALLOWED_STATUS = {"in_progress", "covered", "skipped", "finding"}
         status = str(args.get("status") or "").strip().lower()
@@ -1892,8 +1919,9 @@ async def run_api_alice_turn_stream(
     # into the vault — they require a live POST to obtain a token/cookie.  Instead
     # they are surfaced to the LLM in plain text (see creds_text below) so ALICE
     # can perform the login step itself using http_request.
-    from aespa.models import ApiCredential
     from sqlmodel import select as _sel
+
+    from aespa.models import ApiCredential
 
     session_vault: dict[str, dict] = {}
     login_creds_for_llm: list[dict] = []
@@ -1958,7 +1986,6 @@ async def run_api_alice_turn_stream(
     llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
 
     # Scope-check closure uses a minimal copy of collection data (no DB session).
-    import json as _json
 
     class _CollProxy:
         def __init__(self):
@@ -1976,12 +2003,12 @@ async def run_api_alice_turn_stream(
         """Flip the endpoint × category work-program cell to in_progress when
         ALICE sends a probe declaring the OWASP category it is testing. Mirrors
         the automated scanner's per-probe coverage hook."""
+        from aespa.models import ApiEndpoint as _AE
         from aespa.services.api_scanner import (
+            OWASP_API_CATEGORIES,
             _match_endpoint_for_url,
             update_coverage_cell,
-            OWASP_API_CATEGORIES,
         )
-        from aespa.models import ApiEndpoint as _AE
 
         cat = (owasp_category or "").strip().upper()
         if cat not in OWASP_API_CATEGORIES:

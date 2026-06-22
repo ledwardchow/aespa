@@ -262,12 +262,12 @@ def _link_promoted_finding_to_coverage(
 
     cat = (category_raw or "").strip().upper()
     try:
+        from aespa.models import ApiCollection, ApiEndpoint
         from aespa.services.api_scanner import (
             OWASP_API_CATEGORIES,
             _match_endpoint_for_url,
             update_coverage_cell,
         )
-        from aespa.models import ApiCollection, ApiEndpoint
     except Exception as exc:  # pragma: no cover - import guard
         log.debug("coverage link skipped (import failed): %s", exc)
         return None

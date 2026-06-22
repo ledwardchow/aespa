@@ -4,11 +4,10 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session
 from aespa.main import create_app
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -260,7 +259,8 @@ def test_api_and_web_findings_do_not_cross():
     api_test_run_id (with test_run_id left NULL).  Regression for API findings
     leaking into the web run of the same integer id."""
     from sqlalchemy.pool import StaticPool
-    from sqlmodel import SQLModel, Session, create_engine
+    from sqlmodel import Session, SQLModel, create_engine
+
     from aespa import models
     from aespa.db import get_session
     from aespa.main import create_app
@@ -351,6 +351,7 @@ def test_run_kind_scope_snapshotted_by_child_task():
     the asyncio.create_task context snapshot the fix relies on: the child task
     stays tagged 'api' after the parent leaves the scope."""
     import asyncio
+
     from aespa.services import events as events_svc
 
     captured: dict[str, str] = {}
@@ -375,9 +376,10 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
     with run_kind='api' (driven by run_kind_scope('api')), so the API agent-log
     endpoint returns them."""
     from sqlalchemy.pool import StaticPool
-    from sqlmodel import SQLModel, Session, create_engine, select
-    from aespa import models
+    from sqlmodel import Session, SQLModel, create_engine, select
+
     from aespa import db as db_mod
+    from aespa import models
     from aespa.db import get_session, set_engine
     from aespa.main import create_app
     from aespa.services import events as events_svc
@@ -441,7 +443,8 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
 def test_alice_sessions_do_not_cross_colliding_ids():
     """Verify that ALICE sessions for web and API scans with colliding IDs do not overlap."""
     from sqlalchemy.pool import StaticPool
-    from sqlmodel import SQLModel, Session, create_engine, select
+    from sqlmodel import Session, SQLModel, create_engine, select
+
     from aespa import models
     from aespa.db import get_session
     from aespa.main import create_app
@@ -539,6 +542,7 @@ def test_alice_sessions_do_not_cross_colliding_ids():
 def test_alice_tasks_do_not_cross_colliding_ids():
     """Verify that background tasks for web and API scans with colliding IDs do not overlap in registry."""
     import asyncio
+
     from aespa.services import alice_tasks
 
     # Patch out the actual _run coroutine

@@ -31,6 +31,10 @@ class AliceTask:
     run_type: str = "site"           # "site" | "api"
     # All SSE events produced so far (for replay on reconnect).
     events: list[dict] = field(default_factory=list)
+    # Number of events dropped off the front of ``events`` by buffer trimming.
+    # The client's reconnect cursor is an absolute position in the logical event
+    # stream, so the buffer index is ``cursor - dropped``.
+    dropped: int = 0
     # One asyncio.Queue per connected SSE client.
     waiters: set[asyncio.Queue] = field(default_factory=set)
     asyncio_task: Optional[asyncio.Task] = None
@@ -118,8 +122,12 @@ async def stream_events(run_id: int, cursor: int = 0, run_type: str = "site") ->
         yield f"data: {json.dumps({'type': 'done', 'thought': '', 'message': ''})}\n\n"
         return
 
-    # Replay everything the client missed.
-    for event in task.events[cursor:]:
+    # Replay everything the client missed. ``cursor`` is an absolute position in
+    # the logical stream; the buffer may have dropped older events, so translate
+    # to a buffer index. A cursor older than the retained window resyncs from the
+    # buffer start (best effort — those events are gone).
+    start = max(0, cursor - task.dropped)
+    for event in task.events[start:]:
         yield f"data: {json.dumps(event)}\n\n"
 
     if task.done:
@@ -169,7 +177,9 @@ def _append(task: AliceTask, event: dict) -> None:
         }
 
     if len(task.events) >= BUFFER_LIMIT:
-        task.events = task.events[-(BUFFER_LIMIT - 1):]
+        keep = task.events[-(BUFFER_LIMIT - 1):]
+        task.dropped += len(task.events) - len(keep)
+        task.events = keep
     task.events.append(event)
 
     for q in list(task.waiters):

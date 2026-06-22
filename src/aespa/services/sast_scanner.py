@@ -107,7 +107,6 @@ def _flush_unfiltered_candidates(sast_run_id: int, collection_id: int) -> int:
 
     Returns the count of newly persisted leads.
     """
-    from aespa.models import ScanLead  # local import to avoid circularity
     candidates = _candidates.get(sast_run_id, [])
     flushed = 0
     for c in candidates:
