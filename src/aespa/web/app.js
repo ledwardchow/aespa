@@ -8550,7 +8550,7 @@ const PROVIDER_MODEL_PLACEHOLDERS = {
   openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
   bedrock:"global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
-  bedrock_mantle:"openai.gpt-oss-120b\nglobal.anthropic.claude-opus-4-8",
+  bedrock_mantle:"openai.gpt-5.5\nopenai.gpt-oss-120b",
   azure_openai:"gpt-5.5\ngpt-4o\ngpt-4.1",
   azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
   azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
