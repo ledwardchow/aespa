@@ -8508,12 +8508,13 @@ const API_FORMAT_LABELS = {
   openrouter:"OpenRouter",
   google:"Google Gemini API",
   bedrock:"Amazon Bedrock Runtime",
+  bedrock_mantle:"Amazon Bedrock Mantle",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry (OpenAI API)",
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", project_id:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
 const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
@@ -8522,6 +8523,7 @@ const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openrouter:"https://openrouter.ai/api/v1",
   google:"https://generativelanguage.googleapis.com",
   bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  bedrock_mantle:"https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
@@ -8535,19 +8537,21 @@ const PROVIDER_DEFAULT_BASE_URLS = {
   openrouter: "https://openrouter.ai/api/v1",
   google:     "https://generativelanguage.googleapis.com",
   bedrock:    "AWS SDK default (us-east-1)",
+  bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: null,                // must be set
   azure_foundry: null,
   azure_foundry_openai: null,
   azure_foundry_anthropic: null,
 };
 const PROVIDER_MODEL_PLACEHOLDERS = {
-  anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
-  openai:"gpt-4.1\ngpt-4o\nllama-3.1-8b-instruct",
+  anthropic:"claude-opus-4-8\nclaude-sonnet-4-5",
+  openai:"gpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible:"llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
-  bedrock:"global.anthropic.claude-sonnet-4-6\nglobal.anthropic.claude-opus-4-7",
-  azure_openai:"gpt-4o\ngpt-4.1",
+  bedrock:"global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
+  bedrock_mantle:"openai.gpt-oss-120b\nglobal.anthropic.claude-opus-4-8",
+  azure_openai:"gpt-5.5\ngpt-4o\ngpt-4.1",
   azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
   azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
   azure_foundry_anthropic:"claude-sonnet-4-5\nclaude-opus-4-1",
@@ -8558,6 +8562,7 @@ function providerToForm(provider) {
     name:provider.name || "",
     api_format:provider.api_format || "anthropic",
     base_url:provider.base_url || "",
+    project_id:provider.project_id || "",
     models:(provider.models || []).join("\n"),
     api_key:provider.api_key || "",
     max_tpm:provider.max_tpm != null ? provider.max_tpm : "",
@@ -8570,6 +8575,7 @@ function providerPayload(form) {
     name:form.name.trim(),
     api_format:form.api_format,
     base_url:form.base_url.trim() || null,
+    project_id:form.api_format==="bedrock_mantle" ? (form.project_id.trim() || null) : null,
     models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
     api_key:form.api_key.trim() || null,
     max_tpm:form.max_tpm !== "" ? Number(form.max_tpm) : null,
@@ -8645,6 +8651,7 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
           <option value="openrouter">OpenRouter</option>
           <option value="google">Google Gemini API</option>
           <option value="bedrock">Amazon Bedrock Runtime</option>
+          <option value="bedrock_mantle">Amazon Bedrock Mantle</option>
           <option value="azure_openai">Azure OpenAI</option>
           <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
@@ -8654,16 +8661,23 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
           onChange=${e=>upd({base_url:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
+        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">OpenAI-compatible Mantle endpoint. Leave blank to use the us-east-2 region (or set BEDROCK_MANTLE_REGION / AWS_REGION); override here for another region, e.g. https://bedrock-mantle.us-west-2.api.aws/v1.</div>`}
       </div>
+      ${form.api_format==="bedrock_mantle"&&html`<div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
+        <input type="text" value=${form.project_id} placeholder="proj_5d5ykleja6cwpirysbb7"
+          onChange=${e=>upd({project_id:e.target.value})}/>
+        <div className="field-hint">Sent as the OpenAI-Project header to attribute usage/cost to a Bedrock Mantle project. Use the project id (proj_…) from the Bedrock console, not its name. Leave blank for the account default project.</div>
+      </div>`}
       <div className="field"><label>Model names</label>
         <textarea required rows="5" value=${form.models} placeholder=${PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
           onChange=${e=>upd({models:e.target.value})}></textarea>
         <div className="field-hint">Enter one model per line, or separate models with commas.</div>
       </div>
       <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
+        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":form.api_format==="bedrock_mantle"?"Bedrock API key, or leave blank for AWS credentials":"Leave blank if not required"}
           onChange=${e=>upd({api_key:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role — the same fallback as the Bedrock Runtime provider.</div>`}
       </div>
       <div className="divider"/>
       <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
