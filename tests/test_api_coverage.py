@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -54,6 +54,15 @@ from aespa.services.api_scanner import (
 )
 
 _UTC = timezone.utc
+
+
+def _fake_create_task(coro, **kwargs):
+    """create_task stub: close the scan coroutine (TestClient's loop never runs it,
+    which would leak a 'never awaited' warning) and return a done-looking task."""
+    coro.close()
+    t = MagicMock()
+    t.done.return_value = True
+    return t
 
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
@@ -498,9 +507,8 @@ def test_start_scan_seeds_matrix(client, db_engine, db_session):
 
     with (
         patch("aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock),
-        patch("asyncio.create_task") as mock_task,
+        patch("asyncio.create_task", side_effect=_fake_create_task),
     ):
-        mock_task.return_value = AsyncMock()
         r = client.post(f"/api/api-test-runs/{run['id']}/scan/start")
     assert r.status_code == 200
 
@@ -733,9 +741,8 @@ def test_scan_start_overrides_coverage_mode(client, db_engine, db_session):
     coll, run = _make_collection_and_run(client)  # defaults to track
     with (
         patch("aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock),
-        patch("asyncio.create_task") as mock_task,
+        patch("asyncio.create_task", side_effect=_fake_create_task),
     ):
-        mock_task.return_value = AsyncMock()
         r = client.post(f"/api/api-test-runs/{run['id']}/scan/start", json={"coverage_mode": "enforce"})
     assert r.status_code == 200
     assert r.json()["coverage_mode"] == "enforce"

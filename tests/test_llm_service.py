@@ -1179,6 +1179,205 @@ def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blan
     assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
 
 
+def test_bedrock_mantle_uses_openai_sdk_with_us_east_2_default(monkeypatch):
+    """Mantle is OpenAI-compatible; with no base_url it defaults to the us-east-2 endpoint."""
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            message = SimpleNamespace(content="ok")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.delenv("BEDROCK_MANTLE_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert {
+        "api_key": "bedrock-api-key",
+        "base_url": "https://bedrock-mantle.us-east-2.api.aws/v1",
+    }.items() <= captured["client"].items()
+    assert captured["completion"]["model"] == "openai.gpt-oss-120b"
+
+
+def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
+    """An explicit base_url wins; otherwise the region env var selects the endpoint."""
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["completion"] = kwargs
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    # Region env var drives the endpoint when no base_url is configured.
+    cfg_region = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg_region, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-west-2.api.aws/v1"
+
+    # An explicit base_url overrides region resolution (and gains the /v1 suffix).
+    cfg_explicit = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url="https://bedrock-mantle.eu-west-1.api.aws",
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg_explicit, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.eu-west-1.api.aws/v1"
+
+
+def test_bedrock_mantle_sends_project_id(monkeypatch):
+    """A configured Mantle project id is passed to the SDK (OpenAI-Project header)."""
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        project_id="proj_5d5ykleja6cwpirysbb7",
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+
+    asyncio.run(llm._call(config, "hello", None))
+
+    assert captured["client"]["project"] == "proj_5d5ykleja6cwpirysbb7"
+
+
+def test_bedrock_mantle_omits_project_when_unset(monkeypatch):
+    """No project kwarg is sent when no project id is configured."""
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+
+    asyncio.run(llm._call(config, "hello", None))
+
+    assert "project" not in captured["client"]
+
+
+def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
+    """With no API key, Mantle requests are SigV4-signed under the 'bedrock' service."""
+    import httpx
+    from botocore.credentials import Credentials
+
+    fake_creds = Credentials("AKIAEXAMPLE", "secret-key", token="session-token")
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_credentials(self):
+            return fake_creds
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
+    request = httpx.Request(
+        "POST",
+        "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions",
+        json={"model": "openai.gpt-oss-120b", "messages": []},
+    )
+    # Drive the sync auth flow so the request is signed in place.
+    list(signer.sync_auth_flow(request))
+
+    authorization = request.headers["Authorization"]
+    assert authorization.startswith("AWS4-HMAC-SHA256")
+    # Credential scope must name the resolved region and the "bedrock" service.
+    assert "/us-east-2/bedrock/aws4_request" in authorization
+    assert "x-amz-date" in request.headers
+    # Temporary (role/STS) credentials must carry the session token.
+    assert request.headers["x-amz-security-token"] == "session-token"
+
+
+def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
+    """A clear error is raised when neither an API key nor AWS credentials exist."""
+    import httpx
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_credentials(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
+    request = httpx.Request(
+        "POST", "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions", json={}
+    )
+    with pytest.raises(RuntimeError, match="No AWS credentials"):
+        list(signer.sync_auth_flow(request))
+
+
 @pytest.mark.anyio
 async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
     captured = {}

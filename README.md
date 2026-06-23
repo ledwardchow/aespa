@@ -136,7 +136,7 @@ Parsed API documentation
 SAST Scan-based Lead Detection
 ![Screenshot](docs/images/sastleads.png)
 
-Structured Workprogram for API Scanning
+OWASP Coverage for API Scanning
 ![Screenshot](docs/images/apiworkprogram.png)
 
 API Scan Findings
