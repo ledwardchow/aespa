@@ -1,6 +1,10 @@
 [project]
 name = "aespa"
+<<<<<<< Updated upstream
 version = "0.6.20260623.7"
+=======
+version = "0.6.20260622.20"
+>>>>>>> Stashed changes
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
