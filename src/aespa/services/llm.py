@@ -941,14 +941,17 @@ async def stream_chat_completion(
     else:
         from openai import AsyncOpenAI
 
-        kwargs: dict = {"api_key": config.api_key or "not-needed"}
-        if config.base_url:
-            base = config.base_url.rstrip("/")
-            if not base.endswith("/v1"):
-                base += "/v1"
-            kwargs["base_url"] = base
-        kwargs.update(_llm_client_kwargs())
-        client = AsyncOpenAI(**kwargs)
+        if config.provider == "bedrock_mantle":
+            client = _make_bedrock_mantle_client(config)
+        else:
+            kwargs: dict = {"api_key": config.api_key or "not-needed"}
+            if config.base_url:
+                base = config.base_url.rstrip("/")
+                if not base.endswith("/v1"):
+                    base += "/v1"
+                kwargs["base_url"] = base
+            kwargs.update(_llm_client_kwargs())
+            client = AsyncOpenAI(**kwargs)
 
         formatted_messages = [{"role": "system", "content": system_message}]
         for m in messages:
@@ -1211,16 +1214,20 @@ async def _openai_compat(
 ) -> str:
     from openai import AsyncOpenAI
 
-    kwargs: dict = {"api_key": config.api_key or "not-needed"}
-    if config.base_url:
-        # The OpenAI SDK appends e.g. "/chat/completions" directly to base_url.
-        # LM Studio / Ollama expect the /v1 prefix, so ensure it's present.
-        base = config.base_url.rstrip("/")
-        if not base.endswith("/v1"):
-            base += "/v1"
-        kwargs["base_url"] = base
-    kwargs.update(_llm_client_kwargs())
-    client = AsyncOpenAI(**kwargs)
+    if config.provider == "bedrock_mantle":
+        # OpenAI-compatible Mantle endpoint; API key (Bearer) or AWS creds (SigV4).
+        client = _make_bedrock_mantle_client(config)
+    else:
+        kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.base_url:
+            # The OpenAI SDK appends e.g. "/chat/completions" directly to base_url.
+            # LM Studio / Ollama expect the /v1 prefix, so ensure it's present.
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            kwargs["base_url"] = base
+        kwargs.update(_llm_client_kwargs())
+        client = AsyncOpenAI(**kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -1487,6 +1494,154 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
 def _bedrock_region_from_url(base_url: str) -> str:
     match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
     return match.group(1) if match else "us-east-1"
+
+
+# SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
+# (like the bedrock-runtime OpenAI-compatible endpoint) under the "bedrock"
+# service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
+# (`--aws-sigv4 "aws:amz:<region>:bedrock"`) and litellm's Bedrock signer.
+_BEDROCK_MANTLE_SIGV4_SERVICE = "bedrock"
+
+
+def _bedrock_mantle_region() -> str:
+    """Default region for Bedrock Mantle when no base URL is configured."""
+    return (
+        os.getenv("BEDROCK_MANTLE_REGION")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "us-east-2"
+    )
+
+
+def _bedrock_mantle_base_url(config: LLMConfig) -> str:
+    """Resolve the OpenAI-compatible base URL for a Bedrock Mantle config.
+
+    Mantle is an OpenAI-compatible endpoint (not the Converse API):
+    ``https://bedrock-mantle.{region}.api.aws/v1``.  An explicit ``base_url``
+    wins (with a ``/v1`` suffix ensured); otherwise the region comes from
+    ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION``, defaulting
+    to ``us-east-2``.
+    """
+    if config.base_url:
+        base = config.base_url.rstrip("/")
+        return base if base.endswith("/v1") else f"{base}/v1"
+    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws/v1"
+
+
+def _bedrock_mantle_region_from_url(base_url: str) -> str:
+    """Region used for SigV4 signing — must match the endpoint host's region."""
+    match = re.search(r"bedrock-mantle\.([a-z0-9-]+)\.api\.aws", base_url)
+    return match.group(1) if match else _bedrock_mantle_region()
+
+
+class _BedrockMantleSigV4Auth(httpx.Auth):
+    """httpx auth flow that SigV4-signs Bedrock Mantle requests with AWS creds.
+
+    Lets the OpenAI SDK reach the OpenAI-compatible Mantle endpoint using the
+    default boto3 credential chain (environment, shared profile, SSO, IAM role,
+    instance/task role) instead of a Bedrock API key — mirroring the boto3 path
+    of the Bedrock Runtime provider.  The refreshable credentials object is
+    resolved once (lazily) and re-frozen per request so role/STS credentials
+    rotate before they expire.
+    """
+
+    requires_request_body = True
+
+    def __init__(self, region: str, profile: str | None = None):
+        self._region = region
+        self._profile = profile
+        self._credentials = None
+
+    def _resolve_credentials(self):
+        if self._credentials is None:
+            import boto3
+
+            session = (
+                boto3.Session(profile_name=self._profile)
+                if self._profile
+                else boto3.Session()
+            )
+            creds = session.get_credentials()
+            if creds is None:
+                raise RuntimeError(
+                    "No AWS credentials found for Bedrock Mantle. Provide an "
+                    "Amazon Bedrock API key, or configure AWS credentials "
+                    "(environment, shared profile, SSO, or an IAM role)."
+                )
+            self._credentials = creds
+        return self._credentials
+
+    def _sign(self, request: httpx.Request) -> None:
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        frozen = self._resolve_credentials().get_frozen_credentials()
+        aws_request = AWSRequest(
+            method=request.method,
+            url=str(request.url),
+            data=request.content,
+            headers={
+                "Content-Type": request.headers.get("Content-Type", "application/json")
+            },
+        )
+        SigV4Auth(frozen, _BEDROCK_MANTLE_SIGV4_SERVICE, self._region).add_auth(
+            aws_request
+        )
+        # Copy the signed headers (Authorization, X-Amz-Date, X-Amz-Security-Token)
+        # onto the outgoing request, replacing the SDK's placeholder Bearer header.
+        for key, value in aws_request.headers.items():
+            request.headers[key] = value
+
+    def sync_auth_flow(self, request: httpx.Request):
+        self._sign(request)
+        yield request
+
+    async def async_auth_flow(self, request: httpx.Request):
+        # botocore credential resolution / signing is synchronous and may touch
+        # the filesystem or IMDS on first use; keep it off the event loop.
+        await asyncio.get_running_loop().run_in_executor(None, self._sign, request)
+        yield request
+
+
+def _make_bedrock_mantle_client(config: LLMConfig):
+    """Build an AsyncOpenAI client for Bedrock Mantle.
+
+    With an API key, send it as a Bearer token (default OpenAI SDK behaviour).
+    Without one, fall back to AWS credentials by SigV4-signing each request — the
+    same key-or-boto3 split the Bedrock Runtime provider uses.
+    """
+    from openai import AsyncOpenAI
+
+    base_url = _bedrock_mantle_base_url(config)
+    # A Mantle project id is sent as the OpenAI-Project header (the SDK's
+    # `project=` param) so usage is attributed to that project for cost tracking.
+    project_id = getattr(config, "project_id", None) or None
+    project_kwargs = {"project": project_id} if project_id else {}
+    if config.api_key:
+        return AsyncOpenAI(
+            api_key=config.api_key,
+            base_url=base_url,
+            **project_kwargs,
+            **_llm_client_kwargs(),
+        )
+
+    proxy = _llm_proxy_var.get()
+    signer = _BedrockMantleSigV4Auth(
+        region=_bedrock_mantle_region_from_url(base_url),
+        profile=os.getenv("AWS_PROFILE"),
+    )
+    http_client = httpx.AsyncClient(
+        verify=proxy is None,
+        headers=_LLM_HEADERS,
+        auth=signer,
+        **({"proxy": proxy} if proxy else {}),
+    )
+    return AsyncOpenAI(
+        api_key="not-needed",
+        base_url=base_url,
+        http_client=http_client,
+        **project_kwargs,
+    )
 
 
 async def _bedrock(
@@ -2410,6 +2565,7 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
+        "bedrock_mantle",
         "openai",
         "openai_compatible",
         "openrouter",
@@ -2828,7 +2984,7 @@ async def _call_with_tools_impl(
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
-    #         azure_foundry, azure_foundry_openai
+    #         azure_foundry, azure_foundry_openai, bedrock_mantle
     def _ant_tools_to_openai() -> list[dict]:
         return [
             {
@@ -2904,30 +3060,35 @@ async def _call_with_tools_impl(
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
+        "bedrock_mantle",
     ):
         from openai import AsyncOpenAI
 
-        client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
-        if config.provider == "openrouter":
-            client_kwargs["base_url"] = OPENROUTER_BASE_URL
-        elif config.provider in (
-            "azure_openai",
-            "azure_foundry",
-            "azure_foundry_openai",
-        ):
-            base = (config.base_url or "").rstrip("/")
-            client_kwargs["base_url"] = (
-                _azure_foundry_openai_base_url(base)
-                if config.provider in ("azure_foundry", "azure_foundry_openai")
-                else base
-            )
-        elif config.provider in ("openai", "openai_compatible") and config.base_url:
-            base = config.base_url.rstrip("/")
-            if not base.endswith("/v1"):
-                base += "/v1"
-            client_kwargs["base_url"] = base
-        client_kwargs.update(_llm_client_kwargs())
-        oai_client = AsyncOpenAI(**client_kwargs)
+        if config.provider == "bedrock_mantle":
+            # OpenAI-compatible Mantle endpoint; API key (Bearer) or AWS creds (SigV4).
+            oai_client = _make_bedrock_mantle_client(config)
+        else:
+            client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
+            if config.provider == "openrouter":
+                client_kwargs["base_url"] = OPENROUTER_BASE_URL
+            elif config.provider in (
+                "azure_openai",
+                "azure_foundry",
+                "azure_foundry_openai",
+            ):
+                base = (config.base_url or "").rstrip("/")
+                client_kwargs["base_url"] = (
+                    _azure_foundry_openai_base_url(base)
+                    if config.provider in ("azure_foundry", "azure_foundry_openai")
+                    else base
+                )
+            elif config.provider in ("openai", "openai_compatible") and config.base_url:
+                base = config.base_url.rstrip("/")
+                if not base.endswith("/v1"):
+                    base += "/v1"
+                client_kwargs["base_url"] = base
+            client_kwargs.update(_llm_client_kwargs())
+            oai_client = AsyncOpenAI(**client_kwargs)
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
         call_kwargs = _chat_completion_kwargs(

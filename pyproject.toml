@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.6.20260622.11"
+version = "0.6.20260623.5"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -33,6 +33,11 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # SQLModel domain classes named `Test*` (e.g. TestRun) collide with pytest's
+    # test-class naming heuristic; they aren't tests. Pure noise.
+    "ignore:cannot collect test class:pytest.PytestCollectionWarning",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

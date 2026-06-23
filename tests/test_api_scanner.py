@@ -15,7 +15,7 @@ Tests:
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -348,11 +348,25 @@ def test_scan_start_creates_task(client):
     run = _make_run(client, coll["id"])
     run_id = run["id"]
 
-    with patch("aespa.services.api_scanner._do_api_thinking_scan", new=AsyncMock(return_value=None)):
+    # The route schedules the scan as a background task, but TestClient's event loop
+    # closes right after the request — the coroutine would never run and would leak a
+    # "never awaited" warning. Stub create_task to close the coroutine and hand back a
+    # done-looking task; the route only needs the registry entry + ok=True here.
+    def _fake_create_task(coro, **kwargs):
+        coro.close()
+        t = MagicMock()
+        t.done.return_value = True
+        return t
+
+    target = "aespa.services.api_scanner.asyncio.create_task"
+    with patch(target, side_effect=_fake_create_task):
         r = client.post(f"/api/api-test-runs/{run_id}/scan/start")
 
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+    from aespa.services import api_scanner
+    api_scanner._scan_tasks.pop(run_id, None)
 
 
 def test_scan_stop_returns_ok(client):

@@ -186,6 +186,9 @@ app = create_app()
 def main() -> None:
     import uvicorn
 
+    from aespa.browser import ensure_chromium
+
+    ensure_chromium()
     settings = get_settings()
     uvicorn.run(
         "aespa.main:app",

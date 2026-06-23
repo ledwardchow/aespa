@@ -25,8 +25,8 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
     assert data["bedrock"][:2] == [
+        "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
-        "global.anthropic.claude-opus-4-7",
     ]
 
 
@@ -178,6 +178,29 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+
+
+def test_bedrock_mantle_project_id_round_trips(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Mantle",
+        api_format="bedrock_mantle",
+        base_url=None,
+        project_id="proj_5d5ykleja6cwpirysbb7",
+        models=["openai.gpt-oss-120b"],
+        api_key="bedrock-key",
+    )
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "bedrock_mantle"
+    assert provider["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+
+    profile_r = _make_profile(client, provider["id"], model="openai.gpt-oss-120b")
+    assert profile_r.status_code == 200
+    # The project id is denormalized onto the resolved active profile.
+    active = client.get("/api/settings/llm").json()
+    assert active["provider"] == "bedrock_mantle"
+    assert active["project_id"] == "proj_5d5ykleja6cwpirysbb7"
 
 
 def test_legacy_provider_formats_are_supported(client: TestClient):
