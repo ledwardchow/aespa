@@ -383,11 +383,14 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "global.anthropic.claude-sonnet-4-6",
         "global.anthropic.claude-opus-4-7",
     ],
+    # Mantle is driven via the OpenAI Responses API, which supports the frontier
+    # GPT-5.x models and the gpt-oss models. Claude families are Converse/Messages
+    # only on Mantle — use the Amazon Bedrock Runtime provider for those.
     "bedrock_mantle": [
+        "openai.gpt-5.5",
+        "openai.gpt-5.4",
         "openai.gpt-oss-120b",
         "openai.gpt-oss-20b",
-        "global.anthropic.claude-opus-4-8",
-        "global.anthropic.claude-sonnet-4-6",
     ],
     "azure_openai": [
         "gpt-5.5",

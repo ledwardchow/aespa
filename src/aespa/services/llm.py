@@ -732,6 +732,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             return await _openrouter(config, prompt, screenshot_b64)
         if config.provider == "bedrock":
             return await _bedrock(config, prompt, screenshot_b64)
+        if config.provider == "bedrock_mantle":
+            return await _openai_responses(config, prompt, screenshot_b64)
         return await _openai_compat(config, prompt, screenshot_b64)
 
     estimated_input = estimate_tokens(prompt, screenshot_b64, config.provider)
@@ -761,6 +763,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             resp = await _openrouter(config, prompt, screenshot_b64)
         elif config.provider == "bedrock":
             resp = await _bedrock(config, prompt, screenshot_b64)
+        elif config.provider == "bedrock_mantle":
+            resp = await _openai_responses(config, prompt, screenshot_b64)
         else:
             resp = await _openai_compat(config, prompt, screenshot_b64)
 
@@ -938,20 +942,41 @@ async def stream_chat_completion(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
+    elif config.provider == "bedrock_mantle":
+        # Mantle uses the OpenAI Responses API (gpt-5.x are Responses-only).
+        client = _make_bedrock_mantle_client(config)
+        r_input = [
+            {"type": "message", "role": m["role"], "content": m["content"]}
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+        ]
+        try:
+            stream = await _create_response(
+                client,
+                _mantle_response_kwargs(
+                    config, input=r_input, instructions=system_message, stream=True
+                ),
+            )
+            async for event in stream:
+                if getattr(event, "type", None) == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        yield delta
+        except Exception as e:
+            log.exception("Error in Bedrock Mantle responses stream")
+            raise RuntimeError(f"Bedrock Mantle responses stream failed: {e}") from e
+
     else:
         from openai import AsyncOpenAI
 
-        if config.provider == "bedrock_mantle":
-            client = _make_bedrock_mantle_client(config)
-        else:
-            kwargs: dict = {"api_key": config.api_key or "not-needed"}
-            if config.base_url:
-                base = config.base_url.rstrip("/")
-                if not base.endswith("/v1"):
-                    base += "/v1"
-                kwargs["base_url"] = base
-            kwargs.update(_llm_client_kwargs())
-            client = AsyncOpenAI(**kwargs)
+        kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            kwargs["base_url"] = base
+        kwargs.update(_llm_client_kwargs())
+        client = AsyncOpenAI(**kwargs)
 
         formatted_messages = [{"role": "system", "content": system_message}]
         for m in messages:
@@ -1214,20 +1239,16 @@ async def _openai_compat(
 ) -> str:
     from openai import AsyncOpenAI
 
-    if config.provider == "bedrock_mantle":
-        # OpenAI-compatible Mantle endpoint; API key (Bearer) or AWS creds (SigV4).
-        client = _make_bedrock_mantle_client(config)
-    else:
-        kwargs: dict = {"api_key": config.api_key or "not-needed"}
-        if config.base_url:
-            # The OpenAI SDK appends e.g. "/chat/completions" directly to base_url.
-            # LM Studio / Ollama expect the /v1 prefix, so ensure it's present.
-            base = config.base_url.rstrip("/")
-            if not base.endswith("/v1"):
-                base += "/v1"
-            kwargs["base_url"] = base
-        kwargs.update(_llm_client_kwargs())
-        client = AsyncOpenAI(**kwargs)
+    kwargs: dict = {"api_key": config.api_key or "not-needed"}
+    if config.base_url:
+        # The OpenAI SDK appends e.g. "/chat/completions" directly to base_url.
+        # LM Studio / Ollama expect the /v1 prefix, so ensure it's present.
+        base = config.base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
+    client = AsyncOpenAI(**kwargs)
 
     if screenshot_b64:
         msg_content: object = [
@@ -1261,6 +1282,184 @@ async def _openai_compat(
         cache_read_tokens=_u_cached,
     )
     return _extract_first_choice_text(resp)
+
+
+# ── Bedrock Mantle (OpenAI Responses API) ─────────────────────────────────────
+# Mantle's frontier OpenAI models (gpt-5.x) are served only via the Responses
+# API (/v1/responses), not Chat Completions, so all Mantle traffic uses Responses.
+
+
+def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
+    """Anthropic-style tool specs → OpenAI Responses function tools (flat shape)."""
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("input_schema", {"type": "object"}),
+        }
+        for t in tools
+    ]
+
+
+def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
+    """Translate Anthropic-format history into a Responses ``input`` item list.
+
+    Text turns become ``message`` items; assistant ``tool_use`` blocks become
+    ``function_call`` items and user ``tool_result`` blocks become
+    ``function_call_output`` items, keyed on the same ``call_id``.
+    """
+    items: list[dict] = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if isinstance(content, str):
+            items.append({"type": "message", "role": role, "content": content})
+            continue
+        if role == "user":
+            text_parts: list[str] = []
+            for blk in content:
+                btype = blk.get("type")
+                if btype == "text":
+                    text_parts.append(blk.get("text") or "")
+                elif btype == "tool_result":
+                    rc = blk.get("content") or ""
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": blk.get("tool_use_id") or "",
+                            "output": rc if isinstance(rc, str) else json.dumps(rc),
+                        }
+                    )
+            joined = " ".join(p for p in text_parts if p)
+            if joined:
+                items.append({"type": "message", "role": "user", "content": joined})
+        elif role == "assistant":
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            joined = " ".join(p for p in text_parts if p)
+            if joined:
+                items.append({"type": "message", "role": "assistant", "content": joined})
+            for blk in content:
+                if blk.get("type") == "tool_use":
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": blk.get("id") or "",
+                            "name": blk.get("name") or "",
+                            "arguments": json.dumps(blk.get("input") or {}),
+                        }
+                    )
+    return items
+
+
+def _is_mantle_reasoning_model(model: str) -> bool:
+    """True for Mantle reasoning models (gpt-5.x, o-series) that reject temperature.
+
+    Mantle ids carry a vendor prefix (e.g. ``openai.gpt-5.5``), which the slash-based
+    ``_model_needs_reasoning_params`` split doesn't catch — so match the substring too.
+    """
+    return "gpt-5" in (model or "").lower() or _model_needs_reasoning_params(model)
+
+
+def _mantle_response_kwargs(
+    config: LLMConfig,
+    *,
+    input: Any,
+    instructions: Optional[str] = None,
+    tools: Optional[list[dict]] = None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "input": input,
+        "max_output_tokens": config.max_tokens,
+    }
+    if instructions is not None:
+        kwargs["instructions"] = instructions
+    # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
+    # for them rather than pay a failed round-trip (the retry below is a backstop).
+    if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
+        kwargs["temperature"] = config.temperature
+    if tools is not None:
+        kwargs["tools"] = tools
+    if stream:
+        kwargs["stream"] = True
+    return kwargs
+
+
+async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Call responses.create, retrying once without params the model rejects."""
+    try:
+        return await client.responses.create(**kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        retry = dict(kwargs)
+        changed = False
+        if "temperature" in retry and "temperature" in message:
+            retry.pop("temperature", None)
+            changed = True
+        if "tool_choice" in retry and (
+            "tool_choice" in message or "tool choice" in message
+        ):
+            retry.pop("tool_choice", None)
+            changed = True
+        if not changed:
+            raise
+        return await client.responses.create(**retry)
+
+
+def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
+    usage = getattr(resp, "usage", None)
+    _record_usage(
+        config.model,
+        getattr(usage, "input_tokens", 0) if usage else 0,
+        getattr(usage, "output_tokens", 0) if usage else 0,
+        cache_read_tokens=(
+            getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0)
+            if usage
+            else 0
+        ),
+    )
+
+
+def _extract_responses_text(resp: Any) -> str:
+    text = getattr(resp, "output_text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    parts: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        if getattr(item, "type", None) == "message":
+            for part in getattr(item, "content", None) or []:
+                if getattr(part, "type", None) == "output_text":
+                    value = getattr(part, "text", None)
+                    if isinstance(value, str):
+                        parts.append(value)
+    return "".join(parts).strip()
+
+
+async def _openai_responses(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    client = _make_bedrock_mantle_client(config)
+    if screenshot_b64:
+        r_input: Any = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/png;base64,{screenshot_b64}",
+                    },
+                ],
+            }
+        ]
+    else:
+        r_input = prompt
+    resp = await _create_response(client, _mantle_response_kwargs(config, input=r_input))
+    _record_responses_usage(config, resp)
+    return _extract_responses_text(resp)
 
 
 async def _openrouter(
@@ -2982,9 +3181,61 @@ async def _call_with_tools_impl(
         )
         return blocks, stop_reason, raw_content_ant
 
+    # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
+    if config.provider == "bedrock_mantle":
+        client = _make_bedrock_mantle_client(config)
+        r_kwargs = _mantle_response_kwargs(
+            config,
+            input=_ant_messages_to_responses(messages),
+            instructions=system_message,
+            tools=_ant_tools_to_responses(_active_tools),
+        )
+        # Force a tool call unless disabled; if the model rejects forced tool
+        # choice, _create_response retries once without it.
+        if getattr(config, "force_tool_choice", True):
+            r_kwargs["tool_choice"] = "required"
+        resp = await _create_response(client, r_kwargs)
+
+        blocks = []
+        for item in getattr(resp, "output", None) or []:
+            itype = getattr(item, "type", None)
+            if itype == "message":
+                for part in getattr(item, "content", None) or []:
+                    if getattr(part, "type", None) == "output_text":
+                        text_val = getattr(part, "text", None)
+                        if text_val:
+                            blocks.append(
+                                {
+                                    "type": "text",
+                                    "id": None,
+                                    "name": None,
+                                    "input": None,
+                                    "text": text_val,
+                                }
+                            )
+            elif itype == "function_call":
+                try:
+                    inp = json.loads(getattr(item, "arguments", "") or "{}")
+                except Exception:
+                    inp = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": getattr(item, "call_id", None),
+                        "name": getattr(item, "name", None),
+                        "input": inp,
+                        "text": None,
+                    }
+                )
+        stop_reason = (
+            "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
+        )
+        _record_responses_usage(config, resp)
+        return blocks, stop_reason, blocks  # store Anthropic-format in history
+
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
-    #         azure_foundry, azure_foundry_openai, bedrock_mantle
+    #         azure_foundry, azure_foundry_openai
     def _ant_tools_to_openai() -> list[dict]:
         return [
             {
@@ -3060,35 +3311,30 @@ async def _call_with_tools_impl(
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
-        "bedrock_mantle",
     ):
         from openai import AsyncOpenAI
 
-        if config.provider == "bedrock_mantle":
-            # OpenAI-compatible Mantle endpoint; API key (Bearer) or AWS creds (SigV4).
-            oai_client = _make_bedrock_mantle_client(config)
-        else:
-            client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
-            if config.provider == "openrouter":
-                client_kwargs["base_url"] = OPENROUTER_BASE_URL
-            elif config.provider in (
-                "azure_openai",
-                "azure_foundry",
-                "azure_foundry_openai",
-            ):
-                base = (config.base_url or "").rstrip("/")
-                client_kwargs["base_url"] = (
-                    _azure_foundry_openai_base_url(base)
-                    if config.provider in ("azure_foundry", "azure_foundry_openai")
-                    else base
-                )
-            elif config.provider in ("openai", "openai_compatible") and config.base_url:
-                base = config.base_url.rstrip("/")
-                if not base.endswith("/v1"):
-                    base += "/v1"
-                client_kwargs["base_url"] = base
-            client_kwargs.update(_llm_client_kwargs())
-            oai_client = AsyncOpenAI(**client_kwargs)
+        client_kwargs: dict = {"api_key": config.api_key or "not-needed"}
+        if config.provider == "openrouter":
+            client_kwargs["base_url"] = OPENROUTER_BASE_URL
+        elif config.provider in (
+            "azure_openai",
+            "azure_foundry",
+            "azure_foundry_openai",
+        ):
+            base = (config.base_url or "").rstrip("/")
+            client_kwargs["base_url"] = (
+                _azure_foundry_openai_base_url(base)
+                if config.provider in ("azure_foundry", "azure_foundry_openai")
+                else base
+            )
+        elif config.provider in ("openai", "openai_compatible") and config.base_url:
+            base = config.base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base += "/v1"
+            client_kwargs["base_url"] = base
+        client_kwargs.update(_llm_client_kwargs())
+        oai_client = AsyncOpenAI(**client_kwargs)
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
         call_kwargs = _chat_completion_kwargs(
