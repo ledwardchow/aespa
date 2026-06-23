@@ -67,6 +67,7 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         name=provider.name,
         api_format=provider.api_format,
         base_url=provider.base_url,
+        project_id=provider.project_id,
         models=_provider_models(provider),
         api_key=provider.api_key,
         max_tpm=provider.max_tpm,
@@ -85,6 +86,7 @@ def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
     set_committed_value(cfg, "provider", provider.api_format)
     set_committed_value(cfg, "api_key", provider.api_key)
     set_committed_value(cfg, "base_url", provider.base_url)
+    set_committed_value(cfg, "project_id", provider.project_id)
     return cfg
 
 
@@ -103,6 +105,7 @@ def llm_profile_out(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         provider=resolved.provider,
         api_key=resolved.api_key,
         base_url=resolved.base_url,
+        project_id=resolved.project_id,
         model=resolved.model,
         max_tokens=resolved.max_tokens,
         temperature=resolved.temperature,
@@ -176,6 +179,7 @@ def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: 
     provider.api_format = payload.api_format
     provider.api_key = payload.api_key
     provider.base_url = payload.base_url
+    provider.project_id = payload.project_id
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm
     provider.max_rpm = payload.max_rpm
@@ -591,6 +595,7 @@ def export_llm_config(session: Session) -> LLMConfigExport:
             name=p.name,
             api_format=p.api_format,
             base_url=p.base_url,
+            project_id=p.project_id,
             models=_provider_models(p),
             api_key=p.api_key,
             max_tpm=p.max_tpm,
@@ -668,6 +673,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         provider.name = item.name
         provider.api_format = item.api_format
         provider.base_url = item.base_url
+        provider.project_id = item.project_id
         provider.api_key = item.api_key
         provider.models_json = _json_dumps(item.models)
         provider.max_tpm = item.max_tpm

@@ -207,6 +207,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "llm_config", "project_id", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
@@ -257,6 +258,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
     # agent_log / scan_log share the test_run_id column between web TestRuns and
     # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
     # row with the run kind so the two panels stop reading each other's rows.
@@ -901,6 +903,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
             "openrouter",
             "google",
             "bedrock",
+            "bedrock_mantle",
             "azure_openai",
             "azure_foundry",
             "azure_foundry_openai",
@@ -924,6 +927,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                     "openrouter": "OpenRouter",
                     "google": "Google",
                     "bedrock": "Bedrock",
+                    "bedrock_mantle": "Bedrock Mantle",
                     "azure_openai": "Azure OpenAI",
                     "azure_foundry": "Azure Foundry",
                     "azure_foundry_openai": "Azure Foundry OpenAI",
