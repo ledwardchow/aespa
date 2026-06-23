@@ -36,11 +36,16 @@ fi
 [ -d "$APP" ] || { echo "Not found: $APP — run ./build_mac.sh first."; exit 1; }
 
 echo "==> Signing nested binaries (inner-out)"
-# Sign every Mach-O dylib/so first, then the bundle, so the outer signature seals
-# valid inner signatures. xargs -P parallelizes; codesign is independent per file.
-find "$APP" -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
-  | xargs -0 -P 4 -I{} codesign --force --options runtime --timestamp \
-      --sign "$SIGN_ID" "{}"
+# Sign EVERY Mach-O first, then the bundle, so the outer signature seals valid
+# inner ones. Detect by content (file), not extension — bundled executables like
+# playwright/driver/node have no suffix and `codesign --deep` won't reach them,
+# but the notary scans every Mach-O.
+find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+  case "$(file -b "$f")" in
+    *Mach-O*)
+      codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$f" ;;
+  esac
+done
 
 echo "==> Signing the app bundle"
 codesign --force --options runtime --timestamp \
@@ -50,13 +55,16 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 echo "==> Submitting for notarization (this can take a few minutes)"
 ZIP="dist/AESPA.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-if ! xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait; then
-  echo "Notarization failed. Inspect the most recent submission log with:"
-  echo "  xcrun notarytool history --keychain-profile $NOTARY_PROFILE"
-  echo "  xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE"
+OUT=$(xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1) || true
+echo "$OUT"
+rm -f "$ZIP"
+# `submit --wait` exits 0 even when the verdict is Invalid, so check explicitly.
+if ! printf '%s\n' "$OUT" | grep -q "status: Accepted"; then
+  SUBID=$(printf '%s\n' "$OUT" | awk '/id:/{print $2; exit}')
+  echo "==> Notarization was not accepted. Failure log:"
+  [ -n "$SUBID" ] && xcrun notarytool log "$SUBID" --keychain-profile "$NOTARY_PROFILE"
   exit 1
 fi
-rm -f "$ZIP"
 
 echo "==> Stapling the ticket"
 xcrun stapler staple "$APP"
