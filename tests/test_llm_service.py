@@ -1267,6 +1267,44 @@ def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
     assert captured["client"]["base_url"] == "https://bedrock-mantle.eu-west-1.api.aws/v1"
 
 
+def test_bedrock_mantle_frontier_model_uses_openai_v1_path(monkeypatch):
+    """gpt-5.x frontier models are served on the /openai/v1 path; gpt-oss on /v1."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+    monkeypatch.delenv("BEDROCK_MANTLE_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    frontier = LLMConfig(
+        provider="bedrock_mantle", api_key="k", base_url=None,
+        model="openai.gpt-5.5", max_tokens=64,
+    )
+    asyncio.run(llm._call(frontier, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+
+    oss = LLMConfig(
+        provider="bedrock_mantle", api_key="k", base_url=None,
+        model="openai.gpt-oss-120b", max_tokens=64,
+    )
+    asyncio.run(llm._call(oss, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/v1"
+
+
+def test_bedrock_mantle_rewrites_explicit_base_url_path_per_model(monkeypatch):
+    """An explicit base_url keeps its host but its path suffix is normalised per model."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    # User typed the /v1 host, but selected a frontier model → rewritten to /openai/v1.
+    cfg = LLMConfig(
+        provider="bedrock_mantle", api_key="k",
+        base_url="https://bedrock-mantle.us-east-2.api.aws/v1",
+        model="openai.gpt-5.4", max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+
+
 def test_bedrock_mantle_skips_temperature_for_reasoning_models(monkeypatch):
     """gpt-5.x reasoning models must not receive a custom temperature."""
     captured: dict[str, object] = {}
