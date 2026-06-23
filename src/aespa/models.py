@@ -211,6 +211,7 @@ class LLMProviderAPI(str, Enum):
     openrouter = "openrouter"
     google = "google"
     bedrock = "bedrock"
+    bedrock_mantle = "bedrock_mantle"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
     azure_foundry_openai = "azure_foundry_openai"
@@ -227,6 +228,9 @@ class LLMProviderConfig(SQLModel, table=True):
     api_format: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Bedrock Mantle project id (proj_…); sent as the OpenAI-Project header for
+    # cost/usage attribution. Ignored by other provider formats.
+    project_id: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
@@ -246,6 +250,8 @@ class LLMConfig(SQLModel, table=True):
     provider: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Denormalized from the provider (see LLMProviderConfig.project_id).
+    project_id: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=70000)
     temperature: Optional[float] = Field(default=None)
