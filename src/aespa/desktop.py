@@ -32,7 +32,7 @@ from AppKit import (
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
 )
-from Foundation import NSURL, NSMakeRect, NSObject, NSURLRequest
+from Foundation import NSURL, NSMakeRect, NSMakeSize, NSObject, NSURLRequest
 from WebKit import WKWebView, WKWebViewConfiguration
 
 # Policy enums (cancel=0, allow=1, download=2). Import where available, else fall
@@ -88,6 +88,21 @@ def _wait_port(port: int, timeout: float = 20.0) -> None:
             time.sleep(0.1)
 
 
+def _menubar_icon() -> NSImage:
+    """The AESPA logo as a monochrome menubar template.
+
+    icon-menubar.png is a high-res alpha trace of the logo artwork. A template
+    image is drawn by its alpha only — macOS recolors it to match the menubar,
+    so it looks like a native icon in light and dark mode.
+    """
+    img = NSImage.alloc().initWithContentsOfFile_(
+        str(DEFAULT_WEB_DIR / "icon-menubar.png")
+    )
+    img.setSize_(NSMakeSize(18, 18))
+    img.setTemplate_(True)
+    return img
+
+
 class Controller(NSObject):
     def initWithURL_(self, url):
         self = objc.super(Controller, self).init()
@@ -98,14 +113,7 @@ class Controller(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         bar = NSStatusBar.systemStatusBar()
         self._status = bar.statusItemWithLength_(NSVariableStatusItemLength)
-        icon = NSImage.alloc().initWithContentsOfFile_(
-            str(DEFAULT_WEB_DIR / "icon-sm.png")
-        )
-        if icon is not None:
-            icon.setSize_((18, 18))
-            self._status.button().setImage_(icon)
-        else:
-            self._status.button().setTitle_("A")
+        self._status.button().setImage_(_menubar_icon())
 
         menu = NSMenu.alloc().init()
         open_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
