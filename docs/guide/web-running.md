@@ -24,7 +24,7 @@ ALICE has access to [all tools](../agent-tool-reference.md) that any other agent
 - Can you perform a penetration test of the admin section of this app only?
 - Can you tell me what findings affect the customer section of the app?
 - The are 3 SQL injection findings that look like duplicates. Can you go through all the findings, check whether they are duplicated, and merge/remove them as necessary?
-- Can you clean up the workprogram? It looks like there are some URLs which you hit, but don't show properly - check your work? 
+- Can you clean up the OWASP Coverage matrix? It looks like there are some URLs which you hit, but don't show properly - check your work? 
 - The rating on the Information Disclosure finding looks a bit high - can you review all issues and reconsider the ratings? 
 
 You can also use ALICE to "unstick" the automated pentester if it gets stuck - try giving it a fetch/curl command for a login function that's not well-exposed by the site:
