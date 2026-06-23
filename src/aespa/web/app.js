@@ -8661,7 +8661,7 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
           onChange=${e=>upd({base_url:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
-        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">OpenAI-compatible Mantle endpoint. Leave blank to use the us-east-2 region (or set BEDROCK_MANTLE_REGION / AWS_REGION); override here for another region, e.g. https://bedrock-mantle.us-west-2.api.aws/v1.</div>`}
+        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>`}
       </div>
       ${form.api_format==="bedrock_mantle"&&html`<div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
         <input type="text" value=${form.project_id} placeholder="proj_5d5ykleja6cwpirysbb7"

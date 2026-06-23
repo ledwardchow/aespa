@@ -1712,19 +1712,36 @@ def _bedrock_mantle_region() -> str:
     )
 
 
-def _bedrock_mantle_base_url(config: LLMConfig) -> str:
-    """Resolve the OpenAI-compatible base URL for a Bedrock Mantle config.
+def _bedrock_mantle_is_frontier_model(model: str) -> bool:
+    """Frontier OpenAI models (gpt-5.x) are served on Mantle's ``/openai/v1`` path.
 
-    Mantle is an OpenAI-compatible endpoint (not the Converse API):
-    ``https://bedrock-mantle.{region}.api.aws/v1``.  An explicit ``base_url``
-    wins (with a ``/v1`` suffix ensured); otherwise the region comes from
-    ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION``, defaulting
-    to ``us-east-2``.
+    The gpt-oss and other models use the plain ``/v1`` path instead — confirmed by
+    the AWS launch blog and the OpenAI Bedrock cookbook.
     """
+    return "gpt-5" in (model or "").lower()
+
+
+def _bedrock_mantle_base_url(config: LLMConfig) -> str:
+    """Resolve the OpenAI Responses base URL for a Bedrock Mantle config.
+
+    The path is model-dependent: frontier ``openai.gpt-5.x`` models use
+    ``/openai/v1`` while gpt-oss and others use ``/v1`` — so a single provider can
+    serve both. An explicit ``base_url`` keeps its host (and region) but the path
+    suffix is normalised to match the selected model. When blank, the region comes
+    from ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION`` (default
+    ``us-east-2``).
+    """
+    suffix = "/openai/v1" if _bedrock_mantle_is_frontier_model(config.model) else "/v1"
     if config.base_url:
         base = config.base_url.rstrip("/")
-        return base if base.endswith("/v1") else f"{base}/v1"
-    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws/v1"
+        # Drop any path suffix the user supplied, then re-apply the one this model
+        # needs, so switching models on the same provider routes correctly.
+        for known in ("/openai/v1", "/v1"):
+            if base.endswith(known):
+                base = base[: -len(known)]
+                break
+        return f"{base}{suffix}"
+    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws{suffix}"
 
 
 def _bedrock_mantle_region_from_url(base_url: str) -> str:
