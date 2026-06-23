@@ -36,3 +36,4 @@ uv run --with pyinstaller --with pyobjc-framework-WebKit \
 echo "==> Done: dist/AESPA.app"
 echo "    Unsigned — first open: right-click > Open, or run:"
 echo "    xattr -dr com.apple.quarantine dist/AESPA.app"
+echo "    To distribute: SIGN_ID=\"Developer ID Application: ... (TEAMID)\" ./notarize_mac.sh"
