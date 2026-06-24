@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-
 from collections.abc import Iterator
 
 from sqlalchemy.engine import Engine
@@ -116,6 +115,90 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
         pass  # never block startup on a best-effort cleanup
 
 
+def _cleanup_orphaned_sast_extractions() -> None:
+    """Reconcile leaked ``<data_dir>/sast_extract/<id>/`` dirs from crashed scans.
+
+    SAST scans extract the uploaded archive into a deterministic per-run path
+    under ``<data_dir>/sast_extract/<id>/``. On a hard process crash the
+    coroutine's ``finally`` block does not run, so the dir leaks. The in-memory
+    task registry (``services.sast_scanner._sast_tasks``) is empty on a fresh
+    process, so any dir that survived a restart is orphaned.
+
+    For each numeric subdir of ``<data_dir>/sast_extract/``:
+      * no matching ``SastRun``                              → delete the dir
+      * run in a terminal state (completed/failed/cancelled) → delete the dir
+      * run is ``scanning``                                  → mark the run
+        ``failed`` (with a note that the process was interrupted), then delete
+        the dir
+      * run is ``pending``                                   → leave alone
+        (the user may still start it)
+      * subdir name is not an integer                        → leave alone
+        (e.g. ``lost+found`` or manual artefacts)
+
+    Idempotent and best-effort: any exception is swallowed so startup is
+    never blocked. Runs out of an in-memory engine context — touches the DB
+    only to flip ``SastRun.status`` for ``scanning`` orphans.
+    """
+    import logging
+    import shutil
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from sqlmodel import Session
+
+    from aespa.config import get_settings
+    from aespa.models import SastRun
+
+    _UTC = timezone.utc
+    log = logging.getLogger(__name__)
+
+    try:
+        extract_root = Path(get_settings().data_dir) / "sast_extract"
+        if not extract_root.is_dir():
+            return
+        engine = get_engine()
+        terminal = {"completed", "failed", "cancelled"}
+        for entry in extract_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                run_id = int(entry.name)
+            except ValueError:
+                continue  # non-numeric subdir (e.g. lost+found) — leave alone
+            with Session(engine) as s:
+                run = s.get(SastRun, run_id)
+                if run is None or run.status in terminal:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    log.info(
+                        "sast_extract sweep: removed orphan dir %s "
+                        "(run id=%s status=%r)",
+                        entry, run_id, None if run is None else run.status,
+                    )
+                    continue
+                if run.status == "scanning":
+                    run.status = "failed"
+                    run.error_message = (
+                        "Process was interrupted while the SAST scan was running; "
+                        "extracted source tree has been cleaned up on startup. "
+                        "Re-start the scan to retry."
+                    )
+                    run.completed_at = run.completed_at or datetime.now(_UTC)
+                    run.updated_at = datetime.now(_UTC)
+                    s.add(run)
+                    s.commit()
+                    shutil.rmtree(entry, ignore_errors=True)
+                    log.warning(
+                        "sast_extract sweep: marked run id=%s 'failed' and removed %s "
+                        "(process was interrupted mid-scan)",
+                        run_id, entry,
+                    )
+                    continue
+                # status == 'pending' — user may still start the scan, leave the
+                # dir alone (and it should not exist yet anyway).
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
@@ -124,6 +207,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(engine, "llm_config", "project_id", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
@@ -174,6 +258,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
+    _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
     # agent_log / scan_log share the test_run_id column between web TestRuns and
     # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
     # row with the run kind so the two panels stop reading each other's rows.
@@ -742,6 +827,38 @@ def _migrate(engine: Engine) -> None:
         conn.commit()
     # SAST: back-reference on api_test_run
     _ensure_column(engine, "api_test_run", "sast_run_id", "INTEGER")
+    # SAST web support — additive columns (idempotent).
+    _ensure_column(engine, "sast_run", "source_archive_path", "TEXT")
+    _ensure_column(engine, "sast_run", "source_filename", "TEXT")
+    _ensure_column(engine, "scan_lead", "imported_into_run_type", "TEXT")
+    _ensure_column(engine, "scan_lead", "imported_into_run_id", "INTEGER")
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_imported_into_run_id "
+            "ON scan_lead (imported_into_run_id)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_lead_imported_into_run_type "
+            "ON scan_lead (imported_into_run_type)"
+        ))
+        conn.commit()
+    # Standalone SAST runs have no collection — drop the NOT NULL on collection_id.
+    _ensure_sast_run_collection_id_nullable(engine)
+    # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS cloudflare_access_config (
+                id INTEGER PRIMARY KEY,
+                audience TEXT,
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.commit()
+
+    # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
+    # run only after every SastRun column above has been added — otherwise the
+    # first post-upgrade startup raises "no such column" and silently skips.
+    _cleanup_orphaned_sast_extractions()
 
 
 def _ensure_llm_provider_config_migration(engine: Engine) -> None:
@@ -786,6 +903,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
             "openrouter",
             "google",
             "bedrock",
+            "bedrock_mantle",
             "azure_openai",
             "azure_foundry",
             "azure_foundry_openai",
@@ -809,6 +927,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                     "openrouter": "OpenRouter",
                     "google": "Google",
                     "bedrock": "Bedrock",
+                    "bedrock_mantle": "Bedrock Mantle",
                     "azure_openai": "Azure OpenAI",
                     "azure_foundry": "Azure Foundry",
                     "azure_foundry_openai": "Azure Foundry OpenAI",
@@ -1078,6 +1197,90 @@ def _ensure_scan_finding_test_run_id_nullable(engine: Engine) -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_scan_finding_{col} "
                 f"ON scan_finding ({col})"
             ))
+        conn.commit()
+
+
+def _ensure_sast_run_collection_id_nullable(engine: Engine) -> None:
+    """Make sast_run.collection_id nullable for standalone (web) SAST runs.
+
+    The original table created collection_id as ``NOT NULL REFERENCES
+    api_collection(id)``. Standalone runs have no collection, so rebuild the
+    table to drop the NOT NULL (SQLite cannot alter a constraint in place).
+    Must run AFTER source_archive_path / source_filename are ensured so the
+    rebuild carries the full current column set. Idempotent and best-effort.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    sql = __import__("sqlalchemy").text
+    columns = [
+        "id",
+        "collection_id",
+        "document_id",
+        "source_archive_path",
+        "source_filename",
+        "name",
+        "status",
+        "triggered_by_run_type",
+        "triggered_by_run_id",
+        "llm_config_id",
+        "leads_count",
+        "error_message",
+        "token_usage_json",
+        "started_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ]
+    column_list = ", ".join(columns)
+    with engine.connect() as conn:
+        rows = list(conn.execute(sql("PRAGMA table_info(sast_run)")))
+        if not rows:
+            return  # table not created yet (fresh DB handled by create_all)
+        coll_row = next((row for row in rows if row[1] == "collection_id"), None)
+        # row[3] == notnull flag; already nullable means this migration has run.
+        if coll_row is None or int(coll_row[3] or 0) == 0:
+            return
+
+        conn.execute(sql("DROP TABLE IF EXISTS sast_run_coll_migration"))
+        conn.execute(sql("""
+            CREATE TABLE sast_run_coll_migration (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_id INTEGER REFERENCES api_collection(id),
+                document_id INTEGER,
+                source_archive_path TEXT,
+                source_filename TEXT,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                triggered_by_run_type TEXT,
+                triggered_by_run_id INTEGER,
+                llm_config_id INTEGER REFERENCES llm_config(id),
+                leads_count INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                token_usage_json TEXT,
+                started_at DATETIME,
+                completed_at DATETIME,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(sql(f"""
+            INSERT INTO sast_run_coll_migration ({column_list})
+            SELECT {column_list}
+            FROM sast_run
+        """))
+        conn.execute(sql("DROP TABLE sast_run"))
+        conn.execute(sql(
+            "ALTER TABLE sast_run_coll_migration RENAME TO sast_run"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_collection_id "
+            "ON sast_run (collection_id)"
+        ))
+        conn.execute(sql(
+            "CREATE INDEX IF NOT EXISTS ix_sast_run_triggered_by_run_id "
+            "ON sast_run (triggered_by_run_id)"
+        ))
         conn.commit()
 
 

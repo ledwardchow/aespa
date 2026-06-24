@@ -25,24 +25,42 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import Credential, CrawledPage, LLMConfig, ScanFinding, Site, TargetIntelItem, TestRun, TrafficEntry
-from aespa.services import events as events_svc
+from aespa.models import (
+    CrawledPage,
+    Credential,
+    ScanFinding,
+    Site,
+    TargetIntelItem,
+    TestRun,
+    TrafficEntry,
+)
 from aespa.services import burp_rest as burp_rest_svc
+from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import task_graph as task_graph_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services import checkpoint as checkpoint_svc
-from aespa.services.scope import check_scope, register_scope_host_for_run
-from aespa.services.settings import get_burp_rest_api_config, get_global_http_header_config, get_llm_config_for_run, get_run_scanner_policy, get_upstream_proxy_config, get_specialist_agent_config
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
+)
+from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPTS as _SPECIALIST_SYSTEM_PROMPTS,
+)
+from aespa.services.prompts.specialist import (
     get_specialist_tools as _get_specialist_tools,
 )
 from aespa.services.prompts.test_lead import (
     _THINKING_AGENT_SYSTEM,
-    _API_THINKING_AGENT_SYSTEM,
+)
+from aespa.services.scope import check_scope, register_scope_host_for_run
+from aespa.services.settings import (
+    get_burp_rest_api_config,
+    get_global_http_header_config,
+    get_llm_config_for_run,
+    get_run_scanner_policy,
+    get_specialist_agent_config,
+    get_upstream_proxy_config,
 )
 
 log = logging.getLogger("aespa.scanner")
@@ -65,6 +83,64 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     
     from aespa.services.traffic import LoggingAsyncClient
     return LoggingAsyncClient(run_id=run_id, username=username, api_run_id=api_run_id, **kwargs)
+
+
+_REDIRECT_STATUS = {301, 302, 303, 307, 308}
+
+
+async def _request_scope_checked(
+    hx: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    site_id: int = 0,
+    run_id: int = 0,
+    scope_check=None,
+    max_redirects: int = 10,
+    **req_kwargs,
+):
+    """Issue an HTTP request, following redirects manually so every hop's host is
+    re-validated against scope before it is contacted.
+
+    The scanner client sets ``follow_redirects=True`` globally, which would let a
+    target bounce the scanner to an out-of-scope/internal host (SSRF / scope
+    bypass) without a fresh scope check. Here auto-follow is disabled per call and
+    each ``Location`` is scope-checked before being followed. By default the check
+    is ``check_scope(next_url, site_id, run_id)``; pass ``scope_check`` (a
+    ``str -> str | None`` callable) to override — e.g. ALICE's API-run scope. Returns
+    ``(response, blocked)`` where *blocked* is ``None`` when the chain completed
+    normally, or ``(next_url, reason)`` when an out-of-scope (or over-limit)
+    redirect was refused — in which case *response* is the unfollowed 3xx so the
+    caller can still surface its status/headers.
+    """
+    def _check(u: str):
+        return scope_check(u) if scope_check is not None else check_scope(u, site_id, run_id)
+
+    cur_method = method.upper()
+    cur_url = url
+    kwargs = dict(req_kwargs)
+    resp = None
+    for _ in range(max_redirects):
+        resp = await hx.request(cur_method, cur_url, follow_redirects=False, **kwargs)
+        if resp.status_code not in _REDIRECT_STATUS:
+            return resp, None
+        location = resp.headers.get("location")
+        if not location:
+            return resp, None
+        next_url = str(resp.url.join(location))
+        scope_err = _check(next_url)
+        if scope_err:
+            return resp, (next_url, scope_err)
+        # RFC 7231: 303 — and legacy 301/302 on a non-idempotent method — change
+        # the follow-up to GET and drop the request body.
+        if resp.status_code == 303 or (
+            resp.status_code in (301, 302) and cur_method not in ("GET", "HEAD")
+        ):
+            cur_method = "GET"
+            for _body_key in ("json", "content", "data", "files"):
+                kwargs.pop(_body_key, None)
+        cur_url = next_url
+    return resp, (cur_url, "redirect limit exceeded")
 
 
 def _playwright_proxy() -> dict:
@@ -373,6 +449,7 @@ def _calibrate_finding_rating(title: str, cvss_score: float, vector_str: str) ->
 
 def calibrate_all_findings_for_run(run_id: int, is_api_run: bool = False) -> None:
     from sqlmodel import Session, select
+
     from aespa.models import ScanFinding
     
     with Session(get_engine()) as s:
@@ -960,6 +1037,7 @@ def _build_thinking_context_from_recon_summary(
     pages_snapshot) when no summary is present, so old runs are unaffected.
     """
     import json as _json
+
     from aespa.models import TestRun as _TestRun
 
     with Session(get_engine()) as s:
@@ -2479,8 +2557,6 @@ def _maybe_trigger_specialist_for_burp(
     session_vault: dict,
 ) -> None:
     """If trigger_specialist_on_burp is enabled, dispatch a specialist alongside the Burp scan."""
-    import json as _json
-
     with Session(get_engine()) as s:
         specialist_cfg = get_specialist_agent_config(s)
         if not specialist_cfg.trigger_specialist_on_burp:
@@ -2490,8 +2566,6 @@ def _maybe_trigger_specialist_for_burp(
             return
         llm_cfg = get_llm_config_for_run(s, run)
         scanner_policy = get_run_scanner_policy(s, run)
-        recon_raw = getattr(run, "recon_summary", None)
-        recon_summary = _json.loads(recon_raw) if recon_raw else None
         site_id: int = getattr(run, "site_id", 0) or 0
 
     attack_class = _BURP_VULN_TO_SPECIALIST_CLASS.get(vuln_class, "xss")
@@ -3089,7 +3163,7 @@ async def _run_specialist_agent(
                 timeout=scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT,
                 follow_redirects=True,
                 verify=False,
-                event_hooks=traffic_svc.make_httpx_hooks(run_id, username=f"specialist"),
+                event_hooks=traffic_svc.make_httpx_hooks(run_id, username="specialist"),
             ) as _hx:
                 try:
                     kwargs: dict = {}
@@ -3098,7 +3172,10 @@ async def _run_specialist_agent(
                             kwargs["json"] = body
                         else:
                             kwargs["content"] = str(body).encode()
-                    resp = await _hx.request(method, url, **kwargs)
+                    # Manual, scope-checked redirect following — see the main loop.
+                    resp, _sp_redirect_blocked = await _request_scope_checked(
+                        _hx, method, url, site_id=site_id, run_id=run_id, **kwargs
+                    )
                     resp_body = resp.text[:BODY_READ_LIMIT]
                     _sp_canary_fp = _ssrf_canary.get(run_id)
                     _sp_canary_alert = (
@@ -3106,8 +3183,12 @@ async def _run_specialist_agent(
                         f"{_SSRF_CANARY_URL} — the server fetched and reflected the canary URL. "
                         "Confirmed reflected SSRF. Write a finding immediately.\n\n"
                     ) if _sp_canary_fp and _sp_canary_fp in resp_body else ""
+                    _sp_redirect_note = (
+                        f"[SCOPE BLOCK] Redirect to {_sp_redirect_blocked[0]!r} was "
+                        f"out of scope and NOT followed: {_sp_redirect_blocked[1]}\n\n"
+                    ) if _sp_redirect_blocked else ""
                     return (
-                        f"{_sp_canary_alert}"
+                        f"{_sp_canary_alert}{_sp_redirect_note}"
                         f"HTTP {resp.status_code} {method} {url}\n"
                         f"Response ({len(resp_body)} chars):\n{resp_body[:4096]}"
                     )
@@ -3285,8 +3366,11 @@ def dispatch_specialist_agent(
     summary) from the database so callers only need run_id + attack parameters.
     Returns the agent_id string if dispatched, or None if gated out.
     """
-    from aespa.services import scanner_sessions as session_svc
-    from aespa.services.settings import get_llm_config_for_run, get_run_scanner_policy, get_specialist_agent_config
+    from aespa.services.settings import (
+        get_llm_config_for_run,
+        get_run_scanner_policy,
+        get_specialist_agent_config,
+    )
 
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
@@ -3898,7 +3982,6 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
-        thinking_max_steps = 0  # unused — no step limit
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
         # Crawled pages — used for context and for resolving page_id on findings.
@@ -4035,6 +4118,16 @@ async def _do_thinking_scan(run_id: int) -> None:
     if intel_context:
         crawl_context = f"{crawl_context}\n\n{intel_context}"
 
+    # Append any SAST leads imported into this web run so the Test Lead can
+    # investigate them (mirrors the API scan's collection-keyed lead injection).
+    try:
+        from aespa.services.scan_leads import format_leads_for_run
+        leads_block = format_leads_for_run("web", run_id)
+        if leads_block:
+            crawl_context = f"{crawl_context}\n\n{leads_block}"
+    except Exception:
+        pass
+
     # Resolve a login URL for the selector: prefer the site-level one, else fall back
     # to the first credential that carries its own login_url. A configured login URL is
     # itself a credential endpoint, so this catches login forms at non-standard paths.
@@ -4073,10 +4166,10 @@ async def _do_thinking_scan(run_id: int) -> None:
 
     # ── Workprogram: seed coverage cells and build enforce directive ──────────
     from aespa.services.web_workprogram import (
-        seed_web_workprogram,
         _build_web_enforce_directive,
-        _make_web_post_probe_fn,
         _make_web_post_finding_fn,
+        _make_web_post_probe_fn,
+        seed_web_workprogram,
     )
     try:
         seed_web_workprogram(run_id)
@@ -5109,7 +5202,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                             ))[:40]
                             if _js_paths:
                                 try:
-                                    from aespa.services.crawler import _save_intel_item as _si
+                                    from aespa.services.crawler import (
+                                        _save_intel_item as _si,
+                                    )
                                     for _p in _js_paths:
                                         _si(
                                             run_id=run_id, kind="endpoint", key=_p, value=_p,
@@ -5390,9 +5485,9 @@ async def _do_thinking_scan(run_id: int) -> None:
     stopped = run_id in _thinking_stop_requested
     # ── Workprogram finalisation ───────────────────────────────────────────────
     from aespa.services.web_workprogram import (
-        mark_in_progress_to_covered,
-        _make_web_enforce_prober,
         _enforce_web_coverage_loop,
+        _make_web_enforce_prober,
+        mark_in_progress_to_covered,
     )
     if coverage_mode == "enforce" and not stopped:
         try:
@@ -5769,7 +5864,7 @@ async def _do_agentic_thinking_loop(
                     int(lead_id),
                     status=lead_status,
                     note=lead_note,
-                    investigated_by_run_type="api",
+                    investigated_by_run_type="api" if is_api_run else "web",
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
                 )
@@ -5966,6 +6061,30 @@ async def _do_agentic_thinking_loop(
                 register_scope_host_for_run(run_id, final_url)
             except Exception:
                 pass
+            # The navigation target was scope-checked, but the page may have
+            # redirected onward. Re-check the *final* URL (after the same-root-domain
+            # auto-registration above) and refuse to surface an off-scope page so a
+            # redirect can't drag the LLM onto an out-of-scope host. (Same-origin
+            # cookies stay host-scoped by the browser; this stops the LLM acting on
+            # off-scope content.)
+            _br_final_scope_err = check_scope(final_url, site_id, run_id)
+            if _br_final_scope_err:
+                log.info(
+                    "Agentic scan: browser navigation to %s redirected out of scope "
+                    "to %s — refusing to surface page", br_url, final_url,
+                )
+                events_svc.emit(run_id, {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "complete",
+                    "message": f"Step {step}: BROWSER {br_url} → off-scope redirect blocked",
+                    "data": {"step": step, "url": final_url, "note": note},
+                })
+                return (
+                    f"[SCOPE BLOCK] Browser navigation to {br_url} redirected to "
+                    f"out-of-scope URL {final_url}: {_br_final_scope_err} The "
+                    "off-scope page content was not loaded into context."
+                )
             action_log = br_result.get("action_log") or []
             request_evidence = _request_evidence(
                 f"BROWSER {final_url}\nSteps: {json.dumps(steps_list)[:800]}"
@@ -6556,6 +6675,7 @@ async def _do_agentic_thinking_loop(
         hr_resp_body = ""
         hr_req_body_str = ""
         hr_duration_ms: Optional[int] = None
+        hr_redirect_blocked: tuple[str, str] | None = None
         _js_paths: list[str] = []
         try:
             hr_merged = dict(hx.headers)
@@ -6567,24 +6687,19 @@ async def _do_agentic_thinking_loop(
                 if hr_sel_session and hr_sel_session.get("cookies") else None
             )
             hr_started = time.perf_counter()
+            hr_req_kwargs: dict = {"headers": hr_merged, "cookies": hr_sel_cookies}
             if isinstance(hr_body, dict):
                 hr_merged.setdefault("Content-Type", "application/json")
-                hr_r = await hx.request(
-                    hr_method, hr_url, json=hr_body,
-                    headers=hr_merged, cookies=hr_sel_cookies,
-                )
+                hr_req_kwargs["json"] = hr_body
                 hr_req_body_str = json.dumps(hr_body)[:800]
             elif isinstance(hr_body, str) and hr_body:
-                hr_r = await hx.request(
-                    hr_method, hr_url, content=hr_body,
-                    headers=hr_merged, cookies=hr_sel_cookies,
-                )
+                hr_req_kwargs["content"] = hr_body
                 hr_req_body_str = hr_body[:800]
-            else:
-                hr_r = await hx.request(
-                    hr_method, hr_url,
-                    headers=hr_merged, cookies=hr_sel_cookies,
-                )
+            # Follow redirects manually with a scope re-check on every hop so the
+            # target cannot bounce the scanner to an out-of-scope/internal host.
+            hr_r, hr_redirect_blocked = await _request_scope_checked(
+                hx, hr_method, hr_url, site_id=site_id, run_id=run_id, **hr_req_kwargs
+            )
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
@@ -6748,9 +6863,16 @@ async def _do_agentic_thinking_loop(
             f"{hr_resp_status} and has been removed from the session vault. "
             "Do not use this label again.\n\n"
         ) if _hr_session_evicted else ""
+        _redirect_note = (
+            f"[SCOPE BLOCK] The response redirected to {hr_redirect_blocked[0]!r}, "
+            f"which is out of scope, so the redirect was NOT followed: "
+            f"{hr_redirect_blocked[1]} The status/headers below are the redirect "
+            "response itself.\n\n"
+        ) if hr_redirect_blocked else ""
         return (
             _canary_alert
             + _eviction_note
+            + _redirect_note
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
@@ -7681,7 +7803,7 @@ async def _run_thinking_browser_action(
         _traffic_section
         + f"Final URL: {final_url}\n"
         + f"Title: {title}\n"
-        + f"Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
+        + "Action log:\n" + "\n".join(f"- {line}" for line in action_log) + "\n\n"
         + f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
         + f"HTML excerpt:\n{html[:3000]}"
     )

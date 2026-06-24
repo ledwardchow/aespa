@@ -11,7 +11,14 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import AgentLog, CrawledPage, ScanFinding, ScanLog, TestRun, TestRunStatus
+from aespa.models import (
+    AgentLog,
+    CrawledPage,
+    ScanFinding,
+    ScanLog,
+    TestRun,
+    TestRunStatus,
+)
 from aespa.schemas import (
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
@@ -19,10 +26,10 @@ from aespa.schemas import (
     ScanFindingOut,
     ValidationStatusOut,
 )
-from aespa.services import scanner as scanner_svc
-from aespa.services import validator as validator_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import llm as llm_svc
+from aespa.services import scanner as scanner_svc
+from aespa.services import validator as validator_svc
 
 router = APIRouter(tags=["scan"])
 
@@ -446,10 +453,10 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
     total_steps = sum(1 for k, _ in step_groups if k is not None)
     lines: list[str] = [
         f"# Thinking Scan Log — Run #{run_id}",
-        f"",
+        "",
         f"Exported: {exported_at}  ",
         f"Steps logged: {total_steps}",
-        f"",
+        "",
         "---",
         "",
     ]
@@ -509,7 +516,7 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         if payload_purp:
             lines += [f"**Payload purpose:** {payload_purp}", ""]
         if payload_sum:
-            lines += ["**Payload:**", f"```", payload_sum, "```", ""]
+            lines += ["**Payload:**", "```", payload_sum, "```", ""]
         if finding_id and affected_url:
             lines += [f"**Affected URL:** {affected_url}  ", f"**Finding ID:** {finding_id}", ""]
 
@@ -556,7 +563,7 @@ def export_thinking_log(
 @router.get("/api/test-runs/{run_id}/guided-login/status")
 def guided_login_status(run_id: int) -> dict:
     """Return which credential IDs are currently waiting for guided-login confirmation."""
-    from aespa.services.crawler import _guided_registry, _guided_ready_registry
+    from aespa.services.crawler import _guided_ready_registry, _guided_registry
     return {
         "pending_credential_ids": list(_guided_registry.keys()),
         "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),

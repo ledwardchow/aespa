@@ -6,11 +6,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session
 from aespa.main import create_app
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -129,10 +128,12 @@ def _mock_assess(monkeypatch, canned_response: dict):
     import aespa.services.api_readiness as readiness_mod
 
     async def _fake_assess(session, collection_id):
-        import json, re
+        import json
         from datetime import datetime, timezone
-        from aespa.models import ApiEndpoint
+
         from sqlmodel import select
+
+        from aespa.models import ApiEndpoint
 
         endpoints = session.exec(
             select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
@@ -200,7 +201,6 @@ def test_readiness_404_on_missing_collection(client):
 
 def test_run_readiness_with_mock_llm(client, monkeypatch):
     """POST /readiness with mocked LLM returns structured result and persists."""
-    import aespa.services.api_readiness as readiness_mod
     _mock_assess(monkeypatch, CANNED_READY)
 
     cid = _make_collection(client)
@@ -332,6 +332,7 @@ def test_reassessment_overwrites_previous(client, monkeypatch):
 def test_readiness_db_migration(tmp_path, monkeypatch):
     """_migrate adds the readiness/auth_summary/prereq columns idempotently."""
     import sqlalchemy as sa
+
     from aespa.db import _migrate
 
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
