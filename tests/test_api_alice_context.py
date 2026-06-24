@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.db import get_session
 from aespa.main import create_app
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,6 @@ def _make_collection_with_endpoints(client: TestClient) -> tuple[int, int]:
     cid = r.json()["id"]
 
     # Directly insert endpoints via API service so we don't need a real file.
-    from aespa.models import ApiEndpoint
     with Session(create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -90,8 +89,6 @@ def test_context_tool_collection_info_no_endpoints(db_session):
     db_session.refresh(run)
 
     # Temporarily patch get_engine to return this in-memory engine
-    from aespa.db import get_engine as _orig_get_engine
-    import aespa.services.alice as alice_mod
     import aespa.db as db_mod
     orig_engine = db_mod._engine
     db_mod._engine = db_session.get_bind()
@@ -108,9 +105,9 @@ def test_context_tool_collection_info_no_endpoints(db_session):
 
 def test_context_tool_endpoint_list_and_detail(db_session):
     """endpoint_list and endpoint_detail return expected fields."""
+    import aespa.db as db_mod
     from aespa.models import ApiCollection, ApiEndpoint, ApiTestRun
     from aespa.services.alice import _run_api_context_tool
-    import aespa.db as db_mod
 
     coll = ApiCollection(name="Shop API", base_url="https://shop.example.com")
     db_session.add(coll)
@@ -183,9 +180,9 @@ def test_context_tool_endpoint_list_and_detail(db_session):
 
 def test_context_tool_unknown_returns_error(db_session):
     """Unknown tool name returns an error dict with available_tools."""
+    import aespa.db as db_mod
     from aespa.models import ApiCollection, ApiTestRun
     from aespa.services.alice import _run_api_context_tool
-    import aespa.db as db_mod
 
     coll = ApiCollection(name="A", base_url="https://a.example.com")
     db_session.add(coll)
@@ -215,9 +212,9 @@ def test_context_tool_unknown_returns_error(db_session):
 def _make_coverage_fixture(db_session):
     """Create a collection + one in-scope GET endpoint with a path param and a
     seeded coverage matrix. Returns (collection, endpoint, run)."""
+    import aespa.db as db_mod
     from aespa.models import ApiCollection, ApiEndpoint, ApiTestRun
     from aespa.services.api_scanner import seed_coverage_matrix
-    import aespa.db as db_mod
 
     coll = ApiCollection(name="Cov API", base_url="https://cov.example.com")
     db_session.add(coll)
@@ -256,8 +253,8 @@ def _make_coverage_fixture(db_session):
 
 def test_set_coverage_marks_cell_and_matrix_reflects_it(db_session):
     """set_coverage upgrades a cell and coverage_matrix reports the new status."""
-    from aespa.services.alice import _run_api_context_tool
     import aespa.db as db_mod
+    from aespa.services.alice import _run_api_context_tool
 
     coll, ep, run = _make_coverage_fixture(db_session)
 
@@ -288,8 +285,8 @@ def test_set_coverage_marks_cell_and_matrix_reflects_it(db_session):
 
 def test_set_coverage_never_downgrades(db_session):
     """A request to lower a cell's status is silently kept at the higher state."""
-    from aespa.services.alice import _run_api_context_tool
     import aespa.db as db_mod
+    from aespa.services.alice import _run_api_context_tool
 
     coll, ep, run = _make_coverage_fixture(db_session)
 
@@ -313,8 +310,8 @@ def test_set_coverage_never_downgrades(db_session):
 
 def test_report_finding_auto_links_coverage_cell(db_session):
     """report_finding flips the matched endpoint × category cell to 'finding'."""
-    from aespa.services.alice import _run_api_context_tool
     import aespa.db as db_mod
+    from aespa.services.alice import _run_api_context_tool
 
     coll, ep, run = _make_coverage_fixture(db_session)
 
@@ -343,8 +340,8 @@ def test_report_finding_auto_links_coverage_cell(db_session):
 
 def test_report_finding_no_link_when_url_matches_nothing(db_session):
     """A finding whose affected_url matches no endpoint still saves but links no cell."""
-    from aespa.services.alice import _run_api_context_tool
     import aespa.db as db_mod
+    from aespa.services.alice import _run_api_context_tool
 
     coll, ep, run = _make_coverage_fixture(db_session)
 
@@ -365,8 +362,8 @@ def test_report_finding_no_link_when_url_matches_nothing(db_session):
 
 def test_set_coverage_validates_inputs(db_session):
     """Invalid status, category, endpoint, and non-applicable category are rejected."""
-    from aespa.services.alice import _run_api_context_tool
     import aespa.db as db_mod
+    from aespa.services.alice import _run_api_context_tool
 
     coll, ep, run = _make_coverage_fixture(db_session)
 
@@ -453,6 +450,7 @@ def test_check_api_scope_allows_additional_servers():
 def test_alice_tasks_start_stores_run_type():
     """start() stores run_type='api' on the created AliceTask."""
     import asyncio
+
     from aespa.services import alice_tasks
 
     # Patch out the actual _run coroutine so we don't start a real agent.
@@ -490,8 +488,9 @@ def test_alice_tasks_start_stores_run_type():
 def test_alice_tasks_start_default_run_type_is_site():
     """start() defaults run_type to 'site' when not specified."""
     import asyncio
-    from aespa.services import alice_tasks
+
     import aespa.services.alice_tasks as at_mod
+    from aespa.services import alice_tasks
 
     async def _fake_run(task, message, history):
         pass
@@ -523,8 +522,9 @@ def test_start_alice_run_endpoint_uses_api_run_type(client):
 
     async def _fake_start(run_id, *, tab_id, think_msg_id, reply_msg_id, message, history, run_type="site"):
         captured.append(run_type)
-        from aespa.services.alice_tasks import AliceTask
         import asyncio
+
+        from aespa.services.alice_tasks import AliceTask
         task = AliceTask(run_id=run_id, tab_id=tab_id, think_msg_id=think_msg_id,
                         reply_msg_id=reply_msg_id, run_type=run_type)
         task.asyncio_task = asyncio.create_task(asyncio.sleep(0))

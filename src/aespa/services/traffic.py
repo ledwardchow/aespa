@@ -287,6 +287,12 @@ def setup_playwright_logging(
     _req_data: dict[int, dict] = {}
 
     async def on_request(request) -> None:
+        # Skip the same noisy resource types as on_response / on_request_failed.
+        # Those handlers return early for SKIP_RESOURCE_TYPES *before* popping, so
+        # storing skipped requests here (images/fonts/media — the bulk of browser
+        # traffic) would leak _pending/_req_data entries that are never cleaned up.
+        if request.resource_type in SKIP_RESOURCE_TYPES:
+            return
         # Only store timing and body here.  Full headers are read in on_response
         # via response.request.all_headers(), which is the only point where the
         # browser has finalised cookies, Authorization, and other internally-added

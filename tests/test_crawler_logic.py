@@ -439,6 +439,30 @@ def test_filter_suggested_links_keeps_observed_url():
     ]
 
 
+def test_same_domain_ignores_explicit_default_port():
+    # https with an explicit :443 (and vice-versa) must still be same-domain.
+    assert crawler._same_domain("https://target.local:443/x", "target.local") is True
+    assert crawler._same_domain("https://target.local/x", "target.local:443") is True
+    assert crawler._same_domain("http://target.local:80/x", "target.local") is True
+
+
+def test_same_domain_rejects_different_host_or_nondefault_port():
+    assert crawler._same_domain("https://evil.local/x", "target.local") is False
+    # A non-default explicit port is a different origin and must not match.
+    assert crawler._same_domain("https://target.local:8443/x", "target.local") is False
+    # Non-http(s) schemes are never same-domain.
+    assert crawler._same_domain("ftp://target.local/x", "target.local") is False
+
+
+def test_norm_netloc_strips_default_port_keeps_custom():
+    assert crawler._norm_netloc("target.local:443", "https") == "target.local"
+    assert crawler._norm_netloc("target.local:80", "http") == "target.local"
+    assert crawler._norm_netloc("target.local:8443", "https") == "target.local:8443"
+    assert crawler._norm_netloc("user:pass@target.local:443", "https") == "target.local"
+    # IPv6 literal without a port must be left intact (tail is not numeric).
+    assert crawler._norm_netloc("[::1]", "https") == "[::1]"
+
+
 def test_access_failure_text_detects_could_not_load_details():
     assert crawler._looks_like_access_failure_text(
         "Account details\nCould not load details\nTry again later"

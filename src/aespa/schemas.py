@@ -285,8 +285,9 @@ class SastRunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    collection_id: int
+    collection_id: int | None
     document_id: int | None
+    source_filename: str | None
     name: str
     status: str
     triggered_by_run_type: str | None
@@ -320,6 +321,8 @@ class ScanLeadOut(BaseModel):
     investigated_by_run_type: str | None
     investigated_by_run_id: int | None
     linked_finding_id: int | None
+    imported_into_run_type: str | None
+    imported_into_run_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -333,6 +336,7 @@ LLMProviderAPILiteral = Literal[
     "openrouter",
     "google",
     "bedrock",
+    "bedrock_mantle",
     "azure_openai",
     "azure_foundry",
     "azure_foundry_openai",
@@ -341,6 +345,7 @@ LLMProviderAPILiteral = Literal[
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
     "anthropic": [
+        "claude-opus-4-8",
         "claude-opus-4-5",
         "claude-sonnet-4-5",
         "claude-3-7-sonnet-20250219",
@@ -348,6 +353,8 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-5.5",
+        "gpt-5.4",
         "gpt-4.1",
         "gpt-4.1-mini",
         "gpt-4.1-nano",
@@ -372,10 +379,22 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-1.5-flash",
     ],
     "bedrock": [
+        "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
         "global.anthropic.claude-opus-4-7",
     ],
+    # Mantle is driven via the OpenAI Responses API, which supports the frontier
+    # GPT-5.x models and the gpt-oss models. Claude families are Converse/Messages
+    # only on Mantle — use the Amazon Bedrock Runtime provider for those.
+    "bedrock_mantle": [
+        "openai.gpt-5.5",
+        "openai.gpt-5.4",
+        "openai.gpt-oss-120b",
+        "openai.gpt-oss-20b",
+    ],
     "azure_openai": [
+        "gpt-5.5",
+        "gpt-5.4",
         "gpt-4o",
         "gpt-4o-mini",
         "gpt-4.1",
@@ -406,6 +425,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "Phi-4",
     ],
     "azure_foundry_anthropic": [
+        "claude-opus-4-8",
         "claude-sonnet-4-5",
         "claude-opus-4-1",
         "claude-3-7-sonnet-20250219",
@@ -421,6 +441,7 @@ class LLMProviderConfigIn(BaseModel):
     name: str = Field(default="Default Provider", min_length=1, max_length=120)
     api_format: LLMProviderAPILiteral = "anthropic"
     base_url: str | None = None
+    project_id: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     api_key: str | None = None
     max_tpm: int | None = Field(default=None, ge=1)
@@ -461,6 +482,7 @@ class LLMProviderConfigOut(BaseModel):
     name: str
     api_format: str
     base_url: str | None
+    project_id: str | None = None
     models: list[str] = Field(default_factory=list)
     api_key: str | None
     max_tpm: int | None = None
@@ -499,6 +521,7 @@ class LLMConfigOut(BaseModel):
     provider: str
     api_key: str | None
     base_url: str | None
+    project_id: str | None = None
     model: str
     max_tokens: int
     temperature: Optional[float] = None
@@ -768,12 +791,28 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
+# ── Cloudflare Access config schemas ─────────────────────────────────────────
+
+class CloudflareAccessConfigBase(BaseModel):
+    # Empty/blank string is treated as "no audience" → audience check skipped.
+    audience: str | None = None
+
+
+class CloudflareAccessConfigIn(CloudflareAccessConfigBase):
+    pass
+
+
+class CloudflareAccessConfigOut(CloudflareAccessConfigBase):
+    updated_at: datetime
+
+
 # ── LLM config export / import schemas ───────────────────────────────────────
 
 class LLMExportProviderItem(BaseModel):
     name: str
     api_format: str
     base_url: str | None = None
+    project_id: str | None = None
     models: list[str]
     api_key: str | None = None
     max_tpm: int | None = None

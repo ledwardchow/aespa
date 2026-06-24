@@ -211,6 +211,7 @@ class LLMProviderAPI(str, Enum):
     openrouter = "openrouter"
     google = "google"
     bedrock = "bedrock"
+    bedrock_mantle = "bedrock_mantle"
     azure_openai = "azure_openai"
     azure_foundry = "azure_foundry"
     azure_foundry_openai = "azure_foundry_openai"
@@ -227,6 +228,9 @@ class LLMProviderConfig(SQLModel, table=True):
     api_format: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Bedrock Mantle project id (proj_…); sent as the OpenAI-Project header for
+    # cost/usage attribution. Ignored by other provider formats.
+    project_id: Optional[str] = Field(default=None)
     models_json: str = Field(default="[]")
     max_tpm: Optional[int] = Field(default=None, nullable=True)
     max_rpm: Optional[int] = Field(default=None, nullable=True)
@@ -246,6 +250,8 @@ class LLMConfig(SQLModel, table=True):
     provider: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Denormalized from the provider (see LLMProviderConfig.project_id).
+    project_id: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
     max_tokens: int = Field(default=70000)
     temperature: Optional[float] = Field(default=None)
@@ -380,6 +386,21 @@ class ReportingDebugConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     capture_enabled: bool = Field(default=False)
     panel_enabled: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CloudflareAccessConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for Cloudflare Access JWT verification.
+
+    ``audience`` is the optional Access application AUD tag. When set, the
+    proxy-injected JWT is verified against it; when empty, audience checking is
+    skipped (the legacy behaviour).
+    """
+
+    __tablename__ = "cloudflare_access_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    audience: Optional[str] = Field(default=None)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -756,8 +777,15 @@ class SastRun(SQLModel, table=True):
     __tablename__ = "sast_run"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    collection_id: int = Field(foreign_key="api_collection.id", index=True)
+    # Nullable: API SAST runs key on a collection; standalone (web-oriented) runs
+    # have no collection and carry their own uploaded archive instead.
+    collection_id: Optional[int] = Field(
+        default=None, foreign_key="api_collection.id", index=True
+    )
     document_id: Optional[int] = Field(default=None, index=True)  # the source_zip analysed
+    # Standalone runs store the uploaded archive directly (no ApiDocument).
+    source_archive_path: Optional[str] = Field(default=None)  # absolute path to stored zip
+    source_filename: Optional[str] = Field(default=None)      # original upload filename
     name: str
     status: str = Field(default="pending")  # pending|scanning|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
@@ -795,6 +823,11 @@ class ScanLead(SQLModel, table=True):
     investigated_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     investigated_by_run_id: Optional[int] = Field(default=None)
     linked_finding_id: Optional[int] = Field(default=None)  # set when promoted to a finding
+    # Set on a *copy* imported into a dynamic run (e.g. a web TestRun). Originals
+    # leave these NULL; producer_run_id on a copy still points at the source SAST
+    # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
+    imported_into_run_type: Optional[str] = Field(default=None, index=True)  # "web"
+    imported_into_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

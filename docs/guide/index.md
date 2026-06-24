@@ -2,14 +2,15 @@
 
 ## Screen walkthrough
 
-- [Web scanning](scans/web-screens.md)
+- [Web screens](scans/web-screens.md)
 
 ## Configuration
 - [Setting up LLM providers](config/llm.md)
+- [Configuration settings](config/settings.md)
 
 ## Running scans
 
 - [Web scans](scans/web-running.md)
-- [API scans](scans/api.md)
+- [API scans](api-running.md)
 
 

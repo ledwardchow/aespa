@@ -11,7 +11,6 @@ from sqlmodel import Session, select
 from aespa.db import get_session
 from aespa.models import AliceChatMessage, AliceChatSession, TestRun
 from aespa.services import alice_tasks
-from aespa.services import alice as alice_svc
 
 router = APIRouter(tags=["alice"])
 

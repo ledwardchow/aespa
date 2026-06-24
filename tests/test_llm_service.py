@@ -1,10 +1,49 @@
 import asyncio
+import json
 import sys
 from types import SimpleNamespace
+
 import pytest
 
 from aespa.models import LLMConfig
 from aespa.services import llm
+
+
+def test_limiter_oversized_estimate_does_not_hang():
+    # A single request estimated larger than the entire per-minute budget must
+    # not loop forever waiting for capacity that can never exist. Pre-fix, this
+    # spun in acquire() until the timeout.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=1000)
+    slept = asyncio.run(asyncio.wait_for(limiter.acquire(10_000), timeout=5))
+    assert slept is False  # clamped to max_tokens; the full bucket satisfies it at once
+
+
+def test_limiter_on_wait_fires_when_pacing():
+    # When the bucket is empty the next acquire must pace, and on_wait must fire
+    # (before the sleep) so callers can tell the user it is not stuck.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=6000)  # 100 tokens/sec
+    waits: list[float] = []
+
+    async def _run():
+        await limiter.acquire(6000)  # drain the bucket
+        await limiter.acquire(50, on_wait=lambda wt: waits.append(wt))  # ~0.5s pace
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=10))
+    assert waits and waits[0] > 0
+
+
+def test_limiter_reconcile_only_credits_what_was_reserved():
+    # An oversized estimate reserves at most max_tokens; reconcile must credit back
+    # only the reserved amount, not the unclamped estimate.
+    limiter = llm.AsyncTokenBucketLimiter(tpm=1000)
+
+    async def _run():
+        await limiter.acquire(10_000)          # clamps to 1000, drains bucket to ~0
+        await limiter.reconcile(10_000, 100)   # used 100 of 1000 reserved → credit ~900
+        return limiter.available_tokens
+
+    avail = asyncio.run(_run())
+    assert 850 <= avail <= 1000
 
 
 def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
@@ -1141,6 +1180,313 @@ def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blan
     assert captured["converse"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
 
 
+def _fake_mantle_response(text="ok"):
+    """A minimal OpenAI Responses-API response object for Mantle tests."""
+    return SimpleNamespace(
+        output_text=text,
+        output=[],
+        usage=SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+        ),
+    )
+
+
+def _fake_mantle_openai(captured: dict):
+    """Build a FakeOpenAI class that records client kwargs and responses.create calls."""
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["responses"] = kwargs
+            return _fake_mantle_response()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.responses = FakeResponses()
+
+    return FakeOpenAI
+
+
+def test_bedrock_mantle_uses_responses_api_with_us_east_2_default(monkeypatch):
+    """Mantle drives the OpenAI Responses API; with no base_url it defaults to us-east-2."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+    monkeypatch.delenv("BEDROCK_MANTLE_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=2048,
+        temperature=0.0,
+    )
+
+    result = asyncio.run(llm._call(config, "hello", None))
+
+    assert result == "ok"
+    assert {
+        "api_key": "bedrock-api-key",
+        "base_url": "https://bedrock-mantle.us-east-2.api.aws/v1",
+    }.items() <= captured["client"].items()
+    # Responses API uses `input`, not `messages`.
+    assert captured["responses"]["model"] == "openai.gpt-oss-120b"
+    assert captured["responses"]["input"] == "hello"
+
+
+def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
+    """An explicit base_url wins; otherwise the region env var selects the endpoint."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    # Region env var drives the endpoint when no base_url is configured.
+    cfg_region = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg_region, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-west-2.api.aws/v1"
+
+    # An explicit base_url overrides region resolution (and gains the /v1 suffix).
+    cfg_explicit = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url="https://bedrock-mantle.eu-west-1.api.aws",
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg_explicit, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.eu-west-1.api.aws/v1"
+
+
+def test_bedrock_mantle_frontier_model_uses_openai_v1_path(monkeypatch):
+    """gpt-5.x frontier models are served on the /openai/v1 path; gpt-oss on /v1."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+    monkeypatch.delenv("BEDROCK_MANTLE_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    frontier = LLMConfig(
+        provider="bedrock_mantle", api_key="k", base_url=None,
+        model="openai.gpt-5.5", max_tokens=64,
+    )
+    asyncio.run(llm._call(frontier, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+
+    oss = LLMConfig(
+        provider="bedrock_mantle", api_key="k", base_url=None,
+        model="openai.gpt-oss-120b", max_tokens=64,
+    )
+    asyncio.run(llm._call(oss, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/v1"
+
+
+def test_bedrock_mantle_rewrites_explicit_base_url_path_per_model(monkeypatch):
+    """An explicit base_url keeps its host but its path suffix is normalised per model."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    # User typed the /v1 host, but selected a frontier model → rewritten to /openai/v1.
+    cfg = LLMConfig(
+        provider="bedrock_mantle", api_key="k",
+        base_url="https://bedrock-mantle.us-east-2.api.aws/v1",
+        model="openai.gpt-5.4", max_tokens=64,
+    )
+    asyncio.run(llm._call(cfg, "hi", None))
+    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+
+
+def test_bedrock_mantle_skips_temperature_for_reasoning_models(monkeypatch):
+    """gpt-5.x reasoning models must not receive a custom temperature."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-5.5",
+        max_tokens=64,
+        temperature=0.2,
+    )
+    asyncio.run(llm._call(config, "hi", None))
+    assert "temperature" not in captured["responses"]
+
+
+def test_bedrock_mantle_sends_project_id(monkeypatch):
+    """A configured Mantle project id is passed to the SDK (OpenAI-Project header)."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        project_id="proj_5d5ykleja6cwpirysbb7",
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+
+    asyncio.run(llm._call(config, "hello", None))
+
+    assert captured["client"]["project"] == "proj_5d5ykleja6cwpirysbb7"
+
+
+def test_bedrock_mantle_omits_project_when_unset(monkeypatch):
+    """No project kwarg is sent when no project id is configured."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_mantle_openai(captured))
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="bedrock-api-key",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
+    )
+
+    asyncio.run(llm._call(config, "hello", None))
+
+    assert "project" not in captured["client"]
+
+
+def test_mantle_message_translation_to_responses_items():
+    """Anthropic-format history maps to Responses message/function_call(_output) items."""
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "thinking"},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "http_request",
+                    "input": {"url": "/x"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "200 OK"},
+            ],
+        },
+    ]
+    items = llm._ant_messages_to_responses(messages)
+    assert items[0] == {"type": "message", "role": "user", "content": "start"}
+    assert {"type": "message", "role": "assistant", "content": "thinking"} in items
+    fc = next(i for i in items if i["type"] == "function_call")
+    assert fc["call_id"] == "call_1" and fc["name"] == "http_request"
+    assert json.loads(fc["arguments"]) == {"url": "/x"}
+    fco = next(i for i in items if i["type"] == "function_call_output")
+    assert fco == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "200 OK",
+    }
+
+
+def test_mantle_tools_translation_to_responses():
+    """Anthropic tool specs map to flat Responses function tools."""
+    tools = [
+        {"name": "t", "description": "d", "input_schema": {"type": "object"}},
+    ]
+    assert llm._ant_tools_to_responses(tools) == [
+        {"type": "function", "name": "t", "description": "d", "parameters": {"type": "object"}},
+    ]
+
+
+def test_mantle_create_response_retries_dropping_temperature():
+    """A temperature-rejection error triggers one retry without temperature."""
+    calls: list[dict] = []
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            if "temperature" in kwargs:
+                raise RuntimeError("temperature is not supported with this model")
+            return _fake_mantle_response()
+
+    client = SimpleNamespace(responses=FakeResponses())
+    out = asyncio.run(
+        llm._create_response(
+            client, {"model": "openai.gpt-5.5", "input": "hi", "temperature": 0.2}
+        )
+    )
+    assert out.output_text == "ok"
+    assert len(calls) == 2
+    assert "temperature" not in calls[1]
+
+
+def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
+    """With no API key, Mantle requests are SigV4-signed under the 'bedrock' service."""
+    import httpx
+    from botocore.credentials import Credentials
+
+    fake_creds = Credentials("AKIAEXAMPLE", "secret-key", token="session-token")
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_credentials(self):
+            return fake_creds
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
+    request = httpx.Request(
+        "POST",
+        "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions",
+        json={"model": "openai.gpt-oss-120b", "messages": []},
+    )
+    # Drive the sync auth flow so the request is signed in place.
+    list(signer.sync_auth_flow(request))
+
+    authorization = request.headers["Authorization"]
+    assert authorization.startswith("AWS4-HMAC-SHA256")
+    # Credential scope must name the resolved region and the "bedrock" service.
+    assert "/us-east-2/bedrock/aws4_request" in authorization
+    assert "x-amz-date" in request.headers
+    # Temporary (role/STS) credentials must carry the session token.
+    assert request.headers["x-amz-security-token"] == "session-token"
+
+
+def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
+    """A clear error is raised when neither an API key nor AWS credentials exist."""
+    import httpx
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_credentials(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
+    request = httpx.Request(
+        "POST", "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions", json={}
+    )
+    with pytest.raises(RuntimeError, match="No AWS credentials"):
+        list(signer.sync_auth_flow(request))
+
+
 @pytest.mark.anyio
 async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
     captured = {}
@@ -1792,6 +2138,73 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
     assert blocks[0]["text"] == "ok"
     assert captured["call_1"]["tool_choice"] == "required"
     assert "tool_choice" not in captured["call_2"]
+
+
+def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
+    """Mantle tool-calling goes through the Responses API and parses its output items."""
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        async def create(self, **kwargs):
+            captured["req"] = kwargs
+            text_part = SimpleNamespace(type="output_text", text="thinking")
+            msg_item = SimpleNamespace(type="message", content=[text_part])
+            fc_item = SimpleNamespace(
+                type="function_call",
+                call_id="call_9",
+                name="http_request",
+                arguments='{"url": "/x"}',
+            )
+            return SimpleNamespace(
+                output=[msg_item, fc_item],
+                output_text="thinking",
+                usage=SimpleNamespace(
+                    input_tokens=1,
+                    output_tokens=2,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                ),
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeOpenAI)
+
+    config = LLMConfig(
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-5.5",
+        max_tokens=256,
+        temperature=0.2,
+    )
+
+    blocks, stop_reason, raw = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="sys",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[
+                {"name": "http_request", "description": "d", "input_schema": {"type": "object"}},
+            ],
+        )
+    )
+
+    # Request used Responses shape: instructions + input list + flat tools.
+    assert captured["req"]["instructions"] == "sys"
+    assert isinstance(captured["req"]["input"], list)
+    assert captured["req"]["tools"][0]["type"] == "function"
+    assert captured["req"]["tool_choice"] == "required"
+    # gpt-5.x reasoning model → temperature omitted.
+    assert "temperature" not in captured["req"]
+    # Output items parsed into text + tool_use blocks.
+    assert any(b["type"] == "text" and b["text"] == "thinking" for b in blocks)
+    tool_use = next(b for b in blocks if b["type"] == "tool_use")
+    assert tool_use["id"] == "call_9"
+    assert tool_use["name"] == "http_request"
+    assert tool_use["input"] == {"url": "/x"}
+    assert stop_reason == "tool_use"
 
 
 def test_anthropic_caching_in_call_with_tools(monkeypatch):
