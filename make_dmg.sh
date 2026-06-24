@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Build dist/AESPA.dmg with a "drag to Applications" install layout.
-# Run AFTER ./build_mac.sh (and ./notarize_mac.sh if distributing).
+# Run AFTER ./build_mac.sh. Signs the app, builds the dmg, notarizes + staples.
 #
 #   brew install create-dmg     # one-time
 #   ./make_dmg.sh
-#
-# Signs the .dmg too if a Developer ID Application identity is available
-# (auto-detected, or set SIGN_ID).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,13 +14,17 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-aespa-notary}"
 command -v create-dmg >/dev/null || { echo "Missing create-dmg — run: brew install create-dmg"; exit 1; }
 [ -d "$APP" ] || { echo "Not found: $APP — run ./build_mac.sh first."; exit 1; }
 
-# Auto-pick a signing identity (skip signing if none — the .dmg still works).
+# Sign the app FIRST — the dmg's own signature does not cover its contents, and
+# the notary scans every Mach-O inside. Without this the app ships unsigned.
+./sign_app.sh
+
+# Reuse the same identity to sign the dmg wrapper.
 if [ -z "${SIGN_ID:-}" ]; then
   SIGN_ID=$(security find-identity -v -p codesigning \
     | grep -o '"Developer ID Application:[^"]*"' | sed 's/^"//;s/"$//' | head -1)
 fi
 SIGN_ARGS=()
-[ -n "$SIGN_ID" ] && SIGN_ARGS=(--codesign "$SIGN_ID") && echo "==> Will sign dmg with: $SIGN_ID"
+[ -n "$SIGN_ID" ] && SIGN_ARGS=(--codesign "$SIGN_ID")
 
 rm -f "$DMG"
 echo "==> Building $DMG"
