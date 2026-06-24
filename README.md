@@ -4,6 +4,12 @@
 
 An **exploration** into whether a fully LLM-driven, automated web application/API "penetration tests" could work. 
 
+## What should I use it for?
+
+Testing :) It's got a cool UI and stuff.
+
+**This is not a replacement for human testers; it can help you scale.** If you run an offensive security team and have a lot of websites/APIs you need to work through, running this first can help you prioritise what to put testers on.
+
 ## Features
 
 Multi-agent (test lead + specialists, adversarial validator and reporting) web app and API testing.
@@ -24,6 +30,8 @@ Here's are [two](docs/results/juice-shop-results.md) [comparisons](docs/results/
 * Claude Code + Qwen3.6-35b-A3b 
 
 And a [comparison](docs/results/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+
+Also, scan results for [VAmPI](docs/results/vampi/vampi.md).
 
 ## Documentation
 
@@ -143,6 +151,7 @@ API Scan Findings
 ![Screenshot](docs/images/apifindings.png)
 
 ## Recommended models
-* Claude Sonnet 4.6 - Output token cap 70000
+* Claude Sonnet 4.6 - Output token cap 70000. Doesn't seem to trigger refusals even without CVP.
 * Minimax M3 - Output token cap 70000, turn off force tool call
 * GLM 5.2 - Output token cap 70000, turn off force tool call
+- GPT 5.4/5.5 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
