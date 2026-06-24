@@ -1,10 +1,10 @@
 # AESPA — Architecture & Internal Workings
 
-AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers two distinct surfaces:
+AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads.
+- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
-- **SAST assistance** — an agentic static-analysis pre-phase reads source code from an uploaded ZIP before each dynamic scan, identifying high-confidence vulnerability leads that are fed directly into the dynamic probe loop.
+- **SAST assistance** — an agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. It runs three ways: as an automatic **pre-phase** before an API scan (collection-bound), as a **standalone** scan started from the SAST screen, and as a source of leads **imported into a web scan**. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 
 ---
 
@@ -29,7 +29,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 7. [Dynamic Scan](#7-dynamic-scan)
    - [Bootstrap](#bootstrap) · [Scan resume](#scan-resume) · [Agentic loop](#agentic-loop)
    - [Actions available to the LLM](#actions-available-to-the-llm)
-   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph)
+   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph) · [Web OWASP Coverage](#web-owasp-coverage-owasp-top-10-matrix)
 8. [Multi-Agent System](#8-multi-agent-system)
    - [Agent types](#agent-types) · [Specialist agents](#specialist-agents)
    - [Adversarial validator](#adversarial-validator) · [Post-scan review](#post-scan-review-reporting-agent)
@@ -56,7 +56,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
     - [Scope enforcement](#scope-enforcement) · [ALICE on API runs](#alice-on-api-runs)
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
-    - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Automatic SAST pre-phase](#automatic-sast-pre-phase) · [Concurrency](#concurrency)
+    - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Automatic SAST pre-phase](#automatic-sast-pre-phase) · [Concurrency](#concurrency)
 
 ---
 
@@ -290,6 +290,16 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 | `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written during a dynamic scan |
 | `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when the validator finds a concrete innocent explanation; when `false`, failure to reproduce counts as false positive |
 
+### Cloudflare Access Config (`CloudflareAccessConfig` model)
+
+Singleton row (id = 1). Edited from the Debug page. Holds the optional Cloudflare Access application **audience (AUD)** tag used when verifying the proxy-injected `Cf-Access-Jwt-Assertion` header (see §12 — `/api/version`).
+
+| Field | Default | Description |
+|---|---|---|
+| `audience` | `null` | Access application AUD tag. When set, the JWT is verified against it (`jwt.decode(..., audience=...)`), so only tokens issued for this application are accepted. When empty/null, the audience check is skipped — the legacy behaviour, in which any Cloudflare Access tenant's validly-signed token passes the issuer check. Blank input is normalised to `null` on save. |
+
+This is informational only — the app has **no auth by design** (localhost-only); the header is purely for displaying the authenticated user's email in the sidebar when fronted by a reverse proxy.
+
 ---
 
 ## 5. Data Models
@@ -307,6 +317,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScannerPolicy` | Scan behaviour policy for a test run |
 | `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
+| `CloudflareAccessConfig` | Singleton — optional Access AUD tag for verifying the proxy-injected JWT |
 | `TestRun` | A single web scan session; owns all scan artefacts |
 | `CrawledPage` | A discovered page/endpoint with LLM-assigned flags |
 | `PageLink` | Directed edge between two `CrawledPage` nodes (site map graph) |
@@ -316,6 +327,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
 | `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
 | `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
+| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
@@ -325,8 +337,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ApiCredential` | A parsed credential row tied to a collection (scheme, label, auth endpoint) |
 | `ApiTestRun` | A single API scan session; linked to an `ApiCollection`; carries `coverage_mode` and `sast_run_id` |
 | `ApiEndpointTest` | One cell in the OWASP API Top-10 coverage matrix (endpoint × category, status, finding IDs) |
-| `SastRun` | A static analysis scan over a source ZIP; linked to a collection; tracks `leads_count` |
-| `ScanLead` | A high-confidence SAST finding candidate consumed by the dynamic API scan loop |
+| `SastRun` | A static-analysis scan over a source ZIP; tracks `leads_count`. `collection_id` is **optional** — API pre-phase runs link a collection + `document_id`; standalone runs carry their own archive via `source_archive_path` / `source_filename` |
+| `ScanLead` | A high-confidence SAST lead. Keyed to its producing `SastRun` (`producer_run_id`). An *original* lead leaves `imported_into_run_id` NULL; a *copy* imported into a dynamic run sets `imported_into_run_type`/`imported_into_run_id` to that run (web scans consume copies; API scans consume by collection) |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -348,8 +360,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `affected_url` | Specific URL where the issue was found |
 | `evidence_json` | Structured request/response pairs |
 | `screenshot_b64` | Base64 PNG (form-based probes) |
-| `finding_source` | Origin of the finding: `aespa_scanner` · `burp_active_scan` · `manual_import` · `unknown` |
-| `validation_status` | `unvalidated` · `validating` · `confirmed` · `unconfirmed` · `false_positive` |
+| `finding_source` | Origin of the finding: `aespa_scanner` · `burp_active_scan` · `deterministic_probe` · `sast_lead` (auto-promoted from a confirmed `ScanLead`) · `manual_import` · `unknown` |
+| `validation_status` | `unvalidated` · `validating` · `confirmed` · `unconfirmed` · `false_positive` · `low_confidence` |
 
 ---
 
@@ -385,6 +397,8 @@ start_crawl(run_id)
 ```
 
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
+
+**`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
 
 ### LLM involvement
 
@@ -453,6 +467,7 @@ The loop terminates when:
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a login URL with candidate credentials |
 | `finding_write` | Record a confirmed vulnerability |
+| `update_lead` | Record the outcome (`confirmed`/`dismissed`/`inconclusive`) of investigating a SAST lead; a confirmed lead with no linked finding is auto-promoted to one. Present only when SAST leads are in context (see §17) |
 | `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a high-confidence lead (see §8) |
 | `tool` | Call a read-only context tool (see below) |
 | `done` | Finish the scan with a summary |
@@ -486,6 +501,17 @@ The `PentestHypothesis` / `PentestTask` graph (managed in `services/task_graph.p
 - **Task**: a concrete attempt under a hypothesis (target URL, method, status: pending → in_progress → completed/failed)
 
 Hypotheses are derived from the `attack_classes` in the recon summary so the task queue is directly grounded in the attack surface analysis.
+
+### Web OWASP Coverage (OWASP Top-10 matrix)
+
+**File**: `src/aespa/services/web_workprogram.py`
+
+The web scan tracks OWASP Top-10 coverage in a per-page matrix — the web analogue of the API coverage matrix (§16). Each cell is a `PageOwaspTest` row: a `(TestRun, CrawledPage, OWASP category A01–A10)` triple with status `not_started → in_progress → covered / finding / skipped`.
+
+- `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
+- `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
+- `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
+- `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 
 ---
 
@@ -622,19 +648,21 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 
 ### Upstream proxy
 
-All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. SSL verification is disabled globally when a proxy is active to support HTTPS interception setups (e.g. Burp Suite's proxy listener).
+All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. TLS certificate verification is left **on** for direct connections and is disabled **only when a proxy is active**, to support HTTPS interception setups (e.g. Burp Suite's proxy listener) — so the API key and prompt data are never sent without certificate validation in the normal (no-proxy) case.
 
 ### Rate Limiting & Pacing
 
 To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
 
 - **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
+- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` — page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so a configured `max_tpm` / `max_rpm` applies to the whole run, not just page analysis.
 - **Estimated Pre-allocation:**
-  - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider).
+  - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider). The agentic path flattens the running message history to estimate input size.
   - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.
+  - A single request's estimate is **clamped to the per-minute budget** (`max_tokens`): a call estimated larger than the whole TPM budget paces once and then proceeds, rather than waiting forever for capacity that can never exist.
   - If the bucket does not have enough capacity, the limiter sleeps until the required TPM (Tokens Per Minute) and RPM (Requests Per Minute) quotas are met.
-- **Real-Time Notification:** If pacing triggers, a `rate_limit` scanner-phase SSE event is emitted (e.g. *"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved X tokens)"*) to keep the user informed in the UI.
-- **Post-Call Reconciliation:** Once the API call returns, the exact actual token counts consumed are retrieved, and the bucket's pre-allocation is reconciled (refunding estimated but unused tokens). If the request fails, the estimated tokens are fully refunded.
+- **Real-Time Notification:** When pacing first begins to wait, an `on_wait` callback fires a `rate_limit` scanner-phase event (e.g. *"LLM rate limit reached — pacing requests… (waiting ~Ns, reserved X tokens)"*) routed to the active run's log via the context emit function (the scanner log, the API scan log, or the ALICE stream), so a rate-limited scan never looks frozen. A matching *"rate limit cleared"* event is emitted once the call proceeds.
+- **Post-Call Reconciliation:** Once the API call returns, the exact actual token counts consumed are retrieved, and the bucket's pre-allocation is reconciled (refunding the reserved-but-unused tokens). If the request fails, the reserved tokens are fully refunded.
 
 ---
 
@@ -703,6 +731,16 @@ All findings carry a `finding_source` field that records their origin:
 
 External findings can be imported via `POST /api/test-runs/{run_id}/findings/import`.
 
+### Verified proof-of-concept (PoC) commands
+
+When the validator confirms a finding, `validator.py` tries to attach a **reproducible `curl` command** (`ScanFinding.poc_command` / `poc_setup`). The pipeline is strict — "it works, or there is no PoC":
+
+- The validator must supply a `poc_request` (method, url, headers, body) and a positive `poc_expect` assertion (a status code and/or a distinctive `body_contains` substring). Without a positive assertion nothing is attached.
+- The URL is scope-locked to the finding's host; methods are restricted to an allow-list (`GET`, `HEAD`, `POST` — `POST` is permitted so a confirmed state-changing finding can be reproduced against the already-authorised target); sensitive headers (`authorization`, `cookie`, `host`, `content-length`) are stripped.
+- Auth-required PoCs resolve the live session credential and emit a shippable command that reads it from a token file (`-H "Authorization: Bearer $(cat aespa-poc-auth.txt)"`), plus `poc_setup` markdown telling the user how to capture that file. The live credential never appears in the stored command.
+- **Verification runs the request locally and shell-free**: the shipped command string is for the human, but the verification step builds a separate argv (`_build_curl_argv`) and runs it via `subprocess.run(argv)` with **no shell**, materialising the credential directly into the header. This avoids treating target-derived header/body/url values as shell syntax (a command-injection vector) and behaves identically on POSIX and Windows (POSIX `shlex` quoting is meaningless to `cmd.exe`). Only PoCs whose assertion holds on this re-run are persisted.
+- Every suppressed/failed branch emits an INFO log + scan-log + Reporting-agent event so the reason a PoC is missing is visible (`_emit_poc_outcome`).
+
 ---
 
 ## 12. API Layer
@@ -722,10 +760,15 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
 | `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
+| `/api/settings/cloudflare-access` | `settings.py` | Get/set the Cloudflare Access AUD verified on the proxy-injected JWT |
 | `/api/test-runs/` | `test_runs.py` | Create runs, check status, retrieve site map graph |
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
 | `/api/test-runs/{id}/recon-summary` | `scan.py` | Get the structured attack surface summary for a run |
 | `/api/test-runs/{id}/findings/` | `test_runs.py` | List, import, validate findings |
+| `/api/test-runs/{id}/coverage` | `test_runs.py` | Web OWASP Coverage matrix (OWASP Top-10) (`GET`); `coverage/seed` re-seeds cells |
+| `/api/test-runs/{id}/sast-runs/available` | `test_runs.py` | Completed SAST runs (with leads) available to import into this web run |
+| `/api/test-runs/{id}/import-leads` | `test_runs.py` | Copy a SAST run's leads into this web run |
+| `/api/test-runs/{id}/leads` | `test_runs.py` | List (`GET`) / clear-all (`DELETE`) leads imported into this web run; `leads/{lead_id}` deletes one |
 | `/api/test-runs/{id}/thinking-log/export` | `scan.py` | Export the full scan activity log |
 | `/api/test-runs/{id}/alice/run` | `alice.py` | `POST` start · `DELETE` stop background ALICE task |
 | `/api/test-runs/{id}/alice/stream` | `alice.py` | SSE event stream with cursor-based replay |
@@ -734,6 +777,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
 | `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
 | `/api/api-collections/` | `api_collections.py` | CRUD for API collections; document upload and parse; endpoint and credential management |
+| `/api/api-collections/{id}/export` · `/api/api-collections/import` | `api_collections.py` | Export a collection (endpoints, credentials, metadata) as a JSON bundle and re-import it elsewhere |
 | `/api/api-collections/{id}/readiness` | `api_collections.py` | `POST` run · `GET` retrieve LLM gap analysis |
 | `/api/api-collections/{id}/test-runs/` | `api_collections.py` | Create API test runs under a collection |
 | `/api/api-test-runs/{id}/scan/` | `api_test_runs.py` | Start/stop/status for API scans |
@@ -741,9 +785,10 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/api-test-runs/{id}/findings/` | `api_test_runs.py` | List, import, export API scan findings |
 | `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
 | `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
+| `/api/sast-runs` | `sast_runs.py` | `POST` (multipart) create a **standalone** SAST run from an uploaded source ZIP; `GET` lists all SAST runs |
 | `/api/api-collections/{id}/sast-runs` | `sast_runs.py` | Create a SAST run under a collection |
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
-| `/api/sast-runs/{id}/leads` | `sast_runs.py` | List `ScanLead` rows for a SAST run |
+| `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
 
 ---
@@ -779,8 +824,10 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 | **Intelligence** | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, `xss_sink` items |
 | **Task Graph** | Sub-tabs: **Attack Surface** (rendered `ReconSummary` — trust zones, attack classes, tech stack) and **Task Queue** (`PentestHypothesis` tree with `PentestTask` leaves) |
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
-| **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, and validation controls |
+| **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, validation controls, and export/import (markdown) |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |
+| **OWASP Coverage** | Web OWASP Top-10 coverage matrix (`PageOwaspTest` cells), updated live; Track/Enforce mode |
+| **SAST Leads** | Import a completed SAST run's leads into this run (dropdown), then list the imported copies; per-row delete, clear-all, and export (markdown). Originals on the SAST run are untouched |
 | **A.L.I.C.E.** | Interactive chat panel; supports multiple named sessions (tabs); see §15 |
 
 #### API collection view
@@ -799,17 +846,19 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 | Tab | Content |
 |---|---|
 | **Status / Log** | Agent activity log, scan controls, real-time phase events |
-| **Work Program** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
+| **OWASP Coverage** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
 | **Findings** | `ScanFinding` list for this API run |
 | **Traffic** | HTTP traffic captured during the API scan |
 | **A.L.I.C.E.** | Interactive ALICE chat tab (same surface as web scans) |
 
 #### SAST run view
 
+A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan (no collection). Collection-bound runs are also listed under a collection's **SAST Runs** panel.
+
 | Panel | Content |
 |---|---|
 | **Status / Log** | Agent activity log, scan controls |
-| **Leads** | `ScanLead` rows with severity, confidence score, location, and evidence |
+| **Leads** | Original `ScanLead` rows with severity, confidence score, location, and evidence; exportable to markdown |
 
 ---
 
@@ -823,6 +872,15 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
+
+### Run-id collisions & `run_kind`
+
+`TestRun` (web), `ApiTestRun`, and `SastRun` draw ids from **independent autoincrement sequences that collide in the same integer space** — run #5 can exist as all three at once. Tables shared across run kinds must therefore be disambiguated, or rows leak between unrelated runs:
+
+- **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
+- **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
+- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
+- **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
 
 ---
 
@@ -1045,7 +1103,9 @@ _api_scan_task(api_run_id)
 
 ### Scope enforcement
 
-`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request.
+`_api_check_scope(url, api_run_id)` blocks requests outside the collection's `scope_hosts`. Out-of-scope attempts return an error string to the agent without making the request. The web dynamic scanner enforces the equivalent boundary through `scope.py::check_scope(url, site_id, run_id)` (host must be in `Site.scope_hosts` when set, and the page must not be marked `in_scope=False`).
+
+**Redirects are re-checked per hop.** The scanner HTTP client uses `follow_redirects=True`, so a pre-send `check_scope` on the requested URL alone would let a target bounce the scanner to an out-of-scope/internal host (SSRF / scope bypass). `_request_scope_checked` therefore disables auto-follow and validates every `Location` against `check_scope` before following it; an out-of-scope redirect is refused (the unfollowed 3xx is surfaced to the agent with a `[SCOPE BLOCK]` note) so the off-scope host is never contacted. The browser (`browser` tool) path re-checks the **final** post-redirect URL after navigation and refuses to load an off-scope page into the agent's context; the auth flow is exempt so legitimate external-IdP/SSO redirects still work.
 
 ### ALICE on API runs
 
@@ -1055,21 +1115,33 @@ API test runs expose the same `/alice/*` endpoints as web test runs. `alice.py`'
 
 ## 17. SAST Scanner & Scan Leads
 
-**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`
+**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is an agentic static-analysis pass over uploaded source archives. Its primary role is a **pre-phase** that runs before the dynamic API scan, identifying high-confidence vulnerability leads that the dynamic loop can then probe.
+The SAST scanner is an agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. A `SastRun` can be created three ways:
+
+1. **API pre-phase** — auto-created before a dynamic API scan when the collection has a `source_zip` document (collection-bound; see *Automatic SAST pre-phase* below).
+2. **Standalone** — created from the SAST screen by uploading a ZIP. `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). `POST /api/sast-runs` (multipart).
+3. **Imported into a web scan** — a completed run's leads are *copied* into a web `TestRun`, which then investigates the copies (see *Lead consumption* below).
+
+The scan loop itself is identical in all three cases; only how the archive is located and how the resulting leads are consumed differs.
 
 ### Architecture overview
 
 ```
 start_sast_scan(sast_run_id)
   └─ _sast_scan_task(sast_run_id)
-       1. Load SastRun; locate source_zip ApiDocument
-       2. _safe_unzip — extract archive into sandboxed temp directory
-          (path-jailed: entries that would escape the root are rejected)
-       3. _build_initial_message — construct LLM opening context from
-          extracted ApiEndpoint rows (route definitions already parsed
-          from the same zip by the document parser)
+       1. Load SastRun; resolve the archive: the source_zip ApiDocument
+          (API pre-phase) OR run.source_archive_path (standalone).
+          collection_id may be NULL.
+       2. _safe_unzip - extract archive into a deterministic per-run
+          directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
+          entries that would escape the root are rejected). A startup
+          sweep (db._cleanup_orphaned_sast_extractions) reconciles any
+          dirs leaked by a previous hard crash.
+       3. _build_initial_message — construct LLM opening context. When a
+          collection exists, seed it with the parsed ApiEndpoint rows;
+          for standalone runs there are no endpoints, so the agent
+          discovers entry points itself with the file tools
        4. _make_tool_executor — build the tool executor with path-jailed file tools
        5. llm.thinking_agentic_loop with read-only file tools + write_lead / filter_lead / done
        6. _flush_unfiltered_candidates — persist any remaining candidates
@@ -1105,18 +1177,28 @@ At scan end:
 
 | Field | Notes |
 |---|---|
-| `producer_run_id` | ID of the `SastRun` that created this lead |
+| `producer_run_id` | ID of the `SastRun` that created this lead (kept on copies for provenance) |
 | `producer_run_type` | `"sast"` |
-| `collection_id` | Owning `ApiCollection` |
+| `collection_id` | Owning `ApiCollection`, or NULL for standalone runs |
+| `imported_into_run_type` / `imported_into_run_id` | Set on a *copy* imported into a dynamic run (e.g. `"web"` + `TestRun.id`); NULL on originals |
 | `title` / `description` | Human-readable vulnerability description |
-| `category` | OWASP API Top-10 category slug (e.g. `"API1"`) |
+| `category` | OWASP category slug (e.g. `"API1"` or `"A03"`) |
 | `severity` | `critical` · `high` · `medium` · `low` |
-| `confidence` | 0.0–1.0; only leads ≥ 0.7 are persisted |
+| `confidence` | 0.0–1.0; only leads ≥ 0.7 (`CONFIDENCE_THRESHOLD`) are persisted |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
-| `status` | `open` (default) · `used` (consumed by dynamic scan) |
+| `status` | `open` · `investigating` · `confirmed` · `dismissed` · `inconclusive` |
+| `investigated_by_run_type` / `investigated_by_run_id` | The dynamic run that recorded the outcome via `update_lead` |
+| `linked_finding_id` | Set when a confirmed lead is promoted to a `ScanFinding` |
 
-`get_open_leads_for_collection(collection_id)` returns open leads sorted by severity then confidence. The API scanner calls this to inject leads into the dynamic loop's opening context, so the Test Lead agent knows which endpoints to prioritise.
+### Lead consumption (API vs web)
+
+The dynamic loop investigates leads via the shared `update_lead` action, which sets the outcome and — for a confirmed lead with no finding attached — auto-promotes it to a `ScanFinding` (keyed on `test_run_id` for web runs, `api_test_run_id` for API runs). How leads reach the loop's opening context differs by surface:
+
+- **API scans** consume *in place* by collection: `get_open_leads_for_collection(collection_id)` / `format_leads_for_context(collection_id)`, injected by `api_scanner._build_api_crawl_context`.
+- **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
+
+Leads are exportable to markdown from the UI (originals on the SAST run view, copies on a web run's SAST Leads tab); the export embeds a hidden JSON block for future re-import.
 
 ### Automatic SAST pre-phase
 

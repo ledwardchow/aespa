@@ -14,7 +14,6 @@ from sqlmodel import Session, select
 from aespa.config import get_settings
 from aespa.models import ApiCollection, ApiDocument
 
-
 # 25 MiB per-file cap for v1.
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 

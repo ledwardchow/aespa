@@ -12,7 +12,7 @@ import re
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
 
 import httpx
@@ -23,6 +23,9 @@ from aespa.services.prompts.reporting import (
     _NORMALIZE_TITLES_PROMPT,
     _WRITEUP_REPLAY_PROMPT,
 )
+
+# Re-exported for consumers that import this from aespa.services.llm.
+from aespa.services.prompts.specialist import SPECIALIST_AGENT_TOOLS  # noqa: F401
 from aespa.services.prompts.test_lead import (
     _ANALYSIS_PROMPT,
     _AUTH_PATH_FRAGMENTS,
@@ -38,15 +41,12 @@ from aespa.services.prompts.test_lead import (
     THINKING_AGENT_TOOLS,
     WSTG_SKILLS,
 )
-from aespa.services.prompts.specialist import (
-    SPECIALIST_AGENT_TOOLS,
-)
 from aespa.services.prompts.validator import (
-    _ADVERSARIAL_VALIDATOR_SYSTEM,
+    _ADVERSARIAL_VALIDATOR_SYSTEM,  # noqa: F401 — re-exported via aespa.services.llm
     _DISPROOF_HINTS,
     _VALIDATION_PLAN_PROMPT,
     _VALIDATION_VERDICT_PROMPT,
-    VALIDATOR_AGENT_TOOLS,
+    VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
 
 log = logging.getLogger("aespa.llm")
@@ -87,8 +87,14 @@ class AsyncTokenBucketLimiter:
 
         self._lock = asyncio.Lock()
 
-    async def acquire(self, estimated_tokens: int) -> bool:
+    async def acquire(self, estimated_tokens: int, on_wait=None) -> bool:
+        # A single request can never need more than the entire per-minute budget;
+        # without this clamp an estimate larger than ``max_tokens`` could never be
+        # satisfied (refill caps at ``max_tokens``) and ``acquire`` would loop and
+        # sleep forever. Clamp so an over-budget call paces once, then proceeds.
+        estimated_tokens = min(float(estimated_tokens), self.max_tokens)
         slept = False
+        notified = False
         while True:
             async with self._lock:
                 now = time.monotonic()
@@ -134,11 +140,23 @@ class AsyncTokenBucketLimiter:
                 wait_time = max(wait_time_tokens, wait_time_requests)
                 slept = True
 
+            # Fire the wait notice once, before the first sleep, so the caller can
+            # tell the user it is pacing (not stuck) the moment it starts waiting.
+            if on_wait is not None and not notified:
+                notified = True
+                try:
+                    on_wait(wait_time)
+                except Exception:
+                    pass
+
             await asyncio.sleep(wait_time)
 
     async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
         async with self._lock:
-            difference = estimated_tokens - actual_tokens
+            # Mirror the clamp in acquire(): only ``min(estimated, max_tokens)`` was
+            # ever reserved, so only that much can be credited back.
+            reserved = min(float(estimated_tokens), self.max_tokens)
+            difference = reserved - actual_tokens
             self.available_tokens = min(
                 self.max_tokens, max(0.0, self.available_tokens + difference)
             )
@@ -330,25 +348,90 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+def _emit_run_event(event: dict) -> None:
+    """Emit an event to whatever log is wired for the active run.
+
+    Routes through the context ``emit_fn`` set by ``set_run_context`` (the scanner
+    log, the API scan log, the ALICE event/chat stream, …), falling back to
+    ``events.emit(run_id)``.  Best-effort — never raises into an LLM call.
+    """
+    emit_fn = _emit_fn_var.get()
+    if emit_fn is not None:
+        try:
+            emit_fn(event)
+            return
+        except Exception:
+            pass
+    run_id = _run_id_var.get()
+    if run_id is not None:
+        try:
+            from aespa.services import events as _events
+
+            _events.emit(run_id, event)
+        except Exception:
+            pass
+
+
+def _emit_rate_limit_waiting(model: str, reserved_tokens: float, wait_time: float) -> None:
+    """Tell the user the scan is pacing for the rate limit (not stuck)."""
+    _emit_run_event(
+        {
+            "type": "scanner_phase",
+            "phase": "rate_limit",
+            "status": "active",
+            "message": (
+                f"LLM rate limit reached — pacing requests to stay within the "
+                f"configured limit (waiting ~{wait_time:.0f}s, reserved "
+                f"{int(reserved_tokens):,} tokens for {model})…"
+            ),
+        }
+    )
+
+
+def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
+    _emit_run_event(
+        {
+            "type": "scanner_phase",
+            "phase": "rate_limit",
+            "status": "complete",
+            "message": (
+                f"LLM rate limit cleared — resuming "
+                f"(used {used_tokens:,} tokens for {model})."
+            ),
+        }
+    )
+
+
 # Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
 _LLM_HEADERS = {"HTTP-Referer": "https://aespa.leddytech.com", "X-Title": "AESPA"}
 
 
 def _llm_client_kwargs() -> dict:
-    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI), always with verify=False."""
+    """Returns {'http_client': ...} for SDK clients (Anthropic, OpenAI).
+
+    TLS verification is left ON for direct connections and only disabled when an
+    upstream proxy is configured (to support HTTPS interception, e.g. Burp) —
+    mirroring the Bedrock path. Disabling it unconditionally would expose the API
+    key and prompt data to MITM even with no proxy in play.
+    """
     proxy = _llm_proxy_var.get()
     return {
         "http_client": httpx.AsyncClient(
-            verify=False, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
+            verify=proxy is None, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
         )
     }
 
 
 def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
-    """Creates an httpx client for direct LLM calls, always with verify=False."""
-    kwargs.setdefault("verify", False)
+    """Creates an httpx client for direct LLM calls.
+
+    Verifies TLS by default; only disables verification when an upstream proxy is
+    configured (HTTPS interception). See ``_llm_client_kwargs`` for rationale.
+    """
+    proxy = _llm_proxy_var.get()
+    kwargs.setdefault("verify", proxy is None)
     kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
-    if proxy := _llm_proxy_var.get():
+    if proxy:
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
 
@@ -649,6 +732,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             return await _openrouter(config, prompt, screenshot_b64)
         if config.provider == "bedrock":
             return await _bedrock(config, prompt, screenshot_b64)
+        if config.provider == "bedrock_mantle":
+            return await _openai_responses(config, prompt, screenshot_b64)
         return await _openai_compat(config, prompt, screenshot_b64)
 
     estimated_input = estimate_tokens(prompt, screenshot_b64, config.provider)
@@ -656,24 +741,12 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     total_estimated = estimated_input + estimated_output
 
     _last_call_tokens_var.set(None)
-    slept = await limiter.acquire(total_estimated)
-
-    run_id = _run_id_var.get()
-    if slept and run_id is not None:
-        try:
-            from aespa.services import events
-
-            events.emit(
-                run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "rate_limit",
-                    "status": "active",
-                    "message": f"LLM rate limit reached. Pacing and temporarily slowing down requests... (Reserved {total_estimated:,} tokens for model: {config.model})",
-                },
-            )
-        except Exception:
-            pass
+    # Notify the user the moment pacing starts (on_wait fires before the sleep),
+    # so a rate-limited scan never looks frozen.
+    slept = await limiter.acquire(
+        total_estimated,
+        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(total_estimated, limiter.max_tokens), wt),
+    )
 
     try:
         if config.provider == "anthropic":
@@ -690,6 +763,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             resp = await _openrouter(config, prompt, screenshot_b64)
         elif config.provider == "bedrock":
             resp = await _bedrock(config, prompt, screenshot_b64)
+        elif config.provider == "bedrock_mantle":
+            resp = await _openai_responses(config, prompt, screenshot_b64)
         else:
             resp = await _openai_compat(config, prompt, screenshot_b64)
 
@@ -701,21 +776,8 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             actual_total = total_estimated
             await limiter.reconcile(total_estimated, total_estimated)
 
-        if slept and run_id is not None:
-            try:
-                from aespa.services import events
-
-                events.emit(
-                    run_id,
-                    {
-                        "type": "scanner_phase",
-                        "phase": "rate_limit",
-                        "status": "complete",
-                        "message": f"LLM rate limit cleared. Resuming active scanning (Used {actual_total:,} tokens for model: {config.model})",
-                    },
-                )
-            except Exception:
-                pass
+        if slept:
+            _emit_rate_limit_cleared(config.model, actual_total)
 
         return resp
     except Exception:
@@ -879,6 +941,30 @@ async def stream_chat_completion(
                     break
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
+
+    elif config.provider == "bedrock_mantle":
+        # Mantle uses the OpenAI Responses API (gpt-5.x are Responses-only).
+        client = _make_bedrock_mantle_client(config)
+        r_input = [
+            {"type": "message", "role": m["role"], "content": m["content"]}
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+        ]
+        try:
+            stream = await _create_response(
+                client,
+                _mantle_response_kwargs(
+                    config, input=r_input, instructions=system_message, stream=True
+                ),
+            )
+            async for event in stream:
+                if getattr(event, "type", None) == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        yield delta
+        except Exception as e:
+            log.exception("Error in Bedrock Mantle responses stream")
+            raise RuntimeError(f"Bedrock Mantle responses stream failed: {e}") from e
 
     else:
         from openai import AsyncOpenAI
@@ -1114,7 +1200,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     if config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+        verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
     )
     client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
@@ -1196,6 +1282,184 @@ async def _openai_compat(
         cache_read_tokens=_u_cached,
     )
     return _extract_first_choice_text(resp)
+
+
+# ── Bedrock Mantle (OpenAI Responses API) ─────────────────────────────────────
+# Mantle's frontier OpenAI models (gpt-5.x) are served only via the Responses
+# API (/v1/responses), not Chat Completions, so all Mantle traffic uses Responses.
+
+
+def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
+    """Anthropic-style tool specs → OpenAI Responses function tools (flat shape)."""
+    return [
+        {
+            "type": "function",
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("input_schema", {"type": "object"}),
+        }
+        for t in tools
+    ]
+
+
+def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
+    """Translate Anthropic-format history into a Responses ``input`` item list.
+
+    Text turns become ``message`` items; assistant ``tool_use`` blocks become
+    ``function_call`` items and user ``tool_result`` blocks become
+    ``function_call_output`` items, keyed on the same ``call_id``.
+    """
+    items: list[dict] = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if isinstance(content, str):
+            items.append({"type": "message", "role": role, "content": content})
+            continue
+        if role == "user":
+            text_parts: list[str] = []
+            for blk in content:
+                btype = blk.get("type")
+                if btype == "text":
+                    text_parts.append(blk.get("text") or "")
+                elif btype == "tool_result":
+                    rc = blk.get("content") or ""
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": blk.get("tool_use_id") or "",
+                            "output": rc if isinstance(rc, str) else json.dumps(rc),
+                        }
+                    )
+            joined = " ".join(p for p in text_parts if p)
+            if joined:
+                items.append({"type": "message", "role": "user", "content": joined})
+        elif role == "assistant":
+            text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+            joined = " ".join(p for p in text_parts if p)
+            if joined:
+                items.append({"type": "message", "role": "assistant", "content": joined})
+            for blk in content:
+                if blk.get("type") == "tool_use":
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": blk.get("id") or "",
+                            "name": blk.get("name") or "",
+                            "arguments": json.dumps(blk.get("input") or {}),
+                        }
+                    )
+    return items
+
+
+def _is_mantle_reasoning_model(model: str) -> bool:
+    """True for Mantle reasoning models (gpt-5.x, o-series) that reject temperature.
+
+    Mantle ids carry a vendor prefix (e.g. ``openai.gpt-5.5``), which the slash-based
+    ``_model_needs_reasoning_params`` split doesn't catch — so match the substring too.
+    """
+    return "gpt-5" in (model or "").lower() or _model_needs_reasoning_params(model)
+
+
+def _mantle_response_kwargs(
+    config: LLMConfig,
+    *,
+    input: Any,
+    instructions: Optional[str] = None,
+    tools: Optional[list[dict]] = None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "input": input,
+        "max_output_tokens": config.max_tokens,
+    }
+    if instructions is not None:
+        kwargs["instructions"] = instructions
+    # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
+    # for them rather than pay a failed round-trip (the retry below is a backstop).
+    if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
+        kwargs["temperature"] = config.temperature
+    if tools is not None:
+        kwargs["tools"] = tools
+    if stream:
+        kwargs["stream"] = True
+    return kwargs
+
+
+async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Call responses.create, retrying once without params the model rejects."""
+    try:
+        return await client.responses.create(**kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        retry = dict(kwargs)
+        changed = False
+        if "temperature" in retry and "temperature" in message:
+            retry.pop("temperature", None)
+            changed = True
+        if "tool_choice" in retry and (
+            "tool_choice" in message or "tool choice" in message
+        ):
+            retry.pop("tool_choice", None)
+            changed = True
+        if not changed:
+            raise
+        return await client.responses.create(**retry)
+
+
+def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
+    usage = getattr(resp, "usage", None)
+    _record_usage(
+        config.model,
+        getattr(usage, "input_tokens", 0) if usage else 0,
+        getattr(usage, "output_tokens", 0) if usage else 0,
+        cache_read_tokens=(
+            getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0)
+            if usage
+            else 0
+        ),
+    )
+
+
+def _extract_responses_text(resp: Any) -> str:
+    text = getattr(resp, "output_text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    parts: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        if getattr(item, "type", None) == "message":
+            for part in getattr(item, "content", None) or []:
+                if getattr(part, "type", None) == "output_text":
+                    value = getattr(part, "text", None)
+                    if isinstance(value, str):
+                        parts.append(value)
+    return "".join(parts).strip()
+
+
+async def _openai_responses(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    client = _make_bedrock_mantle_client(config)
+    if screenshot_b64:
+        r_input: Any = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/png;base64,{screenshot_b64}",
+                    },
+                ],
+            }
+        ]
+    else:
+        r_input = prompt
+    resp = await _create_response(client, _mantle_response_kwargs(config, input=r_input))
+    _record_responses_usage(config, resp)
+    return _extract_responses_text(resp)
 
 
 async def _openrouter(
@@ -1429,6 +1693,171 @@ def _extract_bedrock_text(data: dict[str, Any]) -> str:
 def _bedrock_region_from_url(base_url: str) -> str:
     match = re.search(r"bedrock-runtime[.-]([a-z0-9-]+)\.", base_url)
     return match.group(1) if match else "us-east-1"
+
+
+# SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
+# (like the bedrock-runtime OpenAI-compatible endpoint) under the "bedrock"
+# service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
+# (`--aws-sigv4 "aws:amz:<region>:bedrock"`) and litellm's Bedrock signer.
+_BEDROCK_MANTLE_SIGV4_SERVICE = "bedrock"
+
+
+def _bedrock_mantle_region() -> str:
+    """Default region for Bedrock Mantle when no base URL is configured."""
+    return (
+        os.getenv("BEDROCK_MANTLE_REGION")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "us-east-2"
+    )
+
+
+def _bedrock_mantle_is_frontier_model(model: str) -> bool:
+    """Frontier OpenAI models (gpt-5.x) are served on Mantle's ``/openai/v1`` path.
+
+    The gpt-oss and other models use the plain ``/v1`` path instead — confirmed by
+    the AWS launch blog and the OpenAI Bedrock cookbook.
+    """
+    return "gpt-5" in (model or "").lower()
+
+
+def _bedrock_mantle_base_url(config: LLMConfig) -> str:
+    """Resolve the OpenAI Responses base URL for a Bedrock Mantle config.
+
+    The path is model-dependent: frontier ``openai.gpt-5.x`` models use
+    ``/openai/v1`` while gpt-oss and others use ``/v1`` — so a single provider can
+    serve both. An explicit ``base_url`` keeps its host (and region) but the path
+    suffix is normalised to match the selected model. When blank, the region comes
+    from ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION`` (default
+    ``us-east-2``).
+    """
+    suffix = "/openai/v1" if _bedrock_mantle_is_frontier_model(config.model) else "/v1"
+    if config.base_url:
+        base = config.base_url.rstrip("/")
+        # Drop any path suffix the user supplied, then re-apply the one this model
+        # needs, so switching models on the same provider routes correctly.
+        for known in ("/openai/v1", "/v1"):
+            if base.endswith(known):
+                base = base[: -len(known)]
+                break
+        return f"{base}{suffix}"
+    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws{suffix}"
+
+
+def _bedrock_mantle_region_from_url(base_url: str) -> str:
+    """Region used for SigV4 signing — must match the endpoint host's region."""
+    match = re.search(r"bedrock-mantle\.([a-z0-9-]+)\.api\.aws", base_url)
+    return match.group(1) if match else _bedrock_mantle_region()
+
+
+class _BedrockMantleSigV4Auth(httpx.Auth):
+    """httpx auth flow that SigV4-signs Bedrock Mantle requests with AWS creds.
+
+    Lets the OpenAI SDK reach the OpenAI-compatible Mantle endpoint using the
+    default boto3 credential chain (environment, shared profile, SSO, IAM role,
+    instance/task role) instead of a Bedrock API key — mirroring the boto3 path
+    of the Bedrock Runtime provider.  The refreshable credentials object is
+    resolved once (lazily) and re-frozen per request so role/STS credentials
+    rotate before they expire.
+    """
+
+    requires_request_body = True
+
+    def __init__(self, region: str, profile: str | None = None):
+        self._region = region
+        self._profile = profile
+        self._credentials = None
+
+    def _resolve_credentials(self):
+        if self._credentials is None:
+            import boto3
+
+            session = (
+                boto3.Session(profile_name=self._profile)
+                if self._profile
+                else boto3.Session()
+            )
+            creds = session.get_credentials()
+            if creds is None:
+                raise RuntimeError(
+                    "No AWS credentials found for Bedrock Mantle. Provide an "
+                    "Amazon Bedrock API key, or configure AWS credentials "
+                    "(environment, shared profile, SSO, or an IAM role)."
+                )
+            self._credentials = creds
+        return self._credentials
+
+    def _sign(self, request: httpx.Request) -> None:
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        frozen = self._resolve_credentials().get_frozen_credentials()
+        aws_request = AWSRequest(
+            method=request.method,
+            url=str(request.url),
+            data=request.content,
+            headers={
+                "Content-Type": request.headers.get("Content-Type", "application/json")
+            },
+        )
+        SigV4Auth(frozen, _BEDROCK_MANTLE_SIGV4_SERVICE, self._region).add_auth(
+            aws_request
+        )
+        # Copy the signed headers (Authorization, X-Amz-Date, X-Amz-Security-Token)
+        # onto the outgoing request, replacing the SDK's placeholder Bearer header.
+        for key, value in aws_request.headers.items():
+            request.headers[key] = value
+
+    def sync_auth_flow(self, request: httpx.Request):
+        self._sign(request)
+        yield request
+
+    async def async_auth_flow(self, request: httpx.Request):
+        # botocore credential resolution / signing is synchronous and may touch
+        # the filesystem or IMDS on first use; keep it off the event loop.
+        await asyncio.get_running_loop().run_in_executor(None, self._sign, request)
+        yield request
+
+
+def _make_bedrock_mantle_client(config: LLMConfig):
+    """Build an AsyncOpenAI client for Bedrock Mantle.
+
+    With an API key, send it as a Bearer token (default OpenAI SDK behaviour).
+    Without one, fall back to AWS credentials by SigV4-signing each request — the
+    same key-or-boto3 split the Bedrock Runtime provider uses.
+    """
+    from openai import AsyncOpenAI
+
+    base_url = _bedrock_mantle_base_url(config)
+    # A Mantle project id is sent as the OpenAI-Project header (the SDK's
+    # `project=` param) so usage is attributed to that project for cost tracking.
+    project_id = getattr(config, "project_id", None) or None
+    project_kwargs = {"project": project_id} if project_id else {}
+    if config.api_key:
+        return AsyncOpenAI(
+            api_key=config.api_key,
+            base_url=base_url,
+            **project_kwargs,
+            **_llm_client_kwargs(),
+        )
+
+    proxy = _llm_proxy_var.get()
+    signer = _BedrockMantleSigV4Auth(
+        region=_bedrock_mantle_region_from_url(base_url),
+        profile=os.getenv("AWS_PROFILE"),
+    )
+    http_client = httpx.AsyncClient(
+        verify=proxy is None,
+        headers=_LLM_HEADERS,
+        auth=signer,
+        **({"proxy": proxy} if proxy else {}),
+    )
+    return AsyncOpenAI(
+        api_key="not-needed",
+        base_url=base_url,
+        http_client=http_client,
+        **project_kwargs,
+    )
 
 
 async def _bedrock(
@@ -2346,12 +2775,13 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 TOOL_RESULT_CHAR_LIMIT = 8_000
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
-# wire format or the Bedrock Converse toolConfig format.
+# wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
+        "bedrock_mantle",
         "openai",
         "openai_compatible",
         "openrouter",
@@ -2403,13 +2833,74 @@ def _with_anthropic_cache(
     return cached_messages, cached_tools
 
 
+def _estimate_tools_call_tokens(system_message: str, messages: list[dict]) -> int:
+    """Rough input-token estimate for an agentic (tool-using) call.
+
+    The messages list is Anthropic-format; content is either a string or a list
+    of blocks. We only need an order-of-magnitude figure to drive pacing, so flatten
+    everything to text and reuse the same ~chars/4 heuristic as ``estimate_tokens``.
+    """
+    parts: list[str] = [system_message or ""]
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    # text / tool_result content / tool_use input — stringify cheaply.
+                    parts.append(str(block.get("text") or block.get("content") or block.get("input") or ""))
+        elif content is not None:
+            parts.append(str(content))
+    return estimate_tokens("\n".join(parts))
+
+
 async def _call_with_tools(
     config: "LLMConfig",
     system_message: str,
     messages: list[dict],
     tools: list[dict] | None = None,
 ) -> "tuple[list[dict], str, Any]":
-    """Call an LLM with tool definitions.
+    """Rate-limited entry point for an agentic (tool-using) LLM call.
+
+    Paces through the same per-provider token bucket as the non-agentic ``_call``
+    path so the configured ``max_tpm`` / ``max_rpm`` cover dynamic, API, SAST and
+    ALICE scans too — not just page analysis. Emits a rate-limit notice into the
+    active run's log the moment pacing begins, then dispatches to the per-provider
+    implementation.
+    """
+    limiter = get_limiter_for_config(config)
+    if limiter is None:
+        return await _call_with_tools_impl(config, system_message, messages, tools=tools)
+
+    estimated = _estimate_tools_call_tokens(system_message, messages) + (config.max_tokens or 4096)
+    _last_call_tokens_var.set(None)
+    slept = await limiter.acquire(
+        estimated,
+        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(estimated, limiter.max_tokens), wt),
+    )
+    try:
+        result = await _call_with_tools_impl(config, system_message, messages, tools=tools)
+        usage = _last_call_tokens_var.get()
+        actual_total = (usage["input"] + usage["output"]) if usage else estimated
+        await limiter.reconcile(estimated, actual_total)
+        if slept:
+            _emit_rate_limit_cleared(config.model, actual_total)
+        return result
+    except Exception:
+        await limiter.reconcile(estimated, 0)
+        raise
+
+
+async def _call_with_tools_impl(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> "tuple[list[dict], str, Any]":
+    """Call an LLM with tool definitions (per-provider dispatch).
 
     The *messages* list is always in Anthropic format (the canonical internal
     representation used by thinking_agentic_loop).  Each provider branch
@@ -2707,6 +3198,58 @@ async def _call_with_tools(
         )
         return blocks, stop_reason, raw_content_ant
 
+    # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
+    if config.provider == "bedrock_mantle":
+        client = _make_bedrock_mantle_client(config)
+        r_kwargs = _mantle_response_kwargs(
+            config,
+            input=_ant_messages_to_responses(messages),
+            instructions=system_message,
+            tools=_ant_tools_to_responses(_active_tools),
+        )
+        # Force a tool call unless disabled; if the model rejects forced tool
+        # choice, _create_response retries once without it.
+        if getattr(config, "force_tool_choice", True):
+            r_kwargs["tool_choice"] = "required"
+        resp = await _create_response(client, r_kwargs)
+
+        blocks = []
+        for item in getattr(resp, "output", None) or []:
+            itype = getattr(item, "type", None)
+            if itype == "message":
+                for part in getattr(item, "content", None) or []:
+                    if getattr(part, "type", None) == "output_text":
+                        text_val = getattr(part, "text", None)
+                        if text_val:
+                            blocks.append(
+                                {
+                                    "type": "text",
+                                    "id": None,
+                                    "name": None,
+                                    "input": None,
+                                    "text": text_val,
+                                }
+                            )
+            elif itype == "function_call":
+                try:
+                    inp = json.loads(getattr(item, "arguments", "") or "{}")
+                except Exception:
+                    inp = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": getattr(item, "call_id", None),
+                        "name": getattr(item, "name", None),
+                        "input": inp,
+                        "text": None,
+                    }
+                )
+        stop_reason = (
+            "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
+        )
+        _record_responses_usage(config, resp)
+        return blocks, stop_reason, blocks  # store Anthropic-format in history
+
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
     #         azure_foundry, azure_foundry_openai
@@ -2939,7 +3482,7 @@ async def _call_with_tools(
         if config.base_url:
             _g_http_opts["base_url"] = config.base_url
         _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=False, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+            verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
         )
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()

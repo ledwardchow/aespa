@@ -17,18 +17,21 @@ _queues: dict[int, list[asyncio.Queue]] = {}
 # collide (id 1 can be all three at once), so the shared agent_log / scan_log
 # tables need a discriminator written at persist time.  Resolving that
 # discriminator from the run id alone is impossible when ids collide, so the
-# authoritative source is ``_run_kind_ctx`` — a context variable each scan
-# orchestrator sets (via ``run_kind_scope``) for the duration of its work.
-# Because ``asyncio.create_task`` snapshots the current context, every event a
-# scan emits — directly or from child tasks it spawns — inherits the correct
-# kind regardless of id collisions.  The id-keyed sets below remain only as a
-# best-effort fallback for emit paths that run outside any scope.
+# authoritative — and only — source is ``_run_kind_ctx``: a context variable
+# each scan orchestrator sets (via ``run_kind_scope``) for the duration of its
+# work.  Because ``asyncio.create_task`` snapshots the current context, every
+# event a scan emits — directly or from any child task it spawns — inherits the
+# correct kind regardless of id collisions.
+#
+# INVARIANT: every background-task entry point that can emit ``agent_status`` /
+# ``scanner_phase`` MUST run inside a ``run_kind_scope`` (the web/api/sast
+# scanners, the crawler, the validator, and ALICE all do).  There is
+# deliberately no id-keyed fallback: keying on a colliding run id is what leaked
+# events across runs.  An emit that somehow escapes every scope falls back to
+# ``'web'`` — deterministic, never routed by stale global state.
 _run_kind_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "aespa_run_kind", default=None
 )
-
-_api_run_ids: set[int] = set()
-_sast_run_ids: set[int] = set()
 
 
 @contextlib.contextmanager
@@ -44,34 +47,11 @@ def run_kind_scope(kind: str) -> Iterator[None]:
         _run_kind_ctx.reset(token)
 
 
-def register_api_run(run_id: int) -> None:
-    """Mark a run id as belonging to an API scan so its persisted log rows are
-    tagged ``run_kind='api'``.  Safe to call repeatedly.
-
-    Fallback only — prefer ``run_kind_scope('api')``, which is collision-proof."""
-    _api_run_ids.add(run_id)
-
-
-def register_sast_run(run_id: int) -> None:
-    """Mark a run id as belonging to a SAST scan so its persisted log rows are
-    tagged ``run_kind='sast'``.  Safe to call repeatedly.
-
-    Fallback only — prefer ``run_kind_scope('sast')``, which is collision-proof."""
-    _sast_run_ids.add(run_id)
-
-
 def _run_kind_for(run_id: int, event: dict) -> str:
     explicit = event.get("_run_kind")
     if explicit:
         return str(explicit)
-    scoped = _run_kind_ctx.get()
-    if scoped:
-        return scoped
-    if run_id in _sast_run_ids:
-        return "sast"
-    if run_id in _api_run_ids:
-        return "api"
-    return "web"
+    return _run_kind_ctx.get() or "web"
 
 
 def emit(run_id: int, event: dict) -> None:
@@ -96,9 +76,10 @@ def emit(run_id: int, event: dict) -> None:
 def _persist_phase_event(run_id: int, event: dict) -> None:
     """Write a scanner_phase event to scan_log (best-effort, never raises)."""
     try:
+        from sqlmodel import Session
+
         from aespa.db import get_engine
         from aespa.models import ScanLog
-        from sqlmodel import Session
 
         data = event.get("data")
         entry = ScanLog(
@@ -120,9 +101,10 @@ def _persist_phase_event(run_id: int, event: dict) -> None:
 def _persist_agent_status_event(run_id: int, event: dict) -> None:
     """Write an agent_status event to agent_log (best-effort, never raises)."""
     try:
+        from sqlmodel import Session
+
         from aespa.db import get_engine
         from aespa.models import AgentLog
-        from sqlmodel import Session
 
         entry = AgentLog(
             test_run_id=run_id,

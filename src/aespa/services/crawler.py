@@ -36,7 +36,6 @@ from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
     get_global_http_header_config,
-    get_llm_config,
     get_llm_config_for_run,
     get_upstream_proxy_config,
 )
@@ -88,7 +87,13 @@ def _login_url_for_credential(default_login_url: str, cred) -> str:
 async def start_crawl(run_id: int) -> None:
     if run_id in _active_tasks:
         return
-    task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
+    # Tag every event this crawl emits as run_kind='web'.  Run ids collide across
+    # web / api / sast, so the scope — snapshotted by create_task below into the
+    # crawl task and any worker it spawns — is the authoritative discriminator.
+    # Without it, an unscoped agent_status emit for an id that was also a SAST/API
+    # run would be mis-tagged and leak into that run's Agents tab.
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(_crawl_task(run_id), name=f"crawl-{run_id}")
     _active_tasks[run_id] = task
     task.add_done_callback(lambda _: _active_tasks.pop(run_id, None))
 
@@ -390,6 +395,11 @@ async def _crawl_as_credential(
 
         async def _record_api_response(response) -> None:
             try:
+                # Stamp the page this call fired on *synchronously*, before the
+                # body await below. A slow `response.text()` can otherwise resolve
+                # after the crawl has moved to the next URL, and the call would be
+                # attributed to that page instead. (See the promote step.)
+                page_url = page.url
                 if not _same_domain(response.url, base_netloc):
                     return
                 resource_type = response.request.resource_type
@@ -422,6 +432,7 @@ async def _crawl_as_credential(
                         "content_type": content_type,
                         "response_headers": response_headers,
                         "body": body,
+                        "page_url": page_url,
                     }
                 )
             except Exception as exc:
@@ -468,9 +479,14 @@ async def _crawl_as_credential(
                 if norm in shared.crawled_norms:
                     page_id = shared.crawled_norms[norm]
                     is_first = False
-                elif local_pages >= max_pages or depth > max_depth:
-                    # Per-phase budget exhausted — this credential has visited
-                    # enough pages.  Other phases may still have budget.
+                elif depth > max_depth:
+                    continue
+                elif shared.pages_done >= max_pages:
+                    # max_pages caps the total number of distinct site-map nodes
+                    # (shared across every phase), so the node count never exceeds
+                    # it. Already-known URLs above still fall through so each phase
+                    # can record its own access view of them. Same global cap the
+                    # API-page promotion path uses (_promote_api_calls).
                     continue
                 else:
                     page_id = _save_page_placeholder(run_id, url, depth)
@@ -714,9 +730,23 @@ async def _crawl_as_credential(
             )
 
             # ── Enqueue links ─────────────────────────────────────────────────
+            # Promote only the API calls captured while THIS page was loaded
+            # (matched by the page stamp recorded when each response fired). A
+            # straggler from a previous page — whose body download finished late —
+            # carries that page's stamp and is dropped here rather than being
+            # misattributed to the current page. Snapshot + clear is atomic w.r.t.
+            # the event loop (no await between), so concurrent response handlers
+            # can't lose an append. ``norm``/``norm_final`` cover the page's
+            # requested and post-redirect URLs.
+            page_norms = {norm, norm_final}
+            page_calls = [
+                c for c in observed_api_calls
+                if _norm(c.get("page_url") or "") in page_norms
+            ]
+            observed_api_calls.clear()
             await _promote_api_calls(
                 run_id=run_id,
-                calls=observed_api_calls,
+                calls=page_calls,
                 source_page_id=page_id,
                 source_depth=depth,
                 shared=shared,
@@ -725,7 +755,6 @@ async def _crawl_as_credential(
                 username=username,
                 llm_cfg=llm_cfg,
             )
-            observed_api_calls.clear()
 
             if depth < max_depth:
                 filtered_suggested = _filter_suggested_links(
@@ -2672,12 +2701,38 @@ def _norm(url: str) -> str:
         return url
 
 
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def _norm_netloc(netloc: str, scheme: str) -> str:
+    """Lower-case a netloc and drop the scheme's default port + any userinfo.
+
+    So ``example.com`` and ``example.com:443`` (under https) compare equal — a
+    bare prefix-equality check on the raw netloc treats those as different hosts
+    and wrongly drops same-site links that only differ by an explicit default port.
+    """
+    netloc = netloc.lower()
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]  # strip user:pass@
+    host, sep, port = netloc.rpartition(":")
+    # rpartition only yields a port when there is a colon AND the tail is numeric
+    # (guards IPv6 literals like ``[::1]`` whose tail is not all digits).
+    if sep and port.isdigit():
+        if port == _DEFAULT_PORTS.get(scheme):
+            return host
+        return f"{host}:{port}"
+    return netloc
+
+
 def _same_domain(url: str, base_netloc: str) -> bool:
     try:
         parsed = urlparse(url)
-        return (
-            parsed.scheme in ("http", "https")
-            and parsed.netloc.lower() == base_netloc.lower()
+        if parsed.scheme not in ("http", "https"):
+            return False
+        # Normalise both sides against the candidate's scheme so an implicit vs
+        # explicit default port (e.g. :443 on https) does not split the host.
+        return _norm_netloc(parsed.netloc, parsed.scheme) == _norm_netloc(
+            base_netloc, parsed.scheme
         )
     except Exception:
         return False

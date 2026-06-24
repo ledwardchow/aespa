@@ -13,11 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import shlex
 import subprocess
-import tempfile
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -26,11 +24,21 @@ import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import AdversarialValidatorConfig, Credential, CrawledPage, ScanFinding, Site, TestRun
+from aespa.models import (
+    CrawledPage,
+    Credential,
+    ScanFinding,
+    Site,
+    TestRun,
+)
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
-from aespa.services.settings import get_adversarial_validator_config, get_llm_config, get_run_scanner_policy
+from aespa.services.settings import (
+    get_adversarial_validator_config,
+    get_llm_config,
+    get_run_scanner_policy,
+)
 
 log = logging.getLogger("aespa.validator")
 
@@ -88,10 +96,16 @@ async def start_validation(run_id: int, finding_ids: list[int] | None = None) ->
     if run_id in _validation_tasks:
         return
     _stop_requested.discard(run_id)
-    task = asyncio.create_task(
-        _validation_task(run_id, finding_ids=finding_ids),
-        name=f"validate-{run_id}",
-    )
+    # The validator operates exclusively on the web TestRun pipeline (it refuses
+    # API findings), so tag its events run_kind='web'.  When invoked inline during
+    # a scan this scope is already 'web'; the manual /validate endpoints call here
+    # from an unscoped request handler, where this scope is what keeps the
+    # validator's agent_status rows from leaking into a colliding api/sast run.
+    with events_svc.run_kind_scope("web"):
+        task = asyncio.create_task(
+            _validation_task(run_id, finding_ids=finding_ids),
+            name=f"validate-{run_id}",
+        )
     _validation_tasks[run_id] = task
     task.add_done_callback(lambda _: _validation_tasks.pop(run_id, None))
 
@@ -992,11 +1006,73 @@ def _first_page_evidence_match(body: str, page_title: str, page_text: str) -> st
 # Only verified commands are persisted — "it works, or don't have it".
 
 _POC_AUTH_FILE = "aespa-poc-auth.txt"
-_POC_SAFE_METHODS = {"GET", "HEAD"}
+_POC_SAFE_METHODS = {"GET", "HEAD", "POST"}
 _POC_BLOCKED_HEADERS = {"authorization", "cookie", "host", "content-length"}
 _POC_MAX_HEADERS = 12
 _POC_MAX_URL_LEN = 2048
 _POC_TIMEOUT_S = 20
+
+
+def _emit_poc_outcome(
+    run_id: int,
+    finding: ScanFinding,
+    *,
+    status: str,
+    detail: str = "",
+    method: str = "",
+    url: str = "",
+) -> None:
+    """Record a PoC outcome to the Python log, the scan log, and the reporting agent.
+
+    The scanner_phase event is auto-persisted to `scan_log` by events_svc.emit; the
+    agent_status event lands in `agent_log` (because _persist=True) and updates the
+    "Reporting" agent panel in the UI. The Python log line is INFO so the same
+    decision is visible in stderr/file even when the SSE stream is disconnected.
+    """
+    title = (finding.title or "").strip()
+    short = (title[:80] + "…") if len(title) > 80 else title
+    messages = {
+        "verified": f"PoC verified for {short}",
+        "verification_failed": f"PoC verification failed for {short}",
+        "no_request": f"No PoC request supplied by validator for {short}",
+        "out_of_scope": f"PoC suppressed (out-of-scope URL) for {short}",
+        "method_suppressed":
+            f"PoC suppressed (state-changing method {method}) for {short}",
+        "no_assertion": f"PoC suppressed (no positive assertion) for {short}",
+        "auth_unresolved":
+            f"PoC suppressed (auth credential not resolvable) for {short}",
+        "url_too_long": f"PoC suppressed (URL too long) for {short}",
+    }
+    message = messages.get(status, f"PoC outcome [{status}] for {short}")
+    if detail:
+        message = f"{message} — {detail}"
+
+    log.info(
+        "PoC [%s] finding=%s title=%r: %s",
+        status, finding.id, title, detail or url or method,
+    )
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "poc_verify",
+        "status": "complete",
+        "message": message,
+        "data": {
+            "finding_id": finding.id,
+            "poc_status": status,
+            "method": method,
+            "url": url,
+        },
+    })
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "reporting",
+        "role": "Reporting",
+        "status": "active",
+        "current_task": message,
+        "outcome": detail or None,
+        "_persist": True,
+    })
 
 
 async def _attach_poc_if_confirmed(
@@ -1010,6 +1086,8 @@ async def _attach_poc_if_confirmed(
     """Build, verify, and persist a PoC command for a confirmed finding.
 
     Stores nothing if no reproducible request is available or verification fails.
+    Every branch of the build/verify pipeline emits an INFO log + scan-log + reporting
+    event so the reason for a missing PoC is visible to the user.
     """
     if not isinstance(done_input, dict):
         return
@@ -1018,10 +1096,15 @@ async def _attach_poc_if_confirmed(
     }
     try:
         built = await _build_and_verify_poc(
-            finding, done_input, user_sessions_by_name, scanner_policy
+            finding, done_input, user_sessions_by_name, scanner_policy,
+            run_id=run_id,
         )
     except Exception as exc:  # pragma: no cover - defensive
-        log.debug("PoC build/verify failed for finding %s: %s", finding.id, exc)
+        log.warning("PoC build/verify raised for finding %s: %s", finding.id, exc)
+        _emit_poc_outcome(
+            run_id, finding, status="verification_failed",
+            detail=f"exception during build/verify: {exc}",
+        )
         return
     if not built:
         return
@@ -1042,7 +1125,7 @@ async def _attach_poc_if_confirmed(
         "poc_command": command,
         "poc_setup": setup,
     })
-    log.info("Verified PoC attached to finding %s", finding.id)
+    log.info("Verified PoC attached to finding %s (id=%s)", finding.id, finding.id)
 
 
 async def _build_and_verify_poc(
@@ -1050,26 +1133,58 @@ async def _build_and_verify_poc(
     done_input: dict,
     user_sessions_by_name: dict[str, dict],
     scanner_policy,
+    *,
+    run_id: int | None = None,
 ) -> tuple[str, str] | None:
     poc_request = done_input.get("poc_request")
     if not isinstance(poc_request, dict):
+        if run_id is not None:
+            _emit_poc_outcome(
+                run_id, finding, status="no_request",
+                detail="validator did not supply a poc_request",
+            )
         return None
 
     url = str(poc_request.get("url") or "").strip()
     if not _poc_url_in_scope(url, finding.affected_url):
+        if run_id is not None:
+            affected_host = urlparse(finding.affected_url or "").netloc or "empty"
+            _emit_poc_outcome(
+                run_id, finding, status="out_of_scope",
+                detail=f"poc url host does not match finding ({affected_host})",
+                url=url,
+            )
         return None
     if len(url) > _POC_MAX_URL_LEN:
+        if run_id is not None:
+            _emit_poc_outcome(
+                run_id, finding, status="url_too_long",
+                detail=f"url len {len(url)} > {_POC_MAX_URL_LEN}", url=url,
+            )
         return None
 
     method = str(poc_request.get("method") or "GET").upper()
     if method not in _POC_SAFE_METHODS:
-        # Never ship a command that could mutate state.
+        # Restrict to the allow-listed reproduction methods. POST is permitted so
+        # the PoC can reproduce a confirmed state-changing finding against the
+        # already-authorised target; methods outside the allow-list are refused.
+        if run_id is not None:
+            _emit_poc_outcome(
+                run_id, finding, status="method_suppressed",
+                method=method, url=url,
+                detail="only GET, HEAD, and POST are accepted",
+            )
         return None
 
     headers = _sanitise_poc_headers(poc_request.get("headers"))
 
     expect = poc_request_expect(done_input)
     if expect is None:
+        if run_id is not None:
+            _emit_poc_outcome(
+                run_id, finding, status="no_assertion", method=method, url=url,
+                detail="poc_expect has no positive status or body_contains",
+            )
         return None
 
     # Resolve auth, if the request needs a session.
@@ -1079,11 +1194,23 @@ async def _build_and_verify_poc(
     if use_session:
         session = user_sessions_by_name.get(use_session)
         if not session:
+            if run_id is not None:
+                _emit_poc_outcome(
+                    run_id, finding, status="auth_unresolved",
+                    method=method, url=url,
+                    detail=f"no live session for user {use_session!r}",
+                )
             return None
         poc_auth = done_input.get("poc_auth") if isinstance(done_input.get("poc_auth"), dict) else {}
         mechanism = str(poc_auth.get("mechanism") or "cookie_httponly")
         auth = _resolve_poc_auth(session, mechanism)
         if not auth:
+            if run_id is not None:
+                _emit_poc_outcome(
+                    run_id, finding, status="auth_unresolved",
+                    method=method, url=url,
+                    detail=f"no credential for mechanism {mechanism!r}",
+                )
             return None
         setup = _build_poc_setup(mechanism, use_session, str(poc_auth.get("instructions") or ""))
 
@@ -1094,13 +1221,40 @@ async def _build_and_verify_poc(
         insecure=True,
         follow_redirects=bool(getattr(scanner_policy, "follow_redirects", True)),
         auth=auth,
+        body=poc_request.get("body"),
+    )
+    # The shipped `command` is a POSIX shell string for the human to run. The
+    # local verification, however, must not go through a shell: shlex POSIX
+    # quoting is meaningless to cmd.exe on Windows (so nothing ever verifies) and
+    # target-derived header/body/url values under a shell are a command-injection
+    # vector. Re-run the same request as a shell-free argv instead.
+    argv = _build_curl_argv(
+        method,
+        url,
+        headers,
+        insecure=True,
+        follow_redirects=bool(getattr(scanner_policy, "follow_redirects", True)),
+        auth=auth,
+        body=poc_request.get("body"),
     )
 
-    verified = await asyncio.to_thread(
-        _run_and_assert_curl, command, expect, auth["file_value"] if auth else None
-    )
+    verified = await asyncio.to_thread(_run_and_assert_curl, argv, expect)
     if not verified:
+        if run_id is not None:
+            _emit_poc_outcome(
+                run_id, finding, status="verification_failed", method=method, url=url,
+                detail=(
+                    f"curl re-run did not match assertion "
+                    f"(status={expect.get('status')!r})"
+                ),
+            )
         return None
+
+    if run_id is not None:
+        _emit_poc_outcome(
+            run_id, finding, status="verified", method=method, url=url,
+            detail="auth required" if auth else "unauthenticated",
+        )
     return command, setup
 
 
@@ -1179,6 +1333,7 @@ def _build_curl_command(
     insecure: bool,
     follow_redirects: bool,
     auth: dict | None,
+    body: Any = None,
 ) -> str:
     # Everything model-derived is shlex-quoted; only our own constant auth header
     # uses a shell substitution to read the credential from the token file.
@@ -1192,6 +1347,19 @@ def _build_curl_command(
         args += ["-X", method]
     for name, value in headers.items():
         args += ["-H", f"{name}: {value}"]
+
+    if body is not None:
+        if isinstance(body, str):
+            args += ["--data-raw", body]
+        elif isinstance(body, (dict, list)):
+            try:
+                serialized = json.dumps(body, separators=(",", ":"))
+            except (TypeError, ValueError):
+                serialized = str(body)
+            args += ["-H", "Content-Type: application/json", "--data-raw", serialized]
+        else:
+            args += ["--data-raw", str(body)]
+
     args.append(url)
     command = shlex.join(args)
     if auth:
@@ -1199,24 +1367,70 @@ def _build_curl_command(
     return command
 
 
-def _run_and_assert_curl(command: str, expect: dict, auth_file_value: str | None) -> bool:
-    """Run the exact PoC command in a throwaway dir and check the assertion."""
-    with tempfile.TemporaryDirectory(prefix="aespa-poc-") as tmp:
-        if auth_file_value is not None:
-            with open(os.path.join(tmp, _POC_AUTH_FILE), "w", encoding="utf-8") as fh:
-                fh.write(auth_file_value)
-        try:
-            proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=tmp,
-                capture_output=True,
-                text=True,
-                timeout=_POC_TIMEOUT_S + 10,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            log.debug("PoC curl execution failed: %s", exc)
-            return False
+def _build_curl_argv(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    *,
+    insecure: bool,
+    follow_redirects: bool,
+    auth: dict | None,
+    body: Any = None,
+) -> list[str]:
+    """Argv form of the PoC request for shell-free local verification.
+
+    Mirrors ``_build_curl_command`` but returns a list passed straight to
+    ``subprocess.run`` without a shell, so no quoting/metacharacter handling is
+    needed and the result behaves identically on POSIX and Windows. The resolved
+    credential is materialised directly into the Authorization/Cookie header
+    rather than via the shipped command's ``$(cat …)`` substitution.
+    """
+    args = ["curl", "-s", "-S", "-i"]
+    if insecure:
+        args.append("-k")
+    if follow_redirects:
+        args.append("-L")
+    args += ["--max-time", str(_POC_TIMEOUT_S)]
+    if method != "GET":
+        args += ["-X", method]
+    for name, value in headers.items():
+        args += ["-H", f"{name}: {value}"]
+
+    if body is not None:
+        if isinstance(body, str):
+            args += ["--data-raw", body]
+        elif isinstance(body, (dict, list)):
+            try:
+                serialized = json.dumps(body, separators=(",", ":"))
+            except (TypeError, ValueError):
+                serialized = str(body)
+            args += ["-H", "Content-Type: application/json", "--data-raw", serialized]
+        else:
+            args += ["--data-raw", str(body)]
+
+    if auth:
+        args += ["-H", f"{auth['header_name']}: {auth['header_prefix']}{auth['file_value']}"]
+    args.append(url)
+    return args
+
+
+def _run_and_assert_curl(argv: list[str], expect: dict) -> bool:
+    """Run the PoC request as a shell-free argv and check the assertion.
+
+    No shell is used (so target-derived values cannot be interpreted as shell
+    syntax) and no quoting is required, which also makes verification work
+    identically on Windows, where POSIX shlex quoting is meaningless to cmd.exe.
+    """
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_POC_TIMEOUT_S + 10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        log.debug("PoC curl execution failed: %s", exc)
+        return False
     output = proc.stdout or ""
     return _poc_assertion_holds(expect, output)
 

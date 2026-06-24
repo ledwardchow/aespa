@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codename AESPA — AI-Enabled Security Pentesting Agent</title>
+    <meta
+      name="description"
+      content="AESPA is an LLM-driven automated penetration testing tool for web apps and APIs: a FastAPI backend and vanilla-JS UI that drives multi-agent LLM scans against a target."
+    />
+    <meta name="theme-color" content="#0b0d12" />
+    <link rel="icon" type="image/png" href="assets/logo-sm.png" />
+    <link rel="apple-touch-icon" href="assets/logo.png" />
+
+    <meta property="og:title" content="Codename AESPA" />
+    <meta property="og:description" content="An LLM-driven automated penetration testing tool for web apps and APIs." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="assets/logo.png" />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-glow" aria-hidden="true"></div>
+
+    <!-- ===== Nav ===== -->
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="#top">
+          <img src="assets/logo.png" alt="AESPA logo" class="brand-mark" />
+          <span class="brand-text">AESPA</span>
+        </a>
+        <nav class="nav-links">
+          <a href="#surfaces">Surfaces</a>
+          <a href="#agents">Agents</a>
+          <a href="#how">Run lifecycle</a>
+          <a href="#results">Results</a>
+          <a class="nav-cta" href="https://github.com/ledwardchow/aespa">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- ===== Hero ===== -->
+    <section class="hero" id="top">
+      <div class="wrap hero-inner">
+        <div class="hero-logo-wrap">
+          <div class="hero-logo-glow" aria-hidden="true"></div>
+          <img src="assets/logo.png" alt="AESPA — circuit-trace A monogram" class="hero-logo" />
+        </div>
+        <p class="eyebrow">Codename&nbsp;AESPA</p>
+        <h1>An LLM-driven automated penetration testing agent.</h1>
+        <p class="lede">
+          AESPA (AI-Enabled Security Pentesting Agent) is a FastAPI backend and vanilla-JS UI
+          that drives multi-agent LLM scans against a target. It covers three surfaces — web
+          application, API, and SAST-lite — and runs on your own machine with an LLM provider
+          of your choice.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="https://github.com/ledwardchow/aespa">View on GitHub</a>
+          <a class="btn btn-ghost" href="#how">Run lifecycle</a>
+        </div>
+        <p class="hero-note">Self-hosted · localhost-first · bring your own LLM provider</p>
+      </div>
+    </section>
+
+    <!-- ===== Stat strip ===== -->
+    <section class="stats-section">
+      <div class="wrap stats">
+        <div class="stat"><span class="stat-num">3</span><span class="stat-label">attack surfaces</span></div>
+        <div class="stat"><span class="stat-num">4</span><span class="stat-label">agent roles</span></div>
+        <div class="stat"><span class="stat-num">10</span><span class="stat-label">OWASP API Top-10 tracked</span></div>
+        <div class="stat"><span class="stat-num">3.12+</span><span class="stat-label">Python required</span></div>
+      </div>
+    </section>
+
+    <!-- ===== Surfaces ===== -->
+    <section class="section" id="surfaces">
+      <div class="wrap">
+        <p class="section-eyebrow">Three surfaces, one engine</p>
+        <h2>What it scans</h2>
+        <div class="cards">
+          <article class="card">
+            <div class="card-icon">🌐</div>
+            <h3>Web application</h3>
+            <p>
+              Multi-phase crawl — unauthenticated first, then one phase per credential — using
+              parallel Playwright browser workers and LLM-guided BFS. Followed by an agentic
+              dynamic scan in which the Test Lead chooses each action from a toolset.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">🔌</div>
+            <h3>API</h3>
+            <p>
+              Parses OpenAPI, Postman, or source specs — or unstructured docs — into an
+              understanding of the API. Runs the same agentic loop without a browser and tracks
+              an OWASP API Top-10 coverage matrix as it goes.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">🔍</div>
+            <h3>SAST-lite</h3>
+            <p>
+              Agentic static analysis over an uploaded source ZIP, with file tools path-jailed
+              to the extraction root. Emits leads that seed the dynamic scan rather than
+              standalone reports.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Agents ===== -->
+    <section class="section section-alt" id="agents">
+      <div class="wrap">
+        <p class="section-eyebrow">Multi-agent model</p>
+        <h2>Four agent roles per scan</h2>
+        <p class="section-lede">
+          A Test Lead runs the engagement as one continuous session and spawns Specialist
+          agents on high-confidence leads. An Adversarial Validator reviews each finding; a
+          Reporting agent does a post-scan pre-screen. All agents emit status to the Agents
+          panel in the UI.
+        </p>
+        <div class="agents-grid">
+          <div class="agent">
+            <span class="agent-role">Test Lead</span>
+            <p>One continuous session. Builds a recon summary, seeds hypotheses and tasks, and decides each action from its toolset.</p>
+          </div>
+          <div class="agent">
+            <span class="agent-role">Specialist</span>
+            <p>Spawned on high-confidence leads with a narrow mission. Runs as a parallel asyncio task; cannot recursively dispatch.</p>
+          </div>
+          <div class="agent">
+            <span class="agent-role">Adversarial Validator</span>
+            <p>Reviews each finding with a disprove-it mandate to reduce false positives. Cannot create findings of its own.</p>
+          </div>
+          <div class="agent">
+            <span class="agent-role">Reporting</span>
+            <p>Runs a post-scan pre-screen of findings before they reach the report.</p>
+          </div>
+        </div>
+        <p class="agents-foot">
+          A.L.I.C.E. is a separate interactive chat agent for user-directed pentesting.
+        </p>
+      </div>
+    </section>
+
+    <!-- ===== Run lifecycle ===== -->
+    <section class="section" id="how">
+      <div class="wrap">
+        <p class="section-eyebrow">The central unit of work is a <em>run</em></p>
+        <h2>Run lifecycle</h2>
+        <p class="section-lede">
+          A web <code>TestRun</code> progresses through
+          <code>created → crawling → crawled → scanning → scanned</code>. Each run owns all its
+          artifacts: pages, traffic, findings, hypotheses, and logs.
+        </p>
+        <ol class="flow">
+          <li>
+            <span class="flow-step">01</span>
+            <div><h4>Crawl</h4><p>Parallel Playwright workers crawl the target and produce crawled pages plus target-intelligence items.</p></div>
+          </li>
+          <li>
+            <span class="flow-step">02</span>
+            <div><h4>Hypothesize</h4><p>The Test Lead builds a recon summary and seeds hypotheses and tasks — a work program rather than a fixed checklist.</p></div>
+          </li>
+          <li>
+            <span class="flow-step">03</span>
+            <div><h4>Scan</h4><p>The agentic loop dispatches Specialist agents to probe and confirm issues over real traffic.</p></div>
+          </li>
+          <li>
+            <span class="flow-step">04</span>
+            <div><h4>Validate &amp; report</h4><p>Each finding is reviewed by the Adversarial Validator, then the Reporting agent pre-screens before the report.</p></div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ===== Results ===== -->
+    <section class="section section-alt" id="results">
+      <div class="wrap">
+        <p class="section-eyebrow">Measured results</p>
+        <h2>Benchmarks and cost</h2>
+        <p class="section-lede">
+          AESPA has been run against a deliberately-vulnerable target (Bank of Ed) alongside
+          Claude Code, Codex, and local models, and in single-agent vs. multi-agent
+          configurations. As of late May 2026, a full multi-agent scan cost about
+          <strong>$7.50</strong> on Sonnet 4.6 token prices and about <strong>$1.50</strong> on
+          cheap-model prices.
+        </p>
+        <div class="proof-links">
+          <a class="btn btn-ghost" href="https://github.com/ledwardchow/aespa/blob/main/docs/results/results-comparison.md">Results comparison</a>
+          <a class="btn btn-ghost" href="https://github.com/ledwardchow/aespa/blob/main/docs/results/vuln-scanner-comparison.md">Single vs. multi-agent</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Run it ===== -->
+    <section class="cta-band">
+      <div class="wrap cta-inner">
+        <img src="assets/logo.png" alt="" class="cta-logo" aria-hidden="true" />
+        <h2>Running AESPA</h2>
+        <p>Requires Python 3.12+, <code>uv</code>, and an LLM provider key.</p>
+        <div class="cta-code">
+          <code>uv sync &amp;&amp; uv run playwright install chromium &amp;&amp; uv run aespa</code>
+        </div>
+        <p class="cta-sub">The UI runs at <code>http://127.0.0.1:8000</code> by default.</p>
+        <a class="btn btn-primary" href="https://github.com/ledwardchow/aespa">View on GitHub</a>
+      </div>
+    </section>
+
+    <!-- ===== Footer ===== -->
+    <footer class="footer">
+      <div class="wrap">
+        <div class="footer-brand">
+          <img src="assets/logo-sm.png" alt="" class="footer-mark" />
+          <span>Codename AESPA</span>
+        </div>
+        <p class="footer-disclaimer">
+          AESPA is a research exploration into whether a fully LLM-driven, automated web/API
+          penetration test can work. It is intended to run on a machine you sit in front of: it
+          ships with <strong>no authentication</strong>, the API is unauthenticated, and it is
+          localhost-first by design. Only point it at targets you are authorized to test.
+        </p>
+        <p class="footer-copy">© <span id="year"></span> AESPA · An AI-Enabled Security Pentesting Agent</p>
+      </div>
+    </footer>
+
+    <script>
+      document.getElementById("year").textContent = new Date().getFullYear();
+      const nav = document.querySelector(".nav");
+      const onScroll = () => nav.classList.toggle("nav-scrolled", window.scrollY > 12);
+      onScroll();
+      window.addEventListener("scroll", onScroll, { passive: true });
+    </script>
+  </body>
+</html>

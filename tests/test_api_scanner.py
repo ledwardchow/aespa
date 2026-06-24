@@ -15,23 +15,20 @@ Tests:
 from __future__ import annotations
 
 import json
-from unittest.mock import patch, AsyncMock
-from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.db import set_engine, get_engine
+from aespa.db import set_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
-    ApiEndpoint,
     ApiTestRun,
     ScanFinding,
     TrafficEntry,
 )
-
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
 
@@ -99,8 +96,9 @@ def bearer_cred_fixture(db_session, collection):
 @pytest.fixture(name="client")
 def client_fixture(db_engine):
     from fastapi.testclient import TestClient
-    from aespa.main import create_app
+
     from aespa.db import get_session as gs
+    from aespa.main import create_app
 
     def _override_session():
         with Session(db_engine) as s:
@@ -350,11 +348,25 @@ def test_scan_start_creates_task(client):
     run = _make_run(client, coll["id"])
     run_id = run["id"]
 
-    with patch("aespa.services.api_scanner._do_api_thinking_scan", new=AsyncMock(return_value=None)):
+    # The route schedules the scan as a background task, but TestClient's event loop
+    # closes right after the request — the coroutine would never run and would leak a
+    # "never awaited" warning. Stub create_task to close the coroutine and hand back a
+    # done-looking task; the route only needs the registry entry + ok=True here.
+    def _fake_create_task(coro, **kwargs):
+        coro.close()
+        t = MagicMock()
+        t.done.return_value = True
+        return t
+
+    target = "aespa.services.api_scanner.asyncio.create_task"
+    with patch(target, side_effect=_fake_create_task):
         r = client.post(f"/api/api-test-runs/{run_id}/scan/start")
 
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+    from aespa.services import api_scanner
+    api_scanner._scan_tasks.pop(run_id, None)
 
 
 def test_scan_stop_returns_ok(client):
@@ -431,8 +443,8 @@ def test_discovered_credential_saved_to_collection_not_site(db_engine, collectio
     which resolves run_id as a TestRun id and writes a site Credential. Because
     test_run/api_test_run ids overlap, that attached the credential to an unrelated site.
     """
-    from aespa.services.api_scanner import _make_persist_credential_fn
     from aespa.models import ApiCredential, Credential, Site, TestRun
+    from aespa.services.api_scanner import _make_persist_credential_fn
 
     # Seed a Site + TestRun whose id collides with the ApiTestRun id, to prove the
     # hook does not touch the site even when a colliding TestRun exists.
@@ -465,8 +477,8 @@ def test_discovered_credential_saved_to_collection_not_site(db_engine, collectio
 
 def test_discovered_credential_dedup(db_engine, collection, api_run):
     """Persisting the same discovered credential twice creates only one ApiCredential."""
-    from aespa.services.api_scanner import _make_persist_credential_fn
     from aespa.models import ApiCredential
+    from aespa.services.api_scanner import _make_persist_credential_fn
 
     persist = _make_persist_credential_fn(collection.id, api_run.id)
     persist(username="bob", password="pw", login_url=None)

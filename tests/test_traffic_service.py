@@ -1,10 +1,12 @@
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine, select
-import pytest
-import httpx
 from unittest.mock import AsyncMock, MagicMock
 
-from aespa.models import CrawledPage, PageCredentialView, TestRun as RunModel, TrafficEntry
+import httpx
+import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
+
+from aespa.models import CrawledPage, PageCredentialView, TrafficEntry
+from aespa.models import TestRun as RunModel
 from aespa.schemas import PageCredentialViewOut
 from aespa.services import traffic
 from aespa.services.traffic import LoggingAsyncClient, setup_playwright_logging
@@ -246,6 +248,44 @@ async def test_playwright_logging_request_failed(monkeypatch):
         assert entry.status is None
         assert "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]" in entry.response_body
         assert entry.username == "pw_user"
+
+
+@pytest.mark.anyio
+async def test_playwright_logging_skips_noisy_resource_types(monkeypatch):
+    """Image/font/media requests are not logged — and (the bug being fixed) the
+    request handler must not retain per-request state for them, since the response
+    handler returns before cleaning it up."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    listeners = {}
+    mock_ctx = MagicMock()
+    mock_ctx.on = lambda name, handler: listeners.__setitem__(name, handler)
+    setup_playwright_logging(mock_ctx, run_id=101)
+
+    mock_req = MagicMock()
+    mock_req.method = "GET"
+    mock_req.url = "https://target.local/logo.png"
+    mock_req.resource_type = "image"  # in SKIP_RESOURCE_TYPES
+    mock_req.post_data = None
+    mock_req.post_data_json = None
+
+    mock_resp = MagicMock()
+    mock_resp.request = mock_req
+    mock_resp.url = mock_req.url
+    mock_resp.status = 200
+
+    # A skipped request/response pair must produce no traffic entry.
+    await listeners["request"](mock_req)
+    await listeners["response"](mock_resp)
+
+    with Session(engine) as session:
+        assert session.exec(select(TrafficEntry)).all() == []
 
 
 

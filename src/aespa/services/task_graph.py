@@ -9,10 +9,15 @@ from urllib.parse import urlparse
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PentestHypothesis, PentestTask, TargetIntelItem, TestRun
+from aespa.models import (
+    CrawledPage,
+    PentestHypothesis,
+    PentestTask,
+    TargetIntelItem,
+    TestRun,
+)
 from aespa.schemas import PentestHypothesisOut, PentestTaskGraphOut, PentestTaskOut
 from aespa.services import events as events_svc
-
 
 MAX_TASKS_PER_HYPOTHESIS = 20
 

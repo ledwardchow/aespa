@@ -74,6 +74,19 @@ const api = {
   getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
   getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
   getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
+  createStandaloneSastRun: (file, name) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (name) fd.append("name", name);
+    return fetch(`/api/sast-runs`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
+  },
+  // SAST leads imported into a web run
+  getRunAvailableSastRuns: (id)   => req(`/api/test-runs/${id}/sast-runs/available`),
+  importSastLeads:     (id,b)     => req(`/api/test-runs/${id}/import-leads`, { method:"POST", body:b }),
+  getRunLeads:         (id)       => req(`/api/test-runs/${id}/leads`),
+  clearRunLeads:       (id)       => req(`/api/test-runs/${id}/leads`, { method:"DELETE" }),
+  deleteRunLead:       (id,lid)   => req(`/api/test-runs/${id}/leads/${lid}`, { method:"DELETE" }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
@@ -103,6 +116,8 @@ const api = {
   upsertGlobalHttpHeader: (b)     => req("/api/settings/global-http-header", { method:"PUT", body:b }),
   getReportingDebugConfig: ()     => req("/api/settings/reporting-debug"),
   upsertReportingDebugConfig:(b)  => req("/api/settings/reporting-debug", { method:"PUT", body:b }),
+  getCloudflareAccessConfig: ()   => req("/api/settings/cloudflare-access"),
+  upsertCloudflareAccessConfig:(b)=> req("/api/settings/cloudflare-access", { method:"PUT", body:b }),
   getReportingDebugPrompt: (key)  => req(`/api/reporting-debug/prompt${key?`?key=${encodeURIComponent(key)}`:""}`),
   listReportingDebugPrompts:()    => req("/api/reporting-debug/prompts"),
   saveReportingDebugPrompt:(key,b)=> req(`/api/reporting-debug/prompt?key=${encodeURIComponent(key)}`, { method:"PUT", body:b }),
@@ -2545,7 +2560,7 @@ const API_RUN_TABS = [
   { key: "sessions",    label: "Sessions" },
   { key: "traffic",     label: "Traffic Log" },
   { key: "endpoints",   label: "Endpoints" },
-  { key: "workprogram", label: "Workprogram" },
+  { key: "workprogram", label: "OWASP Coverage" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
@@ -2694,11 +2709,15 @@ function ApiTestRunDetail({ runId, initialTab }) {
 
 const SEVERITY_ORDER = { high: 0, medium: 1, low: 2 };
 
-function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
+function LeadsPanel({ leads, loading, emptyMsg, scanRunning, exportName }) {
   const [expanded, setExpanded] = useState(new Set());
   const toggle = (id) => setExpanded(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
+  const onExport = () => {
+    const md = leadsToMarkdown(leads, { runName: exportName, generatedAt: new Date() });
+    downloadTextFile(leadsExportFilename(exportName), md, "text/markdown;charset=utf-8");
+  };
 
   const sevCls  = (s) => ({high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
   const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
@@ -2713,6 +2732,8 @@ function LeadsPanel({ leads, loading, emptyMsg, scanRunning }) {
     <div style=${{display:"flex",alignItems:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
       <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
       ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+      <div style=${{flex:1}}></div>
+      <button className="btn sm" onClick=${onExport}>Export leads</button>
     </div>
     ${leads.map(lead => html`
       <div key=${lead.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
@@ -2753,6 +2774,7 @@ function ApiRunLeadsTab({ runId, scanRunning }) {
   useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 6000); return () => clearInterval(t); }, [scanRunning, runId]);
 
   return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    exportName=${`api-run-${runId}`}
     emptyMsg="No scan leads for this collection yet. Run a SAST scan first."/>`;
 }
 
@@ -2769,10 +2791,25 @@ const SAST_TABS = [
 function SastRunsListPage() {
   const [runs, setRuns]   = useState(null);
   const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
   const load = useCallback(async () => {
     try { setRuns(await api.listAllSastRuns()); } catch(e) { setError(e.message); }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const onUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";  // allow re-selecting the same file
+    if (!file) return;
+    setUploading(true); setError(null);
+    try {
+      const run = await api.createStandaloneSastRun(file);
+      await api.startSastScan(run.id);
+      nav(`#/sast-runs/${run.id}/progress`);
+    } catch(err) { setError(err.message); }
+    finally { setUploading(false); }
+  };
 
   const statusBadge = (s) => {
     const cls = s==="completed"?"ok":s==="failed"?"danger":s==="scanning"?"running":"neutral";
@@ -2782,6 +2819,13 @@ function SastRunsListPage() {
   return html`
     <div className="topbar">
       <div className="topbar-title">SAST Scans</div>
+      <div className="topbar-actions">
+        <input ref=${fileInputRef} type="file" accept=".zip" style=${{display:"none"}} onChange=${onUpload}/>
+        <button className="btn primary sm" disabled=${uploading}
+          onClick=${()=>fileInputRef.current && fileInputRef.current.click()}>
+          ${uploading ? "Uploading…" : "New SAST Scan"}
+        </button>
+      </div>
     </div>
     <div className="content scroll-content">
       ${error && html`<div className="alert error" style=${{marginBottom:16}}>${error}</div>`}
@@ -2790,7 +2834,7 @@ function SastRunsListPage() {
         <div className="empty-state">
           <div className="empty-icon">🔍</div>
           <div className="empty-msg">No SAST scans yet</div>
-          <div className="empty-sub">Upload source code to an API collection and run a SAST scan from the Files tab.</div>
+          <div className="empty-sub">Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web scan.</div>
         </div>`}
       ${runs&&runs.length>0 && html`
         <div className="table-wrap">
@@ -2806,7 +2850,7 @@ function SastRunsListPage() {
                 <td>${r.leads_count}</td>
                 <td>${r.triggered_by_run_id
                   ? html`<a href=${`#/api-runs/${r.triggered_by_run_id}/status`}>API run #${r.triggered_by_run_id}</a>`
-                  : html`<span className="subtle">—</span>`}</td>
+                  : html`<span className="subtle">${r.source_filename || "standalone"}</span>`}</td>
                 <td>${r.started_at ? new Date(r.started_at).toLocaleString() : html`<span className="subtle">—</span>`}</td>
                 <td><a className="btn ghost sm" href=${`#/sast-runs/${r.id}/progress`}>View →</a></td>
               </tr>`)}
@@ -2871,7 +2915,7 @@ function SastRunDetail({ runId, initialTab }) {
   return html`
     <div className="topbar">
       <div className="topbar-title">
-        ${run ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : ""}
+        ${run && run.collection_id ? html`<a href=${`#/apis/${run.collection_id}`} style=${{color:"var(--muted)",fontWeight:400}}>API collection</a><span className="breadcrumb-sep"> / </span>` : (run ? html`<a href="#/sast-runs" style=${{color:"var(--muted)",fontWeight:400}}>SAST</a><span className="breadcrumb-sep"> / </span>` : "")}
         ${run ? run.name : "…"}
         ${run && html` ${statusBadge(scanRunning ? "scanning" : run.status)}`}
         ${run?.triggered_by_run_id && html`
@@ -2895,7 +2939,7 @@ function SastRunDetail({ runId, initialTab }) {
     <div className=${tab==="progress" ? "content no-padding flex-fill-noscroll" : "content scroll-content"}>
       ${error && html`<div className="alert error">${error}</div>`}
       ${tab==="progress" && html`<${SastProgressTab} runId=${runId} scanRunning=${scanRunning}/>`}
-      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning}/>`}
+      ${tab==="leads"    && html`<${SastLeadsTab} runId=${runId} scanRunning=${scanRunning} runName=${run?.name}/>`}
     </div>
   `;
 }
@@ -2947,8 +2991,8 @@ function SastProgressTab({ runId, scanRunning }) {
   return html`<div className="activity-panel" style=${{margin:0,display:"flex",flexDirection:"column",height:"100%"}}>
     <div className="activity-log-toolbar" style=${{flexShrink:0}}>
       <div style=${{display:"flex",gap:4}}>
-        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Activity</button>
-        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agents</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="activity"?" active":"")} onClick=${()=>setSubTab("activity")}>Log</button>
+        <button className=${"activity-sub-tab-btn"+(subTab==="agents"?"  active":"")} onClick=${()=>setSubTab("agents")}>Agent Activity</button>
       </div>
       <span className="activity-count-label">${log.length} entr${log.length!==1?"ies":"y"}</span>
       ${scanRunning && html`<span className="activity-mode-badge running">● Scanning</span>`}
@@ -2989,7 +3033,7 @@ function SastProgressTab({ runId, scanRunning }) {
   </div>`;
 }
 
-function SastLeadsTab({ runId, scanRunning }) {
+function SastLeadsTab({ runId, scanRunning, runName }) {
   const [leads, setLeads] = useState(null);
   const [loading, setLoading] = useState(true);
   const load = () => { setLoading(true); api.getSastLeads(runId).then(d => { setLeads(d); setLoading(false); }).catch(() => setLoading(false)); };
@@ -2997,6 +3041,7 @@ function SastLeadsTab({ runId, scanRunning }) {
   useEffect(() => { if (!scanRunning) return; const t = setInterval(load, 5000); return () => clearInterval(t); }, [scanRunning, runId]);
 
   return html`<${LeadsPanel} leads=${leads} loading=${loading} scanRunning=${scanRunning}
+    exportName=${runName || `sast-run-${runId}`}
     emptyMsg=${scanRunning ? "SAST scan in progress — leads will appear here as they are found." : "No leads yet. Start the SAST scan to analyse the source code."}/>`;
 }
 
@@ -3360,7 +3405,7 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
     <div className="subtle" style=${{padding:24,textAlign:"center"}}>
       No coverage data yet.${" "}
       ${run?.status === "pending"
-        ? "Start a scan to populate the Work Program matrix."
+        ? "Start a scan to populate the OWASP Coverage matrix."
         : "The matrix will appear once a scan has started."}
     </div>`;
 
@@ -3372,13 +3417,13 @@ function ApiRunWorkProgramTab({ runId, scanRunning, run }) {
 
   const onExportMarkdown = () => {
     const md = workProgramToMarkdown(matrix, { cats, labels: OWASP_LABELS, kind: "api", runName: run?.name, generatedAt: new Date() });
-    downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+    downloadTextFile(`${slugForFilename(run?.name || `api-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
   };
 
   return html`
     <div style=${{padding:16}}>
       <div style=${{display:"flex",alignItems:"center",gap:16,marginBottom:12,flexWrap:"wrap"}}>
-        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <h3 style=${{margin:0}}>OWASP Coverage Matrix</h3>
         <span className=${"badge "+(run?.coverage_mode==="enforce"?"warning":"neutral")}>
           ${run?.coverage_mode||"track"} mode
         </span>
@@ -6027,7 +6072,11 @@ function TestRunDetail({ runId, initialTab }) {
         </button>
         <button className=${"tab-btn"+(activeTab==="workprogram"?" active":"")}
           onClick=${()=>{ setActiveTab("workprogram"); setSelNode(null); nav(`#/runs/${runId}/workprogram`); }}>
-          Workprogram
+          OWASP Coverage
+        </button>
+        <button className=${"tab-btn"+(activeTab==="leads"?" active":"")}
+          onClick=${()=>{ setActiveTab("leads"); setSelNode(null); nav(`#/runs/${runId}/leads`); }}>
+          SAST Leads
         </button>
         <div style=${{flex:1}}></div>
         ${canClearCrawl && activeTab==="sitemap" && html`<button className="btn danger-outline sm" style=${{margin:"auto 8px auto 0"}} onClick=${onClearCrawl}>Clear crawl</button>`}
@@ -6130,7 +6179,7 @@ function TestRunDetail({ runId, initialTab }) {
           return progressBar;
         })()}`}
 
-      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions"||activeTab==="workprogram") ? "none" : "flex"}}>
+      <div className="graph-layout" style=${{display: (activeTab==="findings"||activeTab==="traffic"||activeTab==="activity"||activeTab==="intelligence"||activeTab==="tasks"||activeTab==="sessions"||activeTab==="workprogram"||activeTab==="leads") ? "none" : "flex"}}>
         <div className="graph-canvas-wrap">
           ${graph&&graph.nodes.length===0 && html`
             <div className="graph-empty">
@@ -7238,6 +7287,128 @@ function TestRunDetail({ runId, initialTab }) {
         <div className="content scroll-content" style=${{padding:0}}>
           <${WebRunWorkProgramTab} runId=${runId} run=${run} reloadKey=${wpReloadKey} scanRunning=${isDynamicScanActive(thinkingStatus?.status)||run?.status==="crawling"||run?.status==="crawled"}/>
         </div>`}
+      ${activeTab==="leads" && html`
+        <${WebRunSastLeadsTab} runId=${runId} scanRunning=${isDynamicScanActive(thinkingStatus?.status)}/>`}
+    </div>`;
+}
+
+// ── WebRunSastLeadsTab ─────────────────────────────────────────────────────────
+// Lets a web run import a copy of a completed SAST scan's leads. The copies are
+// independent rows owned by this run; the originals stay open on the SAST tab.
+
+function WebRunSastLeadsTab({ runId, scanRunning }) {
+  const [available, setAvailable] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [selected, setSelected] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const loadLeads = useCallback(() => api.getRunLeads(runId).then(setLeads).catch(()=>{}), [runId]);
+  const loadAvailable = useCallback(
+    () => api.getRunAvailableSastRuns(runId).then(setAvailable).catch(()=>{}), [runId]
+  );
+  useEffect(() => { loadLeads(); loadAvailable(); }, [loadLeads, loadAvailable]);
+  // Refresh while a dynamic scan runs so investigation outcomes show live.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const t = setInterval(loadLeads, 6000);
+    return () => clearInterval(t);
+  }, [scanRunning, loadLeads]);
+
+  const onImport = async () => {
+    if (!selected) return;
+    setBusy(true); setError(null); setMsg(null);
+    try {
+      const r = await api.importSastLeads(runId, { sast_run_id: +selected });
+      setMsg(r.imported > 0 ? `Imported ${r.imported} lead(s).` : "Already imported (no new leads).");
+      await loadLeads();
+    } catch(e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const onClearAll = async () => {
+    if (!confirm("Remove all imported SAST leads from this run?\nThe original SAST scan is not affected.")) return;
+    setClearBusy(true); setError(null); setMsg(null);
+    try { await api.clearRunLeads(runId); setLeads([]); }
+    catch(e) { setError(e.message); }
+    finally { setClearBusy(false); }
+  };
+
+  const onDeleteRow = async (leadId) => {
+    setError(null);
+    try { await api.deleteRunLead(runId, leadId); setLeads(prev => prev.filter(l => l.id !== leadId)); }
+    catch(e) { setError(e.message); }
+  };
+
+  const sevCls = (s) => ({high:"sev-high",critical:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-medium");
+  const statCls = (s) => ({open:"neutral",investigating:"warning",confirmed:"success",dismissed:"neutral",inconclusive:"neutral"}[s]||"neutral");
+
+  return html`
+    <div className="findings-panel">
+      <div className="findings-status-bar">
+        <span className="badge neutral" style=${{fontSize:12}}>${leads.length} lead${leads.length!==1?"s":""}</span>
+        ${scanRunning && html`<span className="badge warning" style=${{fontSize:12}}>Scan running…</span>`}
+        <div style=${{flex:1}}></div>
+        <div className="row" style=${{gap:8}}>
+          <select value=${selected} onChange=${e=>setSelected(e.target.value)} style=${{minWidth:240}}>
+            <option value="">Import from SAST scan…</option>
+            ${available.map(r=>html`<option key=${r.id} value=${r.id}>
+              ${r.name} (${r.leads_count} lead${r.leads_count===1?"":"s"})
+            </option>`)}
+          </select>
+          <button className="btn sm" disabled=${!selected||busy} onClick=${onImport}>
+            ${busy?"Importing…":"Import leads"}
+          </button>
+          ${leads.length>0 && html`
+            <button className="btn sm" onClick=${()=>downloadTextFile(
+              leadsExportFilename(`web-run-${runId}`),
+              leadsToMarkdown(leads, { runName:`Web run #${runId}`, generatedAt:new Date() }),
+              "text/markdown;charset=utf-8",
+            )}>Export leads</button>`}
+          ${leads.length>0 && html`
+            <button className="btn danger-outline sm" disabled=${clearBusy} onClick=${onClearAll}>
+              ${clearBusy?"Clearing…":"Clear all"}
+            </button>`}
+        </div>
+      </div>
+      ${error && html`<div className="alert error" style=${{margin:"8px 16px"}}>${error}</div>`}
+      ${msg && html`<div className="subtle" style=${{margin:"8px 16px"}}>${msg}</div>`}
+      ${leads.length===0
+        ? html`<div className="subtle" style=${{padding:24,textAlign:"center"}}>
+            ${available.length===0
+              ? "No completed SAST scans with leads yet. Run one from the SAST tab, then import its leads here."
+              : "No leads imported into this run yet. Pick a SAST scan above and click Import leads."}
+          </div>`
+        : html`
+          <div className="findings-table-wrap">
+            <table className="findings-table">
+              <thead><tr>
+                <th style=${{width:90}}>Severity</th>
+                <th>Title</th>
+                <th style=${{width:90}}>Category</th>
+                <th style=${{width:90}}>Conf.</th>
+                <th>Location</th>
+                <th style=${{width:110}}>Status</th>
+                <th style=${{width:44}}></th>
+              </tr></thead>
+              <tbody>${leads.map(l=>html`
+                <tr key=${l.id}>
+                  <td><span className=${"sev-badge "+sevCls(l.severity)}>${l.severity||"medium"}</span></td>
+                  <td style=${{fontWeight:600}}>${l.title}</td>
+                  <td>${l.category||"—"}</td>
+                  <td>${Math.round((l.confidence||0)*100)}%</td>
+                  <td className="subtle" style=${{fontSize:"0.85em"}}>${l.location||"—"}</td>
+                  <td><span className=${"badge "+statCls(l.status)} style=${{fontSize:11}}>${l.status||"open"}</span></td>
+                  <td>
+                    <button className="btn ghost sm" title="Delete lead"
+                      onClick=${()=>onDeleteRow(l.id)}>✕</button>
+                  </td>
+                </tr>`)}
+              </tbody>
+            </table>
+          </div>`}
     </div>`;
 }
 
@@ -7307,7 +7478,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
     setSeeding(true); setSeedMsg(null);
     try {
       const r = await api.seedWebWorkprogram(runId);
-      setSeedMsg(r.created > 0 ? `Added ${r.created} new cell${r.created!==1?"s":""}.` : "No new cells — workprogram is up to date.");
+      setSeedMsg(r.created > 0 ? `Added ${r.created} new cell${r.created!==1?"s":""}.` : "No new cells — OWASP Coverage is up to date.");
       await loadMatrix();
     } catch(e) { setSeedMsg("Error: " + e.message); }
     finally { setSeeding(false); }
@@ -7315,10 +7486,10 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
 
   const onExportMarkdown = () => {
     const md = workProgramToMarkdown(matrix, { cats: OWASP_WEB_CATEGORIES, labels: OWASP_WEB_LABELS, kind: "web", runName: run?.name, generatedAt: new Date() });
-    downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-workprogram-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
+    downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0,10)}.md`, md, "text/markdown;charset=utf-8");
   };
 
-  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading workprogram…</div>`;
+  if (loading) return html`<div className="subtle" style=${{padding:24}}>Loading OWASP Coverage…</div>`;
 
   const cats = OWASP_WEB_CATEGORIES;
   const totals = matrix?.totals || {};
@@ -7330,7 +7501,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
   return html`
     <div style=${{padding:16}}>
       <div style=${{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}>
-        <h3 style=${{margin:0}}>Work Program Matrix</h3>
+        <h3 style=${{margin:0}}>OWASP Coverage Matrix</h3>
         <span className=${"badge "+(effectiveCoverageMode==="enforce"?"warning":"neutral")}>
           ${effectiveCoverageMode} mode
         </span>
@@ -7354,7 +7525,7 @@ function WebRunWorkProgramTab({ runId, run, scanRunning, reloadKey = 0 }) {
 
       ${!matrix?.seeded && html`
         <div className="subtle" style=${{padding:24,textAlign:"center"}}>
-          No workprogram data yet. Click <b>Populate from Site Map</b> to seed the matrix from crawl data.
+          No OWASP Coverage data yet. Click <b>Populate from Site Map</b> to seed the matrix from crawl data.
         </div>`}
 
       ${matrix?.seeded && !matrix?.pages?.length && html`
@@ -8336,13 +8507,14 @@ const API_FORMAT_LABELS = {
   openai_compatible:"OpenAI-compatible API",
   openrouter:"OpenRouter",
   google:"Google Gemini API",
-  bedrock:"Amazon Bedrock Converse",
+  bedrock:"Amazon Bedrock Runtime",
+  bedrock_mantle:"Amazon Bedrock Mantle",
   azure_openai:"Azure OpenAI",
   azure_foundry:"Azure AI Foundry (OpenAI API)",
   azure_foundry_openai:"Azure AI Foundry (OpenAI API)",
   azure_foundry_anthropic:"Azure AI Foundry (Anthropic API)",
 };
-const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
+const DEFAULT_PROVIDER_FORM = { name:"", api_format:"anthropic", base_url:"", project_id:"", models:"", api_key:"", max_tpm:"", max_rpm:"" };
 const DEFAULT_LLM_FORM = { name:"Default", provider_id:"", model:"", max_tokens:70000, temperature:0.2, use_temperature:true, use_vision:false, force_tool_choice:true };
 const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic:"https://api.anthropic.com",
@@ -8351,6 +8523,7 @@ const PROVIDER_BASE_URL_PLACEHOLDERS = {
   openrouter:"https://openrouter.ai/api/v1",
   google:"https://generativelanguage.googleapis.com",
   bedrock:"https://bedrock-runtime.us-east-1.amazonaws.com",
+  bedrock_mantle:"https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai:"https://myresource.openai.azure.com",
   azure_foundry:"https://myresource.services.ai.azure.com",
   azure_foundry_openai:"https://myresource.services.ai.azure.com/openai/v1",
@@ -8364,19 +8537,21 @@ const PROVIDER_DEFAULT_BASE_URLS = {
   openrouter: "https://openrouter.ai/api/v1",
   google:     "https://generativelanguage.googleapis.com",
   bedrock:    "AWS SDK default (us-east-1)",
+  bedrock_mantle: "https://bedrock-mantle.us-east-2.api.aws/v1",
   azure_openai: null,                // must be set
   azure_foundry: null,
   azure_foundry_openai: null,
   azure_foundry_anthropic: null,
 };
 const PROVIDER_MODEL_PLACEHOLDERS = {
-  anthropic:"claude-opus-4-5\nclaude-sonnet-4-5",
-  openai:"gpt-4.1\ngpt-4o\nllama-3.1-8b-instruct",
+  anthropic:"claude-opus-4-8\nclaude-sonnet-4-5",
+  openai:"gpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible:"llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter:"openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   google:"gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
-  bedrock:"global.anthropic.claude-sonnet-4-6\nglobal.anthropic.claude-opus-4-7",
-  azure_openai:"gpt-4o\ngpt-4.1",
+  bedrock:"global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
+  bedrock_mantle:"openai.gpt-5.5\nopenai.gpt-oss-120b",
+  azure_openai:"gpt-5.5\ngpt-4o\ngpt-4.1",
   azure_foundry:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
   azure_foundry_openai:"gpt-4o\nMeta-Llama-3.3-70B-Instruct",
   azure_foundry_anthropic:"claude-sonnet-4-5\nclaude-opus-4-1",
@@ -8387,6 +8562,7 @@ function providerToForm(provider) {
     name:provider.name || "",
     api_format:provider.api_format || "anthropic",
     base_url:provider.base_url || "",
+    project_id:provider.project_id || "",
     models:(provider.models || []).join("\n"),
     api_key:provider.api_key || "",
     max_tpm:provider.max_tpm != null ? provider.max_tpm : "",
@@ -8399,6 +8575,7 @@ function providerPayload(form) {
     name:form.name.trim(),
     api_format:form.api_format,
     base_url:form.base_url.trim() || null,
+    project_id:form.api_format==="bedrock_mantle" ? (form.project_id.trim() || null) : null,
     models:form.models.split(/\r?\n|,/).map(m=>m.trim()).filter(Boolean),
     api_key:form.api_key.trim() || null,
     max_tpm:form.max_tpm !== "" ? Number(form.max_tpm) : null,
@@ -8473,7 +8650,8 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
           <option value="openai_compatible">OpenAI-compatible API</option>
           <option value="openrouter">OpenRouter</option>
           <option value="google">Google Gemini API</option>
-          <option value="bedrock">Amazon Bedrock Converse</option>
+          <option value="bedrock">Amazon Bedrock Runtime</option>
+          <option value="bedrock_mantle">Amazon Bedrock Mantle</option>
           <option value="azure_openai">Azure OpenAI</option>
           <option value="azure_foundry_openai">Azure AI Foundry (OpenAI API)</option>
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
@@ -8483,16 +8661,23 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
         <input type="url" value=${form.base_url} placeholder=${PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""}
           onChange=${e=>upd({base_url:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>`}
+        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>`}
       </div>
+      ${form.api_format==="bedrock_mantle"&&html`<div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
+        <input type="text" value=${form.project_id} placeholder="proj_5d5ykleja6cwpirysbb7"
+          onChange=${e=>upd({project_id:e.target.value})}/>
+        <div className="field-hint">Sent as the OpenAI-Project header to attribute usage/cost to a Bedrock Mantle project. Use the project id (proj_…) from the Bedrock console, not its name. Leave blank for the account default project.</div>
+      </div>`}
       <div className="field"><label>Model names</label>
         <textarea required rows="5" value=${form.models} placeholder=${PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
           onChange=${e=>upd({models:e.target.value})}></textarea>
         <div className="field-hint">Enter one model per line, or separate models with commas.</div>
       </div>
       <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":"Leave blank if not required"}
+        <input type="password" value=${form.api_key} placeholder=${form.api_format==="bedrock"?"Leave blank to use boto3 / AWS_PROFILE / IAM role":form.api_format==="bedrock_mantle"?"Bedrock API key, or leave blank for AWS credentials":"Leave blank if not required"}
           onChange=${e=>upd({api_key:e.target.value})}/>
         ${form.api_format==="bedrock"&&html`<div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>`}
+        ${form.api_format==="bedrock_mantle"&&html`<div className="field-hint">With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role — the same fallback as the Bedrock Runtime provider.</div>`}
       </div>
       <div className="divider"/>
       <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
@@ -8974,6 +9159,11 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
   const [repSaved, setRepSaved] = useState(false);
   const [repError, setRepError] = useState(null);
 
+  const [cfAud, setCfAud] = useState("");
+  const [cfSaving, setCfSaving] = useState(false);
+  const [cfSaved, setCfSaved] = useState(false);
+  const [cfError, setCfError] = useState(null);
+
   useEffect(() => {
     (async () => {
       try { setCfg(await api.getSpecialistAgentConfig()); }
@@ -8990,7 +9180,21 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
       try { setReportingDebugCfg(await api.getReportingDebugConfig()); }
       catch(e) { setRepError(e.message); }
     })();
+    (async () => {
+      try { setCfAud((await api.getCloudflareAccessConfig()).audience || ""); }
+      catch(e) { setCfError(e.message); }
+    })();
   }, []);
+
+  const saveCloudflareAud = async (e) => {
+    e.preventDefault();
+    setCfSaved(false); setCfSaving(true); setCfError(null);
+    try {
+      const updated = await api.upsertCloudflareAccessConfig({ audience: cfAud.trim() || null });
+      setCfAud(updated.audience || "");
+      setCfSaved(true);
+    } catch(e) { setCfError(e.message); } finally { setCfSaving(false); }
+  };
 
   const toggle = async (checked) => {
     setSaved(false); setSaving(true); setError(null);
@@ -9127,6 +9331,29 @@ function DebugPage({ showUsername, setShowUsername, username, reportingDebugCfg,
             Current verified username: <strong className="mono">${username || "None (will only be displayed in sidebar if verified)"}</strong>
           </div>
         `}
+        <div className="field-hint" style=${{marginTop: 16, marginBottom: 8}}>
+          <strong>Application Audience (AUD) tag.</strong> When set, the Cloudflare Access
+          JWT is verified against this AUD so only tokens issued for this application are
+          accepted. Leave empty to skip the audience check (legacy behaviour — any
+          Cloudflare Access tenant's token is accepted).
+        </div>
+        ${cfError && html`<div className="alert error">${cfError}</div>`}
+        <form onSubmit=${saveCloudflareAud}>
+          <div className="form-row">
+            <label className="form-label">Audience (AUD)</label>
+            <input className="form-input mono" type="text"
+              placeholder="e.g. 64-char hex AUD from the Access application"
+              value=${cfAud}
+              disabled=${cfSaving}
+              onInput=${e => { setCfSaved(false); setCfAud(e.target.value); }}/>
+          </div>
+          <div style=${{display:"flex",alignItems:"center",gap:12,marginTop:8}}>
+            <button className="btn btn-primary" type="submit" disabled=${cfSaving}>
+              ${cfSaving ? "Saving…" : "Save"}
+            </button>
+            ${cfSaved && html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}
+          </div>
+        </form>
       </div>
     </div>`;
 }
@@ -9591,6 +9818,61 @@ function slugForFilename(value) {
     .slice(0, 80) || "issues";
 }
 
+// ── SAST lead export ────────────────────────────────────────────────────────
+// Client-side markdown export of leads, mirroring findingsToMarkdown. The
+// embedded JSON comment keeps the file round-trippable for a future importer.
+
+function leadImportPayload(l) {
+  return {
+    title: l.title, severity: l.severity, category: l.category,
+    confidence: l.confidence, location: l.location, description: l.description,
+    evidence: l.evidence, status: l.status, note: l.note, source: l.source,
+  };
+}
+
+function leadsExportFilename(name, runId) {
+  const base = slugForFilename(name || `sast-run-${runId || ""}`);
+  return `${base}-leads-${new Date().toISOString().slice(0, 10)}.md`;
+}
+
+function leadsToMarkdown(leads, meta = {}) {
+  const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
+  const sorted = [...(leads || [])].sort((a, b) => {
+    const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
+    if (sev !== 0) return sev;
+    return (b.confidence || 0) - (a.confidence || 0);
+  });
+  const lines = [`# SAST Leads Export${meta.runName ? `: ${meta.runName}` : ""}`, ""];
+  if (meta.generatedAt) lines.push(`- Exported: ${meta.generatedAt.toLocaleString()}`);
+  lines.push(`- Total leads: ${sorted.length}`, "");
+  lines.push(
+    "<!-- aespa-sast-leads-json",
+    encodeURIComponent(JSON.stringify(sorted.map(leadImportPayload))),
+    "-->",
+    "",
+  );
+  sorted.forEach((l, idx) => {
+    lines.push(
+      `## ${idx + 1}. ${markdownListValue(l.title)}`,
+      "",
+      `- Severity: ${markdownListValue(l.severity)}`,
+      `- Category: ${markdownListValue(l.category)}`,
+      `- Confidence: ${Math.round((l.confidence || 0) * 100)}%`,
+      `- Status: ${markdownListValue(l.status)}`,
+      `- Location: ${markdownListValue(l.location)}`,
+      "",
+      "### Description",
+      markdownListValue(l.description),
+      "",
+      "### Code Evidence",
+      markdownCodeBlock(l.evidence),
+      "",
+    );
+    if (l.note) lines.push("### Investigation Note", markdownListValue(l.note), "");
+  });
+  return lines.join("\n");
+}
+
 function markdownExportFilename(run, siteName) {
   const base = slugForFilename(run?.name || siteName || `run-${run?.id || "issues"}`);
   const date = new Date().toISOString().slice(0, 10);
@@ -9704,7 +9986,7 @@ function workProgramToMarkdown(matrix, { cats, labels = {}, kind = "web", runNam
   const coveredCount = (totals.covered||0) + (totals.finding||0) + (totals.skipped||0);
   const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
 
-  const lines = [`# Work Program${runName ? `: ${runName}` : ""} (${kind === "api" ? "API" : "Web"})`, ""];
+  const lines = [`# OWASP Coverage${runName ? `: ${runName}` : ""} (${kind === "api" ? "API" : "Web"})`, ""];
   if (generatedAt) lines.push(`- Exported: ${generatedAt.toLocaleString()}`);
   lines.push(`- Coverage: ${pct}% (${coveredCount}/${totalCells} cells)`);
   lines.push("- Status counts: " + ["not_started","in_progress","covered","finding","skipped"].map(s => `${s} ${totals[s]||0}`).join(", "));

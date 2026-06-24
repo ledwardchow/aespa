@@ -1,20 +1,36 @@
 """API routes for SAST runs: /api/sast-runs/* and /api/api-collections/{id}/sast-runs."""
 from __future__ import annotations
 
+import io
+import uuid
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response as HTTPResponse, StreamingResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import Response as HTTPResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from aespa.config import get_settings
 from aespa.db import get_session
-from aespa.models import AgentLog, ApiCollection, ApiDocument, SastRun, ScanLead, ScanLog
+from aespa.models import (
+    AgentLog,
+    ApiCollection,
+    ApiDocument,
+    SastRun,
+    ScanLead,
+    ScanLog,
+)
 from aespa.schemas import SastRunSummary, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import run_cleanup
 
 _UTC = timezone.utc
+
+# 25 MiB cap, matching the API-document upload limit.
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 router = APIRouter(tags=["sast-runs"])
 
@@ -105,6 +121,55 @@ def list_sast_runs(
         .order_by(SastRun.id.desc())  # type: ignore[attr-defined]
     ).all()
     return [_to_summary(r) for r in runs]
+
+
+# ── Standalone SAST run (upload archive + create, no collection) ──────────────
+
+@router.post(
+    "/api/sast-runs",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_standalone_sast_run(
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    llm_config_id: int | None = Form(default=None),
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Create a standalone SAST run from an uploaded source archive.
+
+    Not tied to an API collection — used by the SAST screen and consumed by web
+    scans (which import a copy of the resulting leads).
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB upload limit.",
+        )
+    if not zipfile.is_zipfile(io.BytesIO(content)):
+        raise HTTPException(
+            status_code=400, detail="Uploaded file is not a valid ZIP archive."
+        )
+
+    original_name = Path(file.filename or "source.zip").name or "source.zip"
+    base = Path(get_settings().data_dir) / "sast_uploads"
+    base.mkdir(parents=True, exist_ok=True)
+    ext = Path(original_name).suffix or ".zip"
+    stored_path = base / f"{uuid.uuid4().hex}{ext}"
+    stored_path.write_bytes(content)
+
+    from aespa.services import sast_scanner
+    run = sast_scanner.create_sast_run(
+        collection_id=None,
+        name=name or f"SAST – {original_name}",
+        source_archive_path=str(stored_path),
+        source_filename=original_name,
+        llm_config_id=llm_config_id,
+    )
+    return _to_summary(run)
 
 
 # ── Global SAST runs list ──────────────────────────────────────────────────────
@@ -290,6 +355,7 @@ def get_sast_leads(
     leads = session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
+        .where(ScanLead.imported_into_run_id == None)  # noqa: E711 — originals only
         .order_by(ScanLead.id)
     ).all()
     return [ScanLeadOut.model_validate(lead) for lead in leads]

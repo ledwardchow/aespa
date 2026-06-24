@@ -82,11 +82,17 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
 
 
 def cascade_delete_sast_run(session: Session, run_id: int) -> None:
-    """Delete a ``SastRun`` and every row that keys on it."""
+    """Delete a ``SastRun`` and every row that keys on it.
+
+    Only the *original* leads are removed (``imported_into_run_id IS NULL``):
+    copies imported into a dynamic run keep ``producer_run_id`` pointing here but
+    belong to that run and are cleaned up when the run is deleted instead.
+    """
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
         .where(ScanLead.producer_run_type == "sast")
+        .where(ScanLead.imported_into_run_id == None)  # noqa: E711
     ).all():
         session.delete(lead)
     for slog in session.exec(
@@ -103,4 +109,12 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         session.delete(log)
     run = session.get(SastRun, run_id)
     if run is not None:
+        # Best-effort removal of a standalone run's stored source archive.
+        if run.source_archive_path:
+            try:
+                import os
+                if os.path.isfile(run.source_archive_path):
+                    os.remove(run.source_archive_path)
+            except Exception:
+                pass
         session.delete(run)
