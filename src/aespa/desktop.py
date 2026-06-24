@@ -14,10 +14,14 @@ import time
 
 import objc
 from AppKit import (
+    NSAlert,
+    NSAlertFirstButtonReturn,
+    NSAppearance,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
+    NSColor,
     NSImage,
     NSMenu,
     NSMenuItem,
@@ -25,6 +29,7 @@ from AppKit import (
     NSOpenPanel,
     NSSavePanel,
     NSStatusBar,
+    NSTextField,
     NSVariableStatusItemLength,
     NSWindow,
     NSWindowStyleMaskClosable,
@@ -140,6 +145,17 @@ class Controller(NSObject):
             win.setTitle_("AESPA")
             win.setReleasedWhenClosed_(False)
             win.setDelegate_(self)
+            # Match the site theme (manifest theme_color #0b0d12): dark chrome,
+            # title bar tinted to the page background so it blends in.
+            win.setBackgroundColor_(
+                NSColor.colorWithSRGBRed_green_blue_alpha_(
+                    11 / 255, 13 / 255, 18 / 255, 1.0
+                )
+            )
+            win.setTitlebarAppearsTransparent_(True)
+            win.setAppearance_(
+                NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+            )
             web = WKWebView.alloc().initWithFrame_configuration_(
                 rect, WKWebViewConfiguration.alloc().init()
             )
@@ -164,6 +180,43 @@ class Controller(NSObject):
             NSApplicationActivationPolicyAccessory
         )
         return False
+
+    # --- JS dialogs (WKUIDelegate): alert / confirm / prompt --------------
+    def webView_runJavaScriptAlertPanelWithMessage_initiatedByFrame_completionHandler_(
+        self, _webView, message, _frame, completionHandler
+    ):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("AESPA")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
+        completionHandler()
+
+    def webView_runJavaScriptConfirmPanelWithMessage_initiatedByFrame_completionHandler_(  # noqa: E501
+        self, _webView, message, _frame, completionHandler
+    ):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("AESPA")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.addButtonWithTitle_("Cancel")
+        completionHandler(alert.runModal() == NSAlertFirstButtonReturn)
+
+    def webView_runJavaScriptTextInputPanelWithPrompt_defaultText_initiatedByFrame_completionHandler_(  # noqa: E501
+        self, _webView, prompt, defaultText, _frame, completionHandler
+    ):
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 280, 24))
+        field.setStringValue_(defaultText or "")
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("AESPA")
+        alert.setInformativeText_(prompt)
+        alert.addButtonWithTitle_("OK")
+        alert.addButtonWithTitle_("Cancel")
+        alert.setAccessoryView_(field)
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            completionHandler(field.stringValue())
+        else:
+            completionHandler(None)
 
     # --- File import (WKUIDelegate) ---------------------------------------
     def webView_runOpenPanelWithParameters_initiatedByFrame_completionHandler_(

@@ -4,11 +4,7 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aespa"
-<<<<<<< Updated upstream
-version = "0.6.20260623.7"
-=======
-version = "0.6.20260622.18"
->>>>>>> Stashed changes
+version = "0.6.20260623.12"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
