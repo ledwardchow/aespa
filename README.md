@@ -21,7 +21,7 @@ You will need to provide:
 - For web app testing - URL and (optionally) credentials
 - For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
 - (Optionally) ZIP of the source code for the API. It will perform a "SAST-lite" agentic examination of the code to identify leads to investigate during the DAST API testing
-- An API key for an OpenAPI or an Anthropic-format LLM provider
+- An API key for an OpenAI or an Anthropic-format LLM provider
 
 ## Performance
 
@@ -158,5 +158,4 @@ API Scan Findings
 - Claude Sonnet 4.6 - Output token cap 70000. Doesn't seem to trigger refusals even without CVP.
 - Minimax M3 - Output token cap 70000, turn off force tool call
 - GLM 5.2 - Output token cap 70000, turn off force tool call
-
 - GPT 5.4/5.5 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
