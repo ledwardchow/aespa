@@ -1032,16 +1032,16 @@ def _emit_poc_outcome(
     title = (finding.title or "").strip()
     short = (title[:80] + "…") if len(title) > 80 else title
     messages = {
-        "verified": f"PoC verified for {short}",
-        "verification_failed": f"PoC verification failed for {short}",
-        "no_request": f"No PoC request supplied by validator for {short}",
-        "out_of_scope": f"PoC suppressed (out-of-scope URL) for {short}",
+        "verified": f"Reproducible proof attached for {short}",
+        "verification_failed": f"Couldn't reproduce the issue for {short}",
+        "no_request": f"No proof attached for {short} — validator gave no request to replay",
+        "out_of_scope": f"Proof skipped (request points outside the target) for {short}",
         "method_suppressed":
-            f"PoC suppressed (state-changing method {method}) for {short}",
-        "no_assertion": f"PoC suppressed (no positive assertion) for {short}",
+            f"Proof skipped (would change data via {method}) for {short}",
+        "no_assertion": f"Proof skipped (no way to confirm success) for {short}",
         "auth_unresolved":
-            f"PoC suppressed (auth credential not resolvable) for {short}",
-        "url_too_long": f"PoC suppressed (URL too long) for {short}",
+            f"Proof skipped (couldn't get the required login) for {short}",
+        "url_too_long": f"Proof skipped (URL too long) for {short}",
     }
     message = messages.get(status, f"PoC outcome [{status}] for {short}")
     if detail:
@@ -1068,7 +1068,9 @@ def _emit_poc_outcome(
         "type": "agent_status",
         "agent_id": "reporting",
         "role": "Reporting",
-        "status": "active",
+        # A PoC outcome is terminal, not ongoing work — mark it complete so the
+        # Reporting panel doesn't sit lit on "active" until the next event.
+        "status": "complete",
         "current_task": message,
         "outcome": detail or None,
         "_persist": True,
@@ -1139,10 +1141,7 @@ async def _build_and_verify_poc(
     poc_request = done_input.get("poc_request")
     if not isinstance(poc_request, dict):
         if run_id is not None:
-            _emit_poc_outcome(
-                run_id, finding, status="no_request",
-                detail="validator did not supply a poc_request",
-            )
+            _emit_poc_outcome(run_id, finding, status="no_request")
         return None
 
     url = str(poc_request.get("url") or "").strip()
