@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-![Ask DeepWiki](https://deepwiki.com/badge.svg) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
