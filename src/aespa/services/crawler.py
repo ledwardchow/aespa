@@ -571,7 +571,19 @@ async def _crawl_as_credential(
                 continue
 
             # ── Content extraction ────────────────────────────────────────────
-            await page.wait_for_timeout(2000)
+            # Settle: let client-rendered content paint before snapshotting.
+            # Returns instantly once the DOM has text or links (static pages);
+            # an SPA waits only as long as it needs, capped well under the old
+            # flat 2s. ponytail: content signal beats a fixed sleep.
+            try:
+                await page.wait_for_function(
+                    "() => document.body && ("
+                    "document.body.innerText.trim().length > 0 || "
+                    "document.querySelector('a[href]'))",
+                    timeout=2000,
+                )
+            except Exception:
+                pass
             title = await page.title()
             try:
                 text = await page.evaluate("() => document.body.innerText")
@@ -2269,6 +2281,20 @@ async def _reconcile_direct_access(
         return
 
     log.info("Reconciling direct page access across %d credential(s)", len(creds))
+    total_checks = len(creds) * len(page_rows)
+    checks_done = 0
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": f"Verifying cross-user access (0/{total_checks})…",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
@@ -2306,6 +2332,22 @@ async def _reconcile_direct_access(
                     ) in page_rows:
                         if run_id in _stop_requested:
                             break
+                        checks_done += 1
+                        events_svc.emit(
+                            run_id,
+                            {
+                                "type": "agent_status",
+                                "agent_id": "crawler",
+                                "role": "Crawler",
+                                "status": "active",
+                                "current_task": (
+                                    f"Verifying cross-user access "
+                                    f"({checks_done}/{total_checks})…"
+                                ),
+                                "outcome": None,
+                                "_persist": True,
+                            },
+                        )
                         if cred.id in accessible_by:
                             continue
                         if _is_session_ending_url(page_url):
@@ -2909,7 +2951,10 @@ async def _goto_with_auth_recovery(
     for attempt in range(2):
         response = await _goto_lenient(page, url, timeout=20_000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=8_000)
+            # networkidle is unreliable on apps with polling/analytics/websockets
+            # (never goes idle → full timeout burned). Keep it short — it's a
+            # best-effort settle, not a correctness gate.
+            await page.wait_for_load_state("networkidle", timeout=3_000)
         except Exception:
             pass
         if not requires_auth or credential is None or not login_url:
