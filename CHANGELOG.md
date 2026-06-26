@@ -4,6 +4,23 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #206] June 25 Update — Public release
+
+**Branch:** `develop → main`
+
+### Crawler
+
+- **Replaced fixed sleeps with content-driven waits** (`services/crawler.py`): page settle after navigation now polls for body text or a link instead of a flat 2s timeout, returning as soon as content is ready; the post-navigation `networkidle` wait was cut from 8s to 3s since it never resolves on pages with polling/analytics/websockets and was previously burning the full timeout.
+- **Cross-user access reconciliation progress** (`services/crawler.py`): emits `agent_status` events with a running `(done/total)` count while re-checking each page against each credential, so the Agents panel shows progress instead of sitting idle during this pass.
+
+### Validator
+
+- **PoC outcome messages rewritten for readability** (`services/validator.py`): "PoC suppressed (auth credential not resolvable)" → "Proof skipped (couldn't get the required login)", etc. A PoC outcome now marks the Reporting agent `complete` instead of leaving it `active`, since the outcome is terminal.
+
+### Repo
+
+- Added AGPL licence and switched repo visibility to public.
+
 ## [PR #204] June 24 Update — Bedrock Mantle provider, standalone macOS app, OWASP-coverage rename
 
 **Opened:** 2026-06-24 | Branch: `develop → main`
