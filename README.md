@@ -86,7 +86,7 @@ The image bundles Chromium, so no separate Playwright install is needed.
 
 ### From Docker Hub
 
-The image is published at `[ledwardchow/aespa](https://hub.docker.com/r/ledwardchow/aespa)`. To run it without cloning this repo:
+The image is published at [ledwardchow/aespa](https://hub.docker.com/r/ledwardchow/aespa). To run it without cloning this repo:
 
 ```bash
 docker run -p 8000:8000 ledwardchow/aespa
