@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+![Ask DeepWiki](https://deepwiki.com/badge.svg) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
@@ -79,6 +79,42 @@ Crawls work well on any model, including local models, so you can save a bit of 
 If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 
 This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
+
+## Running with Docker
+
+The image bundles Chromium, so no separate Playwright install is needed.
+
+### From Docker Hub
+
+The image is published at `[ledwardchow/aespa](https://hub.docker.com/r/ledwardchow/aespa)`. To run it without cloning this repo:
+
+```bash
+docker run -p 8000:8000 ledwardchow/aespa
+```
+
+Then open `http://localhost:8000`.
+
+### From a clone
+
+```bash
+docker compose up -d        # pull the image, publish port 8000, persist data
+```
+
+Then open `http://localhost:8000`. The DB and uploads persist in the `aespa-data` volume across restarts. `docker compose down` to stop.
+
+To build and run locally instead of pulling the published image:
+
+```bash
+docker compose up -d --build
+```
+
+If you run with `docker run` directly, you **must** publish the port and mount the volume yourself — there is no image-level default for these:
+
+```bash
+docker run -p 8000:8000 -v aespa-data:/data ledwardchow/aespa
+```
+
+In Docker Desktop, hitting the play button on the **Images** tab starts a container with no published port (you'd get "could not connect"). Either fill in Host port `8000` and a `/data` volume under the Run dialog's "Optional settings", or run `docker compose up -d` once and drive it from the **Containers** tab afterward — those controls reuse the port and volume.
 
 ## Configuration
 
