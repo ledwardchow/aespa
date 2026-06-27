@@ -1,0 +1,12 @@
+services:
+  aespa:
+    image: ledwardchow/aespa:latest
+    build: .          # `docker compose up --build` to build locally instead of pulling
+    ports:
+      - "8000:8000"
+    volumes:
+      - aespa-data:/data
+    restart: unless-stopped
+
+volumes:
+  aespa-data:
