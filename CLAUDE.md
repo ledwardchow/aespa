@@ -22,9 +22,13 @@ uv run pytest -k "validator and not api"               # by keyword
 
 uv run ruff check .                  # lint (rules: E, F, I — isort enforced)
 uv run ruff format .                 # format
+
+deno lint src/aespa/web/app.js       # JS sanity check (node not installed; deno is)
 ```
 
 Requires Python 3.12+ and `uv`. There is no separate frontend build — `src/aespa/web/` is served as static assets.
+
+**After changing any JS (`src/aespa/web/*.js`), lint it before finishing** — there is no build step to catch a typo, so a broken edit ships silently. Run `deno lint src/aespa/web/app.js`: it parses the whole file, so a syntax error fails the command. It also reports pre-existing style problems (empty `catch{}` blocks, unused vars) that are baseline noise — don't chase those; just confirm your change added **no new** problems (compare the count against `git show HEAD:src/aespa/web/app.js`). The `react`/`htm`/`d3` imports are loaded from a CDN at runtime, so `deno check` type-resolution errors on those four are expected and not real failures.
 
 ## Configuration
 

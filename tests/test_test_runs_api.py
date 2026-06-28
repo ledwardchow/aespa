@@ -240,6 +240,75 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
     assert run_after["pages_discovered"] == 1
 
 
+def _import_one_finding(client: TestClient, run_id: int) -> dict:
+    payload = [{
+        "owasp_category": "A01",
+        "severity": "high",
+        "title": "Imported authorization bypass",
+        "description": "A protected resource is accessible.",
+        "affected_url": "https://target.local/admin",
+        "validation_status": "confirmed",
+    }]
+    r = client.post(f"/api/test-runs/{run_id}/findings/import", json=payload)
+    assert r.status_code == 200
+    return r.json()["findings"][0]
+
+
+def test_update_finding_edits_status_severity_and_text(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    finding = _import_one_finding(client, run["id"])
+
+    r = client.patch(
+        f"/api/test-runs/{run['id']}/findings/{finding['id']}",
+        json={
+            "validation_status": "unconfirmed",
+            "severity": "medium",
+            "title": "Edited title",
+            "description": "Edited description.",
+            "cvss_score": 5.4,
+        },
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["validation_status"] == "unconfirmed"
+    assert data["severity"] == "medium"
+    assert data["title"] == "Edited title"
+    assert data["description"] == "Edited description."
+    assert data["cvss_score"] == 5.4
+    # affected_url was not supplied — must be left untouched.
+    assert data["affected_url"] == "https://target.local/admin"
+
+
+def test_update_finding_ignores_invalid_values_and_guards_title(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    finding = _import_one_finding(client, run["id"])
+
+    r = client.patch(
+        f"/api/test-runs/{run['id']}/findings/{finding['id']}",
+        json={"severity": "bogus", "validation_status": "validating", "title": "   "},
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    # Invalid severity/status are ignored; blank title is not applied.
+    assert data["severity"] == "high"
+    assert data["validation_status"] == "confirmed"
+    assert data["title"] == "Imported authorization bypass"
+
+
+def test_update_finding_unknown_id_404(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    r = client.patch(
+        f"/api/test-runs/{run['id']}/findings/999999",
+        json={"severity": "low"},
+    )
+    assert r.status_code == 404
+
+
 def test_get_scanner_sessions_redacts_auth_material():
     from aespa.api import test_runs as test_runs_api
     from aespa.models import Site, TestRun

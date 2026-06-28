@@ -169,6 +169,8 @@ class ApiTestRun(SQLModel, table=True):
     name: str
     status: str = Field(default="pending")   # pending|running|completed|failed|cancelled
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # Per-run model-mixing profile (null = use the globally active profile).
+    llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     coverage_mode: str = Field(default="track")  # track|enforce (used in Slice 8)
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
@@ -259,6 +261,27 @@ class LLMConfig(SQLModel, table=True):
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any
     force_tool_choice: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class LLMProfile(SQLModel, table=True):
+    """A named per-agent-role model assignment.
+
+    A profile maps each agent role (crawler, test_lead, specialist, …) to an
+    ``LLMConfig`` ("Model"), falling back to ``default_model_id`` for roles not
+    explicitly overridden. A scan selects a profile via ``*.llm_profile_id``;
+    each agent resolves its model through ``get_llm_config_for_role()``.
+    """
+
+    __tablename__ = "llm_profile"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(default="Default", index=True)
+    is_active: bool = Field(default=False, index=True)
+    # The Model used for any role without an explicit override.
+    default_model_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # JSON: {role: llm_config_id} — only roles overridden away from the default.
+    role_models_json: str = Field(default="{}")
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -437,8 +460,10 @@ class TestRun(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
-    # Optional per-run LLM profile override (null = use the globally active one)
+    # Optional per-run LLM model override (null = use the globally active one)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # Per-run model-mixing profile (null = use the globally active profile).
+    llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     # JSON blob produced by build_recon_summary() at the end of the crawl phase
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage: {model: {input, output, cache_read, cache_write}}
@@ -792,6 +817,8 @@ class SastRun(SQLModel, table=True):
     triggered_by_run_type: Optional[str] = Field(default=None)   # "api" | "web"
     triggered_by_run_id: Optional[int] = Field(default=None, index=True)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
+    # Per-run model-mixing profile (null = use the globally active profile).
+    llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
     leads_count: int = Field(default=0)
     error_message: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
