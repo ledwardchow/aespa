@@ -451,7 +451,9 @@ async def _crawl_as_credential(
 
         if requires_auth and cred:
             log.info("Authenticating as %s at %s", cred.username, credential_login_url)
-            await _authenticate(page, credential_login_url, cred, run_id)
+            await _authenticate(
+                page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
+            )
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
@@ -571,7 +573,19 @@ async def _crawl_as_credential(
                 continue
 
             # ── Content extraction ────────────────────────────────────────────
-            await page.wait_for_timeout(2000)
+            # Settle: let client-rendered content paint before snapshotting.
+            # Returns instantly once the DOM has text or links (static pages);
+            # an SPA waits only as long as it needs, capped well under the old
+            # flat 2s. ponytail: content signal beats a fixed sleep.
+            try:
+                await page.wait_for_function(
+                    "() => document.body && ("
+                    "document.body.innerText.trim().length > 0 || "
+                    "document.querySelector('a[href]'))",
+                    timeout=2000,
+                )
+            except Exception:
+                pass
             title = await page.title()
             try:
                 text = await page.evaluate("() => document.body.innerText")
@@ -740,7 +754,8 @@ async def _crawl_as_credential(
             # requested and post-redirect URLs.
             page_norms = {norm, norm_final}
             page_calls = [
-                c for c in observed_api_calls
+                c
+                for c in observed_api_calls
                 if _norm(c.get("page_url") or "") in page_norms
             ]
             observed_api_calls.clear()
@@ -2269,6 +2284,20 @@ async def _reconcile_direct_access(
         return
 
     log.info("Reconciling direct page access across %d credential(s)", len(creds))
+    total_checks = len(creds) * len(page_rows)
+    checks_done = 0
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": f"Verifying cross-user access (0/{total_checks})…",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
@@ -2292,7 +2321,9 @@ async def _reconcile_direct_access(
                         )
                     except Exception:
                         pass
-                    await _authenticate(page, credential_login_url, cred, run_id)
+                    await _authenticate(
+                        page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
+                    )
                     auth_check_snapshot = await _capture_auth_check_snapshot(
                         page, credential_login_url
                     )
@@ -2306,6 +2337,22 @@ async def _reconcile_direct_access(
                     ) in page_rows:
                         if run_id in _stop_requested:
                             break
+                        checks_done += 1
+                        events_svc.emit(
+                            run_id,
+                            {
+                                "type": "agent_status",
+                                "agent_id": "crawler",
+                                "role": "Crawler",
+                                "status": "active",
+                                "current_task": (
+                                    f"Verifying cross-user access "
+                                    f"({checks_done}/{total_checks})…"
+                                ),
+                                "outcome": None,
+                                "_persist": True,
+                            },
+                        )
                         if cred.id in accessible_by:
                             continue
                         if _is_session_ending_url(page_url):
@@ -2909,7 +2956,10 @@ async def _goto_with_auth_recovery(
     for attempt in range(2):
         response = await _goto_lenient(page, url, timeout=20_000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=8_000)
+            # networkidle is unreliable on apps with polling/analytics/websockets
+            # (never goes idle → full timeout burned). Keep it short — it's a
+            # best-effort settle, not a correctness gate.
+            await page.wait_for_load_state("networkidle", timeout=3_000)
         except Exception:
             pass
         if not requires_auth or credential is None or not login_url:
@@ -3605,11 +3655,18 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
             )
 
 
-async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> None:
+async def _authenticate(
+    page, login_url: str, credential, run_id: int = 0, llm_cfg=None
+) -> None:
     """Dispatch to the correct auth strategy based on ``credential.auth_mode``.
 
     For guided credentials that already have a cached session (from the crawl
     phase), cookies are injected directly without opening a new browser window.
+
+    When ``llm_cfg`` is supplied and the deterministic auto/totp login fails to
+    clear the login form, falls back to the LLM-driven adaptive login
+    (``_authenticate_smart``) which can handle modal/no-route, non-standard and
+    multi-step login flows.
     """
     mode = getattr(credential, "auth_mode", None) or AuthMode.auto
     try:
@@ -3684,8 +3741,19 @@ async def _authenticate(page, login_url: str, credential, run_id: int = 0) -> No
         await _fill_totp_if_prompted(page, credential)
     elif mode == AuthMode.guided:
         await _authenticate_guided(page, login_url, credential, run_id)
+        return
     else:
         await _authenticate_auto(page, login_url, credential)
+
+    # Smart fallback: if the deterministic heuristic failed to clear the login
+    # form, let the LLM figure the login out (modal/no-route, odd fields, multi-step).
+    if llm_cfg is not None:
+        try:
+            still_blocked = await _page_requires_login(page, login_url)
+        except Exception:
+            still_blocked = False
+        if still_blocked:
+            await _authenticate_smart(page, login_url, credential, run_id, llm_cfg)
 
 
 # Elements that open a modal/drawer login form on pages with no dedicated
@@ -3841,3 +3909,233 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
 
     except Exception as auth_err:
         log.warning("  _authenticate: exception: %s", auth_err)
+
+
+# ── LLM-driven adaptive login fallback ────────────────────────────────────────
+# Used when the deterministic _authenticate_auto heuristic fails (login form
+# still present). Observes the page and lets the LLM drive the login one action
+# at a time, handling modal/no-route logins, non-standard fields and multi-step
+# flows that the hardcoded selector lists cannot.
+
+_SMART_LOGIN_MAX_STEPS = 6
+
+
+async def _build_login_observation(page) -> str:
+    """Render a compact text snapshot of forms + clickable controls for the LLM.
+
+    Reuses _extract_dom_intelligence for form/field structure and adds the
+    visible buttons/links a login flow might need to click.
+    """
+    dom = await _extract_dom_intelligence(page)
+    lines: list[str] = []
+
+    forms = dom.get("forms") or []
+    if forms:
+        lines.append("Forms:")
+        for form in forms[:6]:
+            lines.append(f"  form {form.get('selector', '')}:")
+            for fld in (form.get("fields") or [])[:25]:
+                desc = ", ".join(
+                    f"{k}={v}"
+                    for k, v in (
+                        ("type", fld.get("type")),
+                        ("name", fld.get("name")),
+                        ("id", fld.get("id")),
+                        ("autocomplete", fld.get("autocomplete")),
+                        ("placeholder", fld.get("placeholder")),
+                    )
+                    if v
+                )
+                lines.append(f"    - {fld.get('selector', '')}  [{desc}]")
+    else:
+        lines.append("Forms: (none found)")
+
+    try:
+        controls = await page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                 "button, a, [role='button'], input[type='submit']"))
+               .filter(el => el.offsetParent !== null)
+               .slice(0, 40)
+               .map(el => ({
+                 tag: el.tagName.toLowerCase(),
+                 text: (el.innerText || el.value || el.getAttribute('aria-label')
+                        || el.getAttribute('title') || '').trim().slice(0, 60),
+                 id: el.id || '',
+                 sel: el.id ? '#' + CSS.escape(el.id) : '',
+               }))
+               .filter(c => c.text || c.id)"""
+        )
+    except Exception:
+        controls = []
+
+    if controls:
+        lines.append("Clickable controls:")
+        for c in controls:
+            label = c.get("text") or c.get("id") or ""
+            sel = c.get("sel") or ""
+            lines.append(
+                f"  - <{c.get('tag')}> {label!r}{f'  sel={sel}' if sel else ''}"
+            )
+
+    return "\n".join(lines)
+
+
+async def _apply_login_substitutions(value: str, credential) -> str:
+    """Replace {{username}}/{{password}} tokens with the real credential locally."""
+    value = value.replace("{{username}}", credential.username or "")
+    value = value.replace("{{password}}", credential.password or "")
+    return value
+
+
+async def _locate_login_target(page, action: dict):
+    """Resolve a Playwright locator from an action's selector, falling back to text."""
+    selector = (action.get("selector") or "").strip()
+    if selector:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+    text = (action.get("text") or "").strip()
+    if text:
+        try:
+            loc = page.get_by_text(text, exact=False).first
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+    return None
+
+
+async def _authenticate_smart(
+    page, login_url: str, credential, run_id: int, llm_cfg
+) -> None:
+    """LLM-driven login loop: observe → decide → act → re-check, up to N steps.
+
+    Best-effort: never raises. Stops on success (login form gone), on the LLM's
+    done/give_up, or when the step budget is exhausted. Logs reasons only — never
+    credential values.
+    """
+    if llm_cfg is None:
+        return
+
+    log.info(
+        "  _authenticate_smart: heuristic login failed for %s — trying LLM-driven login",
+        getattr(credential, "username", "?"),
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "crawler",
+            "role": "Crawler",
+            "status": "active",
+            "current_task": f"Figuring out the login form for {credential.username}…",
+            "outcome": None,
+        },
+    )
+
+    history: list[str] = []
+    use_vision = bool(getattr(llm_cfg, "use_vision", False))
+
+    for step in range(_SMART_LOGIN_MAX_STEPS):
+        try:
+            observation = await _build_login_observation(page)
+        except Exception as exc:
+            log.warning("  _authenticate_smart: observation failed: %s", exc)
+            return
+
+        screenshot_b64 = None
+        if use_vision:
+            try:
+                raw = await page.screenshot(type="png", full_page=False)
+                screenshot_b64 = base64.b64encode(raw).decode()
+            except Exception:
+                screenshot_b64 = None
+
+        try:
+            action = await llm_svc.decide_login_action(
+                llm_cfg,
+                url=page.url,
+                observation=observation,
+                username_hint=credential.username,
+                history=history,
+                screenshot_b64=screenshot_b64,
+            )
+        except Exception as exc:
+            log.warning("  _authenticate_smart: LLM call failed: %s", exc)
+            return
+
+        name = action.get("action")
+        reason = action.get("reason") or ""
+        log.info("  _authenticate_smart: step %d → %s (%s)", step + 1, name, reason)
+
+        if name == "done":
+            history.append(f"done: {reason}")
+            break
+        if name == "give_up":
+            log.info("  _authenticate_smart: LLM gave up — %s", reason)
+            history.append(f"give_up: {reason}")
+            break
+
+        try:
+            if name == "press":
+                target = await _locate_login_target(page, action)
+                key = (action.get("value") or "Enter").strip() or "Enter"
+                if target is not None:
+                    await target.press(key)
+                else:
+                    await page.keyboard.press(key)
+                history.append(f"pressed {key}")
+            elif name == "click":
+                target = await _locate_login_target(page, action)
+                if target is None:
+                    history.append(f"click target not found ({reason})")
+                else:
+                    await target.click(timeout=5_000)
+                    history.append(f"clicked: {reason}")
+            elif name == "fill":
+                target = await _locate_login_target(page, action)
+                if target is None:
+                    history.append(f"fill target not found ({reason})")
+                else:
+                    value = await _apply_login_substitutions(
+                        action.get("value") or "", credential
+                    )
+                    await target.fill(value)
+                    # Record which credential token was used, never the value.
+                    token = (
+                        "username"
+                        if "{{username}}" in (action.get("value") or "")
+                        else "password"
+                        if "{{password}}" in (action.get("value") or "")
+                        else "text"
+                    )
+                    history.append(f"filled {token} field ({reason})")
+        except Exception as exc:
+            log.warning("  _authenticate_smart: action %s failed: %s", name, exc)
+            history.append(f"{name} errored: {exc}")
+
+        try:
+            await page.wait_for_timeout(900)
+        except Exception:
+            pass
+
+        # Success check: login form gone.
+        try:
+            if not await _page_requires_login(page, login_url):
+                log.info(
+                    "  _authenticate_smart: success — login form gone. page.url=%s",
+                    page.url,
+                )
+                return
+        except Exception:
+            pass
+
+    if await _page_requires_login(page, login_url):
+        log.warning(
+            "  _authenticate_smart: could not complete login for %s after %d steps",
+            credential.username,
+            _SMART_LOGIN_MAX_STEPS,
+        )
