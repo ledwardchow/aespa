@@ -4,6 +4,39 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #209] June 28 Update — Per-task model routing, adaptive login, editable findings
+
+**Branch:** `develop → main`
+
+### Per-task model routing
+
+- **Per-agent-role model assignment** (`models.py`, `schemas.py`, `db.py`, `services/settings.py`, `api/settings.py`, `web/app.js`): new `LLMProfile` maps each agent role to a "Model" (`LLMConfig`), with a `default_model_id` covering any unmapped role and a `role_models_json` holding only the overrides. Assignable roles: `crawler`, `test_lead`, `specialist`, `validator`, `api_scanner`, `sast`, and `alice`. A scan resolves each agent's model via `get_llm_config_for_role(session, run, role)`; precedence is explicit per-run profile → legacy per-run model → globally active profile → globally active model, and within a profile a per-role override beats the default. Mix a cheap model on the crawler/validator with your best model on the Test Lead to cut cost.
+- **Profile + model CRUD** (`api/settings.py`): `/llm/model-configs` and `/llm/profiles` list/create/update/activate/delete endpoints; runs select a profile via a new nullable `llm_profile_id` on `test_run` / `api_test_run` / `sast_run`. Migration adds the `llm_profile` table, the three `llm_profile_id` columns, and seeds a default profile (`db.py::_migrate`).
+- **Wired through every run type** (`services/scanner.py`, `services/crawler.py`, `services/api_scanner.py`, `services/sast_scanner.py`, `services/validator.py`, `services/alice.py`): each agent now resolves its own model for its role instead of using one run-wide model.
+
+### Crawler / login
+
+- **LLM-driven adaptive login fallback** (`services/crawler.py::_authenticate_smart`, `services/prompts/login_action.py`, `services/llm.py::decide_login_action`): when the deterministic `_authenticate_auto` heuristic can't clear the login form, the model is shown a structured observation of the page (plus a screenshot when the profile has vision) and returns one action at a time (`fill`/`click`/`press`/`done`/`give_up`), driving a small bounded loop until the form is gone. Handles modal/no-route, non-standard, and multi-step logins. Parse failures return `give_up` so the loop always terminates.
+- **Rate-limit waiting events** (`services/llm.py::_emit_rate_limit_waiting`): surfaces back-off waits to the UI instead of stalling silently.
+
+### Validator
+
+- **Access-control validation uses every configured user** (`services/crawler.py`): the cross-user reconcile pass now persists each authenticated credential's session to the vault (`recon_{cred.id}`), not just guided logins and the primary. Previously auto/TOTP credentials were logged in transiently and discarded, so the deterministic access-control check had no alternate-user sessions and reported *"Access-control validation could not run because no alternate user sessions were available"* on every privesc finding. Those sessions now flow through `_active_sessions` to both the inline and post-scan validators.
+
+### Findings
+
+- **Editable findings** (`services/findings.py::apply_finding_update`, `api/scan.py`, `api/api_test_runs.py`, `web/app.js`, `web/styles.css`): `PATCH` endpoints for web (`/api/test-runs/{run_id}/findings/{finding_id}`) and API (`/{run_id}/findings/{finding_id}`) runs let you edit a finding's fields from the UI.
+
+### Docs & tooling
+
+- **Docker instructions** (`4a840d9`) and assorted `README.md` updates.
+- **CLAUDE.md**: added the `deno lint src/aespa/web/app.js` JS-sanity step (no build step to catch typos); `docs/architecture.md` updated for the above.
+- Added Windows standalone build scripts (untested at time of writing)
+
+### Tests
+
+- New `tests/test_model_mixing.py` (profile resolution / role overrides), plus additions to `tests/test_scanner_service.py`, `tests/test_crawler_logic.py`, `tests/test_settings_api.py`, `tests/test_api_test_runs.py`, and `tests/test_test_runs_api.py`.
+
 ## [PR #206] June 25 Update — Public release
 
 **Branch:** `develop → main`

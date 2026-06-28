@@ -14,6 +14,7 @@ from aespa.models import (
     CloudflareAccessConfig,
     GlobalHttpHeaderConfig,
     LLMConfig,
+    LLMProfile,
     LLMProviderConfig,
     ReportingDebugConfig,
     ScannerPolicy,
@@ -34,6 +35,8 @@ from aespa.schemas import (
     LLMExportProfileItem,
     LLMExportProviderItem,
     LLMImportResult,
+    LLMProfileIn,
+    LLMProfileOut,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
     ReportingDebugConfigIn,
@@ -50,6 +53,19 @@ from aespa.schemas import (
 )
 
 _SINGLETON_ID = 1
+
+# Canonical agent roles a profile can assign a Model to. A scan resolves each
+# agent's model via get_llm_config_for_role(); unmapped roles fall back to the
+# profile's default model.
+AGENT_ROLES: tuple[str, ...] = (
+    "crawler",
+    "test_lead",
+    "specialist",
+    "validator",
+    "api_scanner",
+    "sast",
+    "alice",
+)
 
 
 def _utcnow() -> datetime:
@@ -90,7 +106,7 @@ def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
     return cfg
 
 
-def llm_profile_out(session: Session, cfg: LLMConfig) -> LLMConfigOut:
+def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
     resolved = _profile_with_provider(session, cfg)
     provider_name = None
     if cfg.provider_id is not None:
@@ -122,13 +138,66 @@ def get_llm_config(session: Session) -> LLMConfig | None:
     return _profile_with_provider(session, cfg)
 
 
-def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
-    """Return the LLM config for a run: per-run override if set, else the active global one."""
-    if run.llm_config_id is not None:
-        cfg = session.get(LLMConfig, run.llm_config_id)
+def get_active_scan_profile(session: Session) -> LLMProfile | None:
+    return session.exec(select(LLMProfile).where(LLMProfile.is_active == True)).first()  # noqa: E712
+
+
+def _model_for_profile_role(
+    session: Session, prof: LLMProfile, role: str | None
+) -> LLMConfig | None:
+    """Resolve a profile's Model for *role*, falling back to its default model."""
+    model_id: int | None = None
+    if role is not None:
+        raw = _json_loads(prof.role_models_json, {}).get(role)
+        if raw is not None:
+            try:
+                model_id = int(raw)
+            except (TypeError, ValueError):
+                model_id = None
+    if model_id is None:
+        model_id = prof.default_model_id
+    if model_id is None:
+        return None
+    cfg = session.get(LLMConfig, model_id)
+    return _profile_with_provider(session, cfg) if cfg is not None else None
+
+
+def get_llm_config_for_role(
+    session: Session, run: "TestRun", role: str | None = None
+) -> LLMConfig | None:
+    """Resolve the Model an agent should use for a run.
+
+    Precedence: explicit per-run profile → explicit per-run (legacy) model →
+    globally active profile → globally active model. Within a profile, an
+    explicit per-role override beats the profile's default model.
+    """
+    # 1. Explicit per-run profile.
+    profile_id = getattr(run, "llm_profile_id", None)
+    if profile_id is not None:
+        prof = session.get(LLMProfile, profile_id)
+        if prof is not None:
+            cfg = _model_for_profile_role(session, prof, role)
+            if cfg is not None:
+                return cfg
+    # 2. Explicit per-run legacy model (back-compat with pre-profile runs).
+    legacy_id = getattr(run, "llm_config_id", None)
+    if legacy_id is not None:
+        cfg = session.get(LLMConfig, legacy_id)
         if cfg is not None:
             return _profile_with_provider(session, cfg)
+    # 3. Globally active profile.
+    prof = get_active_scan_profile(session)
+    if prof is not None:
+        cfg = _model_for_profile_role(session, prof, role)
+        if cfg is not None:
+            return cfg
+    # 4. Globally active model.
     return get_llm_config(session)
+
+
+def get_llm_config_for_run(session: Session, run: "TestRun") -> LLMConfig | None:
+    """Role-agnostic config for a run (resolves to the profile's default model)."""
+    return get_llm_config_for_role(session, run, None)
 
 
 def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
@@ -227,6 +296,131 @@ def delete_llm_profile(session: Session, profile_id: int) -> None:
         replacement = session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).first()
         if replacement is not None:
             activate_llm_profile(session, replacement.id)
+
+
+# ── Scan profiles (per-agent-role model assignment) ───────────────────────────
+
+def list_scan_profiles(session: Session) -> list[LLMProfile]:
+    return list(
+        session.exec(select(LLMProfile).order_by(LLMProfile.updated_at.desc())).all()
+    )
+
+
+def get_scan_profile(session: Session, profile_id: int) -> LLMProfile:
+    prof = session.get(LLMProfile, profile_id)
+    if prof is None:
+        raise HTTPException(status_code=404, detail="Scan profile not found")
+    return prof
+
+
+def create_scan_profile(session: Session, payload: LLMProfileIn) -> LLMProfile:
+    prof = LLMProfile()
+    return _apply_scan_profile(
+        session, prof, payload, activate=(len(list_scan_profiles(session)) == 0)
+    )
+
+
+def update_scan_profile(session: Session, profile_id: int, payload: LLMProfileIn) -> LLMProfile:
+    prof = get_scan_profile(session, profile_id)
+    return _apply_scan_profile(session, prof, payload, activate=prof.is_active)
+
+
+def activate_scan_profile(session: Session, profile_id: int) -> LLMProfile:
+    prof = get_scan_profile(session, profile_id)
+    for p in session.exec(select(LLMProfile)).all():
+        p.is_active = p.id == profile_id
+        session.add(p)
+    session.commit()
+    session.refresh(prof)
+    return prof
+
+
+def delete_scan_profile(session: Session, profile_id: int) -> None:
+    prof = get_scan_profile(session, profile_id)
+    was_active = prof.is_active
+    session.delete(prof)
+    session.commit()
+    if was_active:
+        replacement = session.exec(
+            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
+        ).first()
+        if replacement is not None:
+            activate_scan_profile(session, replacement.id)
+
+
+def _apply_scan_profile(
+    session: Session, prof: LLMProfile, payload: LLMProfileIn, activate: bool
+) -> LLMProfile:
+    _ensure_unique_scan_profile_name(session, payload.name, prof.id)
+    if session.get(LLMConfig, payload.default_model_id) is None:
+        raise HTTPException(
+            status_code=422, detail="default_model_id does not reference an existing Model"
+        )
+    role_models: dict[str, int] = {}
+    for role, model_id in (payload.role_models or {}).items():
+        if role not in AGENT_ROLES:
+            raise HTTPException(status_code=422, detail=f"Unknown agent role: {role}")
+        if model_id is None:
+            continue
+        if session.get(LLMConfig, model_id) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"role_models[{role}] does not reference an existing Model",
+            )
+        role_models[role] = int(model_id)
+
+    prof.name = payload.name
+    prof.default_model_id = payload.default_model_id
+    prof.role_models_json = _json_dumps(role_models)
+    prof.is_active = bool(activate)
+    prof.updated_at = _utcnow()
+
+    if prof.is_active:
+        for p in session.exec(select(LLMProfile)).all():
+            if p.id != prof.id:
+                p.is_active = False
+                session.add(p)
+
+    session.add(prof)
+    session.commit()
+    session.refresh(prof)
+    return prof
+
+
+def _ensure_unique_scan_profile_name(
+    session: Session, name: str, current_id: int | None
+) -> None:
+    normalized = name.strip().casefold()
+    for p in session.exec(select(LLMProfile)).all():
+        if p.id != current_id and p.name.strip().casefold() == normalized:
+            raise HTTPException(
+                status_code=409, detail="A profile with that name already exists"
+            )
+
+
+def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
+    role_models = {
+        k: int(v)
+        for k, v in _json_loads(prof.role_models_json, {}).items()
+        if v is not None
+    }
+
+    def _model_name(model_id: int | None) -> str | None:
+        if model_id is None:
+            return None
+        model = session.get(LLMConfig, model_id)
+        return model.name if model is not None else None
+
+    return LLMProfileOut(
+        id=prof.id,
+        name=prof.name,
+        is_active=prof.is_active,
+        default_model_id=prof.default_model_id,
+        default_model_name=_model_name(prof.default_model_id),
+        role_models=role_models,
+        role_model_names={k: _model_name(v) for k, v in role_models.items()},
+        updated_at=prof.updated_at,
+    )
 
 
 def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool) -> LLMConfig:

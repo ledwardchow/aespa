@@ -24,9 +24,11 @@ from aespa.schemas import (
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
+    ScanFindingUpdateIn,
     ValidationStatusOut,
 )
 from aespa.services import checkpoint as checkpoint_svc
+from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
@@ -132,6 +134,25 @@ def delete_finding(
         raise HTTPException(status_code=404, detail="Finding not found")
     session.delete(finding)
     session.commit()
+
+
+@router.patch("/api/test-runs/{run_id}/findings/{finding_id}", response_model=ScanFindingOut)
+def update_finding(
+    run_id: int,
+    finding_id: int,
+    payload: ScanFindingUpdateIn,
+    session: Session = Depends(get_session),
+) -> ScanFindingOut:
+    """Apply a user edit (severity, validation status, free text) to a finding."""
+    _get_run_or_404(session, run_id)
+    finding = session.get(ScanFinding, finding_id)
+    if finding is None or finding.test_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    findings_svc.apply_finding_update(finding, payload)
+    session.add(finding)
+    session.commit()
+    session.refresh(finding)
+    return ScanFindingOut.model_validate(finding)
 
 
 @router.delete("/api/test-runs/{run_id}/findings", status_code=204)

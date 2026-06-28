@@ -1143,7 +1143,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     )
     from aespa.services.settings import (
         get_global_http_header_config,
-        get_llm_config_for_run,
+        get_llm_config_for_role,
         get_run_scanner_policy,
         get_specialist_agent_config,
         get_upstream_proxy_config,
@@ -1153,7 +1153,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         run = s.get(ApiTestRun, api_run_id)
         if run is None:
             raise ValueError(f"ApiTestRun {api_run_id} not found")
-        llm_cfg = get_llm_config_for_run(s, run)  # type: ignore[arg-type]
+        llm_cfg = get_llm_config_for_role(s, run, "api_scanner")  # type: ignore[arg-type]
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)  # type: ignore[arg-type]

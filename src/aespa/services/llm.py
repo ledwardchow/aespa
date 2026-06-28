@@ -18,6 +18,7 @@ from urllib.parse import quote
 import httpx
 
 from aespa.models import LLMConfig
+from aespa.services.prompts.login_action import LOGIN_ACTION_PROMPT
 from aespa.services.prompts.reporting import (
     _ANALYSE_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
@@ -372,7 +373,9 @@ def _emit_run_event(event: dict) -> None:
             pass
 
 
-def _emit_rate_limit_waiting(model: str, reserved_tokens: float, wait_time: float) -> None:
+def _emit_rate_limit_waiting(
+    model: str, reserved_tokens: float, wait_time: float
+) -> None:
     """Tell the user the scan is pacing for the rate limit (not stuck)."""
     _emit_run_event(
         {
@@ -417,7 +420,9 @@ def _llm_client_kwargs() -> dict:
     proxy = _llm_proxy_var.get()
     return {
         "http_client": httpx.AsyncClient(
-            verify=proxy is None, headers=_LLM_HEADERS, **{"proxy": proxy} if proxy else {}
+            verify=proxy is None,
+            headers=_LLM_HEADERS,
+            **{"proxy": proxy} if proxy else {},
         )
     }
 
@@ -680,6 +685,52 @@ Rules:
     }
 
 
+_LOGIN_ACTIONS = {"fill", "click", "press", "done", "give_up"}
+
+
+async def decide_login_action(
+    config: LLMConfig,
+    *,
+    url: str,
+    observation: str,
+    username_hint: str,
+    history: list[str],
+    screenshot_b64: Optional[str] = None,
+) -> dict:
+    """Decide the single next browser action to log a user in.
+
+    Returns ``{"action", "selector", "text", "value", "reason"}`` where
+    ``action`` is one of fill/click/press/done/give_up. Used by the crawler's
+    LLM-driven login fallback. The model returns ``{{username}}`` / ``{{password}}``
+    placeholders rather than real secrets — the crawler substitutes them locally.
+    On any parse failure this returns a ``give_up`` action so the caller stops
+    cleanly rather than raising.
+    """
+    history_text = "\n".join(f"- {h}" for h in history[-12:]) or "(none yet)"
+    prompt = LOGIN_ACTION_PROMPT.format(
+        username_hint=username_hint or "(see credential)",
+        url=url,
+        observation=observation[:6000],
+        history=history_text,
+    )
+    try:
+        raw = await _call(config, prompt, screenshot_b64 if config.use_vision else None)
+        action = _extract_action_json(raw)
+    except Exception as exc:
+        return {"action": "give_up", "reason": f"LLM action parse failed: {exc}"}
+
+    name = str(action.get("action") or "").strip().lower()
+    if name not in _LOGIN_ACTIONS:
+        return {"action": "give_up", "reason": f"unknown action {name!r}"}
+    return {
+        "action": name,
+        "selector": str(action.get("selector") or "").strip(),
+        "text": str(action.get("text") or "").strip(),
+        "value": str(action.get("value") or ""),
+        "reason": str(action.get("reason") or "").strip(),
+    }
+
+
 def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCategories]:
     if not raw:
         return "", [], dict(_EMPTY_CATS)
@@ -745,7 +796,9 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     # so a rate-limited scan never looks frozen.
     slept = await limiter.acquire(
         total_estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(total_estimated, limiter.max_tokens), wt),
+        on_wait=lambda wt: _emit_rate_limit_waiting(
+            config.model, min(total_estimated, limiter.max_tokens), wt
+        ),
     )
 
     try:
@@ -1200,7 +1253,9 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     if config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+        verify=_g_proxy is None,
+        headers=_LLM_HEADERS,
+        **({"proxy": _g_proxy} if _g_proxy else {}),
     )
     client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
     parts: list = []
@@ -1338,7 +1393,9 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
             text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
             joined = " ".join(p for p in text_parts if p)
             if joined:
-                items.append({"type": "message", "role": "assistant", "content": joined})
+                items.append(
+                    {"type": "message", "role": "assistant", "content": joined}
+                )
             for blk in content:
                 if blk.get("type") == "tool_use":
                     items.append(
@@ -1457,7 +1514,9 @@ async def _openai_responses(
         ]
     else:
         r_input = prompt
-    resp = await _create_response(client, _mantle_response_kwargs(config, input=r_input))
+    resp = await _create_response(
+        client, _mantle_response_kwargs(config, input=r_input)
+    )
     _record_responses_usage(config, resp)
     return _extract_responses_text(resp)
 
@@ -2851,7 +2910,14 @@ def _estimate_tools_call_tokens(system_message: str, messages: list[dict]) -> in
                     parts.append(block)
                 elif isinstance(block, dict):
                     # text / tool_result content / tool_use input — stringify cheaply.
-                    parts.append(str(block.get("text") or block.get("content") or block.get("input") or ""))
+                    parts.append(
+                        str(
+                            block.get("text")
+                            or block.get("content")
+                            or block.get("input")
+                            or ""
+                        )
+                    )
         elif content is not None:
             parts.append(str(content))
     return estimate_tokens("\n".join(parts))
@@ -2873,16 +2939,24 @@ async def _call_with_tools(
     """
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        return await _call_with_tools_impl(config, system_message, messages, tools=tools)
+        return await _call_with_tools_impl(
+            config, system_message, messages, tools=tools
+        )
 
-    estimated = _estimate_tools_call_tokens(system_message, messages) + (config.max_tokens or 4096)
+    estimated = _estimate_tools_call_tokens(system_message, messages) + (
+        config.max_tokens or 4096
+    )
     _last_call_tokens_var.set(None)
     slept = await limiter.acquire(
         estimated,
-        on_wait=lambda wt: _emit_rate_limit_waiting(config.model, min(estimated, limiter.max_tokens), wt),
+        on_wait=lambda wt: _emit_rate_limit_waiting(
+            config.model, min(estimated, limiter.max_tokens), wt
+        ),
     )
     try:
-        result = await _call_with_tools_impl(config, system_message, messages, tools=tools)
+        result = await _call_with_tools_impl(
+            config, system_message, messages, tools=tools
+        )
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
@@ -3482,7 +3556,9 @@ async def _call_with_tools_impl(
         if config.base_url:
             _g_http_opts["base_url"] = config.base_url
         _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=_g_proxy is None, headers=_LLM_HEADERS, **({"proxy": _g_proxy} if _g_proxy else {})
+            verify=_g_proxy is None,
+            headers=_LLM_HEADERS,
+            **({"proxy": _g_proxy} if _g_proxy else {}),
         )
         g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
         g_tools = _ant_tools_to_gemini()
