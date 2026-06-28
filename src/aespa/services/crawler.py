@@ -2310,6 +2310,47 @@ def _merge_api_categories(fallback: dict, llm_categories: dict) -> dict:
     return merged
 
 
+async def _persist_recon_session(run_id: int, cred, page) -> None:
+    """Capture the cookies/bearer of an authenticated reconcile page into the vault.
+
+    Guided logins persist themselves; auto/totp creds otherwise vanish after
+    reconcile, leaving the validator with no alternate user sessions.
+    """
+    try:
+        raw_cookies = await page.context.cookies()
+        cookies = {c["name"]: c["value"] for c in raw_cookies}
+        token = None
+        for key in ("access_token", "token", "jwt", "auth_token", "id_token",
+                    "authToken", "accessToken"):
+            try:
+                val = await page.evaluate(
+                    "(k) => localStorage.getItem(k) || sessionStorage.getItem(k)",
+                    key,
+                )
+            except Exception:
+                val = None
+            if val:
+                token = val
+                break
+        if not cookies and not token:
+            return  # auth produced no session — nothing to record
+        from aespa.services import scanner_sessions as _ss
+
+        _ss.upsert_session(
+            run_id,
+            label=f"recon_{cred.id}",
+            kind="bearer" if token and not cookies else "cookie",
+            username=cred.username,
+            credential_id=cred.id,
+            source="reconcile_login",
+            cookies=cookies,
+            extra_headers={"Authorization": f"Bearer {token}"} if token else None,
+        )
+    except Exception as exc:
+        log.warning("  reconcile: could not persist session for %s: %s",
+                    getattr(cred, "username", "?"), exc)
+
+
 async def _reconcile_direct_access(
     *,
     run_id: int,
@@ -2400,6 +2441,12 @@ async def _reconcile_direct_access(
                     await _authenticate(
                         page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
                     )
+                    # Persist this credential's session to the vault so the dynamic
+                    # scan and the validator's access-control check have alternate
+                    # user sessions. Without this, only guided logins and the primary
+                    # ever reach the vault, so the validator reports "no alternate
+                    # user sessions were available" for every privesc finding.
+                    await _persist_recon_session(run_id, cred, page)
                     auth_check_snapshot = await _capture_auth_check_snapshot(
                         page, credential_login_url
                     )

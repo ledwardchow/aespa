@@ -17,7 +17,7 @@ from aespa.services import llm as llm_svc
 from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT, ALICE_SYSTEM_PROMPT
 from aespa.services.scope import check_scope
 from aespa.services.settings import (
-    get_llm_config_for_run,
+    get_llm_config_for_role,
     get_scanner_policy,
 )
 
@@ -984,7 +984,7 @@ async def run_alice_turn_stream(
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config_for_run(s, run)
+        llm_cfg = get_llm_config_for_role(s, run, "alice")
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration configured in Settings.")
 
@@ -1894,7 +1894,7 @@ async def run_api_alice_turn_stream(
     # Persisted agent_log / scan_log rows are tagged run_kind='api' by the
     # run_kind_scope('api') that alice_tasks._run opens around this stream.
     from aespa.models import ApiCollection, ApiTestRun
-    from aespa.services.settings import get_llm_config_for_run
+    from aespa.services.settings import get_llm_config_for_role
 
     with Session(get_engine()) as s:
         api_run = s.get(ApiTestRun, api_run_id)
@@ -1903,7 +1903,7 @@ async def run_api_alice_turn_stream(
         collection = s.get(ApiCollection, api_run.collection_id)
         if collection is None:
             raise ValueError(f"ApiCollection {api_run.collection_id} not found")
-        llm_cfg = get_llm_config_for_run(s, api_run)  # type: ignore[arg-type]
+        llm_cfg = get_llm_config_for_role(s, api_run, "alice")  # type: ignore[arg-type]
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration configured in Settings.")
         collection_name = collection.name
