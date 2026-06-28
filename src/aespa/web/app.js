@@ -55,6 +55,7 @@ const api = {
   getApiFindings:      (id)       => req(`/api/api-test-runs/${id}/findings`),
   clearApiFindings:    (id)       => req(`/api/api-test-runs/${id}/findings`,      { method:"DELETE" }),
   deleteApiFinding:    (id,fid)   => req(`/api/api-test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
+  updateApiFinding:    (id,fid,b) => req(`/api/api-test-runs/${id}/findings/${fid}`, { method:"PATCH", body:b }),
   importApiFindings:   (id,b)     => req(`/api/api-test-runs/${id}/findings/import`, { method:"POST", body:b }),
   getApiTraffic:       (id,since) => req(`/api/api-test-runs/${id}/traffic${since?`?since_id=${since}`:"" }`),
   getApiTrafficCount:  (id)       => req(`/api/api-test-runs/${id}/traffic/count`),
@@ -171,6 +172,7 @@ const api = {
   stopAliceRun:      (id)          => req(`/api/test-runs/${id}/alice/run`,      { method:"DELETE" }),
   getFindings:           (id)       => req(`/api/test-runs/${id}/findings`),
   deleteFinding:         (id,fid)   => req(`/api/test-runs/${id}/findings/${fid}`, { method:"DELETE" }),
+  updateFinding:         (id,fid,b) => req(`/api/test-runs/${id}/findings/${fid}`, { method:"PATCH", body:b }),
   deleteFindingGroup:    (id,title) => req(`/api/test-runs/${id}/findings?title=${encodeURIComponent(title)}`, { method:"DELETE" }),
   importFindings:        (id,b)     => req(`/api/test-runs/${id}/findings/import`, { method:"POST", body:b }),
   validateAllFindings:   (id)       => req(`/api/test-runs/${id}/validate`, { method:"POST" }),
@@ -3087,6 +3089,9 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
   const [expanded, setExpanded] = useState(new Set());
   const [clearBusy, setClearBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
+  const [editingFinding, setEditingFinding] = useState(null);  // finding id being edited
+  const [editDraft, setEditDraft] = useState(null);            // working copy
+  const [editBusy, setEditBusy] = useState(false);
   const issueImportInputRef = useRef(null);
 
   const load = async () => {
@@ -3199,6 +3204,42 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
     } catch(err) { setError(err.message); }
   };
 
+  const onEditApiFinding = (e, f) => {
+    e.stopPropagation();
+    setExpanded(prev => new Set(prev).add(f.id));
+    setEditingFinding(f.id);
+    setEditDraft({
+      severity: f.severity,
+      validation_status: f.validation_status,
+      title: f.title || "",
+      affected_url: f.affected_url || "",
+      owasp_api_category: f.owasp_api_category || "",
+      description: f.description || "",
+      impact: f.impact || "",
+      recommendation: f.recommendation || "",
+      evidence: f.evidence || "",
+    });
+  };
+
+  const onCancelEditApiFinding = (e) => {
+    e?.stopPropagation?.();
+    setEditingFinding(null);
+    setEditDraft(null);
+  };
+
+  const onSaveEditApiFinding = async (e, findingId) => {
+    e?.stopPropagation?.();
+    if (!editDraft || editBusy) return;
+    setEditBusy(true);
+    try {
+      const updated = await api.updateApiFinding(runId, findingId, editDraft);
+      setFindings(prev => prev.map(f => f.id === findingId ? { ...f, ...updated } : f));
+      setEditingFinding(null);
+      setEditDraft(null);
+    } catch(err) { setError(err.message); }
+    finally { setEditBusy(false); }
+  };
+
   const sevCls = (s) => ({critical:"sev-critical",high:"sev-high",medium:"sev-medium",low:"sev-low",info:"sev-info"}[s]||"sev-info");
 
   if (loading) return html`<div className="subtle" style=${{padding:32}}>Loading findings…</div>`;
@@ -3234,16 +3275,66 @@ function ApiRunFindingsTab({ runId, scanRunning, run }) {
         : findings.map(f => html`
           <div key=${f.id} className="finding-card" style=${{marginBottom:8,border:"1px solid var(--border)",borderRadius:8,overflow:"hidden"}}>
             <div style=${{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer",background:"var(--surface)"}}
-                 onClick=${()=>toggle(f.id)}>
+                 onClick=${()=>{ if (editingFinding===f.id) return; toggle(f.id); }}>
               <span className=${"sev-badge "+sevCls(f.severity)}>${f.severity}</span>
               <span style=${{fontWeight:600,flex:1}}>${f.title}</span>
+              ${f.validation_status==="confirmed" && html`<span className="val-badge val-confirmed">confirmed</span>`}
+              ${f.validation_status==="unconfirmed" && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
+              ${(f.validation_status==="false_positive"||f.validation_status==="low_confidence") && html`<span className="val-badge val-fp">low conf</span>`}
               ${f.owasp_api_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_api_category}</span>`}
               ${!f.owasp_api_category && f.owasp_category && html`<span className="badge neutral" style=${{fontSize:11}}>${f.owasp_category}</span>`}
               <span style=${{color:"var(--muted)",fontSize:12}}>${expanded.has(f.id)?"▲":"▼"}</span>
+              <button className="btn ghost sm finding-del-btn" title="Edit finding"
+                onClick=${e=>onEditApiFinding(e,f)}>✎</button>
               <button className="btn ghost sm finding-del-btn" title="Delete finding"
                 onClick=${e=>onDeleteApiFinding(e,f.id)}>🗑</button>
             </div>
-            ${expanded.has(f.id) && html`
+            ${expanded.has(f.id) && editingFinding===f.id && editDraft && html`
+              <div className="finding-edit-form" style=${{borderTop:"1px solid var(--border)",background:"var(--bg)"}}
+                   onClick=${e=>e.stopPropagation()}>
+                <div className="finding-edit-row">
+                  <label className="finding-edit-field">
+                    <span>Severity</span>
+                    <select value=${editDraft.severity}
+                      onChange=${e=>setEditDraft(d=>({...d,severity:e.target.value}))}>
+                      ${["critical","high","medium","low","info"].map(s=>html`<option key=${s} value=${s}>${s}</option>`)}
+                    </select>
+                  </label>
+                  <label className="finding-edit-field">
+                    <span>Status</span>
+                    <select value=${editDraft.validation_status}
+                      onChange=${e=>setEditDraft(d=>({...d,validation_status:e.target.value}))}>
+                      ${[["unvalidated","unvalidated"],["confirmed","confirmed"],["unconfirmed","unconfirmed"],["false_positive","low confidence"]].map(([v,l])=>html`<option key=${v} value=${v}>${l}</option>`)}
+                    </select>
+                  </label>
+                  <label className="finding-edit-field" style=${{maxWidth:120}}>
+                    <span>OWASP API</span>
+                    <input type="text" value=${editDraft.owasp_api_category}
+                      onChange=${e=>setEditDraft(d=>({...d,owasp_api_category:e.target.value}))}/>
+                  </label>
+                </div>
+                <label className="finding-edit-field">
+                  <span>Title</span>
+                  <input type="text" value=${editDraft.title}
+                    onChange=${e=>setEditDraft(d=>({...d,title:e.target.value}))}/>
+                </label>
+                <label className="finding-edit-field">
+                  <span>Affected URL</span>
+                  <input type="text" value=${editDraft.affected_url}
+                    onChange=${e=>setEditDraft(d=>({...d,affected_url:e.target.value}))}/>
+                </label>
+                ${[["description","Description"],["impact","Impact"],["recommendation","Recommendation"],["evidence","Evidence"]].map(([k,label])=>html`
+                  <label key=${k} className="finding-edit-field">
+                    <span>${label}</span>
+                    <textarea rows="3" value=${editDraft[k]}
+                      onChange=${e=>setEditDraft(d=>({...d,[k]:e.target.value}))}></textarea>
+                  </label>`)}
+                <div className="row" style=${{gap:8,marginTop:4,justifyContent:"flex-end"}}>
+                  <button className="btn ghost sm" disabled=${editBusy} onClick=${onCancelEditApiFinding}>Cancel</button>
+                  <button className="btn sm" disabled=${editBusy} onClick=${e=>onSaveEditApiFinding(e,f.id)}>${editBusy?"Saving…":"Save"}</button>
+                </div>
+              </div>`}
+            ${expanded.has(f.id) && editingFinding!==f.id && html`
               <div style=${{padding:"12px 14px",borderTop:"1px solid var(--border)",background:"var(--bg)"}}>
                 ${f.affected_url && html`<div style=${{marginBottom:8}}><b>URL:</b> <code style=${{fontSize:12}}>${f.affected_url}</code></div>`}
                 ${f.description && html`<div style=${{marginBottom:8}}><b>Description:</b>
@@ -4967,6 +5058,9 @@ function TestRunDetail({ runId, initialTab }) {
   const [dedupeBusy, setDedupeBusy]         = useState(false);
   const [findings, setFindings]             = useState([]);
   const [expandedFinding, setExpandedFinding] = useState(null);
+  const [editingFinding, setEditingFinding]   = useState(null);  // finding id being edited
+  const [editDraft, setEditDraft]             = useState(null);  // working copy of the edited finding
+  const [editBusy, setEditBusy]               = useState(false);
   const [expandedGroups, setExpandedGroups]   = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = (title) => setExpandedGroups(prev => {
     const next = new Set(prev);
@@ -5850,6 +5944,46 @@ function TestRunDetail({ runId, initialTab }) {
     } catch(err) { setError(err.message); }
   };
 
+  const onEditFinding = (e, f) => {
+    e.stopPropagation();
+    setExpandedFinding(f.id);
+    setEditingFinding(f.id);
+    setEditDraft({
+      severity: f.severity,
+      validation_status: f.validation_status,
+      title: f.title || "",
+      affected_url: f.affected_url || "",
+      cvss_score: f.cvss_score ?? 0,
+      cvss_vector: f.cvss_vector || "",
+      description: f.description || "",
+      impact: f.impact || "",
+      likelihood: f.likelihood || "",
+      recommendation: f.recommendation || "",
+    });
+  };
+
+  const onCancelEditFinding = (e) => {
+    e?.stopPropagation?.();
+    setEditingFinding(null);
+    setEditDraft(null);
+  };
+
+  const onSaveEditFinding = async (e, findingId) => {
+    e?.stopPropagation?.();
+    if (!editDraft || editBusy) return;
+    setEditBusy(true);
+    try {
+      const updated = await api.updateFinding(runId, findingId, {
+        ...editDraft,
+        cvss_score: Number(editDraft.cvss_score) || 0,
+      });
+      setFindings(prev => prev.map(f => f.id === findingId ? { ...f, ...updated } : f));
+      setEditingFinding(null);
+      setEditDraft(null);
+    } catch(err) { setError(err.message); }
+    finally { setEditBusy(false); }
+  };
+
   const onStopValidation = async () => {
     try {
       const vs = await api.stopValidation(runId);
@@ -6423,7 +6557,7 @@ function TestRunDetail({ runId, initialTab }) {
                 };
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
-                    onClick=${()=>setExpandedFinding(expandedFinding===f.id?null:f.id)}>
+                    onClick=${()=>{ if (editingFinding===f.id) return; setExpandedFinding(expandedFinding===f.id?null:f.id); }}>
                     <td>
                       ${f.validation_status==="confirmed"      && html`<span className="val-badge val-confirmed">confirmed</span>`}
                       ${f.validation_status==="unconfirmed"   && html`<span className="val-badge val-unconfirmed">unconfirmed</span>`}
@@ -6442,12 +6576,67 @@ function TestRunDetail({ runId, initialTab }) {
                         ${(f.validation_status==="unvalidated"||f.validation_status==="unconfirmed"||f.validation_status==="false_positive"||f.validation_status==="low_confidence") && html`
                           <button className="btn ghost sm finding-del-btn" title="Validate"
                             onClick=${e=>onValidateFinding(e,f.id)}>✓</button>`}
+                        <button className="btn ghost sm finding-del-btn" title="Edit"
+                          onClick=${e=>onEditFinding(e,f)}>✎</button>
                         <button className="btn ghost sm finding-del-btn" title="Delete"
                           onClick=${e=>onDeleteFinding(e,f.id)}>🗑</button>
                       </div>
                     </td>
                   </tr>
-                  ${expandedFinding===f.id && html`
+                  ${expandedFinding===f.id && editingFinding===f.id && editDraft && html`
+                    <tr key=${"edit-"+keyPrefix+f.id} className="finding-evidence-row">
+                      <td colSpan="5">
+                        <div className="finding-edit-form" onClick=${e=>e.stopPropagation()}>
+                          <div className="finding-edit-row">
+                            <label className="finding-edit-field">
+                              <span>Severity</span>
+                              <select value=${editDraft.severity}
+                                onChange=${e=>setEditDraft(d=>({...d,severity:e.target.value}))}>
+                                ${["critical","high","medium","low","info"].map(s=>html`<option key=${s} value=${s}>${s}</option>`)}
+                              </select>
+                            </label>
+                            <label className="finding-edit-field">
+                              <span>Status</span>
+                              <select value=${editDraft.validation_status}
+                                onChange=${e=>setEditDraft(d=>({...d,validation_status:e.target.value}))}>
+                                ${[["unvalidated","unvalidated"],["confirmed","confirmed"],["unconfirmed","unconfirmed"],["false_positive","low confidence"]].map(([v,l])=>html`<option key=${v} value=${v}>${l}</option>`)}
+                              </select>
+                            </label>
+                            <label className="finding-edit-field" style=${{maxWidth:90}}>
+                              <span>CVSS</span>
+                              <input type="number" min="0" max="10" step="0.1" value=${editDraft.cvss_score}
+                                onChange=${e=>setEditDraft(d=>({...d,cvss_score:e.target.value}))}/>
+                            </label>
+                            <label className="finding-edit-field" style=${{flex:2}}>
+                              <span>CVSS Vector</span>
+                              <input type="text" value=${editDraft.cvss_vector}
+                                onChange=${e=>setEditDraft(d=>({...d,cvss_vector:e.target.value}))}/>
+                            </label>
+                          </div>
+                          <label className="finding-edit-field">
+                            <span>Title</span>
+                            <input type="text" value=${editDraft.title}
+                              onChange=${e=>setEditDraft(d=>({...d,title:e.target.value}))}/>
+                          </label>
+                          <label className="finding-edit-field">
+                            <span>Affected URL</span>
+                            <input type="text" value=${editDraft.affected_url}
+                              onChange=${e=>setEditDraft(d=>({...d,affected_url:e.target.value}))}/>
+                          </label>
+                          ${[["description","Description"],["impact","Impact"],["likelihood","Likelihood"],["recommendation","Recommendation"]].map(([k,label])=>html`
+                            <label key=${k} className="finding-edit-field">
+                              <span>${label}</span>
+                              <textarea rows="3" value=${editDraft[k]}
+                                onChange=${e=>setEditDraft(d=>({...d,[k]:e.target.value}))}></textarea>
+                            </label>`)}
+                          <div className="row" style=${{gap:8,marginTop:4,justifyContent:"flex-end"}}>
+                            <button className="btn ghost sm" disabled=${editBusy} onClick=${onCancelEditFinding}>Cancel</button>
+                            <button className="btn sm" disabled=${editBusy} onClick=${e=>onSaveEditFinding(e,f.id)}>${editBusy?"Saving…":"Save"}</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>`}
+                  ${expandedFinding===f.id && editingFinding!==f.id && html`
                     <tr key=${"ev-"+keyPrefix+f.id} className="finding-evidence-row">
                       <td colSpan="5">
                         <div className="finding-description">

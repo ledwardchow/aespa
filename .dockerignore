@@ -1,0 +1,10 @@
+.git
+.venv
+aespa.db
+*.db
+__pycache__
+.pytest_cache
+.ruff_cache
+.env
+tests
+docs
