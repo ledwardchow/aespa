@@ -46,8 +46,6 @@ The [User Guide](docs/guide/index.md)!
 
 ## Requirements
 
-- Python 3.12+
-- uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
 - Burp Suite Professional, if you want to use the active scan integration
 - Anthropic/OpenAI/Google/AWS Bedrock API key **OR**
 - A local model - some suggestions at the bottom
@@ -92,17 +90,15 @@ To build and run locally instead of pulling the published image:
 docker compose up -d --build
 ```
 
-If you run with `docker run` directly, you **must** publish the port and mount the volume yourself — there is no image-level default for these:
-
-```bash
-docker run -p 8000:8000 -v aespa-data:/data ledwardchow/aespa
-```
-
-In Docker Desktop, hitting the play button on the **Images** tab starts a container with no published port (you'd get "could not connect"). Either fill in Host port `8000` and a `/data` volume under the Run dialog's "Optional settings", or run `docker compose up -d` once and drive it from the **Containers** tab afterward — those controls reuse the port and volume.
-
 ## Running from source
 
 ### Setup
+
+Requirements:
+- Python 3.12+
+- uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
+
+Clone or download a zip of this repository. Within a terminal with the working directory set to the root of the repo:
 
 ```bash
 # Install dependencies
