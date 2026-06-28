@@ -9006,6 +9006,7 @@ const AGENT_ROLE_LABELS = [
   ["validator", "Validator", "Adversarial false-positive checks (high volume)"],
   ["api_scanner", "API Scanner", "API (OpenAPI/Postman) agentic scan loop"],
   ["sast", "SAST", "Static analysis over uploaded source"],
+  ["alice", "A.L.I.C.E.", "Interactive user-directed pentest chat agent"],
 ];
 
 function scanProfileToForm(profile) {
@@ -9201,11 +9202,7 @@ function SettingsPage() {
       ${error&&html`<div className="alert error">${error}</div>`}
       ${loaded&&tab==="profiles"&&screen==="list"&&html`
         ${models.length===0&&html`<div className="alert">Create a model before adding scan profiles.</div>`}
-        <div className="field-hint" style=${{marginBottom:"10px"}}>
-          A profile assigns a model to each agent role. Scans select a profile; mix a cheap model
-          on the crawler/validator with your best model on the Test Lead to cut cost.
-        </div>
-        <div className="settings-list settings-list-profiles">
+        <div className="settings-list settings-list-scanprofiles">
           <div className="settings-list-head">
             <div>Name</div><div>Default model</div><div>Overrides</div><div>Status</div><div></div>
           </div>

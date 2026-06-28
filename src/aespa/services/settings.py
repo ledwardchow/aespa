@@ -64,6 +64,7 @@ AGENT_ROLES: tuple[str, ...] = (
     "validator",
     "api_scanner",
     "sast",
+    "alice",
 )
 
 
