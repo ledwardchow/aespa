@@ -46,8 +46,6 @@ The [User Guide](docs/guide/index.md)!
 
 ## Requirements
 
-- Python 3.12+
-- uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
 - Burp Suite Professional, if you want to use the active scan integration
 - Anthropic/OpenAI/Google/AWS Bedrock API key **OR**
 - A local model - some suggestions at the bottom
@@ -56,29 +54,13 @@ Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may v
 
 If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts (inclusive of cached tokens).
 
-## Setup
 
-```bash
-# Install dependencies
-uv sync
 
-# Install Playwright's Chromium browser (one-time)
-uv run playwright install chromium
-```
+## Running (macOS/Windows)
 
-## Running
+Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). The macOS binaries are notarised. 
 
-```bash
-uv run aespa
-```
-
-The UI is available at `http://127.0.0.1:8000` by default.
-
-Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
-
-If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
-
-This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
+These versions run in the background in the menubar or systray - click on the icon to open the interface/quit the background process. 
 
 ## Running with Docker
 
@@ -108,13 +90,38 @@ To build and run locally instead of pulling the published image:
 docker compose up -d --build
 ```
 
-If you run with `docker run` directly, you **must** publish the port and mount the volume yourself — there is no image-level default for these:
+## Running from source
+
+### Setup
+
+Requirements:
+- Python 3.12+
+- uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
+
+Clone or download a zip of this repository. Within a terminal with the working directory set to the root of the repo:
 
 ```bash
-docker run -p 8000:8000 -v aespa-data:/data ledwardchow/aespa
+# Install dependencies
+uv sync
+
+# Install Playwright's Chromium browser (one-time)
+uv run playwright install chromium
 ```
 
-In Docker Desktop, hitting the play button on the **Images** tab starts a container with no published port (you'd get "could not connect"). Either fill in Host port `8000` and a `/data` volume under the Run dialog's "Optional settings", or run `docker compose up -d` once and drive it from the **Containers** tab afterward — those controls reuse the port and volume.
+### Run
+
+```bash
+uv run aespa
+```
+
+The UI is available at `http://127.0.0.1:8000` by default.
+
+
+Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
+
+If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
+
+This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
 
 ## Configuration
 

@@ -4052,6 +4052,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
+        guidance = (site.scan_guidance or "").strip()
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
         # Crawled pages — used for context and for resolving page_id on findings.
@@ -4485,6 +4486,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     site_id=site_id,
                     creds=creds,
                     login_url=login_url or "",
+                    guidance=guidance,
                     post_probe_fn=_web_post_probe_fn,
                     post_finding_fn=_web_post_finding_fn,
                 )
@@ -5674,6 +5676,7 @@ async def _do_agentic_thinking_loop(
     site_id: int = 0,
     creds: list | None = None,
     login_url: str = "",
+    guidance: str = "",
     # API-mode overrides — when provided these replace the web-scan defaults
     is_api_run: bool = False,   # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
@@ -5856,12 +5859,18 @@ async def _do_agentic_thinking_loop(
             "re-authenticating:\n" + "\n".join(s_lines)
         )
 
+    guidance_text = (
+        "Operator guidance — follow these instructions:\n" + guidance
+        if guidance else ""
+    )
+
     task_context = task_graph_svc.build_task_graph_context(run_id)
     initial_message = "\n\n".join(filter(None, [
         f"Target: {base_url}",
         f"Application context:\n{crawl_context}",
         creds_text,
         sessions_text,
+        guidance_text,
         task_context or "",
         "Begin the assessment.",
     ]))

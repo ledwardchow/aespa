@@ -2305,6 +2305,7 @@ function SiteDetail({ siteId }) {
             </div>
           </div>
           ${site.notes && html`<div style=${{marginTop:10,fontSize:13,color:"var(--muted)"}}>${site.notes}</div>`}
+          ${site.scan_guidance && html`<div style=${{marginTop:8,fontSize:13,color:"var(--muted)"}}><strong>Test Lead guidance:</strong> ${site.scan_guidance}</div>`}
           ${site.requires_auth && site.credentials.length > 0 && html`
             <div className="site-credentials-list">
               ${site.credentials.map(c => html`
@@ -2371,7 +2372,7 @@ function SiteDetail({ siteId }) {
 
 function SiteForm({ siteId }) {
   const isEdit = typeof siteId === "number";
-  const [form, setForm]       = useState({ name:"", base_url:"", requires_auth:false, login_url:"", notes:"", credentials:[] });
+  const [form, setForm]       = useState({ name:"", base_url:"", requires_auth:false, login_url:"", notes:"", scan_guidance:"", credentials:[] });
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving]   = useState(false);
   const [error, setError]     = useState(null);
@@ -2382,7 +2383,7 @@ function SiteForm({ siteId }) {
       try {
         const d = await api.getSite(siteId);
         setForm({ name:d.name, base_url:d.base_url, requires_auth:d.requires_auth,
-          login_url:d.login_url||"", notes:d.notes||"",
+          login_url:d.login_url||"", notes:d.notes||"", scan_guidance:d.scan_guidance||"",
           credentials:d.credentials.map(c=>({username:c.username,password:c.password,label:c.label||"",login_url:c.login_url||"",auth_mode:c.auth_mode||"auto",totp_seed:""})) });
       } catch(e) { setError(e.message); } finally { setLoading(false); }
     })();
@@ -2397,6 +2398,7 @@ function SiteForm({ siteId }) {
     e.preventDefault(); setError(null); setSaving(true);
     const payload = { name:form.name.trim(), base_url:form.base_url.trim(), requires_auth:form.requires_auth,
       login_url:form.requires_auth?(form.login_url.trim()||null):null, notes:form.notes.trim()||null,
+      scan_guidance:form.scan_guidance.trim()||null,
       credentials:form.requires_auth?form.credentials.map(c=>{
         const base = {
           username:c.username,
@@ -2432,6 +2434,8 @@ function SiteForm({ siteId }) {
             <input type="url" required value=${form.base_url} placeholder="https://target.example.com" onChange=${e=>upd({base_url:e.target.value})}/></div>
           <div className="field"><label>Notes (optional)</label>
             <textarea value=${form.notes} placeholder="Scope, contacts…" onChange=${e=>upd({notes:e.target.value})}/></div>
+          <div className="field"><label>Test Lead guidance (optional)</label>
+            <textarea rows="9" value=${form.scan_guidance} placeholder="Instructions for the testing agents (passed directly to the prompt) — i.e. how to complete a particularly complex login sequence, things to focus on, things to avoid…" onChange=${e=>upd({scan_guidance:e.target.value})}/></div>
           <div className="divider"/>
           <div className="form-section-title">Authentication</div>
           <label className="toggle-row">

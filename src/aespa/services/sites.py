@@ -83,6 +83,7 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         requires_auth=payload.requires_auth,
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
+        scan_guidance=payload.scan_guidance,
     )
     for cred in payload.credentials:
         site.credentials.append(
@@ -112,6 +113,7 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.requires_auth = payload.requires_auth
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
+    site.scan_guidance = payload.scan_guidance
     site.updated_at = _utcnow()
 
     # Replace credentials list wholesale.
