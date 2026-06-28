@@ -31,11 +31,13 @@ from aespa.schemas import (
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
+    ScanFindingUpdateIn,
     ScannerSessionOut,
     ScannerSessionSummary,
     ScannerSessionUpdate,
 )
 from aespa.services import alice_tasks, run_cleanup
+from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 
 _UTC = timezone.utc
@@ -342,6 +344,25 @@ def get_api_findings(
     _order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings = sorted(findings, key=lambda f: _order.get(f.severity, 5))
     return [ScanFindingOut.model_validate(f) for f in findings]
+
+
+@router.patch("/{run_id}/findings/{finding_id}", response_model=ScanFindingOut)
+def update_api_finding(
+    run_id: int,
+    finding_id: int,
+    payload: ScanFindingUpdateIn,
+    session: Session = Depends(get_session),
+) -> ScanFindingOut:
+    """Apply a user edit (severity, validation status, free text) to an API finding."""
+    _get_run_or_404(session, run_id)
+    finding = session.get(ScanFinding, finding_id)
+    if finding is None or finding.api_test_run_id != run_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+    findings_svc.apply_finding_update(finding, payload)
+    session.add(finding)
+    session.commit()
+    session.refresh(finding)
+    return ScanFindingOut.model_validate(finding)
 
 
 @router.delete("/{run_id}/findings/{finding_id}", status_code=204)

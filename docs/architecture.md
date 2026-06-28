@@ -408,6 +408,30 @@ The crawler sends each page's content to the LLM twice:
 
 Scope enforcement prevents crawling outside the target domain (configurable via `allow_subdomains`).
 
+### Authentication
+
+`_authenticate` dispatches per `Credential.auth_mode`:
+
+- **`auto`** / **`totp`** — `_authenticate_auto` does a fast deterministic form
+  fill (hardcoded field/submit selectors, plus `_reveal_login_form` to pop a
+  modal login from a small list of trigger selectors). TOTP additionally fills a
+  2FA code from the stored seed.
+- **`guided`** — `_authenticate_guided` opens a headed browser so the user logs
+  in by hand; cookies/storage are captured and injected into the headless crawl
+  contexts.
+
+**LLM-driven adaptive fallback.** When the deterministic `auto`/`totp` attempt
+fails to clear the login form (`_page_requires_login` still true) and the run has
+an LLM profile, `_authenticate_smart` takes over: it builds a text observation of
+the page (forms/fields via `_extract_dom_intelligence` plus visible clickable
+controls; a screenshot too when the profile has `use_vision`) and runs a bounded
+agentic loop (≤6 steps) calling `llm.decide_login_action` for one action at a time
+(fill/click/press/done/give_up), re-checking for success after each. This handles
+modal/no-route logins, non-standard field labels, and multi-step flows that the
+selector heuristics miss. Credentials are kept out of the LLM: the model returns
+`{{username}}`/`{{password}}` placeholders and the crawler substitutes the real
+values locally, so secrets are never sent to the provider or logged.
+
 ---
 
 ## 7. Dynamic Scan

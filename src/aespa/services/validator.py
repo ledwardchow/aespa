@@ -36,7 +36,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services.settings import (
     get_adversarial_validator_config,
-    get_llm_config,
+    get_llm_config_for_role,
     get_run_scanner_policy,
 )
 
@@ -148,7 +148,7 @@ async def validate_finding_inline(
             return
         site = s.get(Site, run.site_id)
         if llm_cfg is None:
-            llm_cfg = get_llm_config(s)
+            llm_cfg = get_llm_config_for_role(s, run, "validator")
         if scanner_policy is None:
             scanner_policy = get_run_scanner_policy(s, run)
         validator_cfg = get_adversarial_validator_config(s)
@@ -236,7 +236,7 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config(s)
+        llm_cfg = get_llm_config_for_role(s, run, "validator")
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration — configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)

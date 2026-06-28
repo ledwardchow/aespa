@@ -224,6 +224,7 @@ class ApiTestRunCreate(BaseModel):
 
     name: str | None = None        # auto-generated if omitted
     llm_config_id: int | None = None
+    llm_profile_id: int | None = None
     coverage_mode: str = "track"   # track|enforce
 
 
@@ -236,6 +237,7 @@ class ApiTestRunSummary(BaseModel):
     status: str
     coverage_mode: str
     llm_config_id: int | None
+    llm_profile_id: int | None = None
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
@@ -293,6 +295,7 @@ class SastRunSummary(BaseModel):
     triggered_by_run_type: str | None
     triggered_by_run_id: int | None
     llm_config_id: int | None
+    llm_profile_id: int | None = None
     leads_count: int
     error_message: str | None
     started_at: datetime | None
@@ -527,6 +530,29 @@ class LLMConfigOut(BaseModel):
     temperature: Optional[float] = None
     use_vision: bool
     force_tool_choice: bool
+    updated_at: datetime
+
+
+class LLMProfileIn(BaseModel):
+    """A per-agent-role model assignment. ``default_model_id`` covers any role not
+    present in ``role_models``."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(default="Default", min_length=1, max_length=120)
+    default_model_id: int
+    # role → LLMConfig id; only roles overridden away from the default.
+    role_models: dict[str, int] = Field(default_factory=dict)
+
+
+class LLMProfileOut(BaseModel):
+    id: int
+    name: str
+    is_active: bool
+    default_model_id: int | None = None
+    default_model_name: str | None = None
+    role_models: dict[str, int] = Field(default_factory=dict)
+    role_model_names: dict[str, str | None] = Field(default_factory=dict)
     updated_at: datetime
 
 
@@ -855,12 +881,14 @@ class TestRunCreate(BaseModel):
     max_depth: int = Field(default=3, ge=1, le=10)
     max_pages: int = Field(default=50, ge=5, le=500)
     llm_config_id: int | None = None
+    llm_profile_id: int | None = None
 
 
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
     llm_config_id: int | None = None
+    llm_profile_id: int | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -895,6 +923,7 @@ class TestRunSummary(BaseModel):
     credentials: list[CredentialSummary] = []
     scanner_policy: dict = Field(default_factory=dict)
     llm_config_id: int | None = None
+    llm_profile_id: int | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
@@ -1176,6 +1205,28 @@ class ScanFindingImportIn(BaseModel):
     merged_instances: str = "[]"
     poc_command: str = ""
     poc_setup: str = ""
+
+
+class ScanFindingUpdateIn(BaseModel):
+    """Partial, user-driven edit of a single finding. Every field is optional;
+    only fields explicitly supplied are applied (see services/findings.py)."""
+
+    severity: str | None = None
+    validation_status: str | None = None
+    title: str | None = None
+    description: str | None = None
+    impact: str | None = None
+    likelihood: str | None = None
+    recommendation: str | None = None
+    cvss_score: float | None = None
+    cvss_vector: str | None = None
+    affected_url: str | None = None
+    owasp_category: str | None = None
+    owasp_api_category: str | None = None
+    evidence: str | None = None
+    request_evidence: str | None = None
+    response_evidence: str | None = None
+    validation_note: str | None = None
 
 
 class ScanFindingImportResult(BaseModel):

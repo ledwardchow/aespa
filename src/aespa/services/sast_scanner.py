@@ -446,7 +446,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
     """Core async task: extract archive, run agentic loop, persist leads."""
     from aespa.services import llm as llm_svc
     from aespa.services.prompts.sast import SAST_SYSTEM_PROMPT, SAST_TOOLS
-    from aespa.services.settings import get_llm_config_for_run
+    from aespa.services.settings import get_llm_config_for_role
 
     _sast_stop_requested.discard(sast_run_id)
     tmpdir: str | None = None
@@ -481,7 +481,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 archive_name = run.source_filename or "source.zip"
             if not archive_path:
                 raise ValueError("No source archive found for this SAST run.")
-            llm_cfg_obj = get_llm_config_for_run(s, run)  # type: ignore[arg-type]
+            llm_cfg_obj = get_llm_config_for_role(s, run, "sast")  # type: ignore[arg-type]
             if llm_cfg_obj is None:
                 raise RuntimeError("No LLM configuration. Configure it in Settings first.")
             endpoints = list(s.exec(
@@ -666,6 +666,7 @@ def create_sast_run(
     source_archive_path: str | None = None,
     source_filename: str | None = None,
     llm_config_id: int | None = None,
+    llm_profile_id: int | None = None,
     triggered_by_run_type: str | None = None,
     triggered_by_run_id: int | None = None,
 ) -> SastRun:
@@ -681,6 +682,7 @@ def create_sast_run(
         source_archive_path=source_archive_path,
         source_filename=source_filename,
         llm_config_id=llm_config_id,
+        llm_profile_id=llm_profile_id,
         triggered_by_run_type=triggered_by_run_type,
         triggered_by_run_id=triggered_by_run_id,
         status="pending",
