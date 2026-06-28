@@ -36,7 +36,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services.settings import (
     get_global_http_header_config,
-    get_llm_config_for_run,
+    get_llm_config_for_role,
     get_upstream_proxy_config,
 )
 
@@ -138,6 +138,44 @@ class _CrawlShared:
         self.pages_done: int = pages_done
 
 
+# ── Progress logging ──────────────────────────────────────────────────────────
+
+
+def _crawl_log(
+    run_id: int,
+    phase: str,
+    status: str,
+    message: str,
+    *,
+    page_url: str | None = None,
+    data: dict | None = None,
+) -> None:
+    """Emit a user-visible Activity-Log line as a ``scanner_phase`` event.
+
+    These are persisted to ``scan_log`` (events.py) and rendered in the Activity
+    Log panel, so the user can follow crawl/auth progress live and after page
+    navigation. ``status`` drives the badge suffix in the UI: ``start`` → "…",
+    ``complete`` → "✓", ``error`` → "✗"; anything else renders plain.
+    Best-effort: never raises. No-op when ``run_id`` is falsy.
+    """
+    if not run_id:
+        return
+    try:
+        evt: dict = {
+            "type": "scanner_phase",
+            "phase": phase,
+            "status": status,
+            "message": message,
+        }
+        if page_url:
+            evt["page_url"] = page_url
+        if data is not None:
+            evt["data"] = data
+        events_svc.emit(run_id, evt)
+    except Exception:
+        pass
+
+
 # ── Core orchestrator ─────────────────────────────────────────────────────────
 
 
@@ -157,7 +195,7 @@ async def _do_crawl_inner(run_id: int) -> None:
         from aespa.models import Site
 
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config_for_run(s, run)
+        llm_cfg = get_llm_config_for_role(s, run, "crawler")
         if llm_cfg is None:
             raise RuntimeError(
                 "No LLM configuration found. Configure it in Settings first."
@@ -229,6 +267,14 @@ async def _do_crawl_inner(run_id: int) -> None:
             "outcome": None,
             "_persist": True,
         },
+    )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "start",
+        f"Crawl started — {base_url} "
+        f"(max {max_pages} pages, depth {max_depth}, {len(creds)} credential(s))",
+        page_url=base_url,
     )
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
@@ -308,6 +354,16 @@ async def _do_crawl_inner(run_id: int) -> None:
         current_url=None,
         pages_discovered=shared.pages_done,
     )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "error" if final_status == TestRunStatus.stopped else "complete",
+        (
+            f"Crawl stopped — {shared.pages_done} page(s) discovered"
+            if final_status == TestRunStatus.stopped
+            else f"Crawl complete — {shared.pages_done} page(s) discovered"
+        ),
+    )
     # Clean up the per-run lock (small object). The session cache is intentionally
     # kept alive so the dynamic scan phase (same run_id) can reuse guided sessions.
     _guided_locks.pop(run_id, None)
@@ -375,6 +431,12 @@ async def _crawl_as_credential(
             "total_phases": total_phases,
             "username": username,
         },
+    )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "info",
+        f"Phase {phase_idx + 1}/{total_phases}: crawling as {username}",
     )
 
     local_pages = 0  # pages actually navigated to by this credential
@@ -522,6 +584,7 @@ async def _crawl_as_credential(
                     username=username,
                     auth_check_snapshot=auth_check_snapshot,
                     run_id=run_id,
+                    llm_cfg=llm_cfg,
                 )
             except Exception as nav_err:
                 if is_first:
@@ -812,6 +875,12 @@ async def _crawl_as_credential(
             "current_url": None,
             "done": True,
         },
+    )
+    _crawl_log(
+        run_id,
+        "crawl",
+        "complete",
+        f"Finished crawling as {username} — {local_pages} page(s)",
     )
 
 
@@ -2298,6 +2367,13 @@ async def _reconcile_direct_access(
             "_persist": True,
         },
     )
+    _crawl_log(
+        run_id,
+        "reconcile",
+        "start",
+        f"Verifying cross-user page access — {total_checks} check(s) across "
+        f"{len(creds)} credential(s)",
+    )
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
@@ -2372,6 +2448,7 @@ async def _reconcile_direct_access(
                             auth_check_snapshot=auth_check_snapshot,
                             recover_api_auth=False,
                             run_id=run_id,
+                            llm_cfg=llm_cfg,
                         )
                         if not accessible:
                             continue
@@ -2422,6 +2499,12 @@ async def _reconcile_direct_access(
                     await ctx.close()
         finally:
             await browser.close()
+    _crawl_log(
+        run_id,
+        "reconcile",
+        "complete",
+        "Cross-user access verification complete",
+    )
 
 
 async def _direct_load_accessible(
@@ -2435,6 +2518,7 @@ async def _direct_load_accessible(
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
     run_id: int = 0,
+    llm_cfg=None,
 ) -> tuple[bool, str, str, Optional[str]]:
     try:
         resp = await _goto_with_auth_recovery(
@@ -2447,6 +2531,7 @@ async def _direct_load_accessible(
             auth_check_snapshot=auth_check_snapshot,
             recover_api_auth=recover_api_auth,
             run_id=run_id,
+            llm_cfg=llm_cfg,
         )
     except Exception:
         return False, "", "", None
@@ -2951,6 +3036,7 @@ async def _goto_with_auth_recovery(
     auth_check_snapshot: dict | None = None,
     recover_api_auth: bool = True,
     run_id: int = 0,
+    llm_cfg=None,
 ):
     response = None
     for attempt in range(2):
@@ -2998,7 +3084,14 @@ async def _goto_with_auth_recovery(
                 username,
                 url,
             )
-            await _authenticate(page, login_url, credential, run_id)
+            _crawl_log(
+                run_id,
+                "auth",
+                "info",
+                f"Session dropped for {username or 'user'} — re-authenticating",
+                page_url=url,
+            )
+            await _authenticate(page, login_url, credential, run_id, llm_cfg=llm_cfg)
             continue
         log.warning(
             "Session still appears unauthenticated after retry for user=%s at %s",
@@ -3736,6 +3829,10 @@ async def _authenticate(
                     )
             return
 
+    username = getattr(credential, "username", "?")
+    if mode in (AuthMode.auto, AuthMode.totp):
+        _crawl_log(run_id, "auth", "start", f"Authenticating as {username}…")
+
     if mode == AuthMode.totp:
         await _authenticate_auto(page, login_url, credential)
         await _fill_totp_if_prompted(page, credential)
@@ -3754,6 +3851,22 @@ async def _authenticate(
             still_blocked = False
         if still_blocked:
             await _authenticate_smart(page, login_url, credential, run_id, llm_cfg)
+
+    # Report the auth outcome to the Activity Log.
+    if mode in (AuthMode.auto, AuthMode.totp):
+        try:
+            blocked = await _page_requires_login(page, login_url)
+        except Exception:
+            blocked = False
+        if blocked:
+            _crawl_log(
+                run_id,
+                "auth",
+                "error",
+                f"Could not log in as {username} — login form still present",
+            )
+        else:
+            _crawl_log(run_id, "auth", "complete", f"Logged in as {username}")
 
 
 # Elements that open a modal/drawer login form on pages with no dedicated
@@ -4035,6 +4148,13 @@ async def _authenticate_smart(
             "outcome": None,
         },
     )
+    _crawl_log(
+        run_id,
+        "auth",
+        "info",
+        f"Standard login failed for {credential.username} — using AI to work out "
+        "the login form",
+    )
 
     history: list[str] = []
     use_vision = bool(getattr(llm_cfg, "use_vision", False))
@@ -4070,6 +4190,12 @@ async def _authenticate_smart(
         name = action.get("action")
         reason = action.get("reason") or ""
         log.info("  _authenticate_smart: step %d → %s (%s)", step + 1, name, reason)
+        _crawl_log(
+            run_id,
+            "auth",
+            "info",
+            f"AI login step {step + 1}: {name}" + (f" — {reason}" if reason else ""),
+        )
 
         if name == "done":
             history.append(f"done: {reason}")
