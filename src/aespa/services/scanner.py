@@ -11,6 +11,7 @@ JS storage tokens so httpx carries a live authenticated session.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -57,7 +58,7 @@ from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
     get_burp_rest_api_config,
     get_global_http_header_config,
-    get_llm_config_for_run,
+    get_llm_config_for_role,
     get_run_scanner_policy,
     get_specialist_agent_config,
     get_upstream_proxy_config,
@@ -83,6 +84,48 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
     
     from aespa.services.traffic import LoggingAsyncClient
     return LoggingAsyncClient(run_id=run_id, username=username, api_run_id=api_run_id, **kwargs)
+
+
+@contextlib.contextmanager
+def _client_session_cookies(hx: httpx.AsyncClient, selected_session: dict | None):
+    """Make the shared client's cookie jar reflect *exactly* the selected session.
+
+    The agentic loop reuses one httpx client whose jar holds the primary
+    authenticated session. httpx MERGES per-request ``cookies=`` into that jar
+    rather than replacing it, so an explicit "anonymous" (empty cookies) or
+    other-user session would still ship the primary session's cookies — turning
+    an intended unauthenticated probe into an authenticated one (false-positive
+    "unauthenticated access" findings).
+
+    When an explicit session is selected, swap the jar to that session's cookies
+    (anonymous → none) for the duration of the request, then restore the prior
+    jar so other requests/handlers still default to the primary session (which
+    re-auth keeps fresh in-place). When no session is selected, leave the jar
+    untouched.
+    """
+    if selected_session is None:
+        yield
+        return
+    saved = hx.cookies
+    hx.cookies = httpx.Cookies(selected_session.get("cookies") or {})
+    try:
+        yield
+    finally:
+        hx.cookies = saved
+
+
+def _cookies_sent(hx: httpx.AsyncClient, selected_session: dict | None) -> dict[str, str]:
+    """Cookies that will actually be sent for a request under the rules above."""
+    if selected_session is not None:
+        return dict(selected_session.get("cookies") or {})
+    return dict(hx.cookies)
+
+
+def _cookie_names_summary(cookies: dict | None) -> str:
+    """Comma-separated cookie *names* for evidence (never the values/tokens)."""
+    if not cookies:
+        return "none"
+    return ", ".join(sorted(cookies.keys()))
 
 
 _REDIRECT_STATUS = {301, 302, 303, 307, 308}
@@ -783,6 +826,19 @@ def _maybe_persist_discovered_credential(
         run = s.get(TestRun, run_id)
         if run is None:
             return False
+        # Defense in depth: never attach a credential whose login URL is outside
+        # the site's scope. A credential_check against an off-host login endpoint
+        # must not pollute this site's store with foreign creds (see scope gate
+        # in the credential_check handlers).
+        if login_url:
+            scope_err = check_scope(login_url, run.site_id, run_id)
+            if scope_err:
+                log.warning(
+                    "Refusing to persist discovered credential for run %s: "
+                    "login_url %r is out of scope (%s)",
+                    run_id, login_url, scope_err,
+                )
+                return False
         existing = s.exec(
             select(Credential)
             .where(Credential.site_id == run.site_id)
@@ -2564,7 +2620,7 @@ def _maybe_trigger_specialist_for_burp(
         run = s.get(TestRun, run_id)
         if not run:
             return
-        llm_cfg = get_llm_config_for_run(s, run)
+        llm_cfg = get_llm_config_for_role(s, run, "specialist")
         scanner_policy = get_run_scanner_policy(s, run)
         site_id: int = getattr(run, "site_id", 0) or 0
 
@@ -2962,6 +3018,20 @@ async def _run_specialist_agent(
     site_id: int,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
+    # The specialist role may be assigned a different Model than the Test Lead
+    # (model mixing). Re-resolve here so every dispatch path — Test Lead, Burp
+    # trigger, ALICE — honours the run's profile. Falls back to the passed-in
+    # config if resolution yields nothing.
+    try:
+        with Session(get_engine()) as _s:
+            _run = _s.get(TestRun, run_id)
+            if _run is not None:
+                _specialist_cfg = get_llm_config_for_role(_s, _run, "specialist")
+                if _specialist_cfg is not None:
+                    llm_cfg = _specialist_cfg
+    except Exception:
+        pass
+
     step_count = [0]  # mutable for closure
 
     # Build the opening brief from the dispatch payload + recon summary entry.
@@ -3367,7 +3437,7 @@ def dispatch_specialist_agent(
     Returns the agent_id string if dispatched, or None if gated out.
     """
     from aespa.services.settings import (
-        get_llm_config_for_run,
+        get_llm_config_for_role,
         get_run_scanner_policy,
         get_specialist_agent_config,
     )
@@ -3376,7 +3446,7 @@ def dispatch_specialist_agent(
         run = s.get(TestRun, run_id)
         if run is None:
             return None
-        llm_cfg = get_llm_config_for_run(s, run)
+        llm_cfg = get_llm_config_for_role(s, run, "specialist")
         scanner_policy = get_run_scanner_policy(s, run)
         specialist_config = get_specialist_agent_config(s)
         site = s.get(Site, run.site_id)
@@ -3977,7 +4047,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         if run is None:
             raise ValueError(f"TestRun {run_id} not found")
         site = s.get(Site, run.site_id)
-        llm_cfg = get_llm_config_for_run(s, run)
+        llm_cfg = get_llm_config_for_role(s, run, "test_lead")
         if llm_cfg is None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
@@ -4273,6 +4343,9 @@ async def _do_thinking_scan(run_id: int) -> None:
 
         raw_cookies = await browser_ctx.cookies()
         cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
+        # Primary browser-session cookies, used to restore default browser steps
+        # after an isolated anonymous/other-user step in the JSON fallback loop.
+        _primary_browser_cookies = list(raw_cookies)
         for key in ["access_token", "token", "jwt", "auth_token", "id_token",
                     "authToken", "accessToken"]:
             try:
@@ -4662,13 +4735,21 @@ async def _do_thinking_scan(run_id: int) -> None:
                     })
 
                     try:
-                        if selected_session and selected_session.get("cookies"):
+                        # Isolate the browser session per step: clear the shared
+                        # context cookies so a prior authenticated step can't leak
+                        # into an anonymous/other-user navigation, then install
+                        # exactly the selected session (default → primary).
+                        with contextlib.suppress(Exception):
+                            await browser_ctx.clear_cookies()
+                        if selected_session is not None:
                             cookie_list = [
                                 {"name": k, "value": v, "url": url}
-                                for k, v in selected_session.get("cookies", {}).items()
+                                for k, v in (selected_session.get("cookies") or {}).items()
                             ]
-                            if cookie_list:
-                                await browser_ctx.add_cookies(cookie_list)
+                        else:
+                            cookie_list = _primary_browser_cookies
+                        if cookie_list:
+                            await browser_ctx.add_cookies(cookie_list)
                         await browser_ctx.set_extra_http_headers(
                             _playwright_global_headers(
                                 (selected_session.get("extra_headers") or {}) if selected_session else {}
@@ -4832,6 +4913,18 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                     if not url:
                         log.warning("Thinking scan step %d: credential_check missing URL.", step)
+                        break
+
+                    # Scope-check the login URL before probing OR persisting. An
+                    # off-host login endpoint must not be tested, and a success
+                    # there must never be saved into this site's credential store
+                    # (which produced foreign "Discovered by dynamic scan" creds).
+                    _cred_scope_err = check_scope(url, site_id, run_id)
+                    if _cred_scope_err:
+                        log.warning(
+                            "Thinking scan step %d: credential_check URL out of scope: %s",
+                            step, _cred_scope_err,
+                        )
                         break
 
                     events_svc.emit(run_id, {
@@ -5132,31 +5225,32 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                     req_body_str = ""
                     duration_ms: int | None = None
+                    sent_cookies: dict[str, str] = {}
                     try:
                         merged_headers = dict(hx.headers)
                         if selected_session and selected_session.get("extra_headers"):
                             merged_headers.update(selected_session["extra_headers"])
                         merged_headers.update(headers)
-                        selected_cookies = (
-                            selected_session.get("cookies")
-                            if selected_session and selected_session.get("cookies")
-                            else None
-                        )
-                        if isinstance(body, dict):
-                            merged_headers.setdefault("Content-Type", "application/json")
-                            started = time.perf_counter()
-                            resp = await hx.request(method, url, json=body, headers=merged_headers, cookies=selected_cookies)
-                            duration_ms = int((time.perf_counter() - started) * 1000)
-                            req_body_str = json.dumps(body)[:800]
-                        elif isinstance(body, str) and body:
-                            started = time.perf_counter()
-                            resp = await hx.request(method, url, content=body, headers=merged_headers, cookies=selected_cookies)
-                            duration_ms = int((time.perf_counter() - started) * 1000)
-                            req_body_str = body[:800]
-                        else:
-                            started = time.perf_counter()
-                            resp = await hx.request(method, url, headers=merged_headers, cookies=selected_cookies)
-                            duration_ms = int((time.perf_counter() - started) * 1000)
+                        # Cookies actually sent (for honest evidence below). The jar
+                        # swap below makes an explicit anonymous/other-user session
+                        # authoritative so it cannot inherit the primary cookies.
+                        sent_cookies = _cookies_sent(hx, selected_session)
+                        with _client_session_cookies(hx, selected_session):
+                            if isinstance(body, dict):
+                                merged_headers.setdefault("Content-Type", "application/json")
+                                started = time.perf_counter()
+                                resp = await hx.request(method, url, json=body, headers=merged_headers)
+                                duration_ms = int((time.perf_counter() - started) * 1000)
+                                req_body_str = json.dumps(body)[:800]
+                            elif isinstance(body, str) and body:
+                                started = time.perf_counter()
+                                resp = await hx.request(method, url, content=body, headers=merged_headers)
+                                duration_ms = int((time.perf_counter() - started) * 1000)
+                                req_body_str = body[:800]
+                            else:
+                                started = time.perf_counter()
+                                resp = await hx.request(method, url, headers=merged_headers)
+                                duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
@@ -5222,7 +5316,10 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                     req_body = body
                     request_evidence = _request_evidence(
-                        f"{method} {url}\n{json.dumps(headers, sort_keys=True)}\n{req_body_str}"
+                        f"{method} {url}\n"
+                        f"use_session: {use_session or '(default)'}  "
+                        f"Cookies: {_cookie_names_summary(sent_cookies)}\n"
+                        f"{json.dumps(headers, sort_keys=True)}\n{req_body_str}"
                     )
                     response_evidence = _response_evidence(
                         "Status: "
@@ -5602,6 +5699,16 @@ async def _do_agentic_thinking_loop(
     _REAUTH_THRESHOLD = 5
     _REAUTH_MAX = 2
 
+    # Snapshot the primary (default) browser-session cookies so anonymous or
+    # other-user browser steps can be isolated and default steps restored without
+    # one step's session leaking into the next. Kept fresh by _try_reauth below.
+    _primary_browser_cookies: list[dict] = []
+    if browser_ctx is not None:
+        try:
+            _primary_browser_cookies = await browser_ctx.cookies()
+        except Exception:
+            _primary_browser_cookies = []
+
     async def _try_reauth() -> bool:
         """Re-authenticate on pw_page and refresh hx + session_vault cookies."""
         if not creds or _reauth_count[0] >= _REAUTH_MAX:
@@ -5630,6 +5737,8 @@ async def _do_agentic_thinking_loop(
             # Refresh the httpx client's cookie jar in-place
             for name, value in new_cookies.items():
                 hx.cookies.set(name, value)
+            # Keep the primary browser-cookie snapshot fresh for default steps.
+            _primary_browser_cookies[:] = raw_cookies
             # Refresh session vault
             if new_cookies:
                 prev = session_vault.get("configured_primary") or {}
@@ -6036,13 +6145,21 @@ async def _do_agentic_thinking_loop(
                 },
             })
             try:
-                if selected_session and selected_session.get("cookies"):
+                # Isolate the browser session per step: clear the shared context's
+                # cookies first so a prior authenticated step can't leak into an
+                # anonymous/other-user navigation, then install exactly the selected
+                # session (default → restore the primary session).
+                with contextlib.suppress(Exception):
+                    await browser_ctx.clear_cookies()
+                if selected_session is not None:
                     cookie_list = [
                         {"name": k, "value": v, "url": br_url}
-                        for k, v in selected_session["cookies"].items()
+                        for k, v in (selected_session.get("cookies") or {}).items()
                     ]
-                    if cookie_list:
-                        await browser_ctx.add_cookies(cookie_list)
+                else:
+                    cookie_list = _primary_browser_cookies
+                if cookie_list:
+                    await browser_ctx.add_cookies(cookie_list)
                 await browser_ctx.set_extra_http_headers(
                     _playwright_global_headers(
                         (selected_session.get("extra_headers") or {}) if selected_session else {}
@@ -6268,6 +6385,15 @@ async def _do_agentic_thinking_loop(
         # ── credential_check ──────────────────────────────────────────────────
         if tool_name == "credential_check":
             cc_url = str(tool_input.get("url") or "").strip()
+            if not cc_url:
+                return "credential_check: missing URL"
+            # Scope-check the login URL before probing OR persisting. Without this,
+            # the LLM can credential_check an off-host login endpoint and a success
+            # would be saved into THIS site's credential store with a foreign
+            # login_url. Mirror the http_request/browser_navigate scope gate.
+            _cc_scope_err = check_scope(cc_url, site_id, run_id)
+            if _cc_scope_err:
+                return f"[SCOPE BLOCK] {_cc_scope_err}"
             cc_candidates = tool_input.get("candidates")
             if not isinstance(cc_candidates, list):
                 cc_candidates = []
@@ -6676,18 +6802,17 @@ async def _do_agentic_thinking_loop(
         hr_req_body_str = ""
         hr_duration_ms: Optional[int] = None
         hr_redirect_blocked: tuple[str, str] | None = None
+        hr_sent_cookies: dict[str, str] = {}
         _js_paths: list[str] = []
         try:
             hr_merged = dict(hx.headers)
             if hr_sel_session and hr_sel_session.get("extra_headers"):
                 hr_merged.update(hr_sel_session["extra_headers"])
             hr_merged.update(hr_headers)
-            hr_sel_cookies = (
-                hr_sel_session.get("cookies")
-                if hr_sel_session and hr_sel_session.get("cookies") else None
-            )
+            # Cookies actually placed on the wire (for honest evidence below).
+            hr_sent_cookies = _cookies_sent(hx, hr_sel_session)
             hr_started = time.perf_counter()
-            hr_req_kwargs: dict = {"headers": hr_merged, "cookies": hr_sel_cookies}
+            hr_req_kwargs: dict = {"headers": hr_merged}
             if isinstance(hr_body, dict):
                 hr_merged.setdefault("Content-Type", "application/json")
                 hr_req_kwargs["json"] = hr_body
@@ -6697,9 +6822,12 @@ async def _do_agentic_thinking_loop(
                 hr_req_body_str = hr_body[:800]
             # Follow redirects manually with a scope re-check on every hop so the
             # target cannot bounce the scanner to an out-of-scope/internal host.
-            hr_r, hr_redirect_blocked = await _request_scope_checked(
-                hx, hr_method, hr_url, site_id=site_id, run_id=run_id, **hr_req_kwargs
-            )
+            # Swap the shared client jar to exactly the selected session so an
+            # "anonymous"/other-user probe is not silently authenticated.
+            with _client_session_cookies(hx, hr_sel_session):
+                hr_r, hr_redirect_blocked = await _request_scope_checked(
+                    hx, hr_method, hr_url, site_id=site_id, run_id=run_id, **hr_req_kwargs
+                )
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
             hr_token = _extract_bearer_token_from_body(hr_raw)
@@ -6759,6 +6887,8 @@ async def _do_agentic_thinking_loop(
 
         hr_req_ev = _request_evidence(
             f"{hr_method} {hr_url}\n"
+            f"use_session: {hr_use_session or '(default)'}  "
+            f"Cookies: {_cookie_names_summary(hr_sent_cookies)}\n"
             f"{json.dumps(hr_headers, sort_keys=True)}\n{hr_req_body_str}"
         )
         hr_resp_ev = _response_evidence(
@@ -7173,10 +7303,21 @@ async def _fetch_matrix_url(
             timeout=timeout,
         ) as client:
             resp = await client.request(method, url)
+        # Build evidence from the *actual* request headers that went on the wire
+        # (after any redirect/Set-Cookie replay or configured global header) rather
+        # than fabricating "Authorization: none" — so an anonymous probe that was
+        # in fact authenticated is visible instead of being reported as clean.
+        _sent_hdrs = resp.request.headers
+        _sent_cookie_hdr = _sent_hdrs.get("cookie", "")
+        _sent_cookie_names = ", ".join(sorted({
+            c.split("=", 1)[0].strip()
+            for c in _sent_cookie_hdr.split(";") if c.strip()
+        })) or "none"
         request_evidence = (
             f"{method} {url} HTTP/1.1\n"
             f"Actor: {actor}\n"
-            f"Authorization: {'present' if session and session.get('extra_headers') else 'none'}"
+            f"Cookies: {_sent_cookie_names}\n"
+            f"Authorization: {'present' if _sent_hdrs.get('authorization') else 'none'}"
         )
         response_evidence = (
             f"HTTP/1.1 {resp.status_code}\n"
@@ -7314,7 +7455,16 @@ def _is_successful_access(result: dict) -> bool:
     if status not in (200, 201, 202, 204, 206):
         return False
     body = result.get("body") or ""
-    return not _looks_like_denial(body)
+    if _looks_like_denial(body):
+        return False
+    # A single-page-app index shell returns HTTP 200 for *any* route (the server
+    # serves index.html and the client routes/guards in JS), so a 200 alone is not
+    # proof the caller actually reached protected data. Reject the generic app
+    # shell to avoid false-positive "unauthenticated/unauthorized access" findings.
+    content_type = (result.get("headers") or {}).get("content-type", "")
+    if _looks_like_spa_shell(body, content_type):
+        return False
+    return True
 
 
 def _looks_like_denial(body: str) -> bool:
@@ -7859,10 +8009,15 @@ async def _analyse_js_sinks(
     """Fetch every JS file discovered during crawling and grep for unsanitized innerHTML sinks.
 
     For each match where no sanitizer call (escapeHtml, DOMPurify, etc.) wraps the value:
-    - Saves a TargetIntelItem(kind='xss_sink') so the thinking-scan agent can find it.
-    - Saves an info-severity ScanFinding so the user sees it in the findings panel
-      before dynamic confirmation runs.
+    - Saves a TargetIntelItem(kind='xss_sink') so the thinking-scan agent can find it
+      and dynamically confirm it.
     - Emits scanner_phase events at start and completion.
+
+    These static matches seed leads for the dynamic scan only — they are deliberately
+    NOT written as findings. A regex match on `innerHTML` is not a confirmed
+    vulnerability, and emitting one info-level "Potential stored XSS sink" row per
+    match (often dozens of near-duplicates) buried the high-value confirmed findings.
+    The agentic loop promotes a sink to a real finding only after dynamic confirmation.
 
     Returns a list of sink dicts (field, js_file, snippet) for the completion event payload.
     """
@@ -7946,46 +8101,6 @@ async def _analyse_js_sinks(
                 metadata={"js_file": js_url, "pattern": m.group(1).strip()},
             )
             found_sinks.append({"field": field_name, "js_file": js_url, "snippet": snippet[:200]})
-
-    if found_sinks:
-        info_findings: list[ScanFinding] = []
-        for sink in found_sinks:
-            info_findings.append(ScanFinding(
-                test_run_id=run_id,
-                owasp_category="A03",
-                severity="info",
-                title=f"Potential stored XSS sink identified in JS source: {sink['field']}",
-                description=(
-                    f"Static analysis of {sink['js_file']} found an unsanitized innerHTML "
-                    f"assignment using the field '{sink['field']}'. No escapeHtml(), DOMPurify, "
-                    f"or equivalent sanitizer call was found in the surrounding context.\n\n"
-                    f"Code context:\n{sink['snippet']}"
-                ),
-                impact=(
-                    "If an attacker controls the value of this field via any writable API "
-                    "endpoint, the payload will execute as JavaScript in every user's browser "
-                    "that renders this view."
-                ),
-                likelihood=(
-                    "Unconfirmed — this is a static finding. Requires dynamic confirmation "
-                    "that the field is writable and that the rendered output reaches this sink."
-                ),
-                recommendation=(
-                    "Wrap all user-supplied values rendered via innerHTML with escapeHtml() or "
-                    "equivalent HTML encoding. Prefer textContent over innerHTML for plain-text "
-                    "values. Add a strict Content-Security-Policy as defence-in-depth."
-                ),
-                cvss_score=0.0,
-                affected_url=sink["js_file"],
-                finding_source="deterministic_probe",
-                validation_status="unvalidated",
-                created_at=_utcnow(),
-            ))
-        with Session(get_engine()) as s:
-            for f in info_findings:
-                s.add(f)
-            s.commit()
-        _emit_scan_update(run_id)
 
     events_svc.emit(run_id, {
         "type": "scanner_phase",

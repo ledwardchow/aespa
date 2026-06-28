@@ -534,11 +534,16 @@ def create_api_test_run(
 ) -> ApiTestRunSummary:
     if session.get(ApiCollection, collection_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+    if payload.llm_profile_id is not None:
+        from aespa.models import LLMProfile
+        if session.get(LLMProfile, payload.llm_profile_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan profile not found")
     name = payload.name or f"Run {_utcnow().strftime('%Y-%m-%d %H:%M')}"
     run = ApiTestRun(
         collection_id=collection_id,
         name=name,
         llm_config_id=payload.llm_config_id,
+        llm_profile_id=payload.llm_profile_id,
         coverage_mode=payload.coverage_mode,
     )
     session.add(run)

@@ -54,6 +54,7 @@ class SastRunCreate(BaseModel):
     name: str | None = None
     document_id: int | None = None
     llm_config_id: int | None = None
+    llm_profile_id: int | None = None
 
 
 @router.post(
@@ -89,11 +90,17 @@ def create_sast_run(
             )
         doc_id = doc.id
 
+    if body.llm_profile_id is not None:
+        from aespa.models import LLMProfile
+        if session.get(LLMProfile, body.llm_profile_id) is None:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+
     run = SastRun(
         collection_id=collection_id,
         document_id=doc_id,
         name=name,
         llm_config_id=body.llm_config_id,
+        llm_profile_id=body.llm_profile_id,
         status="pending",
         created_at=datetime.now(_UTC),
         updated_at=datetime.now(_UTC),
@@ -134,6 +141,7 @@ async def create_standalone_sast_run(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     llm_config_id: int | None = Form(default=None),
+    llm_profile_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> SastRunSummary:
     """Create a standalone SAST run from an uploaded source archive.
@@ -162,12 +170,18 @@ async def create_standalone_sast_run(
     stored_path.write_bytes(content)
 
     from aespa.services import sast_scanner
+    if llm_profile_id is not None:
+        from aespa.models import LLMProfile
+        if session.get(LLMProfile, llm_profile_id) is None:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+
     run = sast_scanner.create_sast_run(
         collection_id=None,
         name=name or f"SAST – {original_name}",
         source_archive_path=str(stored_path),
         source_filename=original_name,
         llm_config_id=llm_config_id,
+        llm_profile_id=llm_profile_id,
     )
     return _to_summary(run)
 

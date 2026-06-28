@@ -90,6 +90,11 @@ const api = {
   deleteRunLead:       (id,lid)   => req(`/api/test-runs/${id}/leads/${lid}`, { method:"DELETE" }),
   getLLMConfig:     ()            => req("/api/settings/llm"),
   upsertLLMConfig:  (b)           => req("/api/settings/llm",  { method:"PUT",    body:b }),
+  listLLMModels:    ()            => req("/api/settings/llm/model-configs"),
+  createLLMModel:   (b)           => req("/api/settings/llm/model-configs", { method:"POST", body:b }),
+  updateLLMModel:   (id,b)        => req(`/api/settings/llm/model-configs/${id}`, { method:"PUT", body:b }),
+  activateLLMModel: (id)          => req(`/api/settings/llm/model-configs/${id}/activate`, { method:"POST" }),
+  deleteLLMModel:   (id)          => req(`/api/settings/llm/model-configs/${id}`, { method:"DELETE" }),
   listLLMProfiles:  ()            => req("/api/settings/llm/profiles"),
   createLLMProfile: (b)           => req("/api/settings/llm/profiles", { method:"POST", body:b }),
   updateLLMProfile: (id,b)        => req(`/api/settings/llm/profiles/${id}`, { method:"PUT", body:b }),
@@ -2220,7 +2225,7 @@ function SiteDetail({ siteId }) {
   useEffect(() => { load(); }, [load]);
 
   const openEdit = (run) => {
-    setEditForm({ max_depth: run.max_depth, max_pages: run.max_pages, llm_config_id: run.llm_config_id || "" });
+    setEditForm({ max_depth: run.max_depth, max_pages: run.max_pages, llm_profile_id: run.llm_profile_id || "" });
     setEditingRun(run);
   };
   const saveEdit = async () => {
@@ -2229,7 +2234,7 @@ function SiteDetail({ siteId }) {
       const updated = await api.updateRun(editingRun.id, {
         max_depth: Number(editForm.max_depth),
         max_pages: Number(editForm.max_pages),
-        llm_config_id: editForm.llm_config_id ? Number(editForm.llm_config_id) : null,
+        llm_profile_id: editForm.llm_profile_id ? Number(editForm.llm_profile_id) : null,
       });
       setRuns(rs => rs.map(r => r.id === updated.id ? updated : r));
       setEditingRun(null);
@@ -2274,9 +2279,9 @@ function SiteDetail({ siteId }) {
           </div>
           <div className="field" style=${{marginBottom:14}}>
             <label>LLM profile <span className="field-optional">(leave blank to use the globally active profile)</span></label>
-            <select className="select" value=${editForm.llm_config_id||""} onChange=${e=>setEditForm(f=>({...f, llm_config_id:e.target.value}))}>
+            <select className="select" value=${editForm.llm_profile_id||""} onChange=${e=>setEditForm(f=>({...f, llm_profile_id:e.target.value}))}>
               <option value="">— Use global active profile —</option>
-              ${editProfiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+              ${editProfiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
             </select>
           </div>
           <div className="row" style=${{gap:8}}>
@@ -2341,7 +2346,7 @@ function SiteDetail({ siteId }) {
                 <tr key=${r.id}>
                   <td>
                     <strong>${r.name}</strong>
-                    ${r.llm_config_id && html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>${(editProfiles.find(p=>p.id===r.llm_config_id)||{name:"LLM #"+r.llm_config_id}).name}</div>`}
+                    ${r.llm_profile_id && html`<div style=${{fontSize:11,color:"var(--muted)",marginTop:2}}>${(editProfiles.find(p=>p.id===r.llm_profile_id)||{name:"Profile #"+r.llm_profile_id}).name}</div>`}
                   </td>
                   <td>${workflowBadge(r)}</td>
                   <td>${r.pages_discovered}</td>
@@ -2493,7 +2498,7 @@ function SiteForm({ siteId }) {
 // ── API test run form ─────────────────────────────────────────────────────────
 
 function ApiTestRunForm({ collectionId }) {
-  const [form, setForm] = useState({ name:"", llm_config_id:"", coverage_mode:"track" });
+  const [form, setForm] = useState({ name:"", llm_profile_id:"", coverage_mode:"track" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [profiles, setProfiles] = useState([]);
@@ -2508,7 +2513,7 @@ function ApiTestRunForm({ collectionId }) {
     try {
       const payload = {
         name: form.name.trim()||null,
-        llm_config_id: form.llm_config_id ? +form.llm_config_id : null,
+        llm_profile_id: form.llm_profile_id ? +form.llm_profile_id : null,
         coverage_mode: form.coverage_mode,
       };
       const run = await api.createApiRun(collectionId, payload);
@@ -2533,9 +2538,9 @@ function ApiTestRunForm({ collectionId }) {
         </div>
         <div className="field">
           <label>LLM profile</label>
-          <select value=${form.llm_config_id} onChange=${e=>upd({llm_config_id:e.target.value})}>
+          <select value=${form.llm_profile_id} onChange=${e=>upd({llm_profile_id:e.target.value})}>
             <option value="">— Use global active profile —</option>
-            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
           </select>
         </div>
         <div className="field">
@@ -4330,7 +4335,7 @@ function ApiRunAgentsTab({ runId, scanRunning }) {
 }
 
 function TestRunForm({ siteId }) {
-  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_config_id:null });
+  const [form, setForm] = useState({ name:"", max_depth:3, max_pages:50, llm_profile_id:null });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [profiles, setProfiles] = useState([]);
@@ -4352,7 +4357,7 @@ function TestRunForm({ siteId }) {
         name: form.name.trim()||null,
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
-        llm_config_id: form.llm_config_id || null,
+        llm_profile_id: form.llm_profile_id || null,
       });
       nav(`#/runs/${run.id}`);
     } catch(e) { setError(e.message); setSaving(false); }
@@ -4390,9 +4395,9 @@ function TestRunForm({ siteId }) {
         <div className="form-section-title">LLM Profile</div>
         <div className="field">
           <label>LLM profile <span className="field-optional">(optional — uses the globally active profile if not set)</span></label>
-          <select className="select" value=${form.llm_config_id||""} onChange=${e=>upd({llm_config_id:e.target.value?Number(e.target.value):null})}>
+          <select className="select" value=${form.llm_profile_id||""} onChange=${e=>upd({llm_profile_id:e.target.value?Number(e.target.value):null})}>
             <option value="">— Use global active profile —</option>
-            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name} (${p.provider} / ${p.model})</option>`)}
+            ${profiles.map(p=>html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
           </select>
         </div>
         <div className="row spread">
@@ -6026,7 +6031,7 @@ function TestRunDetail({ runId, initialTab }) {
   const onEditSettings = () => {
     setEditDepth(String(run.max_depth));
     setEditPages(String(run.max_pages));
-    setEditLlmProfileId(run.llm_config_id || null);
+    setEditLlmProfileId(run.llm_profile_id || null);
     setEditingSettings(true);
   };
   const onSaveSettings = async () => {
@@ -6034,7 +6039,7 @@ function TestRunDetail({ runId, initialTab }) {
     const p = parseInt(editPages, 10);
     if (!d || !p || d < 1 || d > 10 || p < 5 || p > 500) return;
     try {
-      const r = await api.updateRun(runId, { max_depth: d, max_pages: p, llm_config_id: editLlmProfileId || null });
+      const r = await api.updateRun(runId, { max_depth: d, max_pages: p, llm_profile_id: editLlmProfileId || null });
       setRun(r);
       setEditingSettings(false);
     } catch(e) { setError(e.message); }
@@ -6126,9 +6131,9 @@ function TestRunDetail({ runId, initialTab }) {
           ${run ? run.name : "…"}
           ${run && html`<span className=${"run-status-badge"+(["running","stopping"].includes(headerStatus.key)?" running":"")} style=${{color:STATUS_COLOR[headerStatus.key]||"var(--muted)"}}>● ${headerStatus.label}</span>`}
         </div>
-        ${run && run.llm_config_id && runProfiles.length > 0 && html`
+        ${run && run.llm_profile_id && runProfiles.length > 0 && html`
         <div style=${{fontSize:11,fontWeight:400,color:"var(--muted)",marginLeft:0}}>
-            LLM: ${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}
+            Profile: ${(runProfiles.find(p=>p.id===run.llm_profile_id)||{name:"#"+run.llm_profile_id}).name}
           </div>`}
       </div>
       <div className="topbar-actions">
@@ -6252,9 +6257,9 @@ function TestRunDetail({ runId, initialTab }) {
               <span className="run-stat-val">${run.max_pages}</span>
               <span className="run-stat-lbl">Max pages</span>
             </div>
-            ${run.llm_config_id && runProfiles.length > 0 && html`
+            ${run.llm_profile_id && runProfiles.length > 0 && html`
               <div className="run-stat">
-                <span className="run-stat-val" style=${{fontSize:12}}>${(runProfiles.find(p=>p.id===run.llm_config_id)||{name:"#"+run.llm_config_id}).name}</span>
+                <span className="run-stat-val" style=${{fontSize:12}}>${(runProfiles.find(p=>p.id===run.llm_profile_id)||{name:"#"+run.llm_profile_id}).name}</span>
                 <span className="run-stat-lbl">LLM profile</span>
               </div>`}
             ${run.status !== "running" && html`
@@ -6547,13 +6552,20 @@ function TestRunDetail({ runId, initialTab }) {
                 const fpCount = fpGroups.reduce((total,g)=>total+g.count,0);
                 const deterministicCount = deterministicGroups.reduce((total,g)=>total+g.count,0);
                 const evidenceItemsFor = (f) => {
-                  if (Array.isArray(f.evidence_items)) return f.evidence_items;
-                  try {
-                    const parsed = JSON.parse(f.evidence_json || "[]");
-                    return Array.isArray(parsed) ? parsed : [];
-                  } catch (_) {
-                    return [];
+                  let items = [];
+                  if (Array.isArray(f.evidence_items)) {
+                    items = f.evidence_items;
+                  } else {
+                    try {
+                      const parsed = JSON.parse(f.evidence_json || "[]");
+                      items = Array.isArray(parsed) ? parsed : [];
+                    } catch (_) {
+                      items = [];
+                    }
                   }
+                  // The verdict and reasoning are already shown in the finding-level
+                  // "Validation (…)" note, so drop the duplicate evidence items here.
+                  return items.filter(it => it && it.type !== "validation_verdict" && it.type !== "validation_reasoning");
                 };
                 const renderFinding = (f, keyPrefix="") => html`
                   <tr key=${keyPrefix+f.id} className="finding-instance-row"
@@ -6678,17 +6690,25 @@ function TestRunDetail({ runId, initialTab }) {
                               <div key=${idx} className=${"structured-evidence-item evidence-type-"+(item.type||"note")}>
                                 <div className="structured-evidence-label">
                                   <span>${item.label || item.type || "Evidence"}</span>
-                                  ${item.confidence && html`<span className="structured-evidence-confidence">${item.confidence}</span>`}
                                 </div>
                                 <pre className="structured-evidence-value">${item.value}</pre>
                               </div>`)}
                           </div>`}
-                        ${f.request_evidence && html`
-                          <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
-                        ${f.response_evidence && html`
-                          <pre className="finding-evidence">RESPONSE:\n${f.response_evidence}</pre>`}
-                        ${!f.request_evidence && !f.response_evidence && f.evidence && html`
-                          <pre className="finding-evidence">${f.evidence}</pre>`}
+                        ${(() => {
+                          // Skip the raw request/response dump when the structured
+                          // evidence above already renders them — otherwise the same
+                          // HTTP exchange shows up twice in the write-up.
+                          const hasStructuredHttp = evidenceItemsFor(f).some(
+                            it => it.type === "http_request" || it.type === "http_response");
+                          if (hasStructuredHttp) return null;
+                          return html`
+                            ${f.request_evidence && html`
+                              <pre className="finding-evidence">REQUEST:\n${f.request_evidence}</pre>`}
+                            ${f.response_evidence && html`
+                              <pre className="finding-evidence">RESPONSE:\n${f.response_evidence}</pre>`}
+                            ${!f.request_evidence && !f.response_evidence && f.evidence && html`
+                              <pre className="finding-evidence">${f.evidence}</pre>`}`;
+                        })()}
                         ${f.screenshot_b64 && html`
                           <div className="finding-screenshot-wrap">
                             <div className="finding-affected-label">Screenshot</div>
@@ -6950,10 +6970,13 @@ function TestRunDetail({ runId, initialTab }) {
               </div>`}
             ${activityLog.length === 0 && html`
               <div className="subtle" style=${{padding:"24px",textAlign:"center"}}>
-                No scanner activity yet. Start a Dynamic Scan to begin.
+                No activity yet. Start a Crawl or Dynamic Scan to begin.
               </div>`}
             ${activityLog.map(entry => {
               const PHASE_META = {
+                crawl:              { label: "Crawl",     cls: "phase-sweep" },
+                auth:               { label: "Auth",      cls: "phase-plan" },
+                reconcile:          { label: "Access",    cls: "phase-followup" },
                 site_plan:          { label: "Plan",      cls: "phase-plan" },
                 page_plan:          { label: "Probes",    cls: "phase-probes" },
                 page_followup:      { label: "Follow-up", cls: "phase-followup" },
@@ -8892,7 +8915,7 @@ function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
     </form>`;
 }
 
-function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
+function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
   const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -8903,8 +8926,8 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
     try {
       const payload = llmPayload(form);
       const savedProfile = mode === "edit"
-        ? await api.updateLLMProfile(profile.id, payload)
-        : await api.createLLMProfile(payload);
+        ? await api.updateLLMModel(profile.id, payload)
+        : await api.createLLMModel(payload);
       setSaved(true);
       onSaved?.(savedProfile);
     } catch(e) { setError(e.message); } finally { setSaving(false); }
@@ -8916,7 +8939,7 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
   return html`
     ${error&&html`<div className="alert error">${error}</div>`}
     <form className="card" onSubmit=${onSubmit}>
-      <div className="form-section-title">Profile</div>
+      <div className="form-section-title">Model</div>
       <div className="field"><label>Name</label>
         <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
       <div className="field">
@@ -8968,6 +8991,93 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
         <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
         <div className="row">
           ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
+          <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save model":"Create model"}</button>
+        </div>
+      </div>
+    </form>`;
+}
+
+// Agent roles a scan profile can assign a Model to (mirrors AGENT_ROLES in
+// services/settings.py). Order/labels drive the profile editor rows.
+const AGENT_ROLE_LABELS = [
+  ["crawler", "Crawler", "Page discovery & classification (high volume, light reasoning)"],
+  ["test_lead", "Test Lead", "The agentic reasoning loop (keep this on your best model)"],
+  ["specialist", "Specialist", "Focused per-lead attack agents"],
+  ["validator", "Validator", "Adversarial false-positive checks (high volume)"],
+  ["api_scanner", "API Scanner", "API (OpenAPI/Postman) agentic scan loop"],
+  ["sast", "SAST", "Static analysis over uploaded source"],
+];
+
+function scanProfileToForm(profile) {
+  const rm = (profile && profile.role_models) || {};
+  const role_models = {};
+  for (const [role] of AGENT_ROLE_LABELS) role_models[role] = rm[role] ? String(rm[role]) : "";
+  return {
+    name: profile?.name || "",
+    default_model_id: profile?.default_model_id ? String(profile.default_model_id) : "",
+    role_models,
+  };
+}
+
+function ScanProfileForm({ mode, profile, models, onSaved, onCancel }) {
+  const [form, setForm] = useState(() => scanProfileToForm(profile));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState(null);
+  const upd = p => { setSaved(false); setForm(f=>({...f,...p})); };
+  const updRole = (role, v) => { setSaved(false); setForm(f=>({...f, role_models:{...f.role_models, [role]:v}})); };
+  const onSubmit = async (e) => {
+    e.preventDefault(); setError(null); setSaving(true); setSaved(false);
+    try {
+      const role_models = {};
+      for (const [role] of AGENT_ROLE_LABELS) {
+        const v = form.role_models[role];
+        if (v) role_models[role] = Number(v);
+      }
+      const payload = { name: form.name.trim(), default_model_id: Number(form.default_model_id), role_models };
+      const savedProfile = mode === "edit"
+        ? await api.updateLLMProfile(profile.id, payload)
+        : await api.createLLMProfile(payload);
+      setSaved(true);
+      onSaved?.(savedProfile);
+    } catch(e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  const modelName = id => (models.find(m=>m.id===Number(id))||{}).name;
+  const modelOpts = models.map(m=>html`<option key=${m.id} value=${m.id}>${m.name} (${m.model})</option>`);
+
+  return html`
+    ${error&&html`<div className="alert error">${error}</div>`}
+    <form className="card" onSubmit=${onSubmit}>
+      <div className="form-section-title">Profile</div>
+      <div className="field"><label>Name</label>
+        <input type="text" required maxLength="120" value=${form.name} onChange=${e=>upd({name:e.target.value})}/></div>
+      <div className="field"><label>Default model</label>
+        <select className="select" required value=${form.default_model_id} onChange=${e=>upd({default_model_id:e.target.value})}>
+          <option value="">Select a model…</option>
+          ${modelOpts}
+        </select>
+        <div className="field-hint">Used for any agent role left on “Use default” below.</div>
+      </div>
+      <div className="divider"/>
+      <div className="form-section-title">Per-role overrides</div>
+      <div className="field-hint" style=${{marginBottom:"10px"}}>
+        Assign a cheaper model to high-volume roles (crawler, validator) and keep the Test Lead on your best model.
+      </div>
+      ${AGENT_ROLE_LABELS.map(([role,label,hint])=>html`
+        <div className="field" key=${role}>
+          <label>${label}</label>
+          <select className="select" value=${form.role_models[role]} onChange=${e=>updRole(role, e.target.value)}>
+            <option value="">Use default${form.default_model_id?` (${modelName(form.default_model_id)||"—"})`:""}</option>
+            ${modelOpts}
+          </select>
+          <div className="field-hint">${hint}</div>
+        </div>`)}
+      <div className="divider"/>
+      <div className="row spread">
+        <div>${saved&&html`<span className="save-confirm"><${IconCheck}/> Saved</span>`}</div>
+        <div className="row">
+          ${onCancel&&html`<button type="button" className="btn ghost" onClick=${onCancel}>Cancel</button>`}
           <button type="submit" className="btn" disabled=${saving}>${saving?"Saving…":mode==="edit"?"Save profile":"Create profile"}</button>
         </div>
       </div>
@@ -8975,7 +9085,8 @@ function LLMProfileForm({ mode, profile, providers, onSaved, onCancel }) {
 }
 
 function SettingsPage() {
-  const [profiles, setProfiles] = useState(null);
+  const [profiles, setProfiles] = useState(null);   // scan profiles (LLMProfile)
+  const [models, setModels] = useState(null);       // models (LLMConfig)
   const [providers, setProviders] = useState(null);
   const [tab, setTab] = useState("profiles");
   const [screen, setScreen] = useState("list");
@@ -8988,31 +9099,38 @@ function SettingsPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [items,providerItems] = await Promise.all([api.listLLMProfiles(), api.listLLMProviders()]);
-      setProfiles(items);
+      const [profItems, modelItems, providerItems] = await Promise.all([
+        api.listLLMProfiles(), api.listLLMModels(), api.listLLMProviders(),
+      ]);
+      setProfiles(profItems);
+      setModels(modelItems);
       setProviders(providerItems);
-      if (tab === "profiles" && items.length === 0 && providerItems.length > 0) { setScreen("new"); setEditing(null); }
-      else if (tab === "providers" && providerItems.length === 0) { setScreen("new"); setEditing(null); }
-      else if (screen === "new" && ((tab === "profiles" && profiles?.length === 0) || (tab === "providers" && providers?.length === 0))) { setScreen("list"); }
     } catch(e) { setError(e.message); }
-  }, [screen, tab, profiles?.length, providers?.length]);
+  }, []);
 
   useEffect(() => { load(); }, []);
 
   const onSaved = async () => { await load(); setScreen("list"); setEditing(null); };
-  const onEdit = profile => { setEditing(profile); setScreen("edit"); setError(null); };
+  const onEdit = item => { setEditing(item); setScreen("edit"); setError(null); };
   const onNew = () => { setEditing(null); setScreen("new"); setError(null); };
   const onCancel = () => { setScreen("list"); setEditing(null); setError(null); };
-  const onActivate = async (profile) => {
-    setBusyId(profile.id); setError(null);
-    try { await api.activateLLMProfile(profile.id); await load(); }
-    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  const onActivate = async (item) => {
+    setBusyId(item.id); setError(null);
+    try {
+      if (tab === "profiles") await api.activateLLMProfile(item.id);
+      else await api.activateLLMModel(item.id);
+      await load();
+    } catch(e) { setError(e.message); } finally { setBusyId(null); }
   };
-  const onDelete = async (profile) => {
-    if (!confirm(`Delete LLM settings profile "${profile.name}"?`)) return;
-    setBusyId(profile.id); setError(null);
-    try { await api.deleteLLMProfile(profile.id); await load(); }
-    catch(e) { setError(e.message); } finally { setBusyId(null); }
+  const onDelete = async (item) => {
+    const what = tab === "profiles" ? "profile" : "model";
+    if (!confirm(`Delete LLM ${what} "${item.name}"?`)) return;
+    setBusyId(item.id); setError(null);
+    try {
+      if (tab === "profiles") await api.deleteLLMProfile(item.id);
+      else await api.deleteLLMModel(item.id);
+      await load();
+    } catch(e) { setError(e.message); } finally { setBusyId(null); }
   };
   const onDeleteProvider = async (provider) => {
     if (!confirm(`Delete LLM provider "${provider.name}"?`)) return;
@@ -9051,14 +9169,17 @@ function SettingsPage() {
       try { parsed = JSON.parse(text); } catch { throw new Error("Invalid JSON file"); }
       const result = await api.importLLMConfig(parsed);
       await load();
-      alert(`Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} profile(s) created, ${result.profiles_updated} updated.`);
+      alert(`Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} model(s) created, ${result.profiles_updated} updated.`);
     } catch(e) { setError(e.message); } finally { setImporting(false); }
   };
 
-  const title = tab === "providers"
-    ? (screen === "new" ? "New LLM Provider" : screen === "edit" ? "Edit LLM Provider" : "LLM Providers")
-    : (screen === "new" ? "New LLM Profile" : screen === "edit" ? "Edit LLM Profile" : "LLM Profiles");
-  const canCreateProfile = (providers || []).length > 0;
+  const TAB_NOUN = { profiles: "Profile", models: "Model", providers: "Provider" };
+  const noun = TAB_NOUN[tab];
+  const title = (screen === "new" ? `New LLM ${noun}` : screen === "edit" ? `Edit LLM ${noun}` : `LLM ${noun}s`);
+  const canCreateModel = (providers || []).length > 0;
+  const canCreateProfile = (models || []).length > 0;
+  const newDisabled = (tab === "models" && !canCreateModel) || (tab === "profiles" && !canCreateProfile);
+  const loaded = profiles && models && providers;
 
   return html`
     <div className="topbar">
@@ -9067,23 +9188,47 @@ function SettingsPage() {
         <button className="btn secondary sm" disabled=${importing} onClick=${onExport}>Export</button>
         <button className="btn secondary sm" disabled=${importing} onClick=${onImportClick}>${importing?"Importing…":"Import"}</button>
         <input ref=${importRef} type="file" accept=".json,application/json" style=${{display:"none"}} onChange=${onImportFile} />
-        ${screen==="list"&&html`<button className="btn" disabled=${tab==="profiles"&&!canCreateProfile} onClick=${onNew}>${tab==="providers"?"New provider":"New profile"}</button>`}
+        ${screen==="list"&&html`<button className="btn" disabled=${newDisabled} onClick=${onNew}>New ${noun.toLowerCase()}</button>`}
       </div>
     </div>
     <div className="content scroll-content settings-content">
       <div className="tab-bar settings-tab-bar">
         <button className=${"tab-btn "+(tab==="profiles"?"active":"")} onClick=${()=>switchTab("profiles")}>Profiles</button>
+        <button className=${"tab-btn "+(tab==="models"?"active":"")} onClick=${()=>switchTab("models")}>Models</button>
         <button className=${"tab-btn "+(tab==="providers"?"active":"")} onClick=${()=>switchTab("providers")}>Providers</button>
       </div>
-      ${(!profiles||!providers)&&!error&&html`<div className="subtle">Loading…</div>`}
+      ${!loaded&&!error&&html`<div className="subtle">Loading…</div>`}
       ${error&&html`<div className="alert error">${error}</div>`}
-      ${profiles&&providers&&tab==="profiles"&&screen==="list"&&html`
-        ${providers.length===0&&html`<div className="alert">Create a provider before adding LLM profiles.</div>`}
+      ${loaded&&tab==="profiles"&&screen==="list"&&html`
+        ${models.length===0&&html`<div className="alert">Create a model before adding scan profiles.</div>`}
+        <div className="field-hint" style=${{marginBottom:"10px"}}>
+          A profile assigns a model to each agent role. Scans select a profile; mix a cheap model
+          on the crawler/validator with your best model on the Test Lead to cut cost.
+        </div>
+        <div className="settings-list settings-list-profiles">
+          <div className="settings-list-head">
+            <div>Name</div><div>Default model</div><div>Overrides</div><div>Status</div><div></div>
+          </div>
+          ${profiles.map(p=>html`
+            <div className="settings-list-row" key=${p.id}>
+              <div><strong>${p.name}</strong></div>
+              <div className="mono">${p.default_model_name || (p.default_model_id ? `#${p.default_model_id}` : "—")}</div>
+              <div>${Object.keys(p.role_models||{}).length || html`<span className="subtle">none</span>`}</div>
+              <div>${p.is_active?html`<span className="badge ok">Active</span>`:html`<span className="subtle">Inactive</span>`}</div>
+              <div className="row settings-list-actions">
+                ${!p.is_active&&html`<button className="btn sm secondary" disabled=${busyId===p.id} onClick=${()=>onActivate(p)}>Use</button>`}
+                <button className="btn sm" disabled=${busyId===p.id} onClick=${()=>onEdit(p)}>Edit</button>
+                <button className="btn danger-outline sm" disabled=${busyId===p.id} onClick=${()=>onDelete(p)}>Delete</button>
+              </div>
+            </div>`)}
+        </div>`}
+      ${loaded&&tab==="models"&&screen==="list"&&html`
+        ${providers.length===0&&html`<div className="alert">Create a provider before adding models.</div>`}
         <div className="settings-list settings-list-profiles">
           <div className="settings-list-head">
             <div>Name</div><div>Provider</div><div>Model</div><div>Vision</div><div>Status</div><div></div>
           </div>
-          ${profiles.map(p=>html`
+          ${models.map(p=>html`
             <div className="settings-list-row" key=${p.id}>
               <div><strong>${p.name}</strong></div>
               <div>${p.provider_name || `Provider #${p.provider_id}`}</div>
@@ -9097,7 +9242,7 @@ function SettingsPage() {
               </div>
             </div>`)}
         </div>`}
-      ${providers&&tab==="providers"&&screen==="list"&&html`
+      ${loaded&&tab==="providers"&&screen==="list"&&html`
         <div className="settings-list settings-list-providers">
           <div className="settings-list-head">
             <div>Name</div><div>API</div><div>Base URL</div><div>Models</div><div>Limits</div><div></div>
@@ -9120,10 +9265,12 @@ function SettingsPage() {
               </div>
             </div>`)}
         </div>`}
-      ${profiles&&providers&&tab==="profiles"&&screen==="new"&&html`<${LLMProfileForm} mode="new" providers=${providers} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
-      ${profiles&&providers&&tab==="profiles"&&screen==="edit"&&editing&&html`<${LLMProfileForm} mode="edit" profile=${editing} providers=${providers} onSaved=${onSaved} onCancel=${onCancel}/>`}
-      ${providers&&tab==="providers"&&screen==="new"&&html`<${LLMProviderForm} mode="new" onSaved=${onSaved} onCancel=${providers.length?onCancel:null}/>`}
-      ${providers&&tab==="providers"&&screen==="edit"&&editing&&html`<${LLMProviderForm} mode="edit" provider=${editing} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${loaded&&tab==="profiles"&&screen==="new"&&html`<${ScanProfileForm} mode="new" models=${models} onSaved=${onSaved} onCancel=${profiles.length?onCancel:null}/>`}
+      ${loaded&&tab==="profiles"&&screen==="edit"&&editing&&html`<${ScanProfileForm} mode="edit" profile=${editing} models=${models} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${loaded&&tab==="models"&&screen==="new"&&html`<${LLMModelForm} mode="new" providers=${providers} onSaved=${onSaved} onCancel=${models.length?onCancel:null}/>`}
+      ${loaded&&tab==="models"&&screen==="edit"&&editing&&html`<${LLMModelForm} mode="edit" profile=${editing} providers=${providers} onSaved=${onSaved} onCancel=${onCancel}/>`}
+      ${loaded&&tab==="providers"&&screen==="new"&&html`<${LLMProviderForm} mode="new" onSaved=${onSaved} onCancel=${providers.length?onCancel:null}/>`}
+      ${loaded&&tab==="providers"&&screen==="edit"&&editing&&html`<${LLMProviderForm} mode="edit" provider=${editing} onSaved=${onSaved} onCancel=${onCancel}/>`}
     </div>`;
 }
 
