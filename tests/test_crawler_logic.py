@@ -880,6 +880,37 @@ def test_authenticate_smart_completes_login_and_substitutes_credentials(monkeypa
         assert "s3cr3t-pw" not in blob
 
 
+def test_crawl_log_emits_scanner_phase_event(monkeypatch):
+    captured: list[tuple[int, dict]] = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda rid, evt: captured.append((rid, evt))
+    )
+
+    crawler._crawl_log(
+        7, "crawl", "start", "Crawl started", page_url="https://t.local/"
+    )
+
+    assert len(captured) == 1
+    run_id, evt = captured[0]
+    assert run_id == 7
+    assert evt["type"] == "scanner_phase"
+    assert evt["phase"] == "crawl"
+    assert evt["status"] == "start"
+    assert evt["message"] == "Crawl started"
+    assert evt["page_url"] == "https://t.local/"
+
+
+def test_crawl_log_noop_for_zero_run_id(monkeypatch):
+    captured: list = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda rid, evt: captured.append((rid, evt))
+    )
+
+    crawler._crawl_log(0, "auth", "info", "should not emit")
+
+    assert captured == []
+
+
 def test_authenticate_skips_smart_fallback_without_llm_cfg(monkeypatch):
     """Back-compat: with llm_cfg=None the LLM fallback must never be invoked."""
     called = {"smart": False}
