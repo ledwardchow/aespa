@@ -162,6 +162,40 @@ def test_delete_run_cleans_up_findings_so_reused_id_is_clean(client):
     assert r.json() == []
 
 
+def test_update_api_finding_edits_status_severity_and_text(client):
+    cid = _make_collection(client)
+    run = _make_run(client, cid)
+    _import_finding(client, run["id"])
+    finding = client.get(f"/api/api-test-runs/{run['id']}/findings").json()[0]
+
+    r = client.patch(
+        f"/api/api-test-runs/{run['id']}/findings/{finding['id']}",
+        json={
+            "validation_status": "unconfirmed",
+            "severity": "low",
+            "title": "Edited API finding",
+            "owasp_api_category": "API5",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["validation_status"] == "unconfirmed"
+    assert data["severity"] == "low"
+    assert data["title"] == "Edited API finding"
+    assert data["owasp_api_category"] == "API5"
+
+
+def test_update_api_finding_unknown_id_404(client):
+    cid = _make_collection(client)
+    run = _make_run(client, cid)
+    r = client.patch(
+        f"/api/api-test-runs/{run['id']}/findings/999999",
+        json={"severity": "low"},
+    )
+    assert r.status_code == 404
+
+
 def test_delete_collection_cascades_runs_and_findings(client):
     """Deleting a collection must remove its runs (and their findings), or a new
     collection reusing the freed id inherits the orphaned runs."""
