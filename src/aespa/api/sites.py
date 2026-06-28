@@ -45,6 +45,7 @@ def _to_detail(site: Site) -> SiteDetail:
         requires_auth=site.requires_auth,
         login_url=site.login_url,
         notes=site.notes,
+        scan_guidance=site.scan_guidance,
         created_at=site.created_at,
         updated_at=site.updated_at,
         credentials=[CredentialOut.model_validate(c) for c in site.credentials],
