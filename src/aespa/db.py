@@ -844,6 +844,31 @@ def _migrate(engine: Engine) -> None:
         conn.commit()
     # Standalone SAST runs have no collection — drop the NOT NULL on collection_id.
     _ensure_sast_run_collection_id_nullable(engine)
+    # LLM model-mixing profiles (per-agent-role model assignment). Placed here so
+    # all referenced run tables already exist. Profiles map an agent role to an
+    # LLMConfig ("Model"); a run selects a profile via *.llm_profile_id.
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text("""
+            CREATE TABLE IF NOT EXISTS llm_profile (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT 'Default',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                default_model_id INTEGER REFERENCES llm_config(id),
+                role_models_json TEXT NOT NULL DEFAULT '{}',
+                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_llm_profile_name ON llm_profile (name)"
+        ))
+        conn.execute(__import__("sqlalchemy").text(
+            "CREATE INDEX IF NOT EXISTS ix_llm_profile_is_active ON llm_profile (is_active)"
+        ))
+        conn.commit()
+    _ensure_column(engine, "test_run", "llm_profile_id", "INTEGER")
+    _ensure_column(engine, "api_test_run", "llm_profile_id", "INTEGER")
+    _ensure_column(engine, "sast_run", "llm_profile_id", "INTEGER")
+    _ensure_default_llm_profile(engine)
     # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
@@ -974,6 +999,48 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
         conn.execute(sql("UPDATE test_run SET llm_config_id = NULL WHERE llm_config_id IS NOT NULL"))
         conn.execute(sql("INSERT INTO aespa_migration_state (key) VALUES ('llm_provider_split_v1')"))
         conn.commit()
+
+
+def _ensure_default_llm_profile(engine: Engine) -> None:
+    """Seed a default active ``LLMProfile`` when Models exist but no Profile does.
+
+    Keeps existing installs working after the model-mixing upgrade: a scan that
+    doesn't pick a profile resolves through the active profile's default model,
+    which here wraps the previously-active ``LLMConfig``.  Idempotent and
+    best-effort — never blocks startup.
+    """
+    sql = __import__("sqlalchemy").text
+    try:
+        with engine.connect() as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    sql("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            if "llm_profile" not in tables or "llm_config" not in tables:
+                return
+            if conn.execute(sql("SELECT 1 FROM llm_profile LIMIT 1")).first() is not None:
+                return  # profiles already exist — don't seed
+            row = conn.execute(
+                sql(
+                    "SELECT id FROM llm_config "
+                    "ORDER BY is_active DESC, updated_at DESC LIMIT 1"
+                )
+            ).first()
+            if row is None:
+                return  # no Models yet; nothing to wrap (a fresh install)
+            conn.execute(
+                sql(
+                    "INSERT INTO llm_profile "
+                    "(name, is_active, default_model_id, role_models_json, updated_at) "
+                    "VALUES ('Default', 1, :mid, '{}', datetime('now'))"
+                ),
+                {"mid": int(row[0])},
+            )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort seed
 
 
 def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> None:

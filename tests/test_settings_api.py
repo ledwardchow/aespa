@@ -112,7 +112,7 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
         "use_vision": False,
     }
     payload.update(overrides)
-    return client.post("/api/settings/llm/profiles", json=payload)
+    return client.post("/api/settings/llm/model-configs", json=payload)
 
 
 def test_create_provider_and_profile(client: TestClient):
@@ -148,7 +148,7 @@ def test_create_profile_with_optional_temperature(client: TestClient):
     profile = profile_r.json()
     assert profile["temperature"] is None
 
-    client.post(f"/api/settings/llm/profiles/{profile['id']}/activate")
+    client.post(f"/api/settings/llm/model-configs/{profile['id']}/activate")
     active = client.get("/api/settings/llm").json()
     assert active["temperature"] is None
 
@@ -478,6 +478,6 @@ def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
     assert profile_disabled["force_tool_choice"] is False
 
     # Get active config to verify it resolves correctly
-    client.post(f"/api/settings/llm/profiles/{profile_disabled['id']}/activate")
+    client.post(f"/api/settings/llm/model-configs/{profile_disabled['id']}/activate")
     active = client.get("/api/settings/llm").json()
     assert active["force_tool_choice"] is False

@@ -82,6 +82,64 @@ def test_request_scope_checked_303_downgrades_post_to_get_and_drops_body(monkeyp
     assert "json" not in kwargs  # body dropped on the GET follow-up
 
 
+def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch):
+    """A credential whose login_url is on a different host than the site must
+    NOT be saved into the site's credential store (the "Discovered by dynamic
+    scan" foreign-credential bug)."""
+    from aespa.models import Credential, Site, TestRun
+    from aespa.services import scope as scope_svc
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        # Both the persister and check_scope must read the same DB.
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+        monkeypatch.setattr(scope_svc, "get_engine", lambda: engine)
+        monkeypatch.setattr(scanner.events_svc, "emit", lambda *a, **k: None)
+
+        with Session(engine) as session:
+            site = Site(name="Bank of Ed", base_url="https://bankofed.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            site.scope_hosts = '["bankofed.local"]'
+            session.add(site)
+            run = TestRun(site_id=site.id, name="run-1", status="scanning")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            site_id, run_id = site.id, run.id
+
+        # Off-host login → refused, nothing written.
+        created = scanner._maybe_persist_discovered_credential(
+            run_id, username="attacker", password="pw",
+            login_url="https://evil-other.com/login",
+        )
+        assert created is False
+
+        # In-scope login → saved.
+        created = scanner._maybe_persist_discovered_credential(
+            run_id, username="realuser", password="pw",
+            login_url="https://bankofed.local/login",
+        )
+        assert created is True
+
+        with Session(engine) as session:
+            creds = session.exec(
+                select(Credential).where(Credential.site_id == site_id)
+            ).all()
+        assert [c.username for c in creds] == ["realuser"]
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_compact_thinking_context_includes_all_existing_findings():
     findings = [
         {

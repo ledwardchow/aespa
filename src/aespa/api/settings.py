@@ -16,6 +16,8 @@ from aespa.schemas import (
     LLMConfigIn,
     LLMConfigOut,
     LLMImportResult,
+    LLMProfileIn,
+    LLMProfileOut,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
     ReportingDebugConfigIn,
@@ -40,7 +42,7 @@ def get_llm_config(session: Session = Depends(get_session)) -> LLMConfigOut | No
     cfg = settings_service.get_llm_config(session)
     if cfg is None:
         return None
-    return settings_service.llm_profile_out(session, cfg)
+    return settings_service.llm_profile_out_model(session, cfg)
 
 
 @router.put("/llm", response_model=LLMConfigOut)
@@ -49,48 +51,94 @@ def upsert_llm_config(
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.upsert_llm_config(session, payload)
-    return settings_service.llm_profile_out(session, cfg)
+    return settings_service.llm_profile_out_model(session, cfg)
 
 
-@router.get("/llm/profiles", response_model=list[LLMConfigOut])
-def list_llm_profiles(session: Session = Depends(get_session)) -> list[LLMConfigOut]:
-    return [settings_service.llm_profile_out(session, cfg) for cfg in settings_service.list_llm_profiles(session)]
+# ── Models (provider + model + params; formerly "profiles") ───────────────────
+
+@router.get("/llm/model-configs", response_model=list[LLMConfigOut])
+def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOut]:
+    return [settings_service.llm_profile_out_model(session, cfg) for cfg in settings_service.list_llm_profiles(session)]
 
 
-@router.post("/llm/profiles", response_model=LLMConfigOut)
-def create_llm_profile(
+@router.post("/llm/model-configs", response_model=LLMConfigOut)
+def create_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
     cfg = settings_service.create_llm_profile(session, payload)
-    return settings_service.llm_profile_out(session, cfg)
+    return settings_service.llm_profile_out_model(session, cfg)
 
 
-@router.put("/llm/profiles/{profile_id}", response_model=LLMConfigOut)
-def update_llm_profile(
-    profile_id: int,
+@router.put("/llm/model-configs/{model_id}", response_model=LLMConfigOut)
+def update_llm_model(
+    model_id: int,
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.update_llm_profile(session, profile_id, payload)
-    return settings_service.llm_profile_out(session, cfg)
+    cfg = settings_service.update_llm_profile(session, model_id, payload)
+    return settings_service.llm_profile_out_model(session, cfg)
 
 
-@router.post("/llm/profiles/{profile_id}/activate", response_model=LLMConfigOut)
-def activate_llm_profile(
-    profile_id: int,
+@router.post("/llm/model-configs/{model_id}/activate", response_model=LLMConfigOut)
+def activate_llm_model(
+    model_id: int,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = settings_service.activate_llm_profile(session, profile_id)
-    return settings_service.llm_profile_out(session, cfg)
+    cfg = settings_service.activate_llm_profile(session, model_id)
+    return settings_service.llm_profile_out_model(session, cfg)
+
+
+@router.delete("/llm/model-configs/{model_id}", status_code=204)
+def delete_llm_model(
+    model_id: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    settings_service.delete_llm_profile(session, model_id)
+    return Response(status_code=204)
+
+
+# ── Scan profiles (per-agent-role model assignment) ───────────────────────────
+
+@router.get("/llm/profiles", response_model=list[LLMProfileOut])
+def list_scan_profiles(session: Session = Depends(get_session)) -> list[LLMProfileOut]:
+    return [settings_service.llm_profile_out(session, p) for p in settings_service.list_scan_profiles(session)]
+
+
+@router.post("/llm/profiles", response_model=LLMProfileOut)
+def create_scan_profile(
+    payload: LLMProfileIn,
+    session: Session = Depends(get_session),
+) -> LLMProfileOut:
+    prof = settings_service.create_scan_profile(session, payload)
+    return settings_service.llm_profile_out(session, prof)
+
+
+@router.put("/llm/profiles/{profile_id}", response_model=LLMProfileOut)
+def update_scan_profile(
+    profile_id: int,
+    payload: LLMProfileIn,
+    session: Session = Depends(get_session),
+) -> LLMProfileOut:
+    prof = settings_service.update_scan_profile(session, profile_id, payload)
+    return settings_service.llm_profile_out(session, prof)
+
+
+@router.post("/llm/profiles/{profile_id}/activate", response_model=LLMProfileOut)
+def activate_scan_profile(
+    profile_id: int,
+    session: Session = Depends(get_session),
+) -> LLMProfileOut:
+    prof = settings_service.activate_scan_profile(session, profile_id)
+    return settings_service.llm_profile_out(session, prof)
 
 
 @router.delete("/llm/profiles/{profile_id}", status_code=204)
-def delete_llm_profile(
+def delete_scan_profile(
     profile_id: int,
     session: Session = Depends(get_session),
 ) -> Response:
-    settings_service.delete_llm_profile(session, profile_id)
+    settings_service.delete_scan_profile(session, profile_id)
     return Response(status_code=204)
 
 
