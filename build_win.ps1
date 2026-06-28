@@ -1,5 +1,5 @@
 # Build AESPA.exe for Windows. Output: dist\AESPA\AESPA.exe
-# Chromium is NOT bundled — it downloads into %LOCALAPPDATA%\aespa on first launch.
+# Chromium is NOT bundled - it downloads into %LOCALAPPDATA%\aespa on first launch.
 # Needs the Edge WebView2 runtime (preinstalled on Windows 11 and most Windows 10).
 # Run from an x64 "Developer PowerShell" or any PowerShell with uv on PATH:
 #   .\build_win.ps1
@@ -41,5 +41,5 @@ Write-Host "==> Building exe with PyInstaller"
     src\aespa\desktop_win.py
 
 Write-Host "==> Done: dist\AESPA\AESPA.exe"
-Write-Host "    Unsigned — SmartScreen may warn on first run (More info > Run anyway)."
+Write-Host "    Unsigned - SmartScreen may warn on first run (More info > Run anyway)."
 Write-Host "    Distribute the whole dist\AESPA\ folder (zip it)."
