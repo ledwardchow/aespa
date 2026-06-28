@@ -28,6 +28,7 @@ class Site(SQLModel, table=True):
     requires_auth: bool = Field(default=False)
     login_url: Optional[str] = Field(default=None)
     notes: Optional[str] = Field(default=None)
+    scan_guidance: Optional[str] = Field(default=None)  # Test Lead guidance
     scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)

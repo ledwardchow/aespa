@@ -32,6 +32,25 @@ def test_create_site_no_auth(client):
     assert data["credentials"] == []
 
 
+def test_scan_guidance_round_trips(client):
+    guidance = "Log in via /sso then click Enter."
+    r = make_site(client, name="Guided", scan_guidance=guidance)
+    assert r.status_code == 201
+    site_id = r.json()["id"]
+    assert r.json()["scan_guidance"] == guidance
+
+    detail = client.get(f"/api/sites/{site_id}").json()
+    assert detail["scan_guidance"] == guidance
+
+    upd = client.put(
+        f"/api/sites/{site_id}",
+        json={"name": "Guided", "base_url": "https://juice.local",
+              "requires_auth": False, "scan_guidance": "Updated steps."},
+    )
+    assert upd.status_code == 200
+    assert upd.json()["scan_guidance"] == "Updated steps."
+
+
 def test_create_site_with_auth_and_credentials(client):
     r = make_site(
         client,
