@@ -1178,6 +1178,28 @@ class ScanFindingImportIn(BaseModel):
     poc_setup: str = ""
 
 
+class ScanFindingUpdateIn(BaseModel):
+    """Partial, user-driven edit of a single finding. Every field is optional;
+    only fields explicitly supplied are applied (see services/findings.py)."""
+
+    severity: str | None = None
+    validation_status: str | None = None
+    title: str | None = None
+    description: str | None = None
+    impact: str | None = None
+    likelihood: str | None = None
+    recommendation: str | None = None
+    cvss_score: float | None = None
+    cvss_vector: str | None = None
+    affected_url: str | None = None
+    owasp_category: str | None = None
+    owasp_api_category: str | None = None
+    evidence: str | None = None
+    request_evidence: str | None = None
+    response_evidence: str | None = None
+    validation_note: str | None = None
+
+
 class ScanFindingImportResult(BaseModel):
     imported: int
     findings: list[ScanFindingOut]
