@@ -4,9 +4,9 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [PR #TBA] June 28 Update — Per-task model routing, adaptive login, editable findings
+## [PR #209] June 28 Update — Per-task model routing, adaptive login, editable findings
 
-**Branch:** `develop`
+**Branch:** `develop → main`
 
 ### Per-task model routing
 
@@ -31,6 +31,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Docker instructions** (`4a840d9`) and assorted `README.md` updates.
 - **CLAUDE.md**: added the `deno lint src/aespa/web/app.js` JS-sanity step (no build step to catch typos); `docs/architecture.md` updated for the above.
+- Added Windows standalone build scripts (untested at time of writing)
 
 ### Tests
 
