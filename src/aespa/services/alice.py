@@ -36,7 +36,7 @@ def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
 
 
 # Hard step limit to prevent runaway loops regardless of model behaviour.
-ALICE_MAX_STEPS = 40
+ALICE_MAX_STEPS = 300
 
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
