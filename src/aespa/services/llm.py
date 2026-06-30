@@ -406,7 +406,7 @@ def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
 
 
 # Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
-_LLM_HEADERS = {"HTTP-Referer": "https://aespa.leddytech.com", "X-Title": "AESPA"}
+_LLM_HEADERS = {"HTTP-Referer": "https://github.com/ledwardchow/aespa", "X-Title": "AESPA"}
 
 
 def _llm_client_kwargs() -> dict:
