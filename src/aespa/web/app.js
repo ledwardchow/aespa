@@ -1323,6 +1323,7 @@ function App() {
             ${!collapsed && html`<span className="logo-text">ESPA</span>`}
           </div>
           ${!collapsed && html`<div className="logo-sub">AI-Enabled Security Pentesting Agent</div>`}
+          ${!collapsed && html`<a className="logo-link" href="https://github.com/ledwardchow/aespa" target="_blank" rel="noopener noreferrer">github.com/ledwardchow/aespa</a>`}
         </div>
         <div className="sidebar-meta">
           <button className="sidebar-toggle" onClick=${()=>setCollapsed(c=>!c)} title=${collapsed?"Expand sidebar":"Collapse sidebar"}>
