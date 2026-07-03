@@ -145,6 +145,20 @@ a:hover { color: var(--accent-hover); }
   letter-spacing: 0.3px;
 }
 
+.sidebar-brand .logo-link {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-2);
+  letter-spacing: 0.3px;
+  text-decoration: none;
+}
+
+.sidebar-brand .logo-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .sidebar-nav {
   flex: 1;
   padding: 12px 10px;
