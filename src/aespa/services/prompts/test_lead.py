@@ -1145,6 +1145,43 @@ THINKING_AGENT_TOOLS: list[dict] = [
 ]
 
 
+# TLS/SSL posture probe. NOT part of the Test Lead toolset: a consolidated TLS
+# finding is recorded deterministically at scan start (see scanner.py
+# `_run_tls_posture_module`), so the Test Lead must not be able to raise a second
+# one. Exposed only to A.L.I.C.E. for interactive, user-directed inspection.
+TLS_SCAN_TOOL: dict = {
+    "name": "tls_scan",
+    "description": (
+        "Run an sslscan-like TLS/SSL posture probe against a host (default "
+        "port 443). Reports accepted protocol versions (TLS 1.0-1.3), weak / "
+        "non-forward-secret cipher acceptance, and the leaf certificate "
+        "(expiry, key size, signature algorithm, SANs, self-signed, hostname "
+        "match), plus a pre-computed 'issues' list. SSLv2/SSLv3 report as "
+        "'not-testable' (local OpenSSL cannot offer them)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "host": {
+                "type": "string",
+                "description": (
+                    "Target hostname, host:port, or full URL to probe. "
+                    "Must be in scope."
+                ),
+            },
+            "port": {
+                "type": "integer",
+                "description": "TLS port (default 443).",
+            },
+            "observation": {"type": "string"},
+            "hypothesis": {"type": "string"},
+            "note": {"type": "string"},
+        },
+        "required": ["host"],
+    },
+}
+
+
 # ── Non-tool-use next-action prompt (legacy single-turn loop) ─────────────────
 
 _THINKING_NEXT_ACTION_PROMPT = """\
