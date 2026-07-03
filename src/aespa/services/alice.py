@@ -133,11 +133,18 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     ``exclude`` drops tools by name — used to withhold the site-oriented
     ``write_finding`` from API runs, which record findings via the API-aware
     ``report_finding`` context_tool instead.
-    """
-    from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
 
-    allowed = _ALICE_TOOL_NAMES - (exclude or set())
-    return [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    ``tls_scan`` is appended from its standalone schema (it is deliberately not in
+    the Test Lead's ``THINKING_AGENT_TOOLS``; see ``TLS_SCAN_TOOL``).
+    """
+    from aespa.services.prompts.test_lead import TLS_SCAN_TOOL, THINKING_AGENT_TOOLS
+
+    exclude = exclude or set()
+    allowed = _ALICE_TOOL_NAMES - exclude
+    tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "tls_scan" not in exclude:
+        tools.append(TLS_SCAN_TOOL)
+    return tools
 
 
 def _select_session(
@@ -492,6 +499,29 @@ async def _execute_alice_tool(
             except Exception as exc:
                 decoded[part_name] = f"decode error: {exc}"
         return json.dumps(decoded)
+
+    # ── tls_scan ──────────────────────────────────────────────────────────────
+    if tool_name == "tls_scan":
+        from aespa.services import tls_scan as tls_scan_svc
+
+        raw_host = str(tool_input.get("host") or base_url)
+        port_in = tool_input.get("port")
+        try:
+            port_in = int(port_in) if port_in is not None else None
+        except (TypeError, ValueError):
+            port_in = None
+        r_host, r_port = tls_scan_svc._parse_target(raw_host, port_in)
+        if not r_host:
+            return "tls_scan: no host provided."
+        _alice_scope = (
+            scope_check_fn if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
+        )
+        scope_err = _alice_scope(f"https://{r_host}:{r_port}/")
+        if scope_err:
+            return f"[SCOPE BLOCK] {scope_err}"
+        tls_result = await tls_scan_svc.scan_tls(r_host, r_port)
+        return json.dumps(tls_result, default=str)
 
     # ── credential_check ──────────────────────────────────────────────────────
     if tool_name == "credential_check":

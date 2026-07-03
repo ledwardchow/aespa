@@ -1,8 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+import subprocess
+import sys
+
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('src/aespa/web', 'aespa/web')]
+# Reproduce third-party license/NOTICE text next to the app (attribution
+# obligation for the bundled MIT/BSD/Apache/MPL deps). Generated against the
+# interpreter PyInstaller runs under, so it matches exactly what gets bundled.
+subprocess.run(
+    [sys.executable, 'scripts/generate_third_party_licenses.py', 'build/THIRD_PARTY_LICENSES.txt'],
+    check=True,
+)
+
+datas = [('src/aespa/web', 'aespa/web'), ('LICENSE', '.'), ('build/THIRD_PARTY_LICENSES.txt', '.')]
 binaries = []
 hiddenimports = []
 hiddenimports += collect_submodules('aespa')
