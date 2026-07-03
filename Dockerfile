@@ -4,9 +4,13 @@ FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
+COPY scripts ./scripts
 RUN uv sync --frozen --no-dev
+
+# Attribution for the bundled MIT/BSD/Apache/MPL deps (runtime set only).
+RUN uv run --no-dev python scripts/generate_third_party_licenses.py THIRD_PARTY_LICENSES.txt
 
 # DB + uploads live under /data so they're writable and can be mounted to persist.
 RUN mkdir -p /data && chmod 777 /data
