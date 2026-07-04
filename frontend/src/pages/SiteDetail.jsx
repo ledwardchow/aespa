@@ -2056,12 +2056,8 @@ export function TestRunDetail({
     });
     simRef.current = sim;
     return () => sim.stop();
-  }, [
-	graph,
-	activeTab,
-	graphView,
-	nodeColorFn
-]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nodeColorFn intentionally excluded: it's a new identity each render, and including it re-runs this effect (killing the running sim mid-settle → clustered nodes)
+  }, [graph, activeTab, graphView]);
 
   // Highlight the node whose URL is currently being crawled.
   // Runs after the D3 graph effect so the SVG is already populated.

@@ -22,18 +22,14 @@ export function ApiRunWorkProgramTab({
   }).catch(() => setLoading(false));
   useEffect(() => {
     loadMatrix();
-  }, [runId, loadMatrix]);
+  }, [runId]);
 
   // Poll during scan.
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(loadMatrix, 5000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	loadMatrix
-]);
+  }, [scanRunning, runId]);
 
   // SSE live updates.
   useEffect(() => {
@@ -84,11 +80,7 @@ export function ApiRunWorkProgramTab({
       es.close();
       esRef.current = null;
     };
-  }, [
-	scanRunning,
-	runId,
-	loadMatrix
-]);
+  }, [scanRunning, runId]);
   if (loading) return <div className="subtle" style={{
     padding: 24
   }}>Loading coverage matrix…</div>;

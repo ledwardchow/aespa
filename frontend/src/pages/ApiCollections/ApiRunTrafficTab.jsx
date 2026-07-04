@@ -32,16 +32,12 @@ export function ApiRunTrafficTab({
   };
   useEffect(() => {
     loadMore();
-  }, [runId, loadMore]);
+  }, [runId]);
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(loadMore, 4000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	loadMore
-]);
+  }, [scanRunning, runId]);
   useEffect(() => {
     if (autoScroll && tableRef.current) {
       tableRef.current.scrollTop = tableRef.current.scrollHeight;
