@@ -1,9 +1,6 @@
-import { useState, useEffect, useCallback, useContext } from "react";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, sourceLabel, markdownText, markdownCodeBlock, leadImportPayload, leadsExportFilename, leadsToMarkdown, downloadTextFile, WP_STATUS_MARK, findingImportPayload, parseFindingsMarkdownSections, markdownSection } from "../../lib/utilities";
-import * as d3 from "d3";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { api } from "../../lib/api";
+import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
 
 export function WebRunSastLeadsTab({
   runId,
@@ -16,6 +13,8 @@ export function WebRunSastLeadsTab({
   const [clearBusy, setClearBusy] = useState(false);
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState(null);
+  const [expanded, setExpanded] = useState(new Set());
+  const prevScanRunning = useRef(scanRunning);
   const loadLeads = useCallback(() => api.getRunLeads(runId).then(setLeads).catch(() => {}), [runId]);
   const loadAvailable = useCallback(() => api.getRunAvailableSastRuns(runId).then(setAvailable).catch(() => {}), [runId]);
   useEffect(() => {
@@ -25,9 +24,21 @@ export function WebRunSastLeadsTab({
   // Refresh while a dynamic scan runs so investigation outcomes show live.
   useEffect(() => {
     if (!scanRunning) return;
-    const t = setInterval(loadLeads, 6000);
+    const t = setInterval(loadLeads, 3000);
     return () => clearInterval(t);
   }, [scanRunning, loadLeads]);
+  // Final refresh when the scan stops so the last investigation outcomes appear.
+  useEffect(() => {
+    if (prevScanRunning.current && !scanRunning) {
+      loadLeads();
+    }
+    prevScanRunning.current = scanRunning;
+  }, [scanRunning, loadLeads]);
+  const toggle = id => setExpanded(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
   const onImport = async () => {
     if (!selected) return;
     setBusy(true);
@@ -145,10 +156,17 @@ export function WebRunSastLeadsTab({
               width: 110
             }}>Status</th>
                 <th style={{
-              width: 44
+              width: 70
             }}></th>
               </tr></thead>
-              <tbody>{leads.map(l => <tr key={l.id}>
+              <tbody>{leads.map(l => {
+          const isExpanded = expanded.has(l.id);
+          const investigated = l.status && l.status !== "open";
+          return [
+            <tr key={l.id} style={{
+              cursor: "pointer",
+              background: investigated ? "var(--surface, rgba(255,255,255,0.02))" : undefined
+            }} onClick={() => toggle(l.id)}>
                   <td><span className={"sev-badge " + sevCls(l.severity)}>{l.severity || "medium"}</span></td>
                   <td style={{
               fontWeight: 600
@@ -161,10 +179,60 @@ export function WebRunSastLeadsTab({
                   <td><span className={"badge " + statCls(l.status)} style={{
                 fontSize: 11
               }}>{l.status || "open"}</span></td>
-                  <td>
-                    <button className="btn ghost sm" title="Delete lead" onClick={() => onDeleteRow(l.id)}>✕</button>
+                  <td style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              justifyContent: "flex-end"
+            }}>
+                    {investigated && <span className="subtle" style={{
+                fontSize: 11
+              }}>{isExpanded ? "▲" : "▼"}</span>}
+                    <button className="btn ghost sm" title="Delete lead" onClick={e => {
+                e.stopPropagation();
+                onDeleteRow(l.id);
+              }}>✕</button>
                   </td>
-                </tr>)}
+                </tr>,
+            isExpanded && investigated && <tr key={l.id + "-detail"} className="findings-detail-row">
+                    <td colSpan={7} style={{
+                padding: "12px 16px",
+                background: "var(--bg, rgba(0,0,0,0.15))",
+                borderTop: "1px solid var(--border, rgba(255,255,255,0.06))"
+              }}>
+                      {l.note && <div style={{
+                  marginBottom: 8
+                }}><b>Investigation note:</b> {l.note}</div>}
+                      {l.linked_finding_id && <div style={{
+                  marginBottom: 8
+                }}><b>Linked finding:</b> <a href={`#/runs/${runId}/findings`} style={{
+                    color: "var(--success, #4caf50)"
+                  }}>Finding #{l.linked_finding_id}</a></div>}
+                      {l.investigated_by_run_id && <div style={{
+                  marginBottom: 8,
+                  fontSize: 11,
+                  color: "var(--muted)"
+                }}>Investigated by {l.investigated_by_run_type || "run"} #{l.investigated_by_run_id}</div>}
+                      {l.description && <div style={{
+                  marginBottom: 8
+                }}><b>Description:</b> {l.description}</div>}
+                      {l.evidence && <div><b>Code evidence:</b>
+                          <pre style={{
+                      fontSize: 11,
+                      background: "var(--code-bg,#1e1e2e)",
+                      color: "var(--code-fg,#cdd6f4)",
+                      padding: 8,
+                      borderRadius: 4,
+                      overflow: "auto",
+                      maxHeight: 220,
+                      whiteSpace: "pre-wrap",
+                      marginTop: 4
+                    }}>{l.evidence}</pre>
+                        </div>}
+                    </td>
+                  </tr>
+          ];
+        })}
               </tbody>
             </table>
           </div>}
