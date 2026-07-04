@@ -1433,6 +1433,37 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name == "lead_list":
+        if run_id is None:
+            return {"tool": "lead_list", "error": "run_id unavailable"}
+        from aespa.services.scan_leads import get_all_leads_for_run
+        status_filter = str(args.get("status") or "").lower()
+        all_leads = get_all_leads_for_run("web", run_id)
+        if status_filter:
+            all_leads = [ld for ld in all_leads if (ld.status or "open") == status_filter]
+        leads_out = all_leads[:limit]
+        return {
+            "tool": "lead_list",
+            "count": len(all_leads),
+            "returned": len(leads_out),
+            "leads": [
+                {
+                    "id": ld.id,
+                    "title": ld.title,
+                    "category": ld.category,
+                    "severity": ld.severity,
+                    "confidence_pct": int((ld.confidence or 0) * 100),
+                    "location": ld.location,
+                    "description": ld.description,
+                    "evidence": (ld.evidence or "")[:400],
+                    "status": ld.status or "open",
+                    "note": ld.note or "",
+                    "linked_finding_id": ld.linked_finding_id,
+                }
+                for ld in leads_out
+            ],
+        }
+
     if tool_name in {"target_inventory", "search_assets"}:
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}

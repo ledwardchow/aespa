@@ -345,25 +345,23 @@ export function SastLeadsTab({
 }) {
   const [leads, setLeads] = useState(null);
   const [loading, setLoading] = useState(true);
-  const load = () => {
-    setLoading(true);
+  const load = useCallback((isInitial = false) => {
+    if (isInitial) setLoading(true);
     api.getSastLeads(runId).then(d => {
       setLeads(d);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  };
+      if (isInitial) setLoading(false);
+    }).catch(() => {
+      if (isInitial) setLoading(false);
+    });
+  }, [runId]);
   useEffect(() => {
-    load();
-  }, [runId, load]);
+    load(true);
+  }, [load]);
   useEffect(() => {
     if (!scanRunning) return;
-    const t = setInterval(load, 5000);
+    const t = setInterval(() => load(false), 5000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	load
-]);
+  }, [scanRunning, load]);
   return <LeadsPanel leads={leads} loading={loading} scanRunning={scanRunning} exportName={runName || `sast-run-${runId}`} emptyMsg={scanRunning ? "SAST scan in progress — leads will appear here as they are found." : "No leads yet. Start the SAST scan to analyse the source code."} />;
 }
 

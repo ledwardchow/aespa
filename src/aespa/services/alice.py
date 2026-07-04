@@ -1097,8 +1097,20 @@ async def run_alice_turn_stream(
             role = "user" if sender == "user" else "assistant"
             messages.append({"role": role, "content": text})
 
-    # Append the current instruction as the latest user message.
-    messages.append({"role": "user", "content": user_instruction})
+    # Inject any SAST leads imported into this web run so ALICE can investigate them.
+    leads_block = ""
+    try:
+        from aespa.services.scan_leads import format_leads_for_run
+        leads_block = format_leads_for_run("web", run_id)
+    except Exception:
+        pass
+
+    # Append the current instruction as the latest user message, with the leads
+    # block prepended so ALICE sees the investigation targets in context.
+    if leads_block:
+        messages.append({"role": "user", "content": f"{leads_block}\n\n{user_instruction}"})
+    else:
+        messages.append({"role": "user", "content": user_instruction})
 
     alice_tools = _get_alice_tools()
 
