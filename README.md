@@ -116,6 +116,21 @@ uv run aespa
 
 The UI is available at `http://127.0.0.1:8000` by default.
 
+### Frontend build (only for UI development)
+
+The compiled frontend bundle is committed under `src/aespa/web/` to make runs/deployment easier. 
+
+The frontend source is a Vite + React app in `frontend/`. After editing files under `frontend/src/`, rebuild the bundle:
+
+```bash
+cd frontend
+npm ci            # first time only
+npm run build     # regenerates src/aespa/web/
+```
+
+Commit the regenerated `src/aespa/web/` alongside your source changes so deployments stay a simple `git clone && uv run aespa`. For live-reload during development, run `npm run dev` (proxies API calls to a `uv run aespa` backend on port 8000).
+
+### Run notes
 
 Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
 
