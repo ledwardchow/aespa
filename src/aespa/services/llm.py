@@ -743,7 +743,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         if not isinstance(links, list):
             links = []
         safe_links = [
-            str(l) for l in links if isinstance(l, str) and l.startswith("http")
+            str(u) for u in links if isinstance(u, str) and u.startswith("http")
         ]
         # Parse categories — each value coerced to bool or None
         raw_cats = data.get("categories") or {}
