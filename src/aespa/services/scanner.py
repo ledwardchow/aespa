@@ -1433,6 +1433,37 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name == "lead_list":
+        if run_id is None:
+            return {"tool": "lead_list", "error": "run_id unavailable"}
+        from aespa.services.scan_leads import get_all_leads_for_run
+        status_filter = str(args.get("status") or "").lower()
+        all_leads = get_all_leads_for_run("web", run_id)
+        if status_filter:
+            all_leads = [ld for ld in all_leads if (ld.status or "open") == status_filter]
+        leads_out = all_leads[:limit]
+        return {
+            "tool": "lead_list",
+            "count": len(all_leads),
+            "returned": len(leads_out),
+            "leads": [
+                {
+                    "id": ld.id,
+                    "title": ld.title,
+                    "category": ld.category,
+                    "severity": ld.severity,
+                    "confidence_pct": int((ld.confidence or 0) * 100),
+                    "location": ld.location,
+                    "description": ld.description,
+                    "evidence": (ld.evidence or "")[:400],
+                    "status": ld.status or "open",
+                    "note": ld.note or "",
+                    "linked_finding_id": ld.linked_finding_id,
+                }
+                for ld in leads_out
+            ],
+        }
+
     if tool_name in {"target_inventory", "search_assets"}:
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}
@@ -7121,7 +7152,6 @@ def _tls_posture_finding(
     if cvss <= 0.0:
         return None
 
-    cert = result.get("certificate") or {}
     protocols = result.get("protocols") or {}
     accepted = [p for p, state in protocols.items() if state == "accepted"]
 
@@ -7629,8 +7659,22 @@ def _idor_matrix_finding(
     )
 
 
+# Static assets (scripts, styles, images, fonts, media). Fetching one of these
+# anonymously is expected — it is never an "unauthenticated access to a protected
+# endpoint", even when its path contains a sensitive-looking word (e.g.
+# /static/js/user-profile.js matching the "/user" marker below).
+_STATIC_ASSET_EXTENSIONS: tuple[str, ...] = _BROWSER_SKIP_EXTENSIONS + (".js", ".mjs")
+
+
+def _is_static_asset_url(url: str) -> bool:
+    path = urlparse(str(url or "")).path.lower()
+    return path.endswith(_STATIC_ASSET_EXTENSIONS)
+
+
 def _target_requires_auth_or_sensitive(target: dict) -> bool:
     url = str(target.get("url") or "").lower()
+    if _is_static_asset_url(url):
+        return False
     if target.get("req_auth") is True:
         return True
     if target.get("has_business_logic") or target.get("has_object_ref"):

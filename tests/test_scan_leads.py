@@ -255,10 +255,10 @@ def test_copy_leads_to_run_copies_and_preserves_originals(engine):
     # Originals untouched: still open, not owned by any run.
     sast_view = list_leads_for_run(10)
     assert len(sast_view) == 2  # copies excluded from the SAST tab
-    assert {l.id for l in sast_view} == set(originals)
-    for l in sast_view:
-        assert l.imported_into_run_id is None
-        assert l.status == "open"
+    assert {lead.id for lead in sast_view} == set(originals)
+    for lead in sast_view:
+        assert lead.imported_into_run_id is None
+        assert lead.status == "open"
 
     # Copies belong to the web run and are fresh/open.
     copies = get_leads_for_run("web", 7)

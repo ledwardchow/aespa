@@ -137,7 +137,7 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     ``tls_scan`` is appended from its standalone schema (it is deliberately not in
     the Test Lead's ``THINKING_AGENT_TOOLS``; see ``TLS_SCAN_TOOL``).
     """
-    from aespa.services.prompts.test_lead import TLS_SCAN_TOOL, THINKING_AGENT_TOOLS
+    from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS, TLS_SCAN_TOOL
 
     exclude = exclude or set()
     allowed = _ALICE_TOOL_NAMES - exclude
@@ -1097,8 +1097,20 @@ async def run_alice_turn_stream(
             role = "user" if sender == "user" else "assistant"
             messages.append({"role": role, "content": text})
 
-    # Append the current instruction as the latest user message.
-    messages.append({"role": "user", "content": user_instruction})
+    # Inject any SAST leads imported into this web run so ALICE can investigate them.
+    leads_block = ""
+    try:
+        from aespa.services.scan_leads import format_leads_for_run
+        leads_block = format_leads_for_run("web", run_id)
+    except Exception:
+        pass
+
+    # Append the current instruction as the latest user message, with the leads
+    # block prepended so ALICE sees the investigation targets in context.
+    if leads_block:
+        messages.append({"role": "user", "content": f"{leads_block}\n\n{user_instruction}"})
+    else:
+        messages.append({"role": "user", "content": user_instruction})
 
     alice_tools = _get_alice_tools()
 
@@ -2024,10 +2036,12 @@ async def run_api_alice_turn_stream(
             self.scope_hosts = collection_scope_hosts
 
     _coll_proxy = _CollProxy()
-    _scope_fn = lambda url: _check_api_scope(url, _coll_proxy)  # noqa: E731
-    _ctx_fn = lambda tool_name, args: _run_api_context_tool(
-        collection_id, api_run_id, tool_name, args
-    )  # noqa: E731
+
+    def _scope_fn(url):
+        return _check_api_scope(url, _coll_proxy)
+
+    def _ctx_fn(tool_name, args):
+        return _run_api_context_tool(collection_id, api_run_id, tool_name, args)
 
     def _post_probe_fn(url: str, method: str, owasp_category: str) -> None:
         """Flip the endpoint × category work-program cell to in_progress when
