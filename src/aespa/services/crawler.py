@@ -12,13 +12,6 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 
-log = logging.getLogger("aespa.crawler")
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -38,6 +31,13 @@ from aespa.services.settings import (
     get_global_http_header_config,
     get_llm_config_for_role,
     get_upstream_proxy_config,
+)
+
+log = logging.getLogger("aespa.crawler")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -2850,8 +2850,8 @@ def _update_credential_progress(
 def _clear_pages(run_id: int) -> None:
     with Session(get_engine()) as s:
         links = s.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
-        for l in links:
-            s.delete(l)
+        for link in links:
+            s.delete(link)
         views = s.exec(
             select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)
         ).all()
@@ -3037,13 +3037,13 @@ def _is_session_ending_url(url: str, link_text: str | None = None) -> bool:
 
 def _same_url_without_fragment(left: str, right: str) -> bool:
     try:
-        l = urlparse(left)
+        lhs = urlparse(left)
         r = urlparse(right)
         return (
-            l.scheme.lower(),
-            l.netloc.lower(),
-            l.path.rstrip("/") or "/",
-            l.query,
+            lhs.scheme.lower(),
+            lhs.netloc.lower(),
+            lhs.path.rstrip("/") or "/",
+            lhs.query,
         ) == (
             r.scheme.lower(),
             r.netloc.lower(),
