@@ -628,6 +628,26 @@ def test_request_stop_noops_when_validation_not_running(monkeypatch):
     assert reset_calls == []
 
 
+def test_static_assets_are_not_protected_endpoints():
+    # A .js file whose path contains a sensitive-looking word must not be treated
+    # as an auth-protected endpoint (would raise a bogus "unauthenticated access").
+    for url in (
+        "https://target.local/static/js/user-profile.js",
+        "https://target.local/assets/admin.mjs",
+        "https://target.local/css/account.css",
+        "https://target.local/app.js?v=3",
+    ):
+        assert scanner._is_static_asset_url(url) is True
+        assert scanner._target_requires_auth_or_sensitive({"url": url}) is False
+
+
+def test_static_asset_check_still_flags_real_endpoints():
+    assert scanner._is_static_asset_url("https://target.local/admin/users") is False
+    assert scanner._target_requires_auth_or_sensitive(
+        {"url": "https://target.local/admin/users"}
+    ) is True
+
+
 def test_deterministic_result_analysis_detects_sql_error():
     findings = scanner._deterministic_findings_from_results(
         run_id=1,

@@ -7121,7 +7121,6 @@ def _tls_posture_finding(
     if cvss <= 0.0:
         return None
 
-    cert = result.get("certificate") or {}
     protocols = result.get("protocols") or {}
     accepted = [p for p, state in protocols.items() if state == "accepted"]
 
@@ -7629,8 +7628,22 @@ def _idor_matrix_finding(
     )
 
 
+# Static assets (scripts, styles, images, fonts, media). Fetching one of these
+# anonymously is expected — it is never an "unauthenticated access to a protected
+# endpoint", even when its path contains a sensitive-looking word (e.g.
+# /static/js/user-profile.js matching the "/user" marker below).
+_STATIC_ASSET_EXTENSIONS: tuple[str, ...] = _BROWSER_SKIP_EXTENSIONS + (".js", ".mjs")
+
+
+def _is_static_asset_url(url: str) -> bool:
+    path = urlparse(str(url or "")).path.lower()
+    return path.endswith(_STATIC_ASSET_EXTENSIONS)
+
+
 def _target_requires_auth_or_sensitive(target: dict) -> bool:
     url = str(target.get("url") or "").lower()
+    if _is_static_asset_url(url):
+        return False
     if target.get("req_auth") is True:
         return True
     if target.get("has_business_logic") or target.get("has_object_ref"):

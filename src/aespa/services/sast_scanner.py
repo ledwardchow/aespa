@@ -590,7 +590,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 r = s.get(SastRun, sast_run_id)
                 if r is not None:
                     r.leads_count = total
-                    s.add(r); s.commit()
+                    s.add(r)
+                    s.commit()
         else:
             flushed, total = 0, 0
         _update_sast_run_status(sast_run_id, "cancelled")
@@ -620,7 +621,8 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                     r = s.get(SastRun, sast_run_id)
                     if r is not None:
                         r.leads_count = total
-                        s.add(r); s.commit()
+                        s.add(r)
+                        s.commit()
             except Exception:
                 pass
         _update_sast_run_status(sast_run_id, "failed", str(exc))
