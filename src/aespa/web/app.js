@@ -6526,8 +6526,14 @@ function TestRunDetail({ runId, initialTab }) {
                 const unconfirmedMap = {};
                 const fpMap = {};
                 const deterministicMap = {};
+                // The TLS/SSL posture finding is a deterministic_probe by origin, but it
+                // is a first-class A02 finding and belongs in the normal findings list —
+                // not the low-signal Deterministic Findings bucket (per-page probe echoes).
+                const isDeterministicBucket = (f) =>
+                  f.finding_source === "deterministic_probe" &&
+                  f.title !== "TLS/SSL configuration weaknesses";
                 for (const f of findings) {
-                  const target = (f.finding_source === "deterministic_probe")
+                  const target = isDeterministicBucket(f)
                     ? deterministicMap
                     : (f.validation_status === "false_positive" || f.validation_status === "low_confidence")
                       ? fpMap

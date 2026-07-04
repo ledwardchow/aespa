@@ -308,14 +308,22 @@ def test_api_and_web_findings_do_not_cross():
 
     with Session(engine) as s:
         site = models.Site(name="S", base_url="https://example.com")
-        s.add(site); s.commit(); s.refresh(site)
+        s.add(site)
+        s.commit()
+        s.refresh(site)
         web_run = models.TestRun(site_id=site.id, name="web")
-        s.add(web_run); s.commit(); s.refresh(web_run)
+        s.add(web_run)
+        s.commit()
+        s.refresh(web_run)
 
         coll = models.ApiCollection(name="C", base_url="https://example.com")
-        s.add(coll); s.commit(); s.refresh(coll)
+        s.add(coll)
+        s.commit()
+        s.refresh(coll)
         api_run = models.ApiTestRun(collection_id=coll.id, name="api")
-        s.add(api_run); s.commit(); s.refresh(api_run)
+        s.add(api_run)
+        s.commit()
+        s.refresh(api_run)
 
         web_run_id, api_run_id = web_run.id, api_run.id
         # The collision that used to cause the leak.
@@ -429,9 +437,13 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
 
     with Session(engine) as s:
         coll = models.ApiCollection(name="C", base_url="https://example.com")
-        s.add(coll); s.commit(); s.refresh(coll)
+        s.add(coll)
+        s.commit()
+        s.refresh(coll)
         api_run = models.ApiTestRun(collection_id=coll.id, name="api")
-        s.add(api_run); s.commit(); s.refresh(api_run)
+        s.add(api_run)
+        s.commit()
+        s.refresh(api_run)
         api_run_id = api_run.id
 
     try:
@@ -492,14 +504,22 @@ def test_alice_sessions_do_not_cross_colliding_ids():
 
     with Session(engine) as s:
         site = models.Site(name="S", base_url="https://example.com")
-        s.add(site); s.commit(); s.refresh(site)
+        s.add(site)
+        s.commit()
+        s.refresh(site)
         web_run = models.TestRun(site_id=site.id, name="web")
-        s.add(web_run); s.commit(); s.refresh(web_run)
+        s.add(web_run)
+        s.commit()
+        s.refresh(web_run)
 
         coll = models.ApiCollection(name="C", base_url="https://example.com")
-        s.add(coll); s.commit(); s.refresh(coll)
+        s.add(coll)
+        s.commit()
+        s.refresh(coll)
         api_run = models.ApiTestRun(collection_id=coll.id, name="api")
-        s.add(api_run); s.commit(); s.refresh(api_run)
+        s.add(api_run)
+        s.commit()
+        s.refresh(api_run)
 
         web_run_id, api_run_id = web_run.id, api_run.id
         assert web_run_id == api_run_id == 1
