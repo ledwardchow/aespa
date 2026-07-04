@@ -3,7 +3,7 @@ import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
 import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { api, formatError } from "../lib/api";
 import { nav } from "../lib/router";
-import { getAliceSession, aliceSessionSubscribe, aliceSessionAbort, _aliceFlushRecovery, aliceSessionConnect, renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceSession";
+import { getAliceSession, aliceSessionSubscribe, aliceSessionAbort, _aliceFlushRecovery, aliceSessionConnect, aliceSessionStart, renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceSession";
 import { parseDate, fmtDate, truncUrl, sourceLabel, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, downloadTextFile, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
 import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
 import * as d3 from "d3";
@@ -1208,7 +1208,7 @@ export function TestRunDetail({
     // Delegate all I/O to the module-level singleton so the stream survives
     // component unmounts caused by hash navigation.
     // State updates are handled by the useEffect subscriber above.
-    aliceSessionConnect(runId, currentTabId, {
+    aliceSessionStart(runId, currentTabId, {
       userText,
       historyPayload,
       thinkMsgId,
