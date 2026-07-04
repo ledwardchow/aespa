@@ -34,18 +34,14 @@ export function ApiRunFindingsTab({
   };
   useEffect(() => {
     load();
-  }, [runId, load]);
+  }, [runId]);
 
   // Poll while scan is running.
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	load
-]);
+  }, [scanRunning, runId]);
   const toggle = id => {
     setExpanded(prev => {
       const next = new Set(prev);
