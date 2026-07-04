@@ -375,8 +375,8 @@ def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> Non
         crawler_svc.request_stop(run_id)
     # Cascade-delete pages + links manually (SQLite FK off by default)
     links = session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
-    for l in links:
-        session.delete(l)
+    for link in links:
+        session.delete(link)
     views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all()
     for v in views:
         session.delete(v)
@@ -730,11 +730,11 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
     ]
     page_ids = {p.id for p in pages}
     edges = [
-        GraphLink(source=l.source_page_id, target=l.target_page_id, link_text=l.link_text)
-        for l in links
-        if l.target_page_id is not None
-        and l.source_page_id in page_ids
-        and l.target_page_id in page_ids
+        GraphLink(source=link.source_page_id, target=link.target_page_id, link_text=link.link_text)
+        for link in links
+        if link.target_page_id is not None
+        and link.source_page_id in page_ids
+        and link.target_page_id in page_ids
     ]
     return GraphData(nodes=nodes, links=edges)
 

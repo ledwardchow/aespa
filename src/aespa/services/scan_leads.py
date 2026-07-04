@@ -147,6 +147,17 @@ def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead
         ).all())
 
 
+def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
+    """Return ALL leads imported into a dynamic run, regardless of status."""
+    with Session(get_engine(), expire_on_commit=False) as s:
+        return list(s.exec(
+            select(ScanLead)
+            .where(ScanLead.imported_into_run_type == target_run_type)
+            .where(ScanLead.imported_into_run_id == target_run_id)
+            .order_by(ScanLead.id)
+        ).all())
+
+
 def get_open_leads_for_collection(collection_id: int) -> list[ScanLead]:
     """Return open ScanLead rows for a collection (consumed by dynamic scans)."""
     with Session(get_engine(), expire_on_commit=False) as s:

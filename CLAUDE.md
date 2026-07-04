@@ -23,12 +23,16 @@ uv run pytest -k "validator and not api"               # by keyword
 uv run ruff check .                  # lint (rules: E, F, I — isort enforced)
 uv run ruff format .                 # format
 
-deno lint src/aespa/web/app.js       # JS sanity check (node not installed; deno is)
+cd frontend && npm run build         # build the Vite frontend
+
 ```
 
-Requires Python 3.12+ and `uv`. There is no separate frontend build — `src/aespa/web/` is served as static assets.
+Requires Python 3.12+ and `uv`. The frontend is a Vite + React application located in `frontend/`. 
 
-**After changing any JS (`src/aespa/web/*.js`), lint it before finishing** — there is no build step to catch a typo, so a broken edit ships silently. Run `deno lint src/aespa/web/app.js`: it parses the whole file, so a syntax error fails the command. It also reports pre-existing style problems (empty `catch{}` blocks, unused vars) that are baseline noise — don't chase those; just confirm your change added **no new** problems (compare the count against `git show HEAD:src/aespa/web/app.js`). The `react`/`htm`/`d3` imports are loaded from a CDN at runtime, so `deno check` type-resolution errors on those four are expected and not real failures.
+**When making UI changes:**
+1. Make all UI edits in the Vite JSX files within the `frontend/src/` directory (e.g., `frontend/src/App.jsx`, `frontend/src/pages/`).
+2. Do NOT edit files directly in `src/aespa/web/` (these are generated build artifacts).
+3. After completing UI changes, you MUST run `npm run build` inside the `frontend/` directory. This rebuild is critical so that the compiled assets (e.g. index.js / app.js) are placed in `src/aespa/web/` and available to be served when running the backend via `uv run aespa`.
 
 ## Configuration
 
