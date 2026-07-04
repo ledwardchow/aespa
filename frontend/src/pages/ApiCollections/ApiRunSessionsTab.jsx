@@ -10,15 +10,11 @@ export function ApiRunSessionsTab({
   const load = () => api.getApiScannerSessions(runId).then(setData).catch(() => {});
   useEffect(() => {
     load();
-  }, [runId, load]);
+  }, [runId]);
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	load
-]);
+  }, [scanRunning, runId]);
   return <ScannerSessionsPanel runId={runId} data={data} refresh={load} updateSession={(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)} />;
 }

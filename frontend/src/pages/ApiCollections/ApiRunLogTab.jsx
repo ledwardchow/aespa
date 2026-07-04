@@ -15,16 +15,12 @@ export function ApiRunLogTab({
   const load = () => api.getApiAgentLog(runId).then(setLog).catch(e => setError(e.message));
   useEffect(() => {
     load();
-  }, [runId, load]);
+  }, [runId]);
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	load
-]);
+  }, [scanRunning, runId]);
   const onClear = async () => {
     if (!confirm("Clear all agent log entries for this run?")) return;
     setClearBusy(true);

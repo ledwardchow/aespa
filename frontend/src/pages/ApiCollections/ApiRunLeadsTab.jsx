@@ -21,16 +21,12 @@ export function ApiRunLeadsTab({
   };
   useEffect(() => {
     load();
-  }, [runId, load]);
+  }, [runId]);
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(load, 6000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	load
-]);
+  }, [scanRunning, runId]);
   return <LeadsPanel leads={leads} loading={loading} scanRunning={scanRunning} exportName={`api-run-${runId}`} emptyMsg="No scan leads for this collection yet. Run a SAST scan first." />;
 }
 

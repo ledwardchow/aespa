@@ -27,21 +27,17 @@ export function WebRunWorkProgramTab({
   }).catch(() => setLoading(false));
   useEffect(() => {
     loadMatrix();
-  }, [runId, loadMatrix]);
+  }, [runId]);
   useEffect(() => {
     if (reloadKey > 0) loadMatrix();
-  }, [reloadKey, loadMatrix]);
+  }, [reloadKey]);
 
   // Poll during scan.
   useEffect(() => {
     if (!scanRunning) return;
     const t = setInterval(loadMatrix, 5000);
     return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	loadMatrix
-]);
+  }, [scanRunning, runId]);
 
   // SSE live updates — mirrors ApiRunWorkProgramTab.
   useEffect(() => {
@@ -93,11 +89,7 @@ export function WebRunWorkProgramTab({
       es.close();
       esRef.current = null;
     };
-  }, [
-	scanRunning,
-	runId,
-	loadMatrix
-]);
+  }, [scanRunning, runId]);
   const onSeed = async () => {
     setSeeding(true);
     setSeedMsg(null);
