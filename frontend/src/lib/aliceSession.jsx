@@ -137,7 +137,7 @@ export async function aliceSessionConnect(runId, tabId, {
 
 // Start a new ALICE turn: POST to /alice/run (starts background task on server),
 // then open the event stream so the client receives events in real time.
-async function aliceSessionStart(runId, tabId, {
+export async function aliceSessionStart(runId, tabId, {
   userText,
   historyPayload,
   thinkMsgId,
