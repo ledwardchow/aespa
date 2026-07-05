@@ -7,8 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
 APP="${APP:-dist/AESPA.app}"
-DMG="${DMG:-dist/AESPA.dmg}"
+DMG="${DMG:-dist/AESPA-macos-v${VERSION}.dmg}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-aespa-notary}"
 
 command -v create-dmg >/dev/null || { echo "Missing create-dmg — run: brew install create-dmg"; exit 1; }
