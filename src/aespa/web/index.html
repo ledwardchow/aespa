@@ -8,21 +8,11 @@
     <link rel="manifest" href="/manifest.json" />
     <link rel="icon" type="image/png" href="/icon.png" />
     <link rel="apple-touch-icon" href="/icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=__AESPA_ASSET_VERSION__" />
-    <script type="importmap">
-      {
-        "imports": {
-          "react": "/vendor/react.js?v=__AESPA_ASSET_VERSION__",
-          "react-dom/client": "/vendor/react-dom-client.js?v=__AESPA_ASSET_VERSION__",
-          "htm": "/vendor/htm.js?v=__AESPA_ASSET_VERSION__",
-          "d3": "/vendor/d3.js?v=__AESPA_ASSET_VERSION__"
-        }
-      }
-    </script>
+    <script type="module" crossorigin src="/app.js?v=__AESPA_ASSET_VERSION__"></script>
+    <link rel="stylesheet" crossorigin href="/styles.css?v=__AESPA_ASSET_VERSION__">
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/app.js?v=__AESPA_ASSET_VERSION__"></script>
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
