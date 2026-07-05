@@ -59,7 +59,7 @@ jobs:
 
       - name: Upload to release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: gh release upload "v${{ needs.check.outputs.version }}" "AESPA-windows-v${{ needs.check.outputs.version }}.zip"
 
   macos:
@@ -100,5 +100,5 @@ jobs:
 
       - name: Upload to release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: gh release upload "v${{ needs.check.outputs.version }}" dist/AESPA.dmg
