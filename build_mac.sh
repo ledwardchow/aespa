@@ -27,6 +27,11 @@ rm -rf "$BUILD_VENV"
 uv venv "$BUILD_VENV" >/dev/null
 VIRTUAL_ENV="$BUILD_VENV" uv pip install --quiet . pyinstaller pyobjc-framework-WebKit
 
+echo "==> Generating THIRD_PARTY_LICENSES.txt"
+# Attribution for the bundled MIT/BSD/Apache/MPL deps. Run against the build venv
+# so it lists exactly what gets frozen into the app.
+"$BUILD_VENV/bin/python" scripts/generate_third_party_licenses.py THIRD_PARTY_LICENSES.txt
+
 echo "==> Building app bundle with PyInstaller"
 # --collect-all playwright pulls in its node driver so first-run install works
 # in the bundle; AESPA_BUNDLED is read at runtime (frozen sets sys.frozen too).
@@ -37,6 +42,8 @@ echo "==> Building app bundle with PyInstaller"
     --icon "$ICNS" \
     --osx-bundle-identifier com.aespa.app \
     --add-data "src/aespa/web:aespa/web" \
+    --add-data "THIRD_PARTY_LICENSES.txt:." \
+    --add-data "LICENSE:." \
     --collect-all playwright \
     --collect-submodules aespa \
     src/aespa/desktop.py

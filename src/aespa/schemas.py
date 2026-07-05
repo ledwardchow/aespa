@@ -46,6 +46,7 @@ class SiteBase(BaseModel):
     requires_auth: bool = False
     login_url: HttpUrl | None = None
     notes: str | None = None
+    scan_guidance: str | None = None
     scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -98,6 +99,7 @@ class SiteDetail(BaseModel):
     requires_auth: bool
     login_url: str | None
     notes: str | None
+    scan_guidance: str | None
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]

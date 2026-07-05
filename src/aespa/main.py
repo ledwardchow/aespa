@@ -183,11 +183,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 app = create_app()
 
 
+def _build_frontend_if_stale() -> None:
+    # ponytail: rebuild only when a src file is newer than the built index.html.
+    # Skips the ~10-30s npm build on every start; full rebuild if triggered.
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    frontend = repo_root / "frontend"
+    built = get_settings().web_dir / "index.html"
+    if not frontend.exists():
+        return  # installed without sources; nothing to build
+    src = frontend / "src"
+    newest_src = max((p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0)
+    if built.exists() and built.stat().st_mtime >= newest_src:
+        return
+    print("[aespa] frontend changed — running npm run build...")
+    subprocess.run(["npm", "run", "build"], cwd=frontend, check=True)
+
+
 def main() -> None:
     import uvicorn
 
     from aespa.browser import ensure_chromium
 
+    _build_frontend_if_stale()
     ensure_chromium()
     settings = get_settings()
     uvicorn.run(

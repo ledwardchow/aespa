@@ -1,6 +1,6 @@
 [project]
 name = "aespa"
-version = "0.6.20260628.16"
+version = "0.6.20260705.5"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
@@ -41,6 +41,9 @@ filterwarnings = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+# E501 (line length) is not enforced — the codebase uses a wider line convention
+# than the 88-char default and reformatting it wholesale is not worthwhile.
+ignore = ["E501"]
 
 [dependency-groups]
 dev = [
