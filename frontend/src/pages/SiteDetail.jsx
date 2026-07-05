@@ -3,7 +3,8 @@ import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
 import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { api, formatError } from "../lib/api";
 import { nav } from "../lib/router";
-import { getAliceSession, aliceSessionSubscribe, aliceSessionAbort, _aliceFlushRecovery, aliceSessionConnect, aliceSessionStart, renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceSession";
+import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceSession";
+import { useAliceChat } from "./SiteDetail/useAliceChat";
 import { parseDate, fmtDate, truncUrl, sourceLabel, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, downloadTextFile, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
 import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
 import * as d3 from "d3";
@@ -11,6 +12,10 @@ import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
 import { WebRunSitemapTab } from "./SiteDetail/WebRunSitemapTab";
+import { GuidedLoginItem } from "./SiteDetail/GuidedLoginItem";
+import { scopeColor, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
+export { SiteForm } from "./SiteDetail/SiteForm";
+export { useColResize };
 // ── Site detail ───────────────────────────────────────────────────────────────
 
 export function SiteDetail({
@@ -270,413 +275,6 @@ export function SiteDetail({
 
 // ── Site form (create/edit) ───────────────────────────────────────────────────
 
-export function SiteForm({
-  siteId
-}) {
-  const isEdit = typeof siteId === "number";
-  const [form, setForm] = useState({
-    name: "",
-    base_url: "",
-    requires_auth: false,
-    login_url: "",
-    notes: "",
-    scan_guidance: "",
-    credentials: []
-  });
-  const [loading, setLoading] = useState(isEdit);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-  useEffect(() => {
-    if (!isEdit) return;
-    (async () => {
-      try {
-        const d = await api.getSite(siteId);
-        setForm({
-          name: d.name,
-          base_url: d.base_url,
-          requires_auth: d.requires_auth,
-          login_url: d.login_url || "",
-          notes: d.notes || "",
-          scan_guidance: d.scan_guidance || "",
-          credentials: d.credentials.map(c => ({
-            username: c.username,
-            password: c.password,
-            label: c.label || "",
-            login_url: c.login_url || "",
-            auth_mode: c.auth_mode || "auto",
-            totp_seed: ""
-          }))
-        });
-      } catch (e) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [isEdit, siteId]);
-  const upd = p => {
-    setForm(f => ({
-      ...f,
-      ...p
-    }));
-  };
-  const updC = (i, p) => setForm(f => ({
-    ...f,
-    credentials: f.credentials.map((c, j) => j === i ? {
-      ...c,
-      ...p
-    } : c)
-  }));
-  const addC = () => upd({
-    credentials: [...form.credentials, {
-      username: "",
-      password: "",
-      label: "",
-      login_url: "",
-      auth_mode: "auto",
-      totp_seed: ""
-    }]
-  });
-  const rmC = i => upd({
-    credentials: form.credentials.filter((_, j) => j !== i)
-  });
-  const onSubmit = async e => {
-    e.preventDefault();
-    setError(null);
-    setSaving(true);
-    const payload = {
-      name: form.name.trim(),
-      base_url: form.base_url.trim(),
-      requires_auth: form.requires_auth,
-      login_url: form.requires_auth ? form.login_url.trim() || null : null,
-      notes: form.notes.trim() || null,
-      scan_guidance: form.scan_guidance.trim() || null,
-      credentials: form.requires_auth ? form.credentials.map(c => {
-        const base = {
-          username: c.username,
-          password: c.password,
-          label: c.label || null,
-          login_url: c.login_url?.trim() || null,
-          auth_mode: c.auth_mode || "auto"
-        };
-        if (c.totp_seed?.trim()) base.totp_seed = c.totp_seed.trim();
-        return base;
-      }) : []
-    };
-    try {
-      if (isEdit) {
-        await api.updateSite(siteId, payload);
-        nav(`#/sites/${siteId}`);
-      } else {
-        const s = await api.createSite(payload);
-        nav(`#/sites/${s.id}`);
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-  const bc = isEdit ? <><a href={`#/sites/${siteId}`} style={{
-      color: "var(--muted)",
-      fontWeight: 400
-    }}>{form.name || "Site"}</a><span className="breadcrumb-sep"> / </span>Edit</> : "New site";
-  return <>
-    <div className="topbar"><div className="topbar-title">{bc}</div></div>
-    <div className="content scroll-content">
-      {loading && <div className="subtle">Loading…</div>}
-      {!loading && <form className="card" onSubmit={onSubmit}>
-          {error && <div className="alert error">{error}</div>}
-          <div className="form-section-title">Site</div>
-          <div className="field"><label>Name</label>
-            <input type="text" required value={form.name} placeholder="e.g. Juice Shop" onChange={e => upd({
-            name: e.target.value
-          })} /></div>
-          <div className="field"><label>Base URL</label>
-            <input type="url" required value={form.base_url} placeholder="https://target.example.com" onChange={e => upd({
-            base_url: e.target.value
-          })} /></div>
-          <div className="field"><label>Notes (optional)</label>
-            <textarea value={form.notes} placeholder="Scope, contacts…" onChange={e => upd({
-            notes: e.target.value
-          })} /></div>
-          <div className="field"><label>Test Lead guidance (optional)</label>
-            <textarea rows="9" value={form.scan_guidance} placeholder="Instructions for the testing agents (passed directly to the prompt) — i.e. how to complete a particularly complex login sequence, things to focus on, things to avoid…" onChange={e => upd({
-            scan_guidance: e.target.value
-          })} /></div>
-          <div className="divider" />
-          <div className="form-section-title">Authentication</div>
-          <label className="toggle-row">
-            <input type="checkbox" checked={form.requires_auth} onChange={e => upd({
-            requires_auth: e.target.checked
-          })} />
-            <span>This site requires authentication</span>
-          </label>
-          {form.requires_auth && <>
-            <div className="field"><label>Default login page URL</label>
-              <input type="url" value={form.login_url} placeholder="https://target.example.com/login" onChange={e => upd({
-              login_url: e.target.value
-            })} /></div>
-            <fieldset><legend>Credentials</legend>
-              {form.credentials.length === 0 && <div className="subtle">No credentials yet.</div>}
-              {form.credentials.map((c, i) => {
-              
-              return <div className="cred-row" key={i}>
-                  <div className="field"><label>Username</label><input type="text" required value={c.username} onChange={e => updC(i, {
-                    username: e.target.value
-                  })} /></div>
-                  <div className="field"><label>Password</label><input type="text" required value={c.password} onChange={e => updC(i, {
-                    password: e.target.value
-                  })} /></div>
-                  <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value={c.login_url || ""} placeholder={form.login_url ? `Uses default: ${form.login_url}` : "Required if no default login URL"} onChange={e => updC(i, {
-                    login_url: e.target.value
-                  })} /></div>
-                  <div className="field"><label>Label</label><input type="text" value={c.label} placeholder="admin" onChange={e => updC(i, {
-                    label: e.target.value
-                  })} /></div>
-                  <div className="field"><label>Auth Mode</label>
-                    <select value={c.auth_mode || "auto"} onChange={e => updC(i, {
-                    auth_mode: e.target.value
-                  })}>
-                      <option value="auto">auto — single-page form fill</option>
-                      <option value="totp">totp — form fill + TOTP 2FA</option>
-                      <option value="guided">guided — interactive browser login</option>
-                    </select></div>
-                  {(c.auth_mode || "auto") === "totp" && <div className="field"><label>TOTP Seed <span className="field-optional">(base32 secret from authenticator app)</span></label>
-                      <input type="text" value={c.totp_seed || ""} placeholder="JBSWY3DPEHPK3PXP…" onChange={e => updC(i, {
-                    totp_seed: e.target.value
-                  })} /></div>}
-                  {(c.auth_mode || "auto") === "guided" && <div className="field"><div style={{
-                    background: "var(--surface-2,#2a2a2a)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 4,
-                    padding: "8px 10px",
-                    fontSize: 12,
-                    color: "var(--text-2)"
-                  }}>
-                      🖥️ A browser window will open when a crawl or dynamic scan starts. Complete the login (including any SSO / MFA / push notifications), then click <strong>I'm Done</strong> in the run detail view. ALICE reuses the session captured by whichever phase runs first.
-                    </div></div>}
-                  <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick={() => rmC(i)}>Remove</button></div>
-                </div>;
-            })}
-              <button type="button" className="btn secondary sm" onClick={addC}><IconPlus /> Add credential</button>
-            </fieldset></>}
-          <div className="divider" />
-          <div className="row spread">
-            <button type="button" className="btn ghost" onClick={() => isEdit ? nav(`#/sites/${siteId}`) : nav("#/")}>Cancel</button>
-            <button type="submit" className="btn" disabled={saving}>{saving ? "Saving…" : isEdit ? "Save changes" : "Create site"}</button>
-          </div>
-        </form>}
-    </div></>;
-}
-
-// ── Test run form ─────────────────────────────────────────────────────────────
-
-// ── Test run detail + D3 graph ────────────────────────────────────────────────
-
-const SCOPE_IN_COLOR = "#3b82f6";
-const SCOPE_OUT_COLOR = "#ef4444";
-const scopeColor = d => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLOR;
-const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
-const isDynamicScanActive = status => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
-
-// Per-user palette (index into credentials array)
-const USER_PALETTE = ["#f97316", "#06b6d4", "#a855f7", "#f59e0b", "#10b981", "#ec4899"];
-const USER_BOTH_COLOR = "#6366f1"; // accessible to all users
-const USER_NONE_COLOR = "#6b7691"; // not tagged (pre-multi-user crawl)
-const userColor = (d, credentials) => {
-  const ab = d.accessible_by || [];
-  if (!credentials || credentials.length === 0 || ab.length === 0) return USER_NONE_COLOR;
-  if (ab.length >= credentials.length) return USER_BOTH_COLOR;
-  const idx = credentials.findIndex(c => ab.includes(c.id));
-  return idx >= 0 ? USER_PALETTE[idx % USER_PALETTE.length] : USER_NONE_COLOR;
-};
-export function runWorkflowStatus(run, opts = {}) {
-  if (!run) return {
-    key: "pending",
-    label: "pending"
-  };
-  const thinkingStatus = opts.thinkingStatus || run.thinking_status || "idle";
-  if (opts.crawlStopping) return {
-    key: "stopping",
-    label: "stopping crawl"
-  };
-  if (opts.thinkingStopping || thinkingStatus === "stopping") return {
-    key: "stopping",
-    label: "stopping Dynamic Scan"
-  };
-  if (run.status === "running") return {
-    key: "running",
-    label: "crawling"
-  };
-  if (run.status === "failed") return {
-    key: "danger",
-    label: "crawl failed"
-  };
-  if (thinkingStatus === "running") return {
-    key: "running",
-    label: "Dynamic Scan"
-  };
-  if (thinkingStatus === "analysing") return {
-    key: "running",
-    label: "analysing Dynamic Scan"
-  };
-  if (thinkingStatus === "failed") return {
-    key: "danger",
-    label: "Dynamic Scan failed"
-  };
-  if (run.status === "stopped") return {
-    key: "neutral",
-    label: "crawl stopped"
-  };
-  if (thinkingStatus === "stopped") return {
-    key: "neutral",
-    label: "Dynamic Scan stopped"
-  };
-  if (thinkingStatus === "complete") return {
-    key: "ok",
-    label: "Dynamic Scan complete"
-  };
-  if (run.status === "complete") return {
-    key: "ok",
-    label: "complete"
-  };
-  return {
-    key: "neutral",
-    label: run.status || "pending"
-  };
-}
-const workflowBadge = (run, opts = {}) => {
-  const st = runWorkflowStatus(run, opts);
-  return <span className={"badge " + st.key}>{st.label}</span>;
-};
-
-// ── Column resize hook ────────────────────────────────────────────────────────
-export function useColResize(storageKey, defaults) {
-  const [widths, setWidths] = useState(() => {
-    try {
-      const s = localStorage.getItem(storageKey);
-      if (s) return JSON.parse(s);
-    } catch  {}
-    return defaults;
-  });
-  const startResize = useCallback((idx, e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startX = e.clientX;
-    const th = e.currentTarget.closest("th");
-    const startW = widths[idx] ?? (th ? th.offsetWidth : 100);
-    const onMove = ev => {
-      const newW = Math.max(36, startW + ev.clientX - startX);
-      setWidths(prev => {
-        const n = [...prev];
-        n[idx] = newW;
-        return n;
-      });
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      setWidths(prev => {
-        try {
-          localStorage.setItem(storageKey, JSON.stringify(prev));
-        } catch  {}
-        return prev;
-      });
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [storageKey, widths]);
-  return [widths, startResize];
-}
-export function GuidedLoginItem({
-  item,
-  runId,
-  onConfirmed
-}) {
-  const [browserOpen, setBrowserOpen] = useState(item.browserOpen || false);
-  const [launching, setLaunching] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [err, setErr] = useState(null);
-  const [copied, setCopied] = useState(false);
-
-  // Keep in sync if parent state flips (e.g. SSE fires guided_login_browser_open)
-  useEffect(() => {
-    if (item.browserOpen) setBrowserOpen(true);
-  }, [item.browserOpen]);
-  const copyUsername = async () => {
-    try {
-      await navigator.clipboard.writeText(item.username);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch  {
-      setErr("Clipboard unavailable \u2014 copy manually: " + item.username);
-    }
-  };
-  const launch = async () => {
-    setLaunching(true);
-    setErr(null);
-    try {
-      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/ready`, {
-        method: "POST"
-      });
-      setBrowserOpen(true);
-    } catch (e) {
-      setErr(e.message);
-    }
-    setLaunching(false);
-  };
-  const confirm = async () => {
-    setConfirming(true);
-    setErr(null);
-    try {
-      await fetch(`/api/test-runs/${runId}/guided-login/${item.credential_id}/confirm`, {
-        method: "POST"
-      });
-      onConfirmed();
-    } catch (e) {
-      setErr(e.message);
-      setConfirming(false);
-    }
-  };
-  if (!browserOpen) {
-    return <div style={{
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      flexWrap: "wrap"
-    }}>
-        <span style={{
-        fontSize: 13
-      }}>Login required for <strong>{item.username}</strong>. Click <strong>I'm Ready</strong> to open a browser window, then log in and come back here.</span>
-        <button className="btn sm" style={{
-        background: "transparent",
-        border: "1px solid var(--accent)",
-        color: "var(--accent)"
-      }} onClick={copyUsername}>{copied ? "Copied!" : "Copy username"}</button>
-        {err && <span style={{
-        color: "var(--danger)",
-        fontSize: 12
-      }}>{err}</span>}
-        <button className="btn sm" disabled={launching} onClick={launch}>{launching ? "Opening browser\u2026" : "I'm Ready"}</button>
-      </div>;
-  }
-  return <div style={{
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    flexWrap: "wrap"
-  }}>
-      <span style={{
-      fontSize: 13
-    }}>Browser is open for <strong>{item.username}</strong>. Complete login (including any SSO, MFA, or push approval), then click <strong>I'm Done</strong>. Leave the browser window open, it will automatically close after credentials are captured.</span>
-      {err && <span style={{
-      color: "var(--danger)",
-      fontSize: 12
-    }}>{err}</span>}
-      <button className="btn sm" disabled={confirming} onClick={confirm}>{confirming ? "Confirming\u2026" : "I'm Done"}</button>
-    </div>;
-}
 export function TestRunDetail({
   runId,
   initialTab
@@ -732,531 +330,33 @@ export function TestRunDetail({
     next.has(aid) ? next.delete(aid) : next.add(aid);
     return next;
   });
-  const ALICE_WELCOME_MESSAGE = "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start Pentest at the top right, or you can tell me to work on something specific!";
-  const _aliceDefaultChats = () => [{
-    id: "tab-default",
-    title: "Session 1",
-    messages: [{
-      id: "welcome",
-      sender: "alice",
-      type: "message",
-      text: ALICE_WELCOME_MESSAGE,
-      ts: new Date().toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit"
-      })
-    }]
-  }];
-  const [aliceChats, setAliceChats] = useState(() => {
-    // Seed from localStorage for instant display; server load will overwrite below.
-    try {
-      const saved = localStorage.getItem(`alice_chats_${runId}`);
-      if (saved) return JSON.parse(saved);
-    } catch  {}
-    return _aliceDefaultChats();
-  });
-  const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`alice_active_tab_${runId}`);
-      if (saved) return saved;
-    } catch  {}
-    return "tab-default";
-  });
-
-  // Load sessions from the server on mount.
-  // The server (DB rows scoped by test_run_id) is the source of truth for run
-  // *identity*. localStorage is only an instant-paint cache; because SQLite
-  // reuses run ids after the highest run is deleted, a cached chat under
-  // alice_chats_<id> may actually belong to a different, deleted run. We compare
-  // the server's stable run token against the one stored with the cache and
-  // discard the cache when they disagree (or when the run has no chats yet),
-  // which prevents one run from showing another run's chat.
-  useEffect(() => {
-    let cancelled = false;
-    api.getAliceSessions(runId).then(data => {
-      if (cancelled) return;
-      const serverToken = data.run_created_at || "";
-      const localToken = localStorage.getItem(`alice_chats_${runId}_runToken`) || "";
-      const localIsForThisRun = !!serverToken && localToken === serverToken;
-
-      // Helper: patch messages with the latest recovery-key text.
-      const applyRecovery = (chats, tabId) => {
-        try {
-          const rec = JSON.parse(localStorage.getItem(`alice_recover_${runId}:${tabId}`) || "null");
-          if (!rec || !rec.thinkMsgId) return chats;
-          return chats.map(tab => {
-            if (tab.id !== tabId) return tab;
-            return {
-              ...tab,
-              messages: tab.messages.map(m => {
-                if (m.id === rec.thinkMsgId && rec.thought) return {
-                  ...m,
-                  text: rec.thought
-                };
-                if (m.id === rec.replyMsgId && rec.message) return {
-                  ...m,
-                  text: rec.message
-                };
-                return m;
-              })
-            };
-          });
-        } catch  {
-          return chats;
-        }
-      };
-      if (!data.chats || data.chats.length === 0) {
-        // The run has no persisted chat. If our cache is from a *different*
-        // (reused-id) run, it would wrongly display that run's chat — reset to
-        // a fresh default and overwrite the stale cache. Only keep the cache
-        // when it provably belongs to this run (genuine not-yet-saved content).
-        if (!localIsForThisRun) {
-          const defaults = _aliceDefaultChats();
-          setAliceChats(defaults);
-          setActiveAliceTabId("tab-default");
-          try {
-            localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(defaults));
-            localStorage.setItem(`alice_active_tab_${runId}`, "tab-default");
-            localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
-            localStorage.removeItem(`alice_chats_${runId}_savedAt`);
-          } catch  {}
-        }
-        _aliceServerLoaded.current = true;
-        return;
-      }
-      const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
-      const localSavedAt = parseInt(localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0", 10);
-      const activeTabId = data.active_tab_id || "tab-default";
-
-      // Prefer local only when it provably belongs to THIS run and is newer
-      // (a page refresh mid-stream that hasn't flushed to the server yet).
-      // Otherwise the server wins — this also covers the reused-id case, where
-      // the local cache belongs to a deleted run and must be discarded.
-      const preferLocal = localIsForThisRun && localSavedAt > serverUpdatedAt;
-      if (!preferLocal) {
-        const merged = applyRecovery(data.chats, activeTabId);
-        _aliceServerLoaded.current = true;
-        setAliceChats(merged);
-        setActiveAliceTabId(activeTabId);
-        try {
-          localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(merged));
-          localStorage.setItem(`alice_active_tab_${runId}`, activeTabId);
-          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
-          localStorage.setItem(`alice_chats_${runId}_savedAt`, serverUpdatedAt.toString());
-        } catch  {}
-      } else {
-        // Local is fresher and belongs to this run — keep it, but record the
-        // run token so future loads recognise it.
-        try {
-          localStorage.setItem(`alice_chats_${runId}_runToken`, serverToken);
-        } catch  {}
-        _aliceServerLoaded.current = true;
-      }
-    }).catch(() => {
-      _aliceServerLoaded.current = true; // unblock saves even if the API fails
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [runId]);
-  const [aliceInputText, setAliceInputText] = useState("");
-  const [aliceChatHeight, setAliceChatHeight] = useState(300);
-  const [aliceThinkingTabId, setAliceThinkingTabId] = useState(null);
-  const aliceIsThinking = aliceThinkingTabId !== null;
-  const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
-  const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
-
-  // On mount: check whether a background ALICE task is already running (e.g.
-  // after a page refresh) and reconnect to its event stream if so.
-  useEffect(() => {
-    let cancelled = false;
-    api.getAliceStatus(runId).then(st => {
-      if (cancelled || !st.running) return;
-      const {
-        tab_id,
-        think_msg_id,
-        reply_msg_id
-      } = st;
-      setAliceGlobalRunning(true);
-      setAliceThinkingTabId(tab_id);
-      // Pre-populate session so the subscriber can find the right messages.
-      const sess = getAliceSession(runId, tab_id);
-      sess.thinkMsgId = think_msg_id;
-      sess.replyMsgId = reply_msg_id;
-      const done = () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-      };
-      aliceSessionConnect(runId, tab_id, {
-        thinkMsgId: think_msg_id,
-        replyMsgId: reply_msg_id,
-        cursor: 0,
-        onFinish: done,
-        onFail: done
-      });
-    }).catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [runId]);
-  // Subscribe to in-flight stream on mount/tab-switch so navigating back
-  // shows the spinner and receives live chunks from the singleton reader loop.
-  useEffect(() => {
-    const session = getAliceSession(runId, activeAliceTabId);
-    if (session.active) {
-      setAliceThinkingTabId(activeAliceTabId);
-    }
-
-    // Resolve the best available accumulated text: prefer the in-memory session
-    // (same page load), fall back to the localStorage recovery key written
-    // directly by aliceSessionStart (survives navigation + module resets).
-    let recThinkId = session.thinkMsgId;
-    let recReplyId = session.replyMsgId;
-    let recThought = session.accumulatedThought;
-    let recMessage = session.accumulatedMessage;
-    if (!recThinkId || !recThought && !recMessage) {
-      try {
-        const saved = JSON.parse(localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null");
-        if (saved && saved.thinkMsgId) {
-          recThinkId = recThinkId || saved.thinkMsgId;
-          recReplyId = recReplyId || saved.replyMsgId;
-          recThought = recThought || saved.thought;
-          recMessage = recMessage || saved.message;
-        }
-      } catch  {}
-    }
-    if (recThinkId && (recThought || recMessage)) {
-      setAliceChats(prev => prev.map(tab => {
-        if (tab.id !== activeAliceTabId) return tab;
-        return {
-          ...tab,
-          messages: tab.messages.map(m => {
-            if (m.id === recThinkId && recThought) return {
-              ...m,
-              text: recThought
-            };
-            if (m.id === recReplyId && recMessage) return {
-              ...m,
-              text: recMessage
-            };
-            return m;
-          })
-        };
-      }));
-    }
-    const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
-      onChunk: event => {
-        const {
-          thinkMsgId,
-          replyMsgId
-        } = session;
-        // Use session's running totals (not m.text + delta) so every render
-        // sees the complete accumulated text — identical to the catch-up sync
-        // on navigation-back, which ensures blocks parse and render graphically
-        // rather than as an in-progress incremental string.
-        setAliceChats(prev => prev.map(tab => {
-          if (tab.id !== activeAliceTabId) return tab;
-          return {
-            ...tab,
-            messages: tab.messages.map(m => {
-              if (event.type === "thinking_chunk" && m.id === thinkMsgId) return {
-                ...m,
-                text: session.accumulatedThought,
-                stepData: session.stepData
-              };
-              if (event.type === "message_chunk" && m.id === replyMsgId) return {
-                ...m,
-                text: session.accumulatedMessage
-              };
-              if (event.type === "warning" && m.id === replyMsgId) return {
-                ...m,
-                text: event.message
-              };
-              if (["step_llm_call", "step_tool_call", "step_tool_result"].includes(event.type) && m.id === thinkMsgId) return {
-                ...m,
-                stepData: {
-                  ...session.stepData
-                }
-              };
-              if (event.type === "done") {
-                if (m.id === thinkMsgId) {
-                  const upd = {
-                    stepData: session.stepData
-                  };
-                  if (event.thought) upd.text = event.thought;
-                  return {
-                    ...m,
-                    ...upd
-                  };
-                }
-                if (m.id === replyMsgId && event.message) return {
-                  ...m,
-                  text: event.message
-                };
-              }
-              return m;
-            })
-          };
-        }));
-      },
-      onDone: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-      },
-      onError: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-      }
-    });
-    return unsub;
-  }, [runId, activeAliceTabId]);
-  const _aliceSaveTimer = useRef(null);
-  const _aliceServerLoaded = useRef(false);
-  useEffect(() => {
-    // Keep localStorage in sync for fast initial render on next mount.
-    // savedAt lets the server-load effect decide which source is fresher.
-    // Guard: skip until the initial server load has resolved so we don't
-    // stamp a fresh localSavedAt timestamp before the comparison happens.
-    if (!_aliceServerLoaded.current) return;
-    const now = Date.now();
-    try {
-      localStorage.setItem(`alice_chats_${runId}`, JSON.stringify(aliceChats));
-      localStorage.setItem(`alice_active_tab_${runId}`, activeAliceTabId);
-      localStorage.setItem(`alice_chats_${runId}_savedAt`, now.toString());
-    } catch  {}
-    // Debounce server save so rapid streaming chunks don't hammer the API.
-    if (_aliceSaveTimer.current) clearTimeout(_aliceSaveTimer.current);
-    const capturedRunId = runId;
-    const capturedChats = aliceChats;
-    const capturedTabId = activeAliceTabId;
-    _aliceSaveTimer.current = setTimeout(() => {
-      api.saveAliceSessions(capturedRunId, {
-        chats: capturedChats,
-        active_tab_id: capturedTabId
-      }).catch(() => {});
-    }, 800);
-    // Flush any pending save immediately on unmount so navigation away within the
-    // debounce window doesn't silently drop the last change.
-    return () => {
-      if (_aliceSaveTimer.current) {
-        clearTimeout(_aliceSaveTimer.current);
-        _aliceSaveTimer.current = null;
-        api.saveAliceSessions(capturedRunId, {
-          chats: capturedChats,
-          active_tab_id: capturedTabId
-        }).catch(() => {});
-      }
-    };
-  }, [aliceChats, activeAliceTabId, runId]);
-  const activeAliceTab = aliceChats.find(t => t.id === activeAliceTabId) || aliceChats[0];
-  const aliceMessages = activeAliceTab ? activeAliceTab.messages : [];
-  const createAliceTab = () => {
-    const newTabId = "tab-" + Date.now().toString();
-    const newTab = {
-      id: newTabId,
-      title: `Session ${aliceChats.length + 1}`,
-      messages: [{
-        id: "welcome-" + newTabId,
-        sender: "alice",
-        type: "message",
-        text: ALICE_WELCOME_MESSAGE,
-        ts: new Date().toLocaleTimeString("en-US", {
-          hour12: false,
-          hour: "2-digit",
-          minute: "2-digit"
-        })
-      }]
-    };
-    setAliceChats(prev => [...prev, newTab]);
-    setActiveAliceTabId(newTabId);
-  };
-  const deleteAliceTab = (tabId, e) => {
-    if (e) {
-      e.stopPropagation();
-      e.preventDefault();
-    }
-    if (aliceChats.length <= 1) {
-      const resetTab = {
-        id: "tab-default",
-        title: "Session 1",
-        messages: [{
-          id: "welcome-reset",
-          sender: "alice",
-          type: "message",
-          text: ALICE_WELCOME_MESSAGE,
-          ts: new Date().toLocaleTimeString("en-US", {
-            hour12: false,
-            hour: "2-digit",
-            minute: "2-digit"
-          })
-        }]
-      };
-      setAliceChats([resetTab]);
-      setActiveAliceTabId("tab-default");
-      return;
-    }
-    const index = aliceChats.findIndex(t => t.id === tabId);
-    if (index === -1) return;
-    const remainingChats = aliceChats.filter(t => t.id !== tabId);
-    setAliceChats(remainingChats);
-    if (activeAliceTabId === tabId) {
-      const nextActiveIndex = Math.max(0, index - 1);
-      setActiveAliceTabId(remainingChats[nextActiveIndex].id);
-    }
-  };
-  const startAliceResize = useCallback(e => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startY = e.clientY;
-    const startH = aliceChatHeight;
-    const onMove = ev => {
-      const newH = Math.max(150, Math.min(800, startH + (ev.clientY - startY)));
-      setAliceChatHeight(newH);
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [aliceChatHeight]);
-  const handleAliceStop = () => {
-    aliceSessionAbort(runId, activeAliceTabId);
-    api.stopAliceRun(runId).catch(() => {});
-    setAliceThinkingTabId(null);
-    setAliceGlobalRunning(false);
-  };
-
-  // Core ALICE turn submission. `handleAliceSend` drives this from the chat input,
-  // but other UI affordances (e.g. the De-duplicate Issues button) reuse it so a
-  // click does exactly what typing the same directive into the chat would do.
-  const submitAliceDirective = (rawText, {
-    fromInput = false,
-    onComplete = null
-  } = {}) => {
-    const userText = (rawText || "").trim();
-    if (!userText || aliceIsThinking) return;
-    if (fromInput) setAliceInputText("");
-    const currentTabId = activeAliceTabId;
-
-    // Make sure the A.L.I.C.E. panel is expanded so the user can watch it work.
-    setCollapsedAgentIds(prev => {
+  const {
+    aliceChats,
+    setAliceChats,
+    activeAliceTabId,
+    setActiveAliceTabId,
+    aliceInputText,
+    setAliceInputText,
+    aliceChatHeight,
+    aliceThinkingTabId,
+    aliceIsThinking,
+    aliceGlobalRunning,
+    aliceExpandedThinkIds,
+    setAliceExpandedThinkIds,
+    aliceMessages,
+    createAliceTab,
+    deleteAliceTab,
+    startAliceResize,
+    handleAliceStop,
+    handleAliceSend,
+    submitAliceDirective
+  } = useAliceChat(runId, {
+    onActivate: () => setCollapsedAgentIds(prev => {
       if (!prev.has("alice")) return prev;
       const next = new Set(prev);
       next.delete("alice");
       return next;
-    });
-    const userMsg = {
-      id: Date.now().toString(),
-      sender: "user",
-      type: "message",
-      text: userText,
-      ts: new Date().toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit"
-      })
-    };
-    const thinkMsgId = (Date.now() + 1).toString();
-    const replyMsgId = (Date.now() + 2).toString();
-    const thinkMsg = {
-      id: thinkMsgId,
-      sender: "alice",
-      type: "thinking",
-      text: "",
-      ts: new Date().toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit"
-      })
-    };
-    const replyMsg = {
-      id: replyMsgId,
-      sender: "alice",
-      type: "message",
-      text: "",
-      ts: new Date().toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit"
-      })
-    };
-    setAliceChats(prev => prev.map(tab => {
-      if (tab.id === activeAliceTabId) {
-        const isFirstPrompt = tab.messages.length <= 1;
-        let newTitle = tab.title;
-        if (isFirstPrompt) {
-          const truncated = userText.trim().slice(0, 16);
-          newTitle = truncated + (userText.trim().length > 16 ? "..." : "");
-        }
-        return {
-          ...tab,
-          title: newTitle,
-          messages: [...tab.messages, userMsg, thinkMsg, replyMsg]
-        };
-      }
-      return tab;
-    }));
-    setAliceThinkingTabId(currentTabId);
-    setAliceGlobalRunning(true);
-    const historyPayload = aliceMessages.map(m => ({
-      sender: m.sender,
-      text: m.text
-    }));
-
-    // Delegate all I/O to the module-level singleton so the stream survives
-    // component unmounts caused by hash navigation.
-    // State updates are handled by the useEffect subscriber above.
-    aliceSessionStart(runId, currentTabId, {
-      userText,
-      historyPayload,
-      thinkMsgId,
-      replyMsgId,
-      onFinish: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-        if (onComplete) onComplete(null);
-      },
-      onFail: err => {
-        if (err.name === "AbortError") {
-          setAliceChats(prev => prev.map(tab => {
-            if (tab.id !== currentTabId) return tab;
-            return {
-              ...tab,
-              messages: tab.messages.map(m => {
-                if (m.id === thinkMsgId && !m.text) return {
-                  ...m,
-                  text: "[Generation Aborted]"
-                };
-                if (m.id === replyMsgId && !m.text) return {
-                  ...m,
-                  text: "Generation stopped by user."
-                };
-                return m;
-              })
-            };
-          }));
-        } else {
-          setAliceChats(prev => prev.map(tab => {
-            if (tab.id !== currentTabId) return tab;
-            return {
-              ...tab,
-              messages: tab.messages.map(m => m.id === replyMsgId ? {
-                ...m,
-                text: `I encountered an error connecting to the agent: ${err.message}`
-              } : m)
-            };
-          }));
-        }
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-        if (onComplete) onComplete(err);
-      }
-    });
-  };
-  const handleAliceSend = () => submitAliceDirective(aliceInputText, {
-    fromInput: true
+    })
   });
   const [tokenUsage, setTokenUsage] = useState(null); // {total_input, total_output, by_model}
   const [tokenExpanded, setTokenExpanded] = useState(false);
@@ -2384,6 +1484,95 @@ export function TestRunDetail({
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
+  // Shared prop bag for the Findings/Activity tabs — bundled once and spread
+  // so the two call sites aren't 40-attribute walls. Extra props a tab ignores
+  // are harmless. ponytail: object-spread over a context Provider (no middle layer).
+  const runProps = {
+    activityLog,
+    tokenUsage,
+    setTokenExpanded,
+    tokenExpanded,
+    activitySubTab,
+    setActivitySubTab,
+    agents,
+    normalizeAgentForRun,
+    activityFeedRef,
+    runId,
+    clearBusy,
+    confirm,
+    setClearBusy,
+    setClearError,
+    api,
+    setActivityLog,
+    setSitePlanData,
+    setTokenUsage,
+    sitePlanData,
+    expandedLogIds,
+    toggleLogId,
+    truncUrl,
+    collapsedAgentIds,
+    toggleAgentId,
+    defaultAgentRoster,
+    representsAgent,
+    aliceChats,
+    activeAliceTabId,
+    setActiveAliceTabId,
+    deleteAliceTab,
+    createAliceTab,
+    aliceChatHeight,
+    aliceMessages,
+    parseAliceTurnSegments,
+    renderMarkdown,
+    renderAliceTraceBox,
+    aliceExpandedThinkIds,
+    setAliceExpandedThinkIds,
+    renderAliceBlocks,
+    aliceThinkingTabId,
+    startAliceResize,
+    aliceInputText,
+    aliceIsThinking,
+    handleAliceSend,
+    setAliceInputText,
+    handleAliceStop,
+    agentRoleLabel,
+    agentCurrentTask,
+    agentCrawlEvents,
+    agentTaskHistory,
+    agentStatusLabel,
+    thinkingStatus,
+    thinkingStopRequested,
+    validateStatus,
+    onStopValidation,
+    dedupeBusy,
+    findings,
+    onExportFindingsMarkdown,
+    onImportFindingsClick,
+    issueImportInputRef,
+    onImportFindingsFile,
+    validateBusy,
+    onValidateAll,
+    onDeduplicateFindings,
+    setFindings,
+    isDynamicScanActive,
+    editingFinding,
+    setExpandedFinding,
+    expandedFinding,
+    onValidateFinding,
+    onEditFinding,
+    onDeleteFinding,
+    editDraft,
+    setEditDraft,
+    editBusy,
+    onCancelEditFinding,
+    onSaveEditFinding,
+    navigator,
+    toggleGroup,
+    sourceLabel,
+    expandedGroups,
+    findColW,
+    startFindResize,
+    onDeleteFindingGroup
+  };
   return <>
     <div className="topbar">
       <div className="topbar-title" style={{
@@ -2814,7 +2003,7 @@ export function TestRunDetail({
           </div>}
       </div>
 
-      {activeTab === "findings" && <WebRunFindingsTab thinkingStatus={thinkingStatus} thinkingStopRequested={thinkingStopRequested} validateStatus={validateStatus} onStopValidation={onStopValidation} dedupeBusy={dedupeBusy} findings={findings} onExportFindingsMarkdown={onExportFindingsMarkdown} onImportFindingsClick={onImportFindingsClick} issueImportInputRef={issueImportInputRef} onImportFindingsFile={onImportFindingsFile} validateBusy={validateBusy} onValidateAll={onValidateAll} aliceIsThinking={aliceIsThinking} onDeduplicateFindings={onDeduplicateFindings} clearBusy={clearBusy} confirm={confirm} setClearBusy={setClearBusy} setClearError={setClearError} api={api} runId={runId} setFindings={setFindings} isDynamicScanActive={isDynamicScanActive} editingFinding={editingFinding} setExpandedFinding={setExpandedFinding} expandedFinding={expandedFinding} onValidateFinding={onValidateFinding} onEditFinding={onEditFinding} onDeleteFinding={onDeleteFinding} editDraft={editDraft} setEditDraft={setEditDraft} editBusy={editBusy} onCancelEditFinding={onCancelEditFinding} onSaveEditFinding={onSaveEditFinding} renderMarkdown={renderMarkdown} navigator={navigator} toggleGroup={toggleGroup} sourceLabel={sourceLabel} expandedGroups={expandedGroups} findColW={findColW} startFindResize={startFindResize} onDeleteFindingGroup={onDeleteFindingGroup} />}
+      {activeTab === "findings" && <WebRunFindingsTab {...runProps} />}
 
       {activeTab === "intelligence" && <TargetIntelligencePanel data={targetIntel} selectedKind={targetIntelKind} onKind={setTargetIntelKind} refresh={() => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(() => {})} onClear={async () => {
         if (!confirm("Clear all target intelligence for this run?")) return;
@@ -2847,7 +2036,7 @@ export function TestRunDetail({
 
       {activeTab === "sessions" && <ScannerSessionsPanel runId={runId} data={scannerSessions} refresh={() => api.getScannerSessions(runId).then(setScannerSessions).catch(() => {})} />}
 
-      {activeTab === "activity" && <WebRunActivityTab activityLog={activityLog} tokenUsage={tokenUsage} setTokenExpanded={setTokenExpanded} tokenExpanded={tokenExpanded} activitySubTab={activitySubTab} setActivitySubTab={setActivitySubTab} agents={agents} normalizeAgentForRun={normalizeAgentForRun} activityFeedRef={activityFeedRef} runId={runId} clearBusy={clearBusy} confirm={confirm} setClearBusy={setClearBusy} setClearError={setClearError} api={api} setActivityLog={setActivityLog} setSitePlanData={setSitePlanData} setTokenUsage={setTokenUsage} sitePlanData={sitePlanData} expandedLogIds={expandedLogIds} toggleLogId={toggleLogId} truncUrl={truncUrl} collapsedAgentIds={collapsedAgentIds} toggleAgentId={toggleAgentId} defaultAgentRoster={defaultAgentRoster} representsAgent={representsAgent} aliceChats={aliceChats} activeAliceTabId={activeAliceTabId} setActiveAliceTabId={setActiveAliceTabId} deleteAliceTab={deleteAliceTab} createAliceTab={createAliceTab} aliceChatHeight={aliceChatHeight} aliceMessages={aliceMessages} parseAliceTurnSegments={parseAliceTurnSegments} renderMarkdown={renderMarkdown} renderAliceTraceBox={renderAliceTraceBox} aliceExpandedThinkIds={aliceExpandedThinkIds} setAliceExpandedThinkIds={setAliceExpandedThinkIds} renderAliceBlocks={renderAliceBlocks} aliceThinkingTabId={aliceThinkingTabId} startAliceResize={startAliceResize} aliceInputText={aliceInputText} aliceIsThinking={aliceIsThinking} handleAliceSend={handleAliceSend} setAliceInputText={setAliceInputText} handleAliceStop={handleAliceStop} agentRoleLabel={agentRoleLabel} agentCurrentTask={agentCurrentTask} agentCrawlEvents={agentCrawlEvents} agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel} />}
+      {activeTab === "activity" && <WebRunActivityTab {...runProps} />}
 
       {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} activeTab={activeTab} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} setTrafficTotal={setTrafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
       {activeTab === "workprogram" && <div className="content scroll-content" style={{
