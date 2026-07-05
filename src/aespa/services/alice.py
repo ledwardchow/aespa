@@ -36,7 +36,7 @@ def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
 
 
 # Hard step limit to prevent runaway loops regardless of model behaviour.
-ALICE_MAX_STEPS = 40
+ALICE_MAX_STEPS = 300
 
 # Tools available to A.L.I.C.E. — same as specialist but without agent_dispatch loops.
 _ALICE_TOOL_NAMES = {
@@ -133,11 +133,18 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     ``exclude`` drops tools by name — used to withhold the site-oriented
     ``write_finding`` from API runs, which record findings via the API-aware
     ``report_finding`` context_tool instead.
-    """
-    from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
 
-    allowed = _ALICE_TOOL_NAMES - (exclude or set())
-    return [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    ``tls_scan`` is appended from its standalone schema (it is deliberately not in
+    the Test Lead's ``THINKING_AGENT_TOOLS``; see ``TLS_SCAN_TOOL``).
+    """
+    from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS, TLS_SCAN_TOOL
+
+    exclude = exclude or set()
+    allowed = _ALICE_TOOL_NAMES - exclude
+    tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "tls_scan" not in exclude:
+        tools.append(TLS_SCAN_TOOL)
+    return tools
 
 
 def _select_session(
@@ -492,6 +499,29 @@ async def _execute_alice_tool(
             except Exception as exc:
                 decoded[part_name] = f"decode error: {exc}"
         return json.dumps(decoded)
+
+    # ── tls_scan ──────────────────────────────────────────────────────────────
+    if tool_name == "tls_scan":
+        from aespa.services import tls_scan as tls_scan_svc
+
+        raw_host = str(tool_input.get("host") or base_url)
+        port_in = tool_input.get("port")
+        try:
+            port_in = int(port_in) if port_in is not None else None
+        except (TypeError, ValueError):
+            port_in = None
+        r_host, r_port = tls_scan_svc._parse_target(raw_host, port_in)
+        if not r_host:
+            return "tls_scan: no host provided."
+        _alice_scope = (
+            scope_check_fn if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
+        )
+        scope_err = _alice_scope(f"https://{r_host}:{r_port}/")
+        if scope_err:
+            return f"[SCOPE BLOCK] {scope_err}"
+        tls_result = await tls_scan_svc.scan_tls(r_host, r_port)
+        return json.dumps(tls_result, default=str)
 
     # ── credential_check ──────────────────────────────────────────────────────
     if tool_name == "credential_check":
@@ -1067,8 +1097,20 @@ async def run_alice_turn_stream(
             role = "user" if sender == "user" else "assistant"
             messages.append({"role": role, "content": text})
 
-    # Append the current instruction as the latest user message.
-    messages.append({"role": "user", "content": user_instruction})
+    # Inject any SAST leads imported into this web run so ALICE can investigate them.
+    leads_block = ""
+    try:
+        from aespa.services.scan_leads import format_leads_for_run
+        leads_block = format_leads_for_run("web", run_id)
+    except Exception:
+        pass
+
+    # Append the current instruction as the latest user message, with the leads
+    # block prepended so ALICE sees the investigation targets in context.
+    if leads_block:
+        messages.append({"role": "user", "content": f"{leads_block}\n\n{user_instruction}"})
+    else:
+        messages.append({"role": "user", "content": user_instruction})
 
     alice_tools = _get_alice_tools()
 
@@ -1994,10 +2036,12 @@ async def run_api_alice_turn_stream(
             self.scope_hosts = collection_scope_hosts
 
     _coll_proxy = _CollProxy()
-    _scope_fn = lambda url: _check_api_scope(url, _coll_proxy)  # noqa: E731
-    _ctx_fn = lambda tool_name, args: _run_api_context_tool(
-        collection_id, api_run_id, tool_name, args
-    )  # noqa: E731
+
+    def _scope_fn(url):
+        return _check_api_scope(url, _coll_proxy)
+
+    def _ctx_fn(tool_name, args):
+        return _run_api_context_tool(collection_id, api_run_id, tool_name, args)
 
     def _post_probe_fn(url: str, method: str, owasp_category: str) -> None:
         """Flip the endpoint × category work-program cell to in_progress when

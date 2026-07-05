@@ -369,7 +369,9 @@ def test_get_coverage_no_endpoints(client):
 
 def test_applicable_categories_api2_always(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/ping", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     cats = _applicable_categories(ep)
     assert "API2" in cats
 
@@ -378,14 +380,18 @@ def test_applicable_categories_api2_always(db_engine, db_session, collection):
 
 def test_applicable_categories_api1_path_param(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     cats = _applicable_categories(ep)
     assert "API1" in cats
 
 
 def test_applicable_categories_no_api1_without_param(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     cats = _applicable_categories(ep)
     assert "API1" not in cats
 
@@ -394,14 +400,18 @@ def test_applicable_categories_no_api1_without_param(db_engine, db_session, coll
 
 def test_applicable_categories_api3_patch(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="PATCH", path="/users/{id}", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     cats = _applicable_categories(ep)
     assert "API3" in cats
 
 
 def test_applicable_categories_no_api3_get(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     cats = _applicable_categories(ep)
     assert "API3" not in cats
 
@@ -410,7 +420,9 @@ def test_applicable_categories_no_api3_get(db_engine, db_session, collection):
 
 def test_match_endpoint_exact(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/health", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     matched = _match_endpoint_for_url("http://api.local/health", [ep], "http://api.local")
     assert matched is not None
     assert matched.id == ep.id
@@ -420,7 +432,9 @@ def test_match_endpoint_exact(db_engine, db_session, collection):
 
 def test_match_endpoint_path_param(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     matched = _match_endpoint_for_url("http://api.local/users/42", [ep], "http://api.local")
     assert matched is not None
     assert matched.id == ep.id
@@ -428,7 +442,9 @@ def test_match_endpoint_path_param(db_engine, db_session, collection):
 
 def test_match_endpoint_nested_param(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="PATCH", path="/users/{uid}/posts/{pid}", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     matched = _match_endpoint_for_url("http://api.local/users/10/posts/200", [ep], "http://api.local")
     assert matched is not None
     assert matched.id == ep.id
@@ -438,7 +454,9 @@ def test_match_endpoint_nested_param(db_engine, db_session, collection):
 
 def test_match_endpoint_no_match(db_engine, db_session, collection):
     ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/health", in_scope=True)
-    db_session.add(ep); db_session.commit(); db_session.refresh(ep)
+    db_session.add(ep)
+    db_session.commit()
+    db_session.refresh(ep)
     matched = _match_endpoint_for_url("http://api.local/foobar/baz", [ep], "http://api.local")
     assert matched is None
 

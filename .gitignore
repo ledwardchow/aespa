@@ -6,6 +6,8 @@ aespa_data/
 .env
 dist/
 build/
+# Generated per-build from the bundled deps (scripts/generate_third_party_licenses.py)
+THIRD_PARTY_LICENSES.txt
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

@@ -1433,6 +1433,37 @@ def _run_thinking_context_tool(
             matches.append(finding)
         return {"tool": "finding_list", "count": len(matches), "findings": matches[:limit]}
 
+    if tool_name == "lead_list":
+        if run_id is None:
+            return {"tool": "lead_list", "error": "run_id unavailable"}
+        from aespa.services.scan_leads import get_all_leads_for_run
+        status_filter = str(args.get("status") or "").lower()
+        all_leads = get_all_leads_for_run("web", run_id)
+        if status_filter:
+            all_leads = [ld for ld in all_leads if (ld.status or "open") == status_filter]
+        leads_out = all_leads[:limit]
+        return {
+            "tool": "lead_list",
+            "count": len(all_leads),
+            "returned": len(leads_out),
+            "leads": [
+                {
+                    "id": ld.id,
+                    "title": ld.title,
+                    "category": ld.category,
+                    "severity": ld.severity,
+                    "confidence_pct": int((ld.confidence or 0) * 100),
+                    "location": ld.location,
+                    "description": ld.description,
+                    "evidence": (ld.evidence or "")[:400],
+                    "status": ld.status or "open",
+                    "note": ld.note or "",
+                    "linked_finding_id": ld.linked_finding_id,
+                }
+                for ld in leads_out
+            ],
+        }
+
     if tool_name in {"target_inventory", "search_assets"}:
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}
@@ -2251,7 +2282,9 @@ def _finding_from_llm(
     )
 
 
-def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> int:
+def _save_deterministic_findings(
+    run_id: int, findings: list[ScanFinding], *, is_api_run: bool = False
+) -> int:
     saved = 0
     if not findings:
         return saved
@@ -2263,6 +2296,7 @@ def _save_deterministic_findings(run_id: int, findings: list[ScanFinding]) -> in
                 title=finding.title,
                 affected_url=finding.affected_url,
                 owasp_category=finding.owasp_category,
+                is_api_run=is_api_run,
             ):
                 continue
             s.add(finding)
@@ -2460,10 +2494,12 @@ def _finding_exists(
     title: str,
     affected_url: str,
     owasp_category: str = "",
+    is_api_run: bool = False,
 ) -> bool:
+    run_col = ScanFinding.api_test_run_id if is_api_run else ScanFinding.test_run_id
     existing = session.exec(
         select(ScanFinding)
-        .where(ScanFinding.test_run_id == run_id)
+        .where(run_col == run_id)
         .where(ScanFinding.affected_url == affected_url)
     ).all()
     normalized_title = (title or "").strip().lower()
@@ -4052,6 +4088,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             raise RuntimeError("No LLM configuration. Configure it in Settings first.")
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
+        guidance = (site.scan_guidance or "").strip()
         coverage_mode = getattr(run, "coverage_mode", "track") or "track"
 
         # Crawled pages — used for context and for resolving page_id on findings.
@@ -4485,6 +4522,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     site_id=site_id,
                     creds=creds,
                     login_url=login_url or "",
+                    guidance=guidance,
                     post_probe_fn=_web_post_probe_fn,
                     post_finding_fn=_web_post_finding_fn,
                 )
@@ -5674,6 +5712,7 @@ async def _do_agentic_thinking_loop(
     site_id: int = 0,
     creds: list | None = None,
     login_url: str = "",
+    guidance: str = "",
     # API-mode overrides — when provided these replace the web-scan defaults
     is_api_run: bool = False,   # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
@@ -5856,12 +5895,18 @@ async def _do_agentic_thinking_loop(
             "re-authenticating:\n" + "\n".join(s_lines)
         )
 
+    guidance_text = (
+        "Operator guidance — follow these instructions:\n" + guidance
+        if guidance else ""
+    )
+
     task_context = task_graph_svc.build_task_graph_context(run_id)
     initial_message = "\n\n".join(filter(None, [
         f"Target: {base_url}",
         f"Application context:\n{crawl_context}",
         creds_text,
         sessions_text,
+        guidance_text,
         task_context or "",
         "Begin the assessment.",
     ]))
@@ -7041,6 +7086,177 @@ async def _do_agentic_thinking_loop(
     )
     return progressive_findings_count
 
+
+# ── TLS/SSL posture (deterministic, always-on for HTTPS) ──────────────────────
+
+# Per-issue severity tiers, checked against the structured scan_tls result. The
+# finding's overall severity is the worst tier with a matching issue present.
+_TLS_HIGH_CVSS = 7.4
+_TLS_MEDIUM_CVSS = 5.3
+_TLS_LOW_CVSS = 3.7
+
+
+def _tls_worst_cvss(result: dict) -> float:
+    """Return the worst per-issue CVSS present in a scan_tls result (0.0 if clean)."""
+    cert = result.get("certificate") or {}
+    protocols = result.get("protocols") or {}
+    worst = 0.0
+
+    def bump(score: float) -> None:
+        nonlocal worst
+        worst = max(worst, score)
+
+    # High-severity conditions.
+    if cert.get("expired"):
+        bump(_TLS_HIGH_CVSS)
+    if cert.get("hostname_match") is False:
+        bump(_TLS_HIGH_CVSS)
+    if result.get("weak_cipher_accepted"):
+        bump(_TLS_HIGH_CVSS)
+    key_bits = cert.get("key_bits")
+    if isinstance(key_bits, int) and key_bits < 1024:
+        bump(_TLS_HIGH_CVSS)
+
+    # Medium-severity conditions.
+    if protocols.get("TLSv1.0") == "accepted" or protocols.get("TLSv1.1") == "accepted":
+        bump(_TLS_MEDIUM_CVSS)
+    if cert.get("self_signed"):
+        bump(_TLS_MEDIUM_CVSS)
+    if isinstance(key_bits, int) and 1024 <= key_bits < 2048:
+        bump(_TLS_MEDIUM_CVSS)
+    if cert.get("signature_algorithm") in ("md5", "sha1"):
+        bump(_TLS_MEDIUM_CVSS)
+    if result.get("non_pfs_cipher_accepted"):
+        bump(_TLS_MEDIUM_CVSS)
+
+    # Low-severity conditions (cert expiring soon but still valid).
+    days_left = cert.get("days_until_expiry")
+    if isinstance(days_left, int) and 0 <= days_left < 30:
+        bump(_TLS_LOW_CVSS)
+
+    return worst
+
+
+def _tls_posture_finding(
+    run_id: int, base_url: str, result: dict, *, is_api_run: bool = False
+) -> ScanFinding | None:
+    """Build ONE consolidated A02 finding from a scan_tls result, or None if clean.
+
+    ``is_api_run`` keys the finding on ``api_test_run_id`` instead of ``test_run_id``
+    (web/API run ids share an int space — see the run-id-collision note in CLAUDE.md).
+    """
+    issues = result.get("issues") or []
+    if not issues:
+        return None
+    cvss = _tls_worst_cvss(result)
+    if cvss <= 0.0:
+        return None
+
+    protocols = result.get("protocols") or {}
+    accepted = [p for p, state in protocols.items() if state == "accepted"]
+
+    issue_lines = "\n".join(f"- {i}" for i in issues)
+    description = (
+        "The target's TLS/SSL transport configuration has one or more weaknesses "
+        "(OWASP A02, Cryptographic Failures). A deterministic sslscan-style probe "
+        f"of `{result.get('host')}:{result.get('port')}` found:\n\n"
+        f"{issue_lines}\n\n"
+        f"Negotiated protocol: {result.get('negotiated_protocol')} "
+        f"({result.get('negotiated_cipher')}). "
+        f"Accepted protocols: {', '.join(accepted) or 'none'}."
+    )
+    detail = json.dumps(result, indent=2, default=str)
+    summary = f"{len(issues)} TLS/SSL weakness(es) detected on {result.get('host')}."
+
+    return ScanFinding(
+        test_run_id=None if is_api_run else run_id,
+        api_test_run_id=run_id if is_api_run else None,
+        page_id=None,
+        owasp_category="A02",
+        severity=_severity_from_cvss(cvss),
+        title="TLS/SSL configuration weaknesses",
+        description=description,
+        impact=(
+            "Weak transport security can allow attackers positioned on the network to "
+            "downgrade, intercept, or decrypt traffic, or to impersonate the server, "
+            "exposing credentials, session tokens, and other sensitive data in transit."
+        ),
+        likelihood="Confirmed by deterministic TLS/SSL probe.",
+        recommendation=(
+            "Disable deprecated protocols (TLS 1.0/1.1, SSLv2/SSLv3) and weak or "
+            "non-forward-secret cipher suites; serve a valid, trusted certificate with "
+            "a ≥2048-bit key and a SHA-256+ signature that matches the hostname; and "
+            "renew certificates before expiry. Aim for TLS 1.2+ with forward-secret "
+            "(ECDHE) suites only."
+        ),
+        cvss_score=cvss,
+        cvss_vector="",
+        affected_url=base_url,
+        evidence=_full_evidence("", detail, summary),
+        request_evidence=_request_evidence(
+            f"TLS SCAN {result.get('host')}:{result.get('port')}"
+        ),
+        response_evidence=_response_evidence(detail),
+        evidence_json=_http_evidence_items_json("", detail, summary=summary),
+        finding_source="deterministic_probe",
+        validation_status="confirmed",
+        validation_note="Confirmed by deterministic TLS/SSL posture module.",
+        created_at=_utcnow(),
+    )
+
+
+async def _run_tls_posture_module(
+    *, run_id: int, base_url: str, is_api_run: bool = False
+) -> list[ScanFinding]:
+    """sslscan-like TLS posture check — always runs for HTTPS targets.
+
+    Produces at most ONE consolidated A02 finding summarising every weakness. Caller
+    is responsible for saving; the title + affected_url dedup keeps it to a single
+    finding across scan resumes. ``is_api_run`` keys the finding on the API column.
+    """
+    if not base_url.lower().startswith("https://"):
+        return []
+
+    from aespa.services import tls_scan as tls_scan_svc
+
+    host, port = tls_scan_svc._parse_target(base_url, None)
+    if not host:
+        return []
+
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "tls_posture",
+        "status": "start",
+        "message": f"Checking TLS/SSL posture of {host}:{port}…",
+    })
+    result = await tls_scan_svc.scan_tls(host, port)
+    if not result.get("ok"):
+        events_svc.emit(run_id, {
+            "type": "scanner_phase",
+            "phase": "tls_posture",
+            "status": "complete",
+            "message": f"TLS/SSL probe could not connect: {result.get('error')}",
+        })
+        return []
+
+    finding = _tls_posture_finding(run_id, base_url, result, is_api_run=is_api_run)
+    issue_count = len(result.get("issues") or [])
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "tls_posture",
+        "status": "complete",
+        "message": (
+            f"TLS/SSL posture check complete — {issue_count} issue(s) found"
+            + ("; recorded 1 consolidated finding." if finding else "; no finding.")
+        ),
+        "data": {
+            "issue_count": issue_count,
+            "negotiated": result.get("negotiated_protocol"),
+        },
+    })
+    return [finding] if finding else []
+
+
 async def _run_deterministic_site_modules(
     *,
     run_id: int,
@@ -7049,6 +7265,12 @@ async def _run_deterministic_site_modules(
     scanner_policy=None,
 ) -> None:
     """Run deterministic site-level modules that do not require LLM reasoning."""
+    # TLS/SSL posture always runs for HTTPS targets — even in passive mode, since a
+    # TLS handshake probe is non-intrusive. Records at most one consolidated finding.
+    tls_findings = await _run_tls_posture_module(run_id=run_id, base_url=base_url)
+    if tls_findings and _save_deterministic_findings(run_id, tls_findings):
+        _emit_scan_update(run_id)
+
     if scanner_policy and scanner_policy.scan_mode == "passive":
         return
 
@@ -7437,8 +7659,22 @@ def _idor_matrix_finding(
     )
 
 
+# Static assets (scripts, styles, images, fonts, media). Fetching one of these
+# anonymously is expected — it is never an "unauthenticated access to a protected
+# endpoint", even when its path contains a sensitive-looking word (e.g.
+# /static/js/user-profile.js matching the "/user" marker below).
+_STATIC_ASSET_EXTENSIONS: tuple[str, ...] = _BROWSER_SKIP_EXTENSIONS + (".js", ".mjs")
+
+
+def _is_static_asset_url(url: str) -> bool:
+    path = urlparse(str(url or "")).path.lower()
+    return path.endswith(_STATIC_ASSET_EXTENSIONS)
+
+
 def _target_requires_auth_or_sensitive(target: dict) -> bool:
     url = str(target.get("url") or "").lower()
+    if _is_static_asset_url(url):
+        return False
     if target.get("req_auth") is True:
         return True
     if target.get("has_business_logic") or target.get("has_object_ref"):

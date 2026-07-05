@@ -8,6 +8,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+from sqlmodel import Session, select
+
+from aespa.models import Credential, PageCredentialView, Site
+from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
+
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
     """Return *data* with ISO-string values for *fields* converted to datetime objects.
@@ -21,11 +26,6 @@ def _parse_datetimes(data: dict, *fields: str) -> dict:
         if isinstance(value, str):
             data[field] = datetime.fromisoformat(value)
     return data
-
-from sqlmodel import Session, select
-
-from aespa.models import Credential, PageCredentialView, Site
-from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
 
 
 class SiteServiceError(Exception):
@@ -83,6 +83,7 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         requires_auth=payload.requires_auth,
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
+        scan_guidance=payload.scan_guidance,
     )
     for cred in payload.credentials:
         site.credentials.append(
@@ -112,6 +113,7 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.requires_auth = payload.requires_auth
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
+    site.scan_guidance = payload.scan_guidance
     site.updated_at = _utcnow()
 
     # Replace credentials list wholesale.
@@ -265,7 +267,7 @@ def export_site(session: Session, site_id: int) -> dict:
         run_bundles.append({
             "test_run": _row(run),
             "crawled_pages": [_row(p) for p in pages],
-            "page_links": [_row(l) for l in links],
+            "page_links": [_row(link) for link in links],
             "traffic_entries": [_row(t) for t in traffic],
             "scanner_sessions": [_row(s) for s in sessions_],
             "page_credential_views": [_row(v) for v in views],
@@ -273,7 +275,7 @@ def export_site(session: Session, site_id: int) -> dict:
             "pentest_hypotheses": [_row(h) for h in hyps],
             "pentest_tasks": [_row(t) for t in tasks],
             "scan_findings": [_row(f) for f in findings],
-            "scan_logs": [_row(l) for l in logs],
+            "scan_logs": [_row(lg) for lg in logs],
             "page_owasp_tests": [_row(o) for o in owasp_tests],
             "scan_checkpoints": [_row(c) for c in checkpoints],
             "agent_logs": [_row(a) for a in agent_logs],
@@ -374,17 +376,17 @@ def import_site(session: Session, bundle: dict) -> Site:
             page_id_map[old_pid] = page.id  # type: ignore[index]
 
         # ── PageLinks ───────────────────────────────────────────────────────
-        for l in rb.get("page_links", []):
-            l = dict(l)
-            l.pop("id")
-            l["test_run_id"] = new_run_id
-            src = l.get("source_page_id")
-            tgt = l.get("target_page_id")
+        for link in rb.get("page_links", []):
+            link = dict(link)
+            link.pop("id")
+            link["test_run_id"] = new_run_id
+            src = link.get("source_page_id")
+            tgt = link.get("target_page_id")
             if src is not None:
-                l["source_page_id"] = page_id_map.get(src, src)
+                link["source_page_id"] = page_id_map.get(src, src)
             if tgt is not None:
-                l["target_page_id"] = page_id_map.get(tgt, tgt)
-            session.add(PageLink(**l))
+                link["target_page_id"] = page_id_map.get(tgt, tgt)
+            session.add(PageLink(**link))
 
         # ── TrafficEntries ──────────────────────────────────────────────────
         for t in rb.get("traffic_entries", []):
