@@ -2,15 +2,15 @@ import { useState, useCallback } from "react";
 
 // Shared helpers/constants for the SiteDetail page and its tab/panel components.
 
-const SCOPE_IN_COLOR = "#3b82f6";
-const SCOPE_OUT_COLOR = "#ef4444";
+export const SCOPE_IN_COLOR = "#3b82f6";
+export const SCOPE_OUT_COLOR = "#ef4444";
 export const scopeColor = d => d.in_scope === false ? SCOPE_OUT_COLOR : SCOPE_IN_COLOR;
 const DYNAMIC_SCAN_ACTIVE_STATUSES = ["running", "analysing", "stopping"];
 export const isDynamicScanActive = status => DYNAMIC_SCAN_ACTIVE_STATUSES.includes(status);
 
 // Per-user palette (index into credentials array)
-const USER_PALETTE = ["#f97316", "#06b6d4", "#a855f7", "#f59e0b", "#10b981", "#ec4899"];
-const USER_BOTH_COLOR = "#6366f1"; // accessible to all users
+export const USER_PALETTE = ["#f97316", "#06b6d4", "#a855f7", "#f59e0b", "#10b981", "#ec4899"];
+export const USER_BOTH_COLOR = "#6366f1"; // accessible to all users
 const USER_NONE_COLOR = "#6b7691"; // not tagged (pre-multi-user crawl)
 export const userColor = (d, credentials) => {
   const ab = d.accessible_by || [];
