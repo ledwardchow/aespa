@@ -13,7 +13,7 @@ import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
 import { WebRunSitemapTab } from "./SiteDetail/WebRunSitemapTab";
 import { GuidedLoginItem } from "./SiteDetail/GuidedLoginItem";
-import { scopeColor, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
+import { scopeColor, SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_PALETTE, USER_BOTH_COLOR, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { useColResize };
 // ── Site detail ───────────────────────────────────────────────────────────────
@@ -1150,7 +1150,7 @@ export function TestRunDetail({
     // Tooltip on hover
     node.append("title").text(d => d.url);
     svg.on("click", () => setSelNode(null));
-    const sim = d3.forceSimulation(nodes).force("link", d3.forceLink(links).id(d => d.id).distance(110).strength(0.8)).force("charge", d3.forceManyBody().strength(-350)).force("center", d3.forceCenter(W / 2, H / 2)).force("collision", d3.forceCollide(22)).on("tick", () => {
+    const sim = d3.forceSimulation(nodes).force("link", d3.forceLink(links).id(d => d.id).distance(110).strength(0.8)).force("charge", d3.forceManyBody().strength(-350)).force("center", d3.forceCenter(W / 2, H / 2)).force("x", d3.forceX(W / 2).strength(0.06)).force("y", d3.forceY(H / 2).strength(0.06)).force("collision", d3.forceCollide(22)).on("tick", () => {
       link.attr("x1", d => d.source.x).attr("y1", d => d.source.y).attr("x2", d => d.target.x).attr("y2", d => d.target.y);
       node.attr("transform", d => `translate(${d.x},${d.y})`);
     });
