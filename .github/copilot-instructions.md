@@ -20,7 +20,8 @@ uv run ruff check .                  # lint (rules: E, F, I — isort enforced)
 uv run ruff format .                 # format
 ```
 
-Requires Python 3.12+ and `uv`. No frontend build step — `src/aespa/web/` is served as static assets.
+Requires Python 3.12+ and `uv`. The frontend is a Vite + React application in `frontend/`.
+**UI changes MUST be made in the Vite JSX files within the `frontend/src/` directory.** After making UI changes, you MUST run `cd frontend && npm run build`. This rebuild is critical so that the compiled assets (e.g. index.js / app.js) are placed in `src/aespa/web/` and available to be served when running the backend via `uv run aespa`.
 
 ## Architecture
 

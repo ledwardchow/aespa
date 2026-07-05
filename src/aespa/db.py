@@ -202,6 +202,7 @@ def _cleanup_orphaned_sast_extractions() -> None:
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
+    _ensure_column(engine, "site", "scan_guidance", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")
     _ensure_column(engine, "llm_config", "is_active", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(engine, "llm_config", "provider_id", "INTEGER")

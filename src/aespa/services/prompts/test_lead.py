@@ -737,7 +737,9 @@ _API_THINKING_AGENT_SYSTEM = (
     "- update_lead: after investigating a static-analysis lead, record the outcome\n"
     "  (confirmed/dismissed/inconclusive) and a note about what you tested. Investigation\n"
     "  leads are UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before\n"
-    "  calling write_finding. After investigating each lead, always call update_lead.\n"
+    "  calling write_finding. Call update_lead IMMEDIATELY after resolving a lead, in the\n"
+    "  same turn as its write_finding and before moving to the next lead — do NOT batch all\n"
+    "  update_lead calls at the end of the scan.\n"
     "- agent_dispatch: dispatch a specialist for sqli/idor/auth_bypass/ssrf/business_logic.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
@@ -767,8 +769,10 @@ _THINKING_AGENT_SYSTEM = (
     "  This drives the Work Program matrix — do not omit it.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required.\n"
-    "- context_tool: look up crawl data, history, findings, or traffic without hitting "
-    "the target. After 3 consecutive calls, either execute a probe/write a finding or "
+    "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
+    "the target. Available sub-commands: site_map, page_detail, history_search, "
+    "finding_list, lead_list, target_inventory, traffic_search, extract_entities. "
+    "After 3 consecutive calls, either execute a probe/write a finding or "
     "include context_budget_reason with a concrete summary and why one more targeted "
     "scan round will change the next action.\n"
     "- write_finding: persist a confirmed finding with concrete evidence from prior results. "
@@ -789,6 +793,14 @@ _THINKING_AGENT_SYSTEM = (
     "Attack classes: idor, auth_bypass, sqli, xss, business_logic, ssrf, path_traversal, "
     "cors, crypto, config, file_upload. Dispatch immediately — do NOT keep probing the same lead "
     "yourself after dispatching.\n"
+    "- update_lead: after investigating a static-analysis lead from the 'STATIC ANALYSIS "
+    "INVESTIGATION LEADS' block in your context, record the outcome "
+    "(confirmed/dismissed/inconclusive) and a note about what you tested. These leads are "
+    "UNPROVEN hypotheses from a prior SAST scan — confirm dynamically before writing a "
+    "finding. Call update_lead IMMEDIATELY after resolving a lead, in the same turn as its "
+    "write_finding and before moving to the next lead — do NOT batch all update_lead calls "
+    "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
+    "their current statuses.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
     "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
@@ -1143,6 +1155,43 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
 ]
+
+
+# TLS/SSL posture probe. NOT part of the Test Lead toolset: a consolidated TLS
+# finding is recorded deterministically at scan start (see scanner.py
+# `_run_tls_posture_module`), so the Test Lead must not be able to raise a second
+# one. Exposed only to A.L.I.C.E. for interactive, user-directed inspection.
+TLS_SCAN_TOOL: dict = {
+    "name": "tls_scan",
+    "description": (
+        "Run an sslscan-like TLS/SSL posture probe against a host (default "
+        "port 443). Reports accepted protocol versions (TLS 1.0-1.3), weak / "
+        "non-forward-secret cipher acceptance, and the leaf certificate "
+        "(expiry, key size, signature algorithm, SANs, self-signed, hostname "
+        "match), plus a pre-computed 'issues' list. SSLv2/SSLv3 report as "
+        "'not-testable' (local OpenSSL cannot offer them)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "host": {
+                "type": "string",
+                "description": (
+                    "Target hostname, host:port, or full URL to probe. "
+                    "Must be in scope."
+                ),
+            },
+            "port": {
+                "type": "integer",
+                "description": "TLS port (default 443).",
+            },
+            "observation": {"type": "string"},
+            "hypothesis": {"type": "string"},
+            "note": {"type": "string"},
+        },
+        "required": ["host"],
+    },
+}
 
 
 # ── Non-tool-use next-action prompt (legacy single-turn loop) ─────────────────

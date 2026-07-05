@@ -459,8 +459,27 @@ start_thinking_scan(run_id)
        6. Build LLM opening context from recon summary
        7. Detect auth cookies for boundary checks
        8. Restore checkpoint if this is a resumed scan
+       9. _run_deterministic_site_modules(...) — LLM-free probes
+          (TLS/SSL posture, auth matrix, IDOR matrix)
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
+
+**TLS/SSL posture (always-on, deterministic).** For any `https://` target,
+`_run_deterministic_site_modules` first runs `_run_tls_posture_module` — an
+sslscan-like probe (`services/tls_scan.py`, pure stdlib `ssl` + `cryptography`)
+that enumerates accepted protocol versions (TLS 1.0–1.3; SSLv2/SSLv3 report as
+`not-testable`), weak / non-forward-secret cipher acceptance, and leaf-certificate
+weaknesses (expiry, key size, signature algorithm, SANs, self-signed, hostname
+match). It runs on **every** HTTPS scan (including `passive` mode, since the
+handshake is non-intrusive) and records **at most one** consolidated
+`A02 · TLS/SSL configuration weaknesses` finding summarising every issue; overall
+severity is the worst per-issue tier (`_tls_worst_cvss`). Dedup by title +
+`affected_url` keeps it to a single finding across resumes. This is deliberately
+**not** a Test Lead tool — the same `tls_scan` schema (`TLS_SCAN_TOOL`) is exposed
+only to A.L.I.C.E. for interactive inspection, so the automated scan cannot raise
+a second, competing TLS finding. The **API scanner** runs the same module before
+its agentic loop for any `https://` collection base URL (`is_api_run=True`, keyed
+on `api_test_run_id`, categorised `API8 · Security Misconfiguration`).
 
 ### Scan resume
 

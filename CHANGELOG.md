@@ -4,6 +4,40 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #216] July 3–5 Update — Vite/React frontend rewrite, TLS scanner
+
+**Branch:** `vite` (not yet merged to `main`)
+
+### Frontend rewrite: vanilla JS → Vite + React
+
+- **Monolithic app.js replaced with Vite/React source**  under `frontend/src/` (`4e28723`). Now requires `npm run build` after UI changes (agent instructions updated to match).  UI components were split into their own files — e.g. `pages/SiteDetail/` (`WebRunActivityTab`, `WebRunFindingsTab`, `WebRunTrafficTab`, `WebRunSitemapTab`, `WebRunWorkProgramTab`, `WebRunSastLeadsTab`, `TaskGraphPanel`, `AttackSurfacePanel`, `TargetIntelligencePanel`, `ScannerSessionsPanel`), `pages/ApiCollections/*`, and `pages/Settings/*` (provider/model/profile forms, scanner-policy, validator, specialist-agent settings). `styles.css` moved to `frontend/src/`; vendored `d3.js`/`htm.js`/`react*.js` removed.
+- **SPA serving + dev proxy** (`main.py`, `frontend/vite.config.js`): backend serves the built `index.html`/assets; Vite dev config proxies API/WS to the FastAPI server.
+- **d3 sitemap fix** (`69dbb19`): sitemap tab renders under React again; assorted tab components de-duplicated.
+- **Alice chat wiring fixes** (`487c41b`, `4b560d6`): `lib/aliceSession.jsx` reconnect/replay fixed; SAST-leads tab (`WebRunSastLeadsTab`) and `SastRuns` page reworked.
+
+
+### TLS/SSL scanner (`services/tls_scan.py`, `d810ee8`, `1dd6482`)
+
+- **New sslscan-like probe** — pure stdlib `ssl` + the existing `cryptography` dep. Given `host:port`, reports accepted TLS versions (1.0→1.3), weak/non-forward-secret cipher suites, negotiated protocol+cipher, and leaf-cert details (validity, key size, sig alg, SANs, self-signed, hostname match), then derives an `issues` list the agent can turn into an OWASP **A02 Cryptographic Failures** finding.
+- **Deliberate limitation:** SSLv2/SSLv3 are compiled out of Python's linked OpenSSL, so they're reported `"not-testable"` rather than falsely "not supported" (bundling `nassl`/`sslyze` for this would pull in an AGPL dep — intentionally avoided). Blocking socket work runs in a thread via `scan_tls`.
+- **Wired into the scan** (`services/scanner.py`, `api_scanner.py`, `prompts/test_lead.py`): Test Lead gets a TLS tool; TLS findings now land in the normal findings list (`1dd6482`) instead of a separate bucket.
+- Tests: `tests/test_tls_scan.py` (235 lines).
+
+### Test Lead prompt: eager lead resolution (uncommitted)
+
+- **`update_lead` now called immediately** - SAST leads were marked with investigation status at the end of a scan, now they are marked during a scan (via prompt, so may not be 100% reliable...)
+
+### Licensing / packaging
+
+- **Third-party licence generation** (`scripts/generate_third_party_licenses.py`, `d810ee8`): produces a bundled licence file for release artifacts; `.spec`, Dockerfile, and mac/win build scripts updated.
+
+## [develop → main] June 28–30 — Sitewide guidance, release packaging, Alice tuning
+
+- **Sitewide Test Lead guidance** (`c7bedbd`): new `Site.scan_guidance` free-text field (`models.py`, `db.py` migration, `schemas.py`, `api/sites.py`, `services/sites.py`, `web/app.js`) is injected into the Test Lead prompt as *"Operator guidance — follow these instructions"* for every run of that site. Tests in `tests/test_sites_api.py`.
+- **GitHub Actions release packaging** (`8534934`): `.github/workflows/release.yml` builds/packages release artifacts.
+- **Alice max steps 200 → 300** (`272996d`) and an `llm.py` fix (`650c593`).
+- README cleanup and Docker instructions (`9440ef5`, `e643b85`).
+
 ## [PR #209] June 28 Update — Per-task model routing, adaptive login, editable findings
 
 **Branch:** `develop → main`
