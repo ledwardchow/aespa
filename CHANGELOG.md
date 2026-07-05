@@ -4,7 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [PR #TBA] July 3–5 Update — Vite/React frontend rewrite, TLS scanner
+## [PR #216] July 3–5 Update — Vite/React frontend rewrite, TLS scanner
 
 **Branch:** `vite` (not yet merged to `main`)
 
