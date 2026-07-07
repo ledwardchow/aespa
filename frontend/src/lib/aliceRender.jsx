@@ -555,7 +555,7 @@ export const renderMarkdown = text => {
     }
   }
   if (inList) {
-    elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+    elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
   }
   if (inCodeBlock && codeBlockContent.length > 0) {
     elements.push(<div className="alice-code-block-wrapper">
