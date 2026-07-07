@@ -108,6 +108,52 @@ def _menubar_icon() -> NSImage:
     return img
 
 
+def _install_edit_menu() -> None:
+    """Wire ⌘X/⌘C/⌘V/⌘A into the web view.
+
+    WKWebView copy/paste works through the responder chain, which is only
+    reachable if a main menu exposes the cut:/copy:/paste:/selectAll: actions.
+    A menubar-only app has no main menu by default, so without this the
+    keyboard shortcuts are dead. Items have nil targets on purpose — that's
+    what makes them route to the first responder (the web view).
+    """
+    main = NSMenu.alloc().init()
+
+    app_item = NSMenuItem.alloc().init()
+    main.addItem_(app_item)
+    app_menu = NSMenu.alloc().init()
+    app_menu.addItem_(
+        NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit AESPA", "terminate:", "q"
+        )
+    )
+    app_item.setSubmenu_(app_menu)
+
+    edit_item = NSMenuItem.alloc().init()
+    main.addItem_(edit_item)
+    edit_menu = NSMenu.alloc().initWithTitle_("Edit")
+    for title, action, key in (
+        ("Undo", "undo:", "z"),
+        ("Redo", "redo:", "Z"),
+        (None, None, None),
+        ("Cut", "cut:", "x"),
+        ("Copy", "copy:", "c"),
+        ("Paste", "paste:", "v"),
+        ("Select All", "selectAll:", "a"),
+    ):
+        if title is None:
+            edit_menu.addItem_(NSMenuItem.separatorItem())
+        else:
+            edit_menu.addItem_(
+                NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    title, action, key
+                )
+            )
+    edit_item.setSubmenu_(edit_menu)
+
+    NSApplication.sharedApplication().setMainMenu_(main)
+
+
 class Controller(NSObject):
     def initWithURL_(self, url):
         self = objc.super(Controller, self).init()
@@ -134,6 +180,7 @@ class Controller(NSObject):
         menu.addItem_(quit_item)
         self._status.setMenu_(menu)
 
+        _install_edit_menu()
         self.showWindow_(None)
 
     def showWindow_(self, _sender):

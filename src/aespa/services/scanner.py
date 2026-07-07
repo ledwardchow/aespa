@@ -192,6 +192,13 @@ def _playwright_proxy() -> dict:
     return {}
 
 
+def _playwright_launch_args() -> list[str]:
+    # Chromium bypasses the proxy for localhost/127.0.0.1/*.local by default, so
+    # traffic to a loopback target never reaches Burp/ZAP. <-loopback> removes that
+    # bypass. Only when a proxy is set — otherwise it's a harmless no-op.
+    return ["--proxy-bypass-list=<-loopback>"] if _scanner_proxy_var.get() else []
+
+
 def _playwright_global_headers(session_extra_headers: dict | None = None) -> dict[str, str]:
     """Merge global extra header with session-specific extra headers for Playwright contexts."""
     merged = dict(_scanner_global_header_var.get())
@@ -4329,7 +4336,7 @@ async def _do_thinking_scan(run_id: int) -> None:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=_playwright_launch_args())
         browser_ctx = await browser.new_context(user_agent=_UA, ignore_https_errors=True, **_playwright_proxy())
         initial_headers = _playwright_global_headers()
         if initial_headers:
