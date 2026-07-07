@@ -129,7 +129,7 @@ export function WebRunFindingsTab(props) {
               // "Validation (…)" note, so drop the duplicate evidence items here.
               return items.filter(it => it && it.type !== "validation_verdict" && it.type !== "validation_reasoning");
             };
-            const renderFinding = (f, keyPrefix = "") => <>
+            const renderFinding = (f, keyPrefix = "") => <React.Fragment key={keyPrefix + f.id}>
                   <tr key={keyPrefix + f.id} className="finding-instance-row" onClick={() => {
                 if (editingFinding === f.id) return;
                 setExpandedFinding(expandedFinding === f.id ? null : f.id);
@@ -348,10 +348,10 @@ export function WebRunFindingsTab(props) {
                   })()}
                       </td>
                     </tr>}
-                </>;
+                </React.Fragment>;
             const renderStatusRows = (statusGroups, keyPrefix) => statusGroups.map(g => {
               const groupKey = keyPrefix + ":" + g.title;
-              return <>
+              return <React.Fragment key={groupKey}>
                     <tr key={groupKey} className="finding-group-row" onClick={() => toggleGroup(groupKey)}>
                       <td><span className={"sev-badge sev-" + g.topSev}>{g.topSev}</span></td>
                       <td><span className="source-badge">{sourceLabel(g.source)}</span></td>
@@ -363,7 +363,7 @@ export function WebRunFindingsTab(props) {
                       <td></td>
                     </tr>
                     {expandedGroups.has(groupKey) && g.items.map(f => renderFinding(f, keyPrefix + "-"))}
-                  </>;
+                  </React.Fragment>;
             });
             const unconfirmedRows = renderStatusRows(unconfirmedGroups, "unconfirmed");
             const fpRows = renderStatusRows(fpGroups, "fp");
@@ -382,8 +382,8 @@ export function WebRunFindingsTab(props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {groups.map(g => <>
-                      <tr key={g.title} className="finding-group-row" onClick={() => toggleGroup(g.title)}>
+                    {groups.map(g => <React.Fragment key={g.title}>
+                      <tr className="finding-group-row" onClick={() => toggleGroup(g.title)}>
                         <td><span className={"sev-badge sev-" + g.topSev}>{g.topSev}</span></td>
                         <td><span className="source-badge">{sourceLabel(g.source)}</span></td>
                         <td className="finding-title">
@@ -396,7 +396,7 @@ export function WebRunFindingsTab(props) {
                         </td>
                       </tr>
                       {expandedGroups.has(g.title) && g.items.map(f => renderFinding(f))}
-                    </>)}
+                    </React.Fragment>)}
                     {unconfirmedCount > 0 && <>
                       <tr key={UNCONFIRMED_GROUP_KEY} className="finding-group-row" onClick={() => toggleGroup(UNCONFIRMED_GROUP_KEY)}>
                         <td><span className="val-badge val-unconfirmed">unconfirmed</span></td>
