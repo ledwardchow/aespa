@@ -4,9 +4,27 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #220] July 7 Update — upstream proxy fixes, macOS clipboard, packaging
+
+**Branch:** `develop`
+
+### Upstream proxy now actually routes traffic (fix #218)
+
+- **ALICE traffic honours the upstream proxy** (`services/alice.py`): new `_apply_upstream_proxy` sets the scanner/LLM proxy ContextVars at the start of each web/API ALICE turn — previously ALICE ran in a fresh context with the vars unset, so every request bypassed Burp/ZAP.
+- **Loopback targets reach the proxy** (`services/scanner.py`, `services/crawler.py`): Chromium bypasses the proxy for `localhost`/`127.0.0.1`/`*.local` by default. New `_playwright_launch_args()` (and matching args in the crawler) pass `--proxy-bypass-list=<-loopback>` when a proxy is configured, so loopback-target traffic is captured. No-op when no proxy is set.
+
+### macOS build: clipboard shortcuts (fix #219)
+
+- **Edit menu wired into the menubar app** (`desktop.py`): `_install_edit_menu` installs a main menu exposing `cut:/copy:/paste:/selectAll:` (plus undo/redo, quit) with nil targets so ⌘X/⌘C/⌘V/⌘A route through the responder chain to the WKWebView. A menubar-only app has no main menu by default, which is why copy/paste were previously dead.
+
+### Packaging & frontend
+
+- **Versioned DMG artifact** (`make_dmg.sh`, `release.yml`): DMG is now named `AESPA-macos-v<version>.dmg` (read from `pyproject.toml`); release upload uses `RELEASE_PAT` instead of the default `GITHUB_TOKEN`.
+- **d3 sitemap gravity adjustment** (`app.js`, `SiteDetail.jsx`) and scope/palette color constants exported from `SiteDetail/_helpers.jsx`.
+
 ## [PR #216] July 3–5 Update — Vite/React frontend rewrite, TLS scanner
 
-**Branch:** `vite` (not yet merged to `main`)
+**Branch:** `vite` 
 
 ### Frontend rewrite: vanilla JS → Vite + React
 
