@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
 export function ApiTestRunForm({
   collectionId
@@ -38,15 +39,7 @@ export function ApiTestRunForm({
     }
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href={`#/apis/${collectionId}`} style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>API collection</a>
-        <span className="breadcrumb-sep"> / </span>New test run
-      </div>
-    </div>
+    <PageHeader title={<><Crumb href={`#/apis/${collectionId}`}>API collection</Crumb><Sep />New test run</>} />
     <div className="content scroll-content">
       {error && <div className="alert error">{error}</div>}
       <form className="card" style={{

@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { StatusBadge } from "../../components/StatusBadge";
+import { EmptyState } from "../../components/EmptyState";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
 export function ApiCollectionDetail({
   collectionId
@@ -117,22 +120,14 @@ export function ApiCollectionDetail({
     }}>✓</span>;
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href="#/apis" style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>APIs</a>
-        <span className="breadcrumb-sep"> / </span>
-        {collection ? collection.name : "…"}
-      </div>
-      <div className="topbar-actions">
+    <PageHeader
+      title={<><Crumb href="#/apis">APIs</Crumb><Sep />{collection ? collection.name : "…"}</>}
+      actions={<>
         {collection && <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/files`)}>Manage files</button>}
         {collection && <button className="btn danger-outline" onClick={onPurgeData} disabled={purging}>{purging ? "Purging…" : "Purge data"}</button>}
         {collection && <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>Edit collection</button>}
         {collection && <button className="btn danger-outline" onClick={onDelete}>Delete</button>}
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content stack">
       {error && <div className="alert error">{error}</div>}
       {collection && <>
@@ -305,19 +300,15 @@ export function ApiCollectionDetail({
             </div>
           </div>
           {endpoints === null && <div className="subtle">Loading…</div>}
-          {endpoints !== null && endpoints.length === 0 && <div className="empty-state" style={{
-            padding: "32px 16px"
-          }}>
-              <div className="empty-icon">⬡</div>
-              <div className="empty-msg">No endpoints yet</div>
-              <div className="empty-sub">
+          {endpoints !== null && endpoints.length === 0 && <EmptyState style={{ padding: "32px 16px" }}
+            title="No endpoints yet"
+            sub={<>
                 Upload an <strong>OpenAPI/Swagger</strong> or <strong>Postman</strong> file via <strong>Manage files</strong> — it parses automatically.<br />
                 <span style={{
                 color: "var(--muted)",
                 fontSize: 11
               }}>Markdown/text files use LLM extraction and require an active LLM profile in Settings.</span>
-              </div>
-            </div>}
+              </>} />}
           {endpoints !== null && endpoints.length > 0 && <div className="table-wrap" style={{
             overflowX: "auto"
           }}>
@@ -413,7 +404,7 @@ export function ApiCollectionDetail({
                   <td><a href={`#/api-runs/${r.id}/status`} style={{
                     fontWeight: 600
                   }}>{r.name}</a></td>
-                  <td><span className={`badge ${r.status === "completed" ? "success" : r.status === "running" ? "warning" : r.status === "failed" ? "danger" : "neutral"}`}>{r.status}</span></td>
+                  <td><StatusBadge status={r.status} /></td>
                   <td>{r.coverage_mode}</td>
                   <td style={{
                   fontSize: 12,

@@ -8,6 +8,8 @@ import { useFindings } from "./SiteDetail/useFindings";
 import { useActivity } from "./SiteDetail/useActivity";
 import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, workProgramToMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
 import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import * as d3 from "d3";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
@@ -77,20 +79,12 @@ export function SiteDetail({
     }
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href="#/" style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>Sites</a>
-        <span className="breadcrumb-sep"> / </span>
-        {site ? site.name : "…"}
-      </div>
-      <div className="topbar-actions">
+    <PageHeader
+      title={<><Crumb href="#/">Sites</Crumb><Sep />{site ? site.name : "…"}</>}
+      actions={<>
         {site && <button className="btn secondary" onClick={() => nav(`#/sites/${siteId}/edit`)}>Edit site</button>}
         <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content stack">
       {error && <div className="alert error">{error}</div>}
 
@@ -220,13 +214,10 @@ export function SiteDetail({
           }}>Test Runs</div>
         </div>
         {runs === null && <div className="subtle">Loading…</div>}
-        {runs !== null && runs.length === 0 && <div className="empty-state" style={{
-          padding: "32px"
-        }}>
-            <div className="empty-msg">No test runs yet</div>
-            <div className="empty-sub">Create a new run to start crawling this site.</div>
-            <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>
-          </div>}
+        {runs !== null && runs.length === 0 && <EmptyState icon={null} style={{ padding: "32px" }}
+            title="No test runs yet"
+            sub="Create a new run to start crawling this site."
+            action={<button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>} />}
         {runs && runs.length > 0 && <div className="table-wrap">
             <table>
               <colgroup>
@@ -1073,21 +1064,17 @@ export function TestRunDetail({
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
   return <>
-    <div className="topbar">
-      <div className="topbar-title" style={{
+    <PageHeader titleStyle={{
         flexDirection: "column",
         alignItems: "flex-start",
         gap: 2
-      }}>
+      }} title={<>
         <div className="row" style={{
           alignItems: "center",
           gap: 0
         }}>
-          <a href={run ? `#/sites/${run.site_id}` : "#/"} style={{
-            color: "var(--muted)",
-            fontWeight: 400
-          }}>{siteName || "Site"}</a>
-          <span className="breadcrumb-sep"> / </span>
+          <Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb>
+          <Sep />
           {run ? run.name : "…"}
           {run && <span className={"run-status-badge" + (["running", "stopping"].includes(headerStatus.key) ? " running" : "")} style={{
             color: STATUS_COLOR[headerStatus.key] || "var(--muted)"
@@ -1103,8 +1090,8 @@ export function TestRunDetail({
             name: "#" + run.llm_profile_id
           }).name}
           </div>}
-      </div>
-      <div className="topbar-actions">
+      </>}
+      actions={<>
         {canStart && <button className="btn sm" onClick={onStart}><IconPlay /> Start crawl</button>}
         {!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus === "idle" || effectiveThinkingStatus === "complete" || effectiveThinkingStatus === "stopped" || effectiveThinkingStatus === "failed" || effectiveThinkingStatus == null) && <>
           <label className="subtle" style={{
@@ -1133,8 +1120,7 @@ export function TestRunDetail({
           color: "var(--danger)",
           background: "rgba(239,68,68,.08)"
         }} onClick={handleAliceStop} title="Stop the running A.L.I.C.E. agent"><IconStop /> Stop A.L.I.C.E.</button>}
-      </div>
-    </div>
+      </>} />
 
     <div className="content" style={{
       paddingBottom: 0,
