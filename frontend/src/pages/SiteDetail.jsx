@@ -3,11 +3,10 @@ import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
 import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { api, formatError } from "../lib/api";
 import { nav } from "../lib/router";
-import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceRender";
 import { useAliceChat } from "./SiteDetail/useAliceChat";
 import { useFindings } from "./SiteDetail/useFindings";
 import { useActivity } from "./SiteDetail/useActivity";
-import { fmtDate, truncUrl, sourceLabel, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, workProgramToMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
+import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, workProgramToMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
 import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
 import * as d3 from "d3";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
@@ -1073,95 +1072,6 @@ export function TestRunDetail({
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
-  // Shared prop bag for the Findings/Activity tabs — bundled once and spread
-  // so the two call sites aren't 40-attribute walls. Extra props a tab ignores
-  // are harmless. ponytail: object-spread over a context Provider (no middle layer).
-  const runProps = {
-    activityLog,
-    tokenUsage,
-    setTokenExpanded,
-    tokenExpanded,
-    activitySubTab,
-    setActivitySubTab,
-    agents,
-    normalizeAgentForRun,
-    activityFeedRef,
-    runId,
-    clearBusy,
-    confirm,
-    setClearBusy,
-    setClearError,
-    api,
-    setActivityLog,
-    setSitePlanData,
-    setTokenUsage,
-    sitePlanData,
-    expandedLogIds,
-    toggleLogId,
-    truncUrl,
-    collapsedAgentIds,
-    toggleAgentId,
-    defaultAgentRoster,
-    representsAgent,
-    aliceChats,
-    activeAliceTabId,
-    setActiveAliceTabId,
-    deleteAliceTab,
-    createAliceTab,
-    aliceChatHeight,
-    aliceMessages,
-    parseAliceTurnSegments,
-    renderMarkdown,
-    renderAliceTraceBox,
-    aliceExpandedThinkIds,
-    setAliceExpandedThinkIds,
-    renderAliceBlocks,
-    aliceThinkingTabId,
-    startAliceResize,
-    aliceInputText,
-    aliceIsThinking,
-    handleAliceSend,
-    setAliceInputText,
-    handleAliceStop,
-    agentRoleLabel,
-    agentCurrentTask,
-    agentCrawlEvents,
-    agentTaskHistory,
-    agentStatusLabel,
-    thinkingStatus,
-    thinkingStopRequested,
-    validateStatus,
-    onStopValidation,
-    dedupeBusy,
-    findings,
-    onExportFindingsMarkdown,
-    onImportFindingsClick,
-    issueImportInputRef,
-    onImportFindingsFile,
-    validateBusy,
-    onValidateAll,
-    onDeduplicateFindings,
-    setFindings,
-    isDynamicScanActive,
-    editingFinding,
-    setExpandedFinding,
-    expandedFinding,
-    onValidateFinding,
-    onEditFinding,
-    onDeleteFinding,
-    editDraft,
-    setEditDraft,
-    editBusy,
-    onCancelEditFinding,
-    onSaveEditFinding,
-    navigator,
-    toggleGroup,
-    sourceLabel,
-    expandedGroups,
-    findColW,
-    startFindResize,
-    onDeleteFindingGroup
-  };
   return <>
     <div className="topbar">
       <div className="topbar-title" style={{
@@ -1592,7 +1502,22 @@ export function TestRunDetail({
           </div>}
       </div>
 
-      {activeTab === "findings" && <WebRunFindingsTab {...runProps} />}
+      {activeTab === "findings" && <WebRunFindingsTab
+        thinkingStatus={thinkingStatus} thinkingStopRequested={thinkingStopRequested}
+        validateStatus={validateStatus} onStopValidation={onStopValidation}
+        dedupeBusy={dedupeBusy} findings={findings}
+        onExportFindingsMarkdown={onExportFindingsMarkdown} onImportFindingsClick={onImportFindingsClick}
+        issueImportInputRef={issueImportInputRef} onImportFindingsFile={onImportFindingsFile}
+        validateBusy={validateBusy} onValidateAll={onValidateAll} aliceIsThinking={aliceIsThinking}
+        onDeduplicateFindings={onDeduplicateFindings} clearBusy={clearBusy}
+        setClearBusy={setClearBusy} setClearError={setClearError} runId={runId} setFindings={setFindings}
+        editingFinding={editingFinding} setExpandedFinding={setExpandedFinding} expandedFinding={expandedFinding}
+        onValidateFinding={onValidateFinding} onEditFinding={onEditFinding} onDeleteFinding={onDeleteFinding}
+        editDraft={editDraft} setEditDraft={setEditDraft} editBusy={editBusy}
+        onCancelEditFinding={onCancelEditFinding} onSaveEditFinding={onSaveEditFinding}
+        toggleGroup={toggleGroup} expandedGroups={expandedGroups} findColW={findColW}
+        startFindResize={startFindResize} onDeleteFindingGroup={onDeleteFindingGroup}
+      />}
 
       {activeTab === "intelligence" && <TargetIntelligencePanel data={targetIntel} selectedKind={targetIntelKind} onKind={setTargetIntelKind} refresh={() => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(() => {})} onClear={async () => {
         if (!confirm("Clear all target intelligence for this run?")) return;
@@ -1625,7 +1550,24 @@ export function TestRunDetail({
 
       {activeTab === "sessions" && <ScannerSessionsPanel runId={runId} data={scannerSessions} refresh={() => api.getScannerSessions(runId).then(setScannerSessions).catch(() => {})} />}
 
-      {activeTab === "activity" && <WebRunActivityTab {...runProps} />}
+      {activeTab === "activity" && <WebRunActivityTab
+        activityLog={activityLog} tokenUsage={tokenUsage} setTokenExpanded={setTokenExpanded}
+        tokenExpanded={tokenExpanded} activitySubTab={activitySubTab} setActivitySubTab={setActivitySubTab}
+        agents={agents} normalizeAgentForRun={normalizeAgentForRun} activityFeedRef={activityFeedRef}
+        runId={runId} clearBusy={clearBusy} setClearBusy={setClearBusy} setClearError={setClearError}
+        setActivityLog={setActivityLog} setSitePlanData={setSitePlanData} setTokenUsage={setTokenUsage}
+        sitePlanData={sitePlanData} expandedLogIds={expandedLogIds} toggleLogId={toggleLogId}
+        collapsedAgentIds={collapsedAgentIds} toggleAgentId={toggleAgentId}
+        defaultAgentRoster={defaultAgentRoster} representsAgent={representsAgent}
+        aliceChats={aliceChats} activeAliceTabId={activeAliceTabId} setActiveAliceTabId={setActiveAliceTabId}
+        deleteAliceTab={deleteAliceTab} createAliceTab={createAliceTab} aliceChatHeight={aliceChatHeight}
+        aliceMessages={aliceMessages} aliceExpandedThinkIds={aliceExpandedThinkIds}
+        setAliceExpandedThinkIds={setAliceExpandedThinkIds} aliceThinkingTabId={aliceThinkingTabId}
+        startAliceResize={startAliceResize} aliceInputText={aliceInputText} aliceIsThinking={aliceIsThinking}
+        handleAliceSend={handleAliceSend} setAliceInputText={setAliceInputText} handleAliceStop={handleAliceStop}
+        agentRoleLabel={agentRoleLabel} agentCurrentTask={agentCurrentTask} agentCrawlEvents={agentCrawlEvents}
+        agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel}
+      />}
 
       {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} activeTab={activeTab} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} setTrafficTotal={setTrafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
       {activeTab === "workprogram" && <div className="content scroll-content" style={{
