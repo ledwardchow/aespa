@@ -442,7 +442,10 @@ async def _crawl_as_credential(
     local_pages = 0  # pages actually navigated to by this credential
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # <-loopback> removes Chromium's default proxy bypass for localhost so
+        # loopback-target traffic reaches Burp/ZAP when a proxy is configured.
+        _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
+        browser = await p.chromium.launch(headless=True, args=_args)
         ctx = await browser.new_context(
             user_agent=_UA,
             ignore_https_errors=True,
@@ -2416,7 +2419,8 @@ async def _reconcile_direct_access(
         f"{len(creds)} credential(s)",
     )
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        _args = ["--proxy-bypass-list=<-loopback>"] if pw_proxy else []
+        browser = await p.chromium.launch(headless=True, args=_args)
         try:
             for cred in creds:
                 if run_id in _stop_requested:

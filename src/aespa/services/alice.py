@@ -24,6 +24,25 @@ from aespa.services.settings import (
 log = logging.getLogger(__name__)
 
 
+def _apply_upstream_proxy(session: Session) -> None:
+    """Route ALICE's scanner + LLM traffic through the configured upstream proxy.
+
+    ALICE's HTTP (`_make_scanner_client`), browser (`_playwright_proxy`) and LLM
+    clients all read the proxy ContextVars set here; without this call they run in
+    a fresh context with the vars unset and every request bypasses Burp/ZAP.
+    """
+    from aespa.services.scanner import _scanner_proxy_var
+    from aespa.services.settings import get_upstream_proxy_config
+
+    cfg = get_upstream_proxy_config(session)
+    _scanner_proxy_var.set(cfg.proxy_url if cfg.proxy_scanner else None)
+    llm_svc.set_llm_proxy(cfg.proxy_url if cfg.proxy_llm else None)
+    log.info(
+        "ALICE upstream proxy: url=%s scanner=%s llm=%s",
+        cfg.proxy_url, cfg.proxy_scanner, cfg.proxy_llm,
+    )
+
+
 def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
     """Return the configured request timeout, falling back to the scanner default."""
     from aespa.services.scanner import REQUEST_TIMEOUT
@@ -1020,6 +1039,7 @@ async def run_alice_turn_stream(
 
         site_id = site.id
         base_url = str(site.base_url or "").strip()
+        _apply_upstream_proxy(s)
 
     # Load the per-run session vault so ALICE carries stored authenticated
     # sessions (configured credentials, registered/forged tokens) instead of
@@ -1954,6 +1974,7 @@ async def run_api_alice_turn_stream(
         collection_id = collection.id
         collection_scope_hosts = collection.scope_hosts
         collection_servers = collection.servers
+        _apply_upstream_proxy(s)
 
     # Load stored API credentials into the session vault so http_request
     # can carry authentication automatically.
