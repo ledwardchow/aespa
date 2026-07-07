@@ -29,6 +29,8 @@ from AppKit import (
     NSOpenPanel,
     NSSavePanel,
     NSStatusBar,
+    NSTerminateCancel,
+    NSTerminateNow,
     NSTextField,
     NSVariableStatusItemLength,
     NSWindow,
@@ -159,6 +161,7 @@ class Controller(NSObject):
         self = objc.super(Controller, self).init()
         self._url = url
         self._window = None
+        self._quitting = False
         return self
 
     def applicationDidFinishLaunching_(self, _notification):
@@ -340,7 +343,21 @@ class Controller(NSObject):
     def applicationShouldTerminateAfterLastWindowClosed_(self, _sender):
         return False
 
+    def applicationShouldTerminate_(self, _sender):
+        # ⌘Q / app-menu Quit hides the window and keeps the server + scans
+        # running; only the menubar "Quit AESPA" (which sets _quitting) really
+        # exits. Mirrors windowShouldClose_.
+        if self._quitting:
+            return NSTerminateNow
+        if self._window is not None:
+            self._window.orderOut_(None)
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyAccessory
+        )
+        return NSTerminateCancel
+
     def quit_(self, _sender):
+        self._quitting = True
         NSApplication.sharedApplication().terminate_(None)
 
 
