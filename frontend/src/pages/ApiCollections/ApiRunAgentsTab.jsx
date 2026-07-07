@@ -2,7 +2,8 @@ import { _buildAgentsFromLog } from "./_buildAgentsFromLog";
 import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { api, formatError } from "../../lib/api";
 import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery, renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../../lib/aliceSession";
+import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
+import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../../lib/aliceRender";
 import { IconApis, IconPlus, IconPlay, IconShield, IconChevronRight, IconMessageSquare, IconSend } from "../../components/Icons";
 
 
