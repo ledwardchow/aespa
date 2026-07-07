@@ -1,6 +1,10 @@
 import React from "react";
+import { api } from "../../lib/api";
+import { renderMarkdown } from "../../lib/aliceRender";
+import { sourceLabel } from "../../lib/utilities";
+import { isDynamicScanActive } from "./_helpers";
 export function WebRunFindingsTab(props) {
-  const { thinkingStatus, thinkingStopRequested, validateStatus, onStopValidation, dedupeBusy, findings, onExportFindingsMarkdown, onImportFindingsClick, issueImportInputRef, onImportFindingsFile, validateBusy, onValidateAll, aliceIsThinking, onDeduplicateFindings, clearBusy, confirm, setClearBusy, setClearError, api, runId, setFindings, isDynamicScanActive, editingFinding, setExpandedFinding, expandedFinding, onValidateFinding, onEditFinding, onDeleteFinding, editDraft, setEditDraft, editBusy, onCancelEditFinding, onSaveEditFinding, renderMarkdown, navigator, toggleGroup, sourceLabel, expandedGroups, findColW, startFindResize, onDeleteFindingGroup } = props;
+  const { thinkingStatus, thinkingStopRequested, validateStatus, onStopValidation, dedupeBusy, findings, onExportFindingsMarkdown, onImportFindingsClick, issueImportInputRef, onImportFindingsFile, validateBusy, onValidateAll, aliceIsThinking, onDeduplicateFindings, clearBusy, setClearBusy, setClearError, runId, setFindings, editingFinding, setExpandedFinding, expandedFinding, onValidateFinding, onEditFinding, onDeleteFinding, editDraft, setEditDraft, editBusy, onCancelEditFinding, onSaveEditFinding, toggleGroup, expandedGroups, findColW, startFindResize, onDeleteFindingGroup } = props;
   return (
     <>
       <div className="findings-panel">
