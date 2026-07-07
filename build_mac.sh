@@ -25,7 +25,13 @@ echo "==> Building isolated build env (non-editable install)"
 BUILD_VENV="build/venv"
 rm -rf "$BUILD_VENV"
 uv venv "$BUILD_VENV" >/dev/null
-VIRTUAL_ENV="$BUILD_VENV" uv pip install --quiet . pyinstaller pyobjc-framework-WebKit
+# Constrain to uv.lock so the bundled Playwright matches the dev env. Without
+# this, `.`'s `playwright>=…` spec resolves to the newest release, whose browser
+# build (e.g. v1228) differs from what dev/users have cached (v1223) — the app
+# then can't find its headless-shell and first-run must re-download 260MB.
+VIRTUAL_ENV="$BUILD_VENV" uv pip install --quiet \
+    --constraint <(uv export --no-emit-project --no-hashes) \
+    . pyinstaller pyobjc-framework-WebKit
 
 echo "==> Generating THIRD_PARTY_LICENSES.txt"
 # Attribution for the bundled MIT/BSD/Apache/MPL deps. Run against the build venv

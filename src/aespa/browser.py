@@ -50,14 +50,18 @@ def download_chromium_if_missing() -> None:
     """Download Chromium into the configured dir if it isn't there. Blocking.
 
     No-op outside a packaged app. Safe to run on a background thread.
+
+    We always invoke Playwright's installer rather than short-circuiting on a
+    glob: `playwright install` is idempotent — it skips browsers already at the
+    expected revision (no network) and downloads only what's missing. A loose
+    "any chromium-* dir exists" check breaks on Playwright upgrades, where the
+    bundled driver wants a newer build (e.g. chromium_headless_shell-1228) than
+    the stale cached one (…-1223), yet the check wrongly reports "installed".
     """
     if not _bundled():
         return
 
     target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
-    if any(target.glob("chromium-*")):  # already installed
-        return
-
     target.mkdir(parents=True, exist_ok=True)
     print(f"[aespa] First run: downloading Chromium into {target} ...", flush=True)
     if getattr(sys, "frozen", False):
