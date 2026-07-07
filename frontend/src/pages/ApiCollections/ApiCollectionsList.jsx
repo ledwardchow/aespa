@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
 import { IconPlus } from "../../components/Icons";
+import { EmptyState } from "../../components/EmptyState";
+import { PageHeader } from "../../components/PageHeader";
 
 export function ApiCollectionsList() {
   const [collections, setCollections] = useState(null);
@@ -46,27 +48,22 @@ export function ApiCollectionsList() {
     }
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">APIs</div>
-      <div className="topbar-actions">
+    <PageHeader title="APIs" actions={<>
         <input ref={importRef} type="file" accept=".json" style={{
           display: "none"
         }} onChange={onImportFile} />
         <button className="btn secondary" onClick={() => importRef.current.click()} disabled={importing}>{importing ? "Importing…" : "Import API"}</button>
         <button className="btn" onClick={() => nav("#/apis/new")}><IconPlus /> New API collection</button>
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content">
       {error && <div className="alert error" style={{
         marginBottom: 16
       }}>{error}</div>}
       {collections === null && <div className="subtle">Loading…</div>}
-      {collections !== null && collections.length === 0 && <div className="empty-state">
-          <div className="empty-icon">⬡</div>
-          <div className="empty-msg">No API collections yet</div>
-          <div className="empty-sub">Create a collection, upload API docs, and run structured API security tests.</div>
-          <button className="btn" onClick={() => nav("#/apis/new")}><IconPlus /> New API collection</button>
-        </div>}
+      {collections !== null && collections.length === 0 && <EmptyState
+        title="No API collections yet"
+        sub="Create a collection, upload API docs, and run structured API security tests."
+        action={<button className="btn" onClick={() => nav("#/apis/new")}><IconPlus /> New API collection</button>} />}
       {collections && collections.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>

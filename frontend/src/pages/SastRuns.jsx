@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { LeadsPanel } from "./ApiCollections/LeadsPanel";
 import { api, formatError } from "../lib/api";
 import { nav } from "../lib/router";
+import { StatusBadge } from "../components/StatusBadge";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { aliceSessionSubscribe, _aliceFlushRecovery } from "../lib/aliceSession";
 import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../components/Icons";
 
@@ -47,32 +50,23 @@ export function SastRunsListPage() {
       setUploading(false);
     }
   };
-  const statusBadge = s => {
-    const cls = s === "completed" ? "ok" : s === "failed" ? "danger" : s === "scanning" ? "running" : "neutral";
-    return <span className={"badge " + cls}>{s}</span>;
-  };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">SAST Scans</div>
-      <div className="topbar-actions">
+    <PageHeader title="SAST Scans" actions={<>
         <input ref={fileInputRef} type="file" accept=".zip" style={{
           display: "none"
         }} onChange={onUpload} />
         <button className="btn primary sm" disabled={uploading} onClick={() => fileInputRef.current && fileInputRef.current.click()}>
           {uploading ? "Uploading…" : "New SAST Scan"}
         </button>
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content">
       {error && <div className="alert error" style={{
         marginBottom: 16
       }}>{error}</div>}
       {runs === null && <div className="subtle">Loading…</div>}
-      {runs !== null && runs.length === 0 && <div className="empty-state">
-          <div className="empty-icon">🔍</div>
-          <div className="empty-msg">No SAST scans yet</div>
-          <div className="empty-sub">Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web scan.</div>
-        </div>}
+      {runs !== null && runs.length === 0 && <EmptyState icon="🔍"
+        title="No SAST scans yet"
+        sub={'Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web scan.'} />}
       {runs && runs.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>
@@ -93,7 +87,7 @@ export function SastRunsListPage() {
                 <td><a href={`#/sast-runs/${r.id}/progress`} style={{
                   fontWeight: 600
                 }}>{r.name}</a></td>
-                <td>{statusBadge(r.status)}</td>
+                <td><StatusBadge status={r.status} /></td>
                 <td>{r.leads_count}</td>
                 <td>{r.triggered_by_run_id ? <a href={`#/api-runs/${r.triggered_by_run_id}/status`}>API run #{r.triggered_by_run_id}</a> : <span className="subtle">{r.source_filename || "standalone"}</span>}</td>
                 <td>{r.started_at ? new Date(r.started_at).toLocaleString() : <span className="subtle">—</span>}</td>
@@ -168,35 +162,24 @@ export function SastRunDetail({
   };
   
   const canStart = run && !scanRunning && ["pending", "completed", "failed", "cancelled"].includes(run.status);
-  const statusBadge = s => {
-    const cls = s === "completed" ? "success" : s === "scanning" || s === "running" ? "warning" : s === "failed" || s === "cancelled" ? "danger" : "neutral";
-    return <span className={"badge " + cls}>{s}</span>;
-  };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        {run && run.collection_id ? <><a href={`#/apis/${run.collection_id}`} style={{
-            color: "var(--muted)",
-            fontWeight: 400
-          }}>API collection</a><span className="breadcrumb-sep"> / </span></> : run ? <><a href="#/sast-runs" style={{
-            color: "var(--muted)",
-            fontWeight: 400
-          }}>SAST</a><span className="breadcrumb-sep"> / </span></> : ""}
+    <PageHeader
+      title={<>
+        {run && run.collection_id ? <><Crumb href={`#/apis/${run.collection_id}`}>API collection</Crumb><Sep /></> : run ? <><Crumb href="#/sast-runs">SAST</Crumb><Sep /></> : ""}
         {run ? run.name : "…"}
-        {run && <> {statusBadge(scanRunning ? "scanning" : run.status)}</>}
+        {run && <> <StatusBadge status={scanRunning ? "scanning" : run.status} /></>}
         {run?.triggered_by_run_id && <>
           <span className="breadcrumb-sep"> · </span>
           <a href={`#/api-runs/${run.triggered_by_run_id}/status`} style={{
             fontSize: 12,
             color: "var(--muted)"
           }}>API Run #{run.triggered_by_run_id}</a></>}
-      </div>
-      <div className="topbar-actions">
+      </>}
+      actions={<>
         {canStart && <button className="btn" disabled={startBusy} onClick={onStart}>{startBusy ? "Starting…" : "Start SAST Scan"}</button>}
         {scanRunning && <button className="btn danger-outline" onClick={onStop}>Stop</button>}
         {run && <button className="btn danger-outline" onClick={onDelete}>Delete</button>}
-      </div>
-    </div>
+      </>} />
     <div className="tab-bar">
       {SAST_TABS.map(t => <button key={t.key} className={"tab-btn" + (tab === t.key ? " active" : "")} onClick={() => {
         setTab(t.key);
