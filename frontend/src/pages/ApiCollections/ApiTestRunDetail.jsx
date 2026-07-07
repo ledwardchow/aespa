@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { StatusBadge } from "../../components/StatusBadge";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 import { ApiRunStatusTab } from "./ApiRunStatusTab";
 import { ApiRunFindingsTab } from "./ApiRunFindingsTab";
 import { ApiRunLeadsTab } from "./ApiRunLeadsTab";
@@ -151,23 +153,16 @@ export function ApiTestRunDetail({
       setError(e.message);
     }
   };
-  const statusBadge = s => {
-    const cls = s === "completed" ? "success" : s === "running" || s === "scanning" ? "warning" : s === "failed" || s === "cancelled" ? "danger" : "neutral";
-    return <span className={"badge " + cls}>{s}</span>;
-  };
   const scanRunning = scanStatus?.running === true;
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href={run ? `#/apis/${run.collection_id}` : "#/apis"} style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>API collection</a>
-        <span className="breadcrumb-sep"> / </span>
+    <PageHeader
+      title={<>
+        <Crumb href={run ? `#/apis/${run.collection_id}` : "#/apis"}>API collection</Crumb>
+        <Sep />
         {run ? run.name : "…"}
-        {run && <> {statusBadge(run.status)}</>}
-      </div>
-      <div className="topbar-actions">
+        {run && <> <StatusBadge status={run.status} /></>}
+      </>}
+      actions={<>
         {scanRunning ? <button className="btn danger-outline" disabled={scanBusy} onClick={onStopScan}>
                    {scanBusy ? "Stopping…" : "Stop Scan"}
                  </button> : <>
@@ -187,8 +182,7 @@ export function ApiTestRunDetail({
               {scanBusy ? "Starting…" : "Start Scan"}
             </button></>}
         {run && <button className="btn danger-outline" onClick={onDelete}>Delete</button>}
-      </div>
-    </div>
+      </>} />
     <div className="tab-bar">
       {API_RUN_TABS.map(t => <button key={t.key} className={"tab-btn" + (tab === t.key ? " active" : "")} onClick={() => nav(`#/api-runs/${runId}/${t.key}`)}>{t.label}</button>)}
     </div>

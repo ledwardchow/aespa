@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
 export function ApiCollectionForm({
   collectionId
@@ -58,15 +59,11 @@ export function ApiCollectionForm({
       setSaving(false);
     }
   };
-  const bc = isEdit ? <><a href={`#/apis/${collectionId}`} style={{
-      color: "var(--muted)",
-      fontWeight: 400
-    }}>{form.name || "API collection"}</a><span className="breadcrumb-sep"> / </span>Edit</> : <><a href="#/apis" style={{
-      color: "var(--muted)",
-      fontWeight: 400
-    }}>APIs</a><span className="breadcrumb-sep"> / </span>New API collection</>;
+  const bc = isEdit
+    ? <><Crumb href={`#/apis/${collectionId}`}>{form.name || "API collection"}</Crumb><Sep />Edit</>
+    : <><Crumb href="#/apis">APIs</Crumb><Sep />New API collection</>;
   return <>
-    <div className="topbar"><div className="topbar-title">{bc}</div></div>
+    <PageHeader title={bc} />
     <div className="content scroll-content">
       {loading && <div className="subtle">Loading…</div>}
       {!loading && <form className="card" onSubmit={onSubmit}>

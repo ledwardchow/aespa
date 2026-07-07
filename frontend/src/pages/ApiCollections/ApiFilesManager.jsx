@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { StatusBadge } from "../../components/StatusBadge";
+import { EmptyState } from "../../components/EmptyState";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
 export function fmtBytes(n) {
   if (n === null || n === undefined) return "—";
@@ -120,27 +123,20 @@ export function ApiFilesManager({
     return <span className="badge neutral">uploaded</span>;
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href="#/apis" style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>APIs</a>
-        <span className="breadcrumb-sep"> / </span>
-        <a href={`#/apis/${collectionId}`} style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>{collection ? collection.name : "…"}</a>
-        <span className="breadcrumb-sep"> / </span>
+    <PageHeader
+      title={<>
+        <Crumb href="#/apis">APIs</Crumb>
+        <Sep />
+        <Crumb href={`#/apis/${collectionId}`}>{collection ? collection.name : "…"}</Crumb>
+        <Sep />
         Files
-      </div>
-      <div className="topbar-actions">
+      </>}
+      actions={<>
         <input ref={fileRef} type="file" multiple style={{
           display: "none"
         }} onChange={onPick} />
         <button className="btn" onClick={() => fileRef.current.click()} disabled={uploading}>{uploading ? "Uploading…" : "Upload files"}</button>
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content stack">
       {error && <div className="alert error">{error}</div>}
       <div className={"upload-dropzone" + (dragOver ? " dragover" : "")} onDragOver={e => {
@@ -181,13 +177,9 @@ export function ApiFilesManager({
         }}>View endpoints →</a>
         </div>}
       {docs === null && <div className="subtle">Loading…</div>}
-      {docs !== null && docs.length === 0 && <div className="empty-state" style={{
-        padding: "24px 16px"
-      }}>
-          <div className="empty-icon">📄</div>
-          <div className="empty-msg">No files uploaded yet</div>
-          <div className="empty-sub">Upload API documentation to attach it to this collection.</div>
-        </div>}
+      {docs !== null && docs.length === 0 && <EmptyState icon="📄" style={{ padding: "24px 16px" }}
+        title="No files uploaded yet"
+        sub="Upload API documentation to attach it to this collection." />}
       {docs && docs.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>
@@ -268,7 +260,7 @@ export function ApiFilesManager({
                 <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
                 <tbody>{sastRuns.map(sr => <tr key={sr.id}>
                     <td>{sr.name}</td>
-                    <td><span className={"badge " + (sr.status === "completed" ? "ok" : sr.status === "failed" ? "danger" : sr.status === "scanning" ? "running" : "neutral")}>{sr.status}</span></td>
+                    <td><StatusBadge status={sr.status} /></td>
                     <td>{sr.leads_count}</td>
                     <td>{sr.triggered_by_run_id ? <a href={`#/api-runs/${sr.triggered_by_run_id}/status`}>API run #{sr.triggered_by_run_id}</a> : <span className="subtle">—</span>}</td>
                     <td>{sr.started_at ? new Date(sr.started_at).toLocaleString() : "—"}</td>

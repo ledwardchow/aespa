@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useContext } from "react";
 import { truncUrl, fmtDate } from "../lib/utilities";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
+import { EmptyState } from "../components/EmptyState";
 
 // ── Active jobs ───────────────────────────────────────────────────────────────
 
@@ -88,11 +89,9 @@ export function ActiveJobsPage() {
         marginBottom: 16
       }}>{error}</div>}
       {jobs === null && <div className="subtle">Loading…</div>}
-      {jobs !== null && jobs.length === 0 && <div className="empty-state">
-          <div className="empty-icon">▶</div>
-          <div className="empty-msg">No active jobs</div>
-          <div className="empty-sub">Running crawls and scans will appear here.</div>
-        </div>}
+      {jobs !== null && jobs.length === 0 && <EmptyState icon="▶"
+        title="No active jobs"
+        sub="Running crawls and scans will appear here." />}
       {jobs && jobs.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>
