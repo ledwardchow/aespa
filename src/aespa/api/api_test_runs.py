@@ -93,12 +93,20 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
             .where(AliceChatMessage.session_id == s.id)
             .order_by(AliceChatMessage.position, AliceChatMessage.id)
         ).all()
+        def _safe_step_data(raw: str) -> dict:
+            try:
+                parsed = json.loads(raw or "{}")
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+
         chats.append({
             "id": s.session_key,
             "title": s.title,
             "messages": [
                 {"id": m.message_key, "sender": m.sender,
-                 "type": m.type, "text": m.text, "ts": m.ts}
+                 "type": m.type, "text": m.text, "ts": m.ts,
+                 "stepData": _safe_step_data(m.step_data_json)}
                 for m in msg_rows
             ],
         })

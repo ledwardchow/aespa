@@ -373,6 +373,7 @@ export function TestRunDetail({
     validateStatus,
     setValidateStatus,
     validateBusy,
+    setValidateBusy,
     dedupeBusy,
     expandedFinding,
     setExpandedFinding,
@@ -587,7 +588,19 @@ export function TestRunDetail({
           poc_setup: evt.poc_setup ?? f.poc_setup
         } : f));
         // Refresh validation status summary when an individual finding resolves.
-        api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
+        api.getValidateStatus(runId).then(vs => {
+          setValidateStatus(vs);
+          if (vs.status !== "running") {
+            setValidateBusy(false);
+            api.getFindings(runId).then(setFindings).catch(() => {});
+          }
+        }).catch(() => {});
+      } else if (evt.type === "validation_status_update") {
+        setValidateStatus(evt);
+        if (evt.status !== "running") {
+          setValidateBusy(false);
+          api.getFindings(runId).then(setFindings).catch(() => {});
+        }
       } else if (evt.type === "agent_status") {
         const ts = new Date().toLocaleTimeString("en-US", {
           hour12: false,

@@ -235,7 +235,22 @@ def test_alice_sessions_save_and_reload(client):
             {
                 "id": "tab-default",
                 "title": "Session 1",
-                "messages": [{"id": "m1", "sender": "user", "type": "message", "text": "hello", "ts": "12:00"}],
+                "messages": [
+                    {"id": "m1", "sender": "user", "type": "message", "text": "hello", "ts": "12:00"},
+                    {
+                        "id": "m2",
+                        "sender": "alice",
+                        "type": "thinking",
+                        "text": "[Step 1] Executing tool: context_tool",
+                        "ts": "12:01",
+                        "stepData": {
+                            "1": {
+                                "llmMessages": [],
+                                "tools": [{"tool": "context_tool", "input": {"tool": "finding_list"}, "result": "{\"count\":0}"}],
+                            }
+                        },
+                    },
+                ],
             }
         ],
         "active_tab_id": "tab-default",
@@ -248,6 +263,7 @@ def test_alice_sessions_save_and_reload(client):
     body = r2.json()
     assert len(body["chats"]) == 1
     assert body["chats"][0]["messages"][0]["text"] == "hello"
+    assert body["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["result"] == "{\"count\":0}"
 
 
 def test_alice_sessions_404(client):
