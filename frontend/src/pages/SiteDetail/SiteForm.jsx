@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
+import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 import { IconPlus } from "../../components/Icons";
 
 export function SiteForm({
@@ -110,12 +111,11 @@ export function SiteForm({
       setSaving(false);
     }
   };
-  const bc = isEdit ? <><a href={`#/sites/${siteId}`} style={{
-      color: "var(--muted)",
-      fontWeight: 400
-    }}>{form.name || "Site"}</a><span className="breadcrumb-sep"> / </span>Edit</> : "New site";
+  const bc = isEdit
+    ? <><Crumb href={`#/sites/${siteId}`}>{form.name || "Site"}</Crumb><Sep />Edit</>
+    : "New site";
   return <>
-    <div className="topbar"><div className="topbar-title">{bc}</div></div>
+    <PageHeader title={bc} />
     <div className="content scroll-content">
       {loading && <div className="subtle">Loading…</div>}
       {!loading && <form className="card" onSubmit={onSubmit}>

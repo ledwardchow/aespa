@@ -1,12 +1,15 @@
-import { ALICE_DEDUP_DIRECTIVE, OWASP_WEB_LABELS } from "./SiteDetail/_constants";
+import { OWASP_WEB_LABELS } from "./SiteDetail/_constants";
 import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
 import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { api, formatError } from "../lib/api";
 import { nav } from "../lib/router";
-import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../lib/aliceSession";
 import { useAliceChat } from "./SiteDetail/useAliceChat";
-import { parseDate, fmtDate, truncUrl, sourceLabel, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, downloadTextFile, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
+import { useFindings } from "./SiteDetail/useFindings";
+import { useActivity } from "./SiteDetail/useActivity";
+import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, workProgramToMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
 import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
+import { EmptyState } from "../components/EmptyState";
+import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import * as d3 from "d3";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
@@ -15,6 +18,7 @@ import { WebRunSitemapTab } from "./SiteDetail/WebRunSitemapTab";
 import { GuidedLoginItem } from "./SiteDetail/GuidedLoginItem";
 import { scopeColor, SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_PALETTE, USER_BOTH_COLOR, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
+export { TestRunForm } from "./SiteDetail/TestRunForm";
 export { useColResize };
 // ── Site detail ───────────────────────────────────────────────────────────────
 
@@ -75,20 +79,12 @@ export function SiteDetail({
     }
   };
   return <>
-    <div className="topbar">
-      <div className="topbar-title">
-        <a href="#/" style={{
-          color: "var(--muted)",
-          fontWeight: 400
-        }}>Sites</a>
-        <span className="breadcrumb-sep"> / </span>
-        {site ? site.name : "…"}
-      </div>
-      <div className="topbar-actions">
+    <PageHeader
+      title={<><Crumb href="#/">Sites</Crumb><Sep />{site ? site.name : "…"}</>}
+      actions={<>
         {site && <button className="btn secondary" onClick={() => nav(`#/sites/${siteId}/edit`)}>Edit site</button>}
         <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>
-      </div>
-    </div>
+      </>} />
     <div className="content scroll-content stack">
       {error && <div className="alert error">{error}</div>}
 
@@ -218,13 +214,10 @@ export function SiteDetail({
           }}>Test Runs</div>
         </div>
         {runs === null && <div className="subtle">Loading…</div>}
-        {runs !== null && runs.length === 0 && <div className="empty-state" style={{
-          padding: "32px"
-        }}>
-            <div className="empty-msg">No test runs yet</div>
-            <div className="empty-sub">Create a new run to start crawling this site.</div>
-            <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>
-          </div>}
+        {runs !== null && runs.length === 0 && <EmptyState icon={null} style={{ padding: "32px" }}
+            title="No test runs yet"
+            sub="Create a new run to start crawling this site."
+            action={<button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}><IconPlus /> New run</button>} />}
         {runs && runs.length > 0 && <div className="table-wrap">
             <table>
               <colgroup>
@@ -315,15 +308,6 @@ export function TestRunDetail({
   useEffect(() => {
     api.listLLMProfiles().then(setRunProfiles).catch(() => {});
   }, []);
-  const [activityLog, setActivityLog] = useState([]);
-  const [expandedLogIds, setExpandedLogIds] = useState(new Set());
-  const toggleLogId = id => setExpandedLogIds(prev => {
-    const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
-    return next;
-  });
-  const [activitySubTab, setActivitySubTab] = useState("agents");
-  const [agents, setAgents] = useState([]);
   const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
   const toggleAgentId = aid => setCollapsedAgentIds(prev => {
     const next = new Set(prev);
@@ -358,30 +342,12 @@ export function TestRunDetail({
       return next;
     })
   });
-  const [tokenUsage, setTokenUsage] = useState(null); // {total_input, total_output, by_model}
-  const [tokenExpanded, setTokenExpanded] = useState(false);
-  const [sitePlanData, setSitePlanData] = useState(null);
-  const activityFeedRef = useRef(null);
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [coverageMode, setCoverageMode] = useState("track");
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
-  const [validateStatus, setValidateStatus] = useState(null);
-  const [validateBusy, setValidateBusy] = useState(false);
-  const [dedupeBusy, setDedupeBusy] = useState(false);
-  const [findings, setFindings] = useState([]);
-  const [expandedFinding, setExpandedFinding] = useState(null);
-  const [editingFinding, setEditingFinding] = useState(null); // finding id being edited
-  const [editDraft, setEditDraft] = useState(null); // working copy of the edited finding
-  const [editBusy, setEditBusy] = useState(false);
-  const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
-  const toggleGroup = title => setExpandedGroups(prev => {
-    const next = new Set(prev);
-    next.has(title) ? next.delete(title) : next.add(title);
-    return next;
-  });
   const [traffic, setTraffic] = useState([]);
 
   const [trafficTotal, setTrafficTotal] = useState(0);
@@ -393,14 +359,86 @@ export function TestRunDetail({
   
   
   const lastTrafficIdRef = useRef(0);
-  const issueImportInputRef = useRef(null);
   const [error, setError] = useState(null);
   const svgRef = useRef(null);
   const simRef = useRef(null);
   const prevGraphKeyRef = useRef("");
   const lastRunPollOkRef = useRef(Date.now());
-  const [findColW, startFindResize] = useColResize("colw:findings", [80, 52, null, 28, 60]);
   const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
+  // Findings state, effects and handlers live in this hook; the SSE stream
+  // below writes through the setFindings/setValidateStatus it returns.
+  const {
+    findings,
+    setFindings,
+    validateStatus,
+    setValidateStatus,
+    validateBusy,
+    dedupeBusy,
+    expandedFinding,
+    setExpandedFinding,
+    editingFinding,
+    editDraft,
+    setEditDraft,
+    editBusy,
+    expandedGroups,
+    toggleGroup,
+    issueImportInputRef,
+    findColW,
+    startFindResize,
+    onDeleteFinding,
+    onDeleteFindingGroup,
+    onValidateAll,
+    onDeduplicateFindings,
+    onExportFindingsMarkdown,
+    onImportFindingsClick,
+    onImportFindingsFile,
+    onValidateFinding,
+    onEditFinding,
+    onCancelEditFinding,
+    onSaveEditFinding,
+    onStopValidation
+  } = useFindings(runId, activeTab, {
+    run,
+    siteName,
+    submitAliceDirective,
+    aliceIsThinking,
+    setRun,
+    setGraph,
+    setError
+  });
+  // Activity log, agent roster + its label/task helpers, and token usage. The
+  // SSE stream below writes through the setters this returns.
+  const {
+    activityLog,
+    setActivityLog,
+    expandedLogIds,
+    toggleLogId,
+    activitySubTab,
+    setActivitySubTab,
+    agents,
+    setAgents,
+    tokenUsage,
+    setTokenUsage,
+    tokenExpanded,
+    setTokenExpanded,
+    sitePlanData,
+    setSitePlanData,
+    activityFeedRef,
+    upsertAgent,
+    normalizeAgentForRun,
+    defaultAgentRoster,
+    representsAgent,
+    agentRoleLabel,
+    agentCurrentTask,
+    agentCrawlEvents,
+    agentTaskHistory,
+    agentStatusLabel
+  } = useActivity(runId, activeTab, {
+    run,
+    thinkingStatus,
+    aliceIsThinking,
+    lastRunPollOkRef
+  });
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -420,279 +458,6 @@ export function TestRunDetail({
   useEffect(() => {
     loadAll();
   }, [loadAll]);
-  const agentRoleLabel = agent => {
-    if (agent?.id === "crawler") return "Crawler";
-    if (agent?.id === "scanner") return "Test Lead";
-    if (agent?.id === "alice") return "A.L.I.C.E";
-    return agent?.role || "Agent";
-  };
-  const normalizeAgentForRun = agent => {
-    if (agent?.id !== "crawler") return agent;
-    if (run?.status === "running") return {
-      ...agent,
-      status: "active"
-    };
-    if (Date.now() - lastRunPollOkRef.current > 10000) {
-      return {
-        ...agent,
-        status: "idle",
-        currentTask: "Crawler connection stale"
-      };
-    }
-    return {
-      ...agent,
-      status: agent.status === "failed" ? "failed" : "idle",
-      currentTask: agent.currentTask || "Crawl is not running"
-    };
-  };
-  const defaultAgentRoster = () => [{
-    id: "alice",
-    role: "A.L.I.C.E",
-    status: aliceIsThinking ? "active" : "idle",
-    currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction"
-  }, {
-    id: "crawler",
-    role: "Crawler",
-    status: run?.status === "running" ? "active" : "idle",
-    currentTask: run?.status === "running" ? "" : "Waiting for crawl"
-  }, {
-    id: "scanner",
-    role: "Test Lead",
-    status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
-    currentTask: isDynamicScanActive(thinkingStatus?.status) ? "Coordinating pentest" : "Standing by"
-  }, {
-    id: "specialist",
-    role: "Specialist",
-    status: "idle",
-    currentTask: "No specialist dispatched"
-  }, {
-    id: "burp",
-    role: "Burp",
-    status: "idle",
-    currentTask: "No active scan dispatched"
-  }, {
-    id: "validator",
-    role: "Validator",
-    status: "idle",
-    currentTask: "No validation running"
-  }, {
-    id: "reporting",
-    role: "Reporting",
-    status: thinkingStatus?.status === "analysing" ? "active" : "idle",
-    currentTask: thinkingStatus?.status === "analysing" ? "Analysing probe results…" : "Standing by"
-  }];
-  const representsAgent = (agent, placeholder) => {
-    if (agent.id === placeholder.id) return true;
-    if (placeholder.id === "burp") return agent.role === "Burp" || agent.id?.startsWith("burp-");
-    if (placeholder.id === "validator") return agent.role === "Validator" || agent.id?.startsWith("validator-");
-    if (placeholder.id === "specialist") return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
-    if (placeholder.id === "reporting") return agent.role === "Reporting" || agent.id === "reporting";
-    return false;
-  };
-  const fmtEventTime = value => {
-    if (!value) return "--:--:--";
-    try {
-      return parseDate(value).toLocaleTimeString("en-US", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
-      });
-    } catch {
-      return "--:--:--";
-    }
-  };
-  const crawlEventsFromRun = () => {
-    const progress = run?.per_user_progress || {};
-    const labelByUsername = new Map((run?.credentials || []).map(c => [c.username, c.label || c.username]));
-    return Object.entries(progress).filter(([, p]) => p && (p.current_url || p.done || p.pages_visited)).map(([username, p]) => ({
-      ts: fmtEventTime(p.updated_at),
-      username: labelByUsername.get(username) || username || "anonymous",
-      url: p.current_url || "",
-      pagesVisited: p.pages_visited || 0,
-      done: !!p.done
-    }));
-  };
-  const mergeCrawlEvents = (liveEvents, threadEvents) => {
-    const seen = new Set();
-    return [...(liveEvents || []), ...threadEvents].filter(event => {
-      const key = `${event.username || ""}:${event.url || ""}:${event.pagesVisited || 0}:${event.done ? 1 : 0}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  };
-  const agentCrawlEvents = agent => agent?.id === "crawler" ? mergeCrawlEvents(agent.crawlEvents || [], crawlEventsFromRun()) : [];
-  const compactAgentText = (value, max = 180) => {
-    const text = String(value || "").replace(/\s+/g, " ").trim();
-    return text.length > max ? text.slice(0, max - 1) + "…" : text;
-  };
-  const thinkingStepTitle = entry => {
-    const step = entry.data?.step;
-    const prefix = step ? `Step ${step}` : "Step";
-    const message = String(entry.message || "").replace(/^Step\s+\d+:\s*/i, "").trim();
-    const isDuplicateStep = value => !value || /^Step\s+\d+$/i.test(String(value).trim());
-    let detail = entry.data?.payload_purpose || entry.data?.hypothesis || entry.data?.observation || entry.data?.payload_summary || message;
-    if (isDuplicateStep(detail)) {
-      if (entry.data?.tool) {
-        detail = `Context tool: ${entry.data.tool}`;
-      } else if (entry.data?.method && entry.data?.url) {
-        detail = `${entry.data.method} ${truncUrl(entry.data.url, 110)}${entry.data.status !== undefined ? ` → ${entry.data.status}` : ""}`;
-      } else if (message && !isDuplicateStep(message)) {
-        detail = message;
-      } else if (entry.status === "deciding") {
-        detail = "LLM deciding next action";
-      } else {
-        detail = "Reviewing scan state";
-      }
-    }
-    const cleaned = compactAgentText(detail || "Reviewing next action");
-    return `${prefix}: ${cleaned}`;
-  };
-  const thinkingStepOutcome = entry => {
-    const parts = [];
-    if (entry.data?.tool) parts.push(`Tool: ${entry.data.tool}`);
-    if (entry.data?.method && entry.data?.url) parts.push(`${entry.data.method}: ${truncUrl(entry.data.url, 120)}`);
-    if (entry.data?.observation) parts.push(`Observed: ${compactAgentText(entry.data.observation, 140)}`);
-    if (entry.data?.hypothesis) parts.push(`Hypothesis: ${compactAgentText(entry.data.hypothesis, 140)}`);
-    if (entry.data?.payload_purpose) parts.push(`Purpose: ${compactAgentText(entry.data.payload_purpose, 140)}`);
-    if (entry.data?.payload_summary) parts.push(`Payload: ${compactAgentText(entry.data.payload_summary, 120)}`);
-    if (entry.data?.status !== undefined) parts.push(`Status: ${entry.data.status}`);
-    return parts.join(" · ");
-  };
-  const testLeadHistory = () => activityLog.filter(entry => entry.phase === "thinking_step").map(entry => ({
-    ts: entry._ts || "--:--:--",
-    task: thinkingStepTitle(entry),
-    outcome: thinkingStepOutcome(entry)
-  }));
-  const agentTaskHistory = agent => agent?.id === "scanner" && testLeadHistory().length ? testLeadHistory() : agent?.taskHistory || [];
-  const agentCurrentTask = agent => {
-    agent = normalizeAgentForRun(agent);
-    const crawlEvents = agentCrawlEvents(agent);
-    if (agent?.id === "crawler" && crawlEvents.length) {
-      if (agent.status !== "active") {
-        const label = run?.status === "failed" ? "Crawl failed" : run?.status === "stopped" ? "Crawl stopped" : run?.status === "complete" ? "Crawl complete" : "Crawl is not running";
-        return agent.outcome ? `${label} · ${agent.outcome}` : label;
-      }
-      const active = [...crawlEvents].reverse().find(h => !h.done && h.url);
-      const latest = active || crawlEvents[crawlEvents.length - 1];
-      if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
-      return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
-    }
-    if (agent?.id === "scanner" && testLeadHistory().length) {
-      if (agent.status !== "active") return "Standing by";
-      return testLeadHistory()[testLeadHistory().length - 1].task;
-    }
-    return agent?.currentTask || "Waiting for work";
-  };
-  const agentStatusLabel = agent => {
-    if (agent?.status === "active") return "ACTIVE";
-    if (agent?.status === "idle") return "IDLE";
-    if (agent?.status === "failed") return "FAILED";
-    return "COMPLETE";
-  };
-  const upsertAgent = (items, patch, histEntry = null) => {
-    const normalized = {
-      ...patch,
-      role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role
-    };
-    const idx = items.findIndex(a => a.id === normalized.id);
-    if (idx === -1) {
-      return [...items, {
-        ...normalized,
-        taskHistory: histEntry ? [histEntry] : [],
-        crawlEvents: normalized.crawlEvents || []
-      }];
-    }
-    const updated = [...items];
-    const prev = updated[idx];
-    updated[idx] = {
-      ...prev,
-      ...normalized,
-      taskHistory: histEntry ? [...(prev.taskHistory || []), histEntry].slice(-200) : prev.taskHistory || [],
-      crawlEvents: normalized.crawlEvents || prev.crawlEvents || []
-    };
-    return updated;
-  };
-
-  // Seed activity log from persisted DB entries on mount so it survives navigation.
-  useEffect(() => {
-    api.getScanLog(runId).then(entries => {
-      if (!entries || entries.length === 0) return;
-      setActivityLog(entries.map(e => {
-        const ts = e._persisted_at ? parseDate(e._persisted_at).toLocaleTimeString("en-US", {
-          hour12: false,
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }) : "--:--:--";
-        return {
-          ...e,
-          _ts: ts,
-          _id: "db-" + e._persisted_at + "-" + e.phase + "-" + e.status
-        };
-      }));
-      // Restore site plan data from persisted log.
-      const planComplete = entries.find(e => e.phase === "site_plan" && e.status === "complete" && e.data);
-      if (planComplete) setSitePlanData(planComplete.data);
-    }).catch(() => {});
-  }, [runId]);
-
-  // Seed agents panel from persisted DB entries on mount.
-  // Also fetches the live scan status so stale "active" agents left by a
-  // force-killed process are reconciled back to "idle" immediately.
-  useEffect(() => {
-    Promise.all([api.getAgentLog(runId), api.getThinkingStatus(runId)]).then(([entries, scanStatus]) => {
-      if (!entries || entries.length === 0) return;
-      const scanRunning = isDynamicScanActive(scanStatus?.status);
-      const agentsMap = new Map();
-      for (const e of entries) {
-        const entryTs = e.created_at ? parseDate(e.created_at).toLocaleTimeString("en-US", {
-          hour12: false,
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }) : "--:--:--";
-        const role = e.agent_id === "crawler" ? "Crawler" : e.agent_id === "scanner" ? "Test Lead" : e.role;
-        const existing = agentsMap.get(e.agent_id) || {
-          id: e.agent_id,
-          role,
-          status: e.status,
-          currentTask: e.current_task,
-          taskHistory: [],
-          crawlEvents: []
-        };
-        existing.status = e.status;
-        existing.role = role;
-        existing.currentTask = e.current_task;
-        existing.taskHistory.push({
-          ts: entryTs,
-          task: e.current_task,
-          outcome: e.outcome
-        });
-        agentsMap.set(e.agent_id, existing);
-      }
-      // If no scan is running, reset any stale "active" agents to "idle".
-      if (!scanRunning) {
-        for (const [id, agent] of agentsMap) {
-          if (agent.status === "active" && id !== "crawler") {
-            agentsMap.set(id, {
-              ...agent,
-              status: "idle"
-            });
-          }
-        }
-      }
-      setAgents([...agentsMap.values()]);
-    }).catch(() => {});
-  }, [runId]);
-
-  // Load token usage from the API on mount (in-process memory, best effort).
-  useEffect(() => {
-    api.getTokenUsage(runId).then(d => {
-      if (d) setTokenUsage(d);
-    }).catch(() => {});
-  }, [runId]);
 
   // SSE: receive incremental graph + status updates — no graph polling needed
   useEffect(() => {
@@ -937,16 +702,6 @@ export function TestRunDetail({
     return () => clearInterval(iv);
   }, [run?.status, runId, crawlStopRequested]);
 
-  // Poll findings when on findings tab.
-  useEffect(() => {
-    if (activeTab !== "findings") return;
-    api.getFindings(runId).then(setFindings).catch(() => {});
-    const iv = setInterval(() => {
-      api.getFindings(runId).then(setFindings).catch(() => {});
-    }, 4000);
-    return () => clearInterval(iv);
-  }, [runId, activeTab]);
-
   // Poll thinking-scan status independently.
   useEffect(() => {
     const active = isDynamicScanActive(thinkingStatus?.status) || thinkingStopRequested;
@@ -966,24 +721,6 @@ export function TestRunDetail({
     return () => clearInterval(iv);
   }, [runId, thinkingStatus?.status, thinkingStopRequested]);
 
-  // Poll validation status while validating is running
-  useEffect(() => {
-    if (validateStatus?.status !== "running" && activeTab !== "findings") return;
-    const iv = setInterval(() => {
-      api.getValidateStatus(runId).then(vs => {
-        setValidateStatus(vs);
-        if (vs.status !== "running") setValidateBusy(false);
-      }).catch(() => {});
-    }, 3000);
-    return () => clearInterval(iv);
-  }, [runId, validateStatus?.status, activeTab]);
-
-  // Fetch findings when switching to findings tab
-  useEffect(() => {
-    if (activeTab !== "findings") return;
-    api.getFindings(runId).then(setFindings).catch(() => {});
-    api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
-  }, [activeTab, runId]);
   useEffect(() => {
     if (activeTab !== "intelligence" && run?.status !== "running") return;
     const loadIntel = () => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(() => {});
@@ -1046,12 +783,6 @@ export function TestRunDetail({
     const iv = setInterval(poll, 2000);
     return () => clearInterval(iv);
   }, [activeTab, run?.status, thinkingStatus?.status, runId, crawlStopRequested, thinkingStopRequested]);
-
-  // Auto-scroll activity feed when new entries arrive
-  useEffect(() => {
-    if (activeTab !== "activity" || !activityFeedRef.current) return;
-    activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
-  }, [activityLog.length, activeTab]);
 
   // Fetch page detail when node selected
   useEffect(() => {
@@ -1171,158 +902,6 @@ export function TestRunDetail({
   }, [run?.current_url, graph]);
 
 
-  const onDeleteFinding = async (e, findingId) => {
-    e.stopPropagation();
-    try {
-      await api.deleteFinding(runId, findingId);
-      setFindings(prev => prev.filter(f => f.id !== findingId));
-      if (expandedFinding === findingId) setExpandedFinding(null);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const onDeleteFindingGroup = async (e, title) => {
-    e.stopPropagation();
-    if (!confirm(`Delete all instances of "${title}"?`)) return;
-    try {
-      await api.deleteFindingGroup(runId, title);
-      setFindings(prev => prev.filter(f => f.title !== title));
-      setExpandedGroups(prev => {
-        const next = new Set(prev);
-        next.delete(title);
-        return next;
-      });
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const onValidateAll = async () => {
-    if (validateBusy) return;
-    setValidateBusy(true);
-    try {
-      const vs = await api.validateAllFindings(runId);
-      setValidateStatus(vs);
-    } catch (err) {
-      setError(err.message);
-      setValidateBusy(false);
-    }
-  };
-  const onDeduplicateFindings = () => {
-    if (dedupeBusy || aliceIsThinking) return;
-    setDedupeBusy(true);
-    submitAliceDirective(ALICE_DEDUP_DIRECTIVE, {
-      onComplete: () => {
-        api.getFindings(runId).then(setFindings).catch(() => {});
-        api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
-        setExpandedFinding(null);
-        setExpandedGroups(new Set());
-        setDedupeBusy(false);
-      }
-    });
-  };
-  const onExportFindingsMarkdown = () => {
-    try {
-      const md = findingsToMarkdown(findings, {
-        runName: run?.name,
-        siteName,
-        generatedAt: new Date()
-      });
-      downloadTextFile(markdownExportFilename(run, siteName), md, "text/markdown;charset=utf-8");
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const onImportFindingsClick = () => {
-    issueImportInputRef.current?.click();
-  };
-  const onImportFindingsFile = async e => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      const imported = parseFindingsMarkdown(await file.text());
-      if (!imported.length) throw new Error("No issues found in the selected file.");
-      const result = await api.importFindings(runId, imported);
-      setFindings(await api.getFindings(runId));
-      api.getValidateStatus(runId).then(setValidateStatus).catch(() => {});
-      const [r, g] = await Promise.all([api.getRun(runId), api.getGraph(runId)]);
-      setRun(r);
-      setGraph(g);
-      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const onValidateFinding = async (e, findingId) => {
-    e.stopPropagation();
-    try {
-      const updated = await api.validateFinding(runId, findingId);
-      setFindings(prev => prev.map(f => f.id === findingId ? {
-        ...f,
-        ...updated
-      } : f));
-      setValidateStatus(vs => vs ? {
-        ...vs,
-        status: "running"
-      } : vs);
-      setValidateBusy(true);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-  const onEditFinding = (e, f) => {
-    e.stopPropagation();
-    setExpandedFinding(f.id);
-    setEditingFinding(f.id);
-    setEditDraft({
-      severity: f.severity,
-      validation_status: f.validation_status,
-      title: f.title || "",
-      affected_url: f.affected_url || "",
-      cvss_score: f.cvss_score ?? 0,
-      cvss_vector: f.cvss_vector || "",
-      description: f.description || "",
-      impact: f.impact || "",
-      likelihood: f.likelihood || "",
-      recommendation: f.recommendation || ""
-    });
-  };
-  const onCancelEditFinding = e => {
-    e?.stopPropagation?.();
-    setEditingFinding(null);
-    setEditDraft(null);
-  };
-  const onSaveEditFinding = async (e, findingId) => {
-    e?.stopPropagation?.();
-    if (!editDraft || editBusy) return;
-    setEditBusy(true);
-    try {
-      const updated = await api.updateFinding(runId, findingId, {
-        ...editDraft,
-        cvss_score: Number(editDraft.cvss_score) || 0
-      });
-      setFindings(prev => prev.map(f => f.id === findingId ? {
-        ...f,
-        ...updated
-      } : f));
-      setEditingFinding(null);
-      setEditDraft(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setEditBusy(false);
-    }
-  };
-  const onStopValidation = async () => {
-    try {
-      const vs = await api.stopValidation(runId);
-      setValidateStatus(vs);
-      setValidateBusy(false);
-      setFindings(await api.getFindings(runId));
-    } catch (err) {
-      setError(err.message);
-    }
-  };
   const onStopThinkingScan = async () => {
     try {
       setThinkingStopReq(true);
@@ -1484,111 +1063,18 @@ export function TestRunDetail({
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
-  // Shared prop bag for the Findings/Activity tabs — bundled once and spread
-  // so the two call sites aren't 40-attribute walls. Extra props a tab ignores
-  // are harmless. ponytail: object-spread over a context Provider (no middle layer).
-  const runProps = {
-    activityLog,
-    tokenUsage,
-    setTokenExpanded,
-    tokenExpanded,
-    activitySubTab,
-    setActivitySubTab,
-    agents,
-    normalizeAgentForRun,
-    activityFeedRef,
-    runId,
-    clearBusy,
-    confirm,
-    setClearBusy,
-    setClearError,
-    api,
-    setActivityLog,
-    setSitePlanData,
-    setTokenUsage,
-    sitePlanData,
-    expandedLogIds,
-    toggleLogId,
-    truncUrl,
-    collapsedAgentIds,
-    toggleAgentId,
-    defaultAgentRoster,
-    representsAgent,
-    aliceChats,
-    activeAliceTabId,
-    setActiveAliceTabId,
-    deleteAliceTab,
-    createAliceTab,
-    aliceChatHeight,
-    aliceMessages,
-    parseAliceTurnSegments,
-    renderMarkdown,
-    renderAliceTraceBox,
-    aliceExpandedThinkIds,
-    setAliceExpandedThinkIds,
-    renderAliceBlocks,
-    aliceThinkingTabId,
-    startAliceResize,
-    aliceInputText,
-    aliceIsThinking,
-    handleAliceSend,
-    setAliceInputText,
-    handleAliceStop,
-    agentRoleLabel,
-    agentCurrentTask,
-    agentCrawlEvents,
-    agentTaskHistory,
-    agentStatusLabel,
-    thinkingStatus,
-    thinkingStopRequested,
-    validateStatus,
-    onStopValidation,
-    dedupeBusy,
-    findings,
-    onExportFindingsMarkdown,
-    onImportFindingsClick,
-    issueImportInputRef,
-    onImportFindingsFile,
-    validateBusy,
-    onValidateAll,
-    onDeduplicateFindings,
-    setFindings,
-    isDynamicScanActive,
-    editingFinding,
-    setExpandedFinding,
-    expandedFinding,
-    onValidateFinding,
-    onEditFinding,
-    onDeleteFinding,
-    editDraft,
-    setEditDraft,
-    editBusy,
-    onCancelEditFinding,
-    onSaveEditFinding,
-    navigator,
-    toggleGroup,
-    sourceLabel,
-    expandedGroups,
-    findColW,
-    startFindResize,
-    onDeleteFindingGroup
-  };
   return <>
-    <div className="topbar">
-      <div className="topbar-title" style={{
+    <PageHeader titleStyle={{
         flexDirection: "column",
         alignItems: "flex-start",
         gap: 2
-      }}>
+      }} title={<>
         <div className="row" style={{
           alignItems: "center",
           gap: 0
         }}>
-          <a href={run ? `#/sites/${run.site_id}` : "#/"} style={{
-            color: "var(--muted)",
-            fontWeight: 400
-          }}>{siteName || "Site"}</a>
-          <span className="breadcrumb-sep"> / </span>
+          <Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb>
+          <Sep />
           {run ? run.name : "…"}
           {run && <span className={"run-status-badge" + (["running", "stopping"].includes(headerStatus.key) ? " running" : "")} style={{
             color: STATUS_COLOR[headerStatus.key] || "var(--muted)"
@@ -1604,8 +1090,8 @@ export function TestRunDetail({
             name: "#" + run.llm_profile_id
           }).name}
           </div>}
-      </div>
-      <div className="topbar-actions">
+      </>}
+      actions={<>
         {canStart && <button className="btn sm" onClick={onStart}><IconPlay /> Start crawl</button>}
         {!thinkingStopRequested && canStartAnyScan && (effectiveThinkingStatus === "idle" || effectiveThinkingStatus === "complete" || effectiveThinkingStatus === "stopped" || effectiveThinkingStatus === "failed" || effectiveThinkingStatus == null) && <>
           <label className="subtle" style={{
@@ -1634,8 +1120,7 @@ export function TestRunDetail({
           color: "var(--danger)",
           background: "rgba(239,68,68,.08)"
         }} onClick={handleAliceStop} title="Stop the running A.L.I.C.E. agent"><IconStop /> Stop A.L.I.C.E.</button>}
-      </div>
-    </div>
+      </>} />
 
     <div className="content" style={{
       paddingBottom: 0,
@@ -2003,7 +1488,22 @@ export function TestRunDetail({
           </div>}
       </div>
 
-      {activeTab === "findings" && <WebRunFindingsTab {...runProps} />}
+      {activeTab === "findings" && <WebRunFindingsTab
+        thinkingStatus={thinkingStatus} thinkingStopRequested={thinkingStopRequested}
+        validateStatus={validateStatus} onStopValidation={onStopValidation}
+        dedupeBusy={dedupeBusy} findings={findings}
+        onExportFindingsMarkdown={onExportFindingsMarkdown} onImportFindingsClick={onImportFindingsClick}
+        issueImportInputRef={issueImportInputRef} onImportFindingsFile={onImportFindingsFile}
+        validateBusy={validateBusy} onValidateAll={onValidateAll} aliceIsThinking={aliceIsThinking}
+        onDeduplicateFindings={onDeduplicateFindings} clearBusy={clearBusy}
+        setClearBusy={setClearBusy} setClearError={setClearError} runId={runId} setFindings={setFindings}
+        editingFinding={editingFinding} setExpandedFinding={setExpandedFinding} expandedFinding={expandedFinding}
+        onValidateFinding={onValidateFinding} onEditFinding={onEditFinding} onDeleteFinding={onDeleteFinding}
+        editDraft={editDraft} setEditDraft={setEditDraft} editBusy={editBusy}
+        onCancelEditFinding={onCancelEditFinding} onSaveEditFinding={onSaveEditFinding}
+        toggleGroup={toggleGroup} expandedGroups={expandedGroups} findColW={findColW}
+        startFindResize={startFindResize} onDeleteFindingGroup={onDeleteFindingGroup}
+      />}
 
       {activeTab === "intelligence" && <TargetIntelligencePanel data={targetIntel} selectedKind={targetIntelKind} onKind={setTargetIntelKind} refresh={() => api.getTargetIntelligence(runId, targetIntelKind).then(setTargetIntel).catch(() => {})} onClear={async () => {
         if (!confirm("Clear all target intelligence for this run?")) return;
@@ -2036,7 +1536,24 @@ export function TestRunDetail({
 
       {activeTab === "sessions" && <ScannerSessionsPanel runId={runId} data={scannerSessions} refresh={() => api.getScannerSessions(runId).then(setScannerSessions).catch(() => {})} />}
 
-      {activeTab === "activity" && <WebRunActivityTab {...runProps} />}
+      {activeTab === "activity" && <WebRunActivityTab
+        activityLog={activityLog} tokenUsage={tokenUsage} setTokenExpanded={setTokenExpanded}
+        tokenExpanded={tokenExpanded} activitySubTab={activitySubTab} setActivitySubTab={setActivitySubTab}
+        agents={agents} normalizeAgentForRun={normalizeAgentForRun} activityFeedRef={activityFeedRef}
+        runId={runId} clearBusy={clearBusy} setClearBusy={setClearBusy} setClearError={setClearError}
+        setActivityLog={setActivityLog} setSitePlanData={setSitePlanData} setTokenUsage={setTokenUsage}
+        sitePlanData={sitePlanData} expandedLogIds={expandedLogIds} toggleLogId={toggleLogId}
+        collapsedAgentIds={collapsedAgentIds} toggleAgentId={toggleAgentId}
+        defaultAgentRoster={defaultAgentRoster} representsAgent={representsAgent}
+        aliceChats={aliceChats} activeAliceTabId={activeAliceTabId} setActiveAliceTabId={setActiveAliceTabId}
+        deleteAliceTab={deleteAliceTab} createAliceTab={createAliceTab} aliceChatHeight={aliceChatHeight}
+        aliceMessages={aliceMessages} aliceExpandedThinkIds={aliceExpandedThinkIds}
+        setAliceExpandedThinkIds={setAliceExpandedThinkIds} aliceThinkingTabId={aliceThinkingTabId}
+        startAliceResize={startAliceResize} aliceInputText={aliceInputText} aliceIsThinking={aliceIsThinking}
+        handleAliceSend={handleAliceSend} setAliceInputText={setAliceInputText} handleAliceStop={handleAliceStop}
+        agentRoleLabel={agentRoleLabel} agentCurrentTask={agentCurrentTask} agentCrawlEvents={agentCrawlEvents}
+        agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel}
+      />}
 
       {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} activeTab={activeTab} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} setTrafficTotal={setTrafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
       {activeTab === "workprogram" && <div className="content scroll-content" style={{

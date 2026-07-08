@@ -31,10 +31,15 @@ echo "==> Signing nested binaries (every Mach-O, inner-out)"
 # Detect by content (file), not extension — bundled executables like
 # playwright/driver/node have no suffix and `codesign --deep` won't reach them,
 # but the notary scans every Mach-O.
+# Nested binaries get the SAME entitlements as the bundle. Playwright's bundled
+# `node` driver runs V8, which JITs (write+execute memory); under hardened
+# runtime without allow-jit / allow-unsigned-executable-memory the OS kills it
+# mid-run → "Connection closed while reading from the driver" and crawls die.
 find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
   case "$(file -b "$f")" in
     *Mach-O*)
-      codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$f" ;;
+      codesign --force --options runtime --timestamp \
+        --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$f" ;;
   esac
 done
 

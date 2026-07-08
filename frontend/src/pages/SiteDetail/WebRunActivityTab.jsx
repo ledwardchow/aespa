@@ -1,7 +1,10 @@
 import React from "react";
 import { IconSend } from "../../components/Icons";
+import { api } from "../../lib/api";
+import { truncUrl } from "../../lib/utilities";
+import { renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, renderAliceBlocks } from "../../lib/aliceRender";
 export function WebRunActivityTab(props) {
-  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, confirm, setClearBusy, setClearError, api, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, truncUrl, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, parseAliceTurnSegments, renderMarkdown, renderAliceTraceBox, aliceExpandedThinkIds, setAliceExpandedThinkIds, renderAliceBlocks, aliceThinkingTabId, startAliceResize, aliceInputText, aliceIsThinking, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
+  const { activityLog, tokenUsage, setTokenExpanded, tokenExpanded, activitySubTab, setActivitySubTab, agents, normalizeAgentForRun, activityFeedRef, runId, clearBusy, setClearBusy, setClearError, setActivityLog, setSitePlanData, setTokenUsage, sitePlanData, expandedLogIds, toggleLogId, collapsedAgentIds, toggleAgentId, defaultAgentRoster, representsAgent, aliceChats, activeAliceTabId, setActiveAliceTabId, deleteAliceTab, createAliceTab, aliceChatHeight, aliceMessages, aliceExpandedThinkIds, setAliceExpandedThinkIds, aliceThinkingTabId, startAliceResize, aliceInputText, aliceIsThinking, handleAliceSend, setAliceInputText, handleAliceStop, agentRoleLabel, agentCurrentTask, agentCrawlEvents, agentTaskHistory, agentStatusLabel } = props;
   return (
     <>
       <div className="activity-panel">
@@ -437,7 +440,7 @@ export function WebRunActivityTab(props) {
                         if (msg.type === "thinking") {
                           if (!msg.text) return null;
                           const segs = parseAliceTurnSegments(msg.text);
-                          return segs.map((seg, si) => {
+                          return <React.Fragment key={msg.id}>{segs.map((seg, si) => {
                             if (seg.kind === "message") {
                               return <div key={msg.id + ":m" + si} className="alice-msg-row alice-msg-row--alice">
                                         <div className="alice-msg-bubble alice-msg-bubble--alice">
@@ -451,7 +454,7 @@ export function WebRunActivityTab(props) {
                               next.has(segKey) ? next.delete(segKey) : next.add(segKey);
                               return next;
                             }));
-                          });
+                          })}</React.Fragment>;
                         }
                         const isUser = msg.sender === "user";
                         if (!isUser && !msg.text) return null;

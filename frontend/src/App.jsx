@@ -1,6 +1,6 @@
-import { ApiCollectionsList, ApiCollectionForm, ApiCollectionDetail, ApiFilesManager, ApiTestRunForm, ApiTestRunDetail, ApiRunLeadsTab, ApiRunEndpointsTab, ApiRunTrafficTab, _buildAgentsFromLog, ApiRunLogTab, TestRunForm } from "./pages/ApiCollections";
+import { ApiCollectionsList, ApiCollectionForm, ApiCollectionDetail, ApiFilesManager, ApiTestRunForm, ApiTestRunDetail, ApiRunLeadsTab, ApiRunEndpointsTab, ApiRunTrafficTab, _buildAgentsFromLog, ApiRunLogTab } from "./pages/ApiCollections";
 import { SastRunsListPage, SastRunDetail, SastLeadsTab } from "./pages/SastRuns";
-import { SiteDetail, SiteForm, useColResize, TestRunDetail, WebRunWorkProgramTab, ScannerSessionsPanel, AttackSurfacePanel } from "./pages/SiteDetail";
+import { SiteDetail, SiteForm, useColResize, TestRunDetail, TestRunForm, WebRunWorkProgramTab, ScannerSessionsPanel, AttackSurfacePanel } from "./pages/SiteDetail";
 import { SettingsPage, ScanPolicyPage, ExternalIntegrationsPage, DebugPage, ReportingDebugPage } from "./pages/Settings";
 import { ActiveJobsPage } from "./pages/ActiveJobs";
 import { SitesList } from "./pages/SitesList";
