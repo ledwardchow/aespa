@@ -1,179 +1,10 @@
+import { cloneElement } from "react";
 import { IconBrain } from "../components/Icons";
 import { markdownText } from "./utilities";
-// ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
-// Module-level singleton: keeps the stream reader loop alive even when the
-// TestRunDetail component unmounts (user navigates away). Subscribers
-// (React setState callbacks) are registered/deregistered as the component
-// mounts and unmounts. On re-mount, the component can re-subscribe and
-// immediately get the current live state.
-export const aliceSessionStore = {};
-export function getAliceSession(runId, tabId) {
-  const key = `${runId}:${tabId}`;
-  if (!aliceSessionStore[key]) {
-    aliceSessionStore[key] = {
-      active: false,
-      abortController: null,
-      thinkMsgId: null,
-      replyMsgId: null,
-      accumulatedThought: "",
-      accumulatedMessage: "",
-      stepData: {},
-      subscribers: new Set()
-    };
-  }
-  return aliceSessionStore[key];
-}
-export function aliceSessionSubscribe(runId, tabId, handlers) {
-  const session = getAliceSession(runId, tabId);
-  session.subscribers.add(handlers);
-  return () => session.subscribers.delete(handlers);
-}
-export function aliceSessionAbort(runId, tabId) {
-  const key = `${runId}:${tabId}`;
-  const session = aliceSessionStore[key];
-  if (session?.abortController) {
-    session.abortController.abort();
-  }
-}
-export const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
-  try {
-    localStorage.setItem(`alice_recover_${runId}:${tabId}`, JSON.stringify({
-      thinkMsgId,
-      replyMsgId,
-      thought,
-      message
-    }));
-  } catch  {}
-};
+// ── A.L.I.C.E. trace + markdown rendering ──────────────────────────────────
+// Pure view helpers that turn ALICE's streamed thinking/reply text into React
+// elements. No session or network state lives here — see aliceSession.js.
 
-// Connect to /alice/stream?cursor=N and pump events through the session.
-// Called both for fresh sessions (cursor=0) and reconnects after a page refresh.
-export async function aliceSessionConnect(runId, tabId, {
-  thinkMsgId,
-  replyMsgId,
-  cursor = 0,
-  onFinish,
-  onFail
-}) {
-  const session = getAliceSession(runId, tabId);
-  if (session.active) return;
-  session.active = true;
-  session.thinkMsgId = thinkMsgId;
-  session.replyMsgId = replyMsgId;
-  // Re-accumulate from cursor 0 on every connect so the totals are always correct.
-  session.accumulatedThought = "";
-  session.accumulatedMessage = "";
-  session.stepData = {};
-  const controller = new AbortController();
-  session.abortController = controller;
-  try {
-    const response = await fetch(`/api/test-runs/${runId}/alice/stream?cursor=${cursor}`, {
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const {
-        value,
-        done
-      } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, {
-        stream: true
-      });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data: ")) continue;
-        try {
-          const event = JSON.parse(trimmed.slice(6));
-          if (event.type === "thinking_chunk" && event.delta) session.accumulatedThought += event.delta;else if (event.type === "message_chunk" && event.delta) session.accumulatedMessage += event.delta;else if (event.type === "done") {
-            if (event.thought) session.accumulatedThought = event.thought;
-            if (event.message) session.accumulatedMessage = event.message;
-          } else if (event.type === "step_llm_call") {
-            if (!session.stepData[event.step]) session.stepData[event.step] = {
-              llmMessages: [],
-              tools: []
-            };
-            session.stepData[event.step].llmMessages = event.messages || [];
-          } else if (event.type === "step_tool_call") {
-            if (!session.stepData[event.step]) session.stepData[event.step] = {
-              llmMessages: [],
-              tools: []
-            };
-            session.stepData[event.step].tools.push({
-              tool: event.tool,
-              input: event.input,
-              result: null
-            });
-          } else if (event.type === "step_tool_result") {
-            if (!session.stepData[event.step]) session.stepData[event.step] = {
-              llmMessages: [],
-              tools: []
-            };
-            const tools = session.stepData[event.step].tools;
-            if (tools.length > 0 && tools[tools.length - 1].result === null) {
-              tools[tools.length - 1].result = event.result;
-            }
-          }
-          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, session.accumulatedThought, session.accumulatedMessage);
-          session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
-        } catch  {}
-      }
-    }
-    session.subscribers.forEach(h => h.onDone && h.onDone());
-    if (onFinish) onFinish();
-  } catch (err) {
-    session.subscribers.forEach(h => h.onError && h.onError(err));
-    if (onFail) onFail(err);
-  } finally {
-    session.active = false;
-    session.abortController = null;
-  }
-}
-
-// Start a new ALICE turn: POST to /alice/run (starts background task on server),
-// then open the event stream so the client receives events in real time.
-export async function aliceSessionStart(runId, tabId, {
-  userText,
-  historyPayload,
-  thinkMsgId,
-  replyMsgId,
-  onFinish,
-  onFail
-}) {
-  // Seed recovery immediately so a fast refresh can find the message IDs.
-  _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, "", "");
-  try {
-    const resp = await fetch(`/api/test-runs/${runId}/alice/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        message: userText,
-        history: historyPayload,
-        tab_id: tabId,
-        think_msg_id: thinkMsgId,
-        reply_msg_id: replyMsgId
-      })
-    });
-    if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
-  } catch (err) {
-    if (onFail) onFail(err);
-    return;
-  }
-  await aliceSessionConnect(runId, tabId, {
-    thinkMsgId,
-    replyMsgId,
-    cursor: 0,
-    onFinish,
-    onFail
-  });
-}
 const parseToolArgs = text => {
   const args = {};
   const jsonMatch = text.match(/\{.*\}/s);
@@ -594,10 +425,10 @@ export const renderMarkdown = text => {
     const segments = txt.split(inlineRegex);
     return segments.map((seg, _idx) => {
       if (seg.startsWith("`") && seg.endsWith("`")) {
-        return <code className="alice-inline-code">{seg.slice(1, -1)}</code>;
+        return <code key={_idx} className="alice-inline-code">{seg.slice(1, -1)}</code>;
       }
       if (seg.startsWith("**") && seg.endsWith("**")) {
-        return <strong className="alice-bold-text">{seg.slice(2, -2)}</strong>;
+        return <strong key={_idx} className="alice-bold-text">{seg.slice(2, -2)}</strong>;
       }
       return seg;
     });
@@ -625,7 +456,7 @@ export const renderMarkdown = text => {
         codeBlockContent = [];
       } else {
         if (inList) {
-          elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+          elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
           inList = false;
           listItems = [];
         }
@@ -642,7 +473,7 @@ export const renderMarkdown = text => {
     // Tables
     if (trimmed.startsWith("|")) {
       if (inList) {
-        elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+        elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
         inList = false;
         listItems = [];
       }
@@ -665,12 +496,12 @@ export const renderMarkdown = text => {
             <table className="alice-table">
               <thead>
                 <tr>
-                  {headers.map(h => <th>{renderTextWithFormatting(h)}</th>)}
+                  {headers.map((h, hi) => <th key={hi}>{renderTextWithFormatting(h)}</th>)}
                 </tr>
               </thead>
               <tbody>
-                {rows.map(row => <tr>
-                    {row.map(cell => <td>{renderTextWithFormatting(cell)}</td>)}
+                {rows.map((row, ri) => <tr key={ri}>
+                    {row.map((cell, ci) => <td key={ci}>{renderTextWithFormatting(cell)}</td>)}
                   </tr>)}
               </tbody>
             </table>
@@ -682,7 +513,7 @@ export const renderMarkdown = text => {
     // Headers
     if (trimmed.startsWith("### ")) {
       if (inList) {
-        elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+        elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
         inList = false;
         listItems = [];
       }
@@ -691,7 +522,7 @@ export const renderMarkdown = text => {
     }
     if (trimmed.startsWith("## ")) {
       if (inList) {
-        elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+        elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
         inList = false;
         listItems = [];
       }
@@ -709,14 +540,14 @@ export const renderMarkdown = text => {
     // Paragraph
     if (trimmed === "") {
       if (inList) {
-        elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+        elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
         inList = false;
         listItems = [];
       }
       elements.push(<div className="alice-md-space"></div>);
     } else {
       if (inList) {
-        elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+        elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
         inList = false;
         listItems = [];
       }
@@ -724,7 +555,7 @@ export const renderMarkdown = text => {
     }
   }
   if (inList) {
-    elements.push(<ul className="alice-markdown-list">{listItems.map(item => <li>{renderTextWithFormatting(item)}</li>)}</ul>);
+    elements.push(<ul className="alice-markdown-list">{listItems.map((item, li) => <li key={li}>{renderTextWithFormatting(item)}</li>)}</ul>);
   }
   if (inCodeBlock && codeBlockContent.length > 0) {
     elements.push(<div className="alice-code-block-wrapper">
@@ -734,7 +565,8 @@ export const renderMarkdown = text => {
         <pre className="alice-code-block"><code>{codeBlockContent.join("\n")}</code></pre>
       </div>);
   }
-  return elements;
+  // Each pushed node is an array child at the call site, so give it a stable key.
+  return elements.map((el, i) => cloneElement(el, { key: i }));
 };
 
 // Summarize an ALICE thinking trace into a one-line label for the collapsed
