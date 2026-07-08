@@ -1,4 +1,6 @@
 // ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
+import { normalizeAliceText } from "./aliceRender";
+
 // Module-level singleton: keeps the stream reader loop alive even when the
 // TestRunDetail component unmounts (user navigates away). Subscribers
 // (React setState callbacks) are registered/deregistered as the component
@@ -33,13 +35,14 @@ export function aliceSessionAbort(runId, tabId) {
     session.abortController.abort();
   }
 }
-export const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
+export const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message, stepData = {}) => {
   try {
     localStorage.setItem(`alice_recover_${runId}:${tabId}`, JSON.stringify({
       thinkMsgId,
       replyMsgId,
-      thought,
-      message
+      thought: normalizeAliceText(thought),
+      message: normalizeAliceText(message),
+      stepData
     }));
   } catch  {}
 };
@@ -88,9 +91,9 @@ export async function aliceSessionConnect(runId, tabId, {
         if (!trimmed.startsWith("data: ")) continue;
         try {
           const event = JSON.parse(trimmed.slice(6));
-          if (event.type === "thinking_chunk" && event.delta) session.accumulatedThought += event.delta;else if (event.type === "message_chunk" && event.delta) session.accumulatedMessage += event.delta;else if (event.type === "done") {
-            if (event.thought) session.accumulatedThought = event.thought;
-            if (event.message) session.accumulatedMessage = event.message;
+          if (event.type === "thinking_chunk" && event.delta) session.accumulatedThought = normalizeAliceText(session.accumulatedThought + event.delta);else if (event.type === "message_chunk" && event.delta) session.accumulatedMessage = normalizeAliceText(session.accumulatedMessage + event.delta);else if (event.type === "done") {
+            if (event.thought) session.accumulatedThought = normalizeAliceText(event.thought);
+            if (event.message) session.accumulatedMessage = normalizeAliceText(event.message);
           } else if (event.type === "step_llm_call") {
             if (!session.stepData[event.step]) session.stepData[event.step] = {
               llmMessages: [],
@@ -117,7 +120,7 @@ export async function aliceSessionConnect(runId, tabId, {
               tools[tools.length - 1].result = event.result;
             }
           }
-          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, session.accumulatedThought, session.accumulatedMessage);
+          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, session.accumulatedThought, session.accumulatedMessage, session.stepData);
           session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
         } catch  {}
       }
