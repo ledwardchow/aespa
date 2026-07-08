@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useContext } from "react";
 import { nav } from "../lib/router";
 import { api } from "../lib/api";
 import { IconApis, IconPlus, IconPlay, IconShield, IconChevronRight, IconMessageSquare, IconBrain } from "../components/Icons";
+import { EmptyState } from "../components/EmptyState";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
 
@@ -64,12 +65,10 @@ export function SitesList() {
         marginBottom: 16
       }}>{error}</div>}
       {sites === null && <div className="subtle">Loading…</div>}
-      {sites !== null && sites.length === 0 && <div className="empty-state">
-          <div className="empty-icon">⬡</div>
-          <div className="empty-msg">No sites configured</div>
-          <div className="empty-sub">Add a target site to begin setting up your pentest scope.</div>
-          <button className="btn" onClick={() => nav("#/sites/new")}><IconPlus /> New site</button>
-        </div>}
+      {sites !== null && sites.length === 0 && <EmptyState
+        title="No sites configured"
+        sub="Add a target site to begin setting up your pentest scope."
+        action={<button className="btn" onClick={() => nav("#/sites/new")}><IconPlus /> New site</button>} />}
       {sites && sites.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>

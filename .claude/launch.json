@@ -10,7 +10,7 @@
     {
       "name": "aespa-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": ["run", "--prefix", "frontend", "dev"],
       "port": 5173
     }
   ]

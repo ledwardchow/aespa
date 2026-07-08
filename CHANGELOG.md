@@ -4,6 +4,23 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #222] July 8 Update — frontend component extraction, macOS crawl fix
+
+**Branch:** `frontend-refactor`
+
+### Crawls no longer die immediately on the macOS build (`sign_app.sh`)
+
+- **Nested Mach-O binaries now sign with the app entitlements.** Playwright's bundled `node` driver runs V8, which JITs (write+execute memory). Under hardened runtime without `allow-jit` / `allow-unsigned-executable-memory` the OS killed it on startup (`Failed to reserve virtual memory for CodeRange`), Playwright reported *"Connection closed while reading from the driver"*, and every crawl ended instantly. `sign_app.sh` previously passed `--entitlements` only to the outer bundle; it now passes them to every nested Mach-O too. Fixes the GitHub Actions release build as well (CI signs via the same script). Requires a rebuild + re-sign + re-notarize — already-shipped DMGs stay broken.
+
+### Frontend refactor — extract shared components & split god-files
+
+No behavior change intended; this is structural cleanup of the Vite/React SPA.
+
+- **Shared components** (`frontend/src/components/`): `PageHeader` (+ `Crumb`/`Sep`) replaces the topbar/breadcrumb markup copy-pasted across ~9 pages; `EmptyState` standardises the icon+message+action empty card; `StatusBadge` centralises status→colour mapping. `StatusBadge` also **fixes drifted badge colours** — some pages used `success`/`warning` variants that had no CSS rule and rendered colourless.
+- **`ApiCollections.jsx` (1315 lines) split** into an `ApiCollections/` module: `ApiCollectionsList`, `ApiCollectionForm`, `ApiCollectionDetail`, `ApiFilesManager`, `ApiTestRunDetail`, `ApiTestRunForm`, with a barrel `index.js` as the router's import surface.
+- **`SiteDetail.jsx` slimmed (743 → ~120 lines):** extracted `TestRunForm`, plus `useActivity` and `useFindings` hooks that each own one tab's state (event log/agent roster/token usage; findings list/validation/dedup) instead of threading ~40 loose props through `TestRunDetail`.
+- **A.L.I.C.E. session split** (`frontend/src/lib/`): `aliceSession.jsx` → `aliceRender.jsx` (render helpers) + `aliceSession.js` (the module-level singleton stream store that keeps the reader loop alive across component unmounts).
+
 ## [PR #220] July 7 Update — upstream proxy fixes, macOS clipboard, packaging
 
 **Branch:** `develop`

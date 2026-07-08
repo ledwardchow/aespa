@@ -1,4 +1,4 @@
-import { renderMarkdown } from "../../lib/aliceSession";
+import { renderMarkdown } from "../../lib/aliceRender";
 import { ALICE_DEDUP_DIRECTIVE } from "../SastRuns";
 import { useState, useEffect, useRef, useMemo, useReducer } from "react";
 import { api, formatError } from "../../lib/api";
