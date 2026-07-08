@@ -70,7 +70,8 @@ export function useAliceChat(runId, { onActivate } = {}) {
               messages: tab.messages.map(m => {
                 if (m.id === rec.thinkMsgId && rec.thought) return {
                   ...m,
-                  text: rec.thought
+                  text: rec.thought,
+                  stepData: rec.stepData || m.stepData || {}
                 };
                 if (m.id === rec.replyMsgId && rec.message) return {
                   ...m,
@@ -193,6 +194,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     let recReplyId = session.replyMsgId;
     let recThought = session.accumulatedThought;
     let recMessage = session.accumulatedMessage;
+    let recStepData = session.stepData;
     if (!recThinkId || !recThought && !recMessage) {
       try {
         const saved = JSON.parse(localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null");
@@ -201,6 +203,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
           recReplyId = recReplyId || saved.replyMsgId;
           recThought = recThought || saved.thought;
           recMessage = recMessage || saved.message;
+          recStepData = Object.keys(recStepData || {}).length ? recStepData : saved.stepData || {};
         }
       } catch  {}
     }
@@ -212,7 +215,8 @@ export function useAliceChat(runId, { onActivate } = {}) {
           messages: tab.messages.map(m => {
             if (m.id === recThinkId && recThought) return {
               ...m,
-              text: recThought
+              text: recThought,
+              stepData: recStepData || m.stepData || {}
             };
             if (m.id === recReplyId && recMessage) return {
               ...m,
