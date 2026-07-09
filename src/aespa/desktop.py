@@ -273,7 +273,7 @@ class Controller(NSObject):
     def openUpdate_(self, _sender):
         NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(self._update_url))
 
-    def showWindow_(self, _sender):
+    def _ensureWindow(self):
         if self._window is None:
             rect = NSMakeRect(0, 0, 1280, 820)
             win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -304,10 +304,19 @@ class Controller(NSObject):
             win.center()
             self._window = win
 
+    def _presentWindow(self):
+        self._ensureWindow()
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        app.unhide_(None)
         app.activateIgnoringOtherApps_(True)
+        if self._window.isMiniaturized():
+            self._window.deminiaturize_(None)
         self._window.makeKeyAndOrderFront_(None)
+        self._window.orderFrontRegardless()
+
+    def showWindow_(self, _sender):
+        self._presentWindow()
 
     def windowShouldClose_(self, sender):
         # Hide instead of close: server + scans keep running. Drop the dock
@@ -323,8 +332,21 @@ class Controller(NSObject):
     ):
         # Dock clicks on a running app arrive here. The window may have been
         # hidden into menubar mode, so route reopen through the normal presenter.
-        self.showWindow_(None)
+        self._presentWindow()
         return True
+
+    def applicationDidBecomeActive_(self, _notification):
+        # Some macOS paths (notably Dock activation after the app was hidden or
+        # the window was miniaturized) activate the app without sending the
+        # narrower reopen callback. If the Dock icon is present, make sure the
+        # UI comes back with the activation.
+        if (
+            self._window is not None
+            and NSApplication.sharedApplication().activationPolicy()
+            == NSApplicationActivationPolicyRegular
+            and (not self._window.isVisible() or self._window.isMiniaturized())
+        ):
+            self._presentWindow()
 
     # --- JS dialogs (WKUIDelegate): alert / confirm / prompt --------------
     def webView_runJavaScriptAlertPanelWithMessage_initiatedByFrame_completionHandler_(
