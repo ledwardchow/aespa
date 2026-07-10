@@ -14,6 +14,7 @@ import * as d3 from "d3";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
+import { WebRunTabBar } from "./SiteDetail/WebRunTabBar";
 import { WebRunSitemapTab } from "./SiteDetail/WebRunSitemapTab";
 import { GuidedLoginItem } from "./SiteDetail/GuidedLoginItem";
 import { scopeColor, SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_PALETTE, USER_BOTH_COLOR, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
@@ -348,23 +349,18 @@ export function TestRunDetail({
   const [coverageMode, setCoverageMode] = useState("track");
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
-  const [traffic, setTraffic] = useState([]);
-
   const [trafficTotal, setTrafficTotal] = useState(0);
-  const [selectedTraffic, setSelectedTraffic] = useState(null);
 
   
   
   
   
   
-  const lastTrafficIdRef = useRef(0);
   const [error, setError] = useState(null);
   const svgRef = useRef(null);
   const simRef = useRef(null);
   const prevGraphKeyRef = useRef("");
   const lastRunPollOkRef = useRef(Date.now());
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
   // Findings state, effects and handlers live in this hook; the SSE stream
   // below writes through the setFindings/setValidateStatus it returns.
   const {
@@ -761,42 +757,6 @@ export function TestRunDetail({
     const iv = setInterval(loadSessions, 4000);
     return () => clearInterval(iv);
   }, [activeTab, runId, thinkingStatus?.status]);
-  useEffect(() => {
-    setTraffic([]);
-    lastTrafficIdRef.current = 0;
-    setSelectedTraffic(null);
-    api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(() => {});
-  }, [runId]);
-
-  // Traffic log polling — always active while crawling or scanning; also when on the tab
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const entries = await api.getTraffic(runId, lastTrafficIdRef.current);
-        if (entries.length > 0) {
-          lastTrafficIdRef.current = entries[entries.length - 1].id;
-          setTraffic(prev => {
-            const base = prev.length;
-            const stamped = entries.map((e, i) => ({
-              ...e,
-              _seq: base + i + 1
-            }));
-            const next = [...prev, ...stamped];
-            return next.length > 2000 ? next.slice(-2000) : next;
-          });
-        }
-        if (activeTab === "traffic" || entries.length > 0) {
-          api.getTrafficCount(runId).then(r => setTrafficTotal(r.count || 0)).catch(() => {});
-        }
-      } catch  {}
-    };
-    const isActive = activeTab === "traffic" || run?.status === "running" || isDynamicScanActive(thinkingStatus?.status) || crawlStopRequested || thinkingStopRequested;
-    if (!isActive) return;
-    poll();
-    const iv = setInterval(poll, 2000);
-    return () => clearInterval(iv);
-  }, [activeTab, run?.status, thinkingStatus?.status, runId, crawlStopRequested, thinkingStopRequested]);
-
   // Fetch page detail when node selected
   useEffect(() => {
     if (!selectedNode) {
@@ -1191,71 +1151,22 @@ export function TestRunDetail({
           {guidedLoginPending.map(p => <GuidedLoginItem key={p.credential_id} item={p} runId={runId} onConfirmed={() => setGuidedLoginPending(prev => prev.filter(x => x.credential_id !== p.credential_id))} />)}
         </div>}
 
-      <div className="tab-bar">
-        <button className={"tab-btn" + (activeTab === "activity" ? " active" : "")} onClick={() => {
-          setActiveTab("activity");
+      <WebRunTabBar
+        activeTab={activeTab}
+        onSelect={tab => {
+          setActiveTab(tab);
           setSelNode(null);
-          nav(`#/runs/${runId}/activity`);
-        }}>
-          Status{isDynamicScanActive(thinkingStatus?.status) && activityLog.length > 0 ? <span className="activity-live-dot">●</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "sitemap" ? " active" : "")} onClick={() => {
-          setActiveTab("sitemap");
-          setSelNode(null);
-          nav(`#/runs/${runId}/sitemap`);
-        }}>Site Map</button>
-        <button className={"tab-btn" + (activeTab === "intelligence" ? " active" : "")} onClick={() => {
-          setActiveTab("intelligence");
-          setSelNode(null);
-          nav(`#/runs/${runId}/intelligence`);
-        }}>
-          Intelligence{targetIntel && Object.values(targetIntel.counts || {}).reduce((a, b) => a + b, 0) > 0 ? <span className="traffic-count">{Object.values(targetIntel.counts || {}).reduce((a, b) => a + b, 0)}</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "tasks" ? " active" : "")} onClick={() => {
-          setActiveTab("tasks");
-          setSelNode(null);
-          nav(`#/runs/${runId}/tasks`);
-        }}>
-          Task Graph{taskGraph?.counts?.tasks > 0 ? <span className="traffic-count">{taskGraph.counts.tasks}</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "sessions" ? " active" : "")} onClick={() => {
-          setActiveTab("sessions");
-          setSelNode(null);
-          nav(`#/runs/${runId}/sessions`);
-        }}>
-          Sessions{scannerSessions?.counts?.total > 0 ? <span className="traffic-count">{scannerSessions.counts.total}</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "findings" ? " active" : "")} onClick={() => {
-          setActiveTab("findings");
-          setSelNode(null);
-          nav(`#/runs/${runId}/findings`);
-        }}>
-          Findings{findings.length > 0 ? <span className="findings-badge">{findings.length}</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "traffic" ? " active" : "")} onClick={() => {
-          setActiveTab("traffic");
-          setSelNode(null);
-          nav(`#/runs/${runId}/traffic`);
-        }}>
-          Traffic Log{trafficTotal > 0 ? <span className="traffic-count">{trafficTotal}</span> : ""}
-        </button>
-        <button className={"tab-btn" + (activeTab === "workprogram" ? " active" : "")} onClick={() => {
-          setActiveTab("workprogram");
-          setSelNode(null);
-          nav(`#/runs/${runId}/workprogram`);
-        }}>
-          OWASP Coverage
-        </button>
-        <button className={"tab-btn" + (activeTab === "leads" ? " active" : "")} onClick={() => {
-          setActiveTab("leads");
-          setSelNode(null);
-          nav(`#/runs/${runId}/leads`);
-        }}>
-          SAST Leads
-        </button>
-        <div style={{
-          flex: 1
-        }}></div>
+          nav(`#/runs/${runId}/${tab}`);
+        }}
+        activityLive={isDynamicScanActive(thinkingStatus?.status) && activityLog.length > 0}
+        counts={{
+          intelligence: targetIntel ? Object.values(targetIntel.counts || {}).reduce((a, b) => a + b, 0) : 0,
+          tasks: taskGraph?.counts?.tasks || 0,
+          sessions: scannerSessions?.counts?.total || 0,
+          findings: findings.length,
+          traffic: trafficTotal
+        }}
+      >
         {canClearCrawl && activeTab === "sitemap" && <button className="btn danger-outline sm" style={{
           margin: "auto 8px auto 0"
         }} onClick={onClearCrawl}>Clear crawl</button>}
@@ -1265,7 +1176,7 @@ export function TestRunDetail({
             <button className={"btn ghost sm" + (graphView === "scope" ? " active" : "")} onClick={() => setGraphView("scope")}>By Scope</button>
             <button className={"btn ghost sm" + (graphView === "user" ? " active" : "")} onClick={() => setGraphView("user")}>By User</button>
           </div>}
-      </div>
+      </WebRunTabBar>
 
       {activeTab === "sitemap" && run && <>
         <div className="run-meta">
@@ -1567,7 +1478,13 @@ export function TestRunDetail({
         agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel}
       />}
 
-      {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
+      <WebRunTrafficTab
+        runId={runId}
+        active={activeTab === "traffic"}
+        captureActive={run?.status === "running" || isDynamicScanActive(thinkingStatus?.status) || crawlStopRequested || thinkingStopRequested}
+        runStatus={run?.status}
+        onTotalChange={setTrafficTotal}
+      />
       {activeTab === "workprogram" && <div className="content scroll-content" style={{
         padding: 0
       }}>

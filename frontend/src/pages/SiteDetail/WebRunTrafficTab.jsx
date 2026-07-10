@@ -1,15 +1,61 @@
-import React, { useState, useRef } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
+import { api } from "../../lib/api";
 import { parseDate } from "../../lib/utilities";
+import { usePolling } from "../../hooks/usePolling";
+import { useColResize } from "./_helpers";
 
-export function WebRunTrafficTab({ runId, traffic, setTraffic, api, lastTrafficIdRef, trafficColW, startTrafficResize, run, isDynamicScanActive, thinkingStatus, trafficTotal, selectedTraffic, setSelectedTraffic }) {
-    const [trafficFilter, setTrafficFilter] = useState("");
+export function WebRunTrafficTab({ runId, active, captureActive, runStatus, onTotalChange }) {
+  const [traffic, setTraffic] = useState([]);
+  const [trafficTotal, setTrafficTotal] = useState(0);
+  const [selectedTraffic, setSelectedTraffic] = useState(null);
+  const [trafficFilter, setTrafficFilter] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
-    const [trafficSort, setTrafficSort] = useState({
+  const [trafficSort, setTrafficSort] = useState({
     field: "_seq",
     dir: "asc"
   });
+  const trafficTableRef = useRef(null);
+  const lastTrafficIdRef = useRef(0);
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [30, 88, 68, 70, 62, 52, null, 66]);
 
-    const trafficTableRef = useRef(null);
+  const updateTotal = useCallback(total => {
+    setTrafficTotal(total);
+    onTotalChange(total);
+  }, [onTotalChange]);
+
+  useEffect(() => {
+    setTraffic([]);
+    lastTrafficIdRef.current = 0;
+    setSelectedTraffic(null);
+    api.getTrafficCount(runId).then(result => updateTotal(result.count || 0)).catch(() => {});
+  }, [runId, updateTotal]);
+
+  const pollTraffic = useCallback(async () => {
+    try {
+      const entries = await api.getTraffic(runId, lastTrafficIdRef.current);
+      if (entries.length > 0) {
+        lastTrafficIdRef.current = entries[entries.length - 1].id;
+        setTraffic(previous => {
+          const stamped = entries.map((entry, index) => ({
+            ...entry,
+            _seq: previous.length + index + 1
+          }));
+          const next = [...previous, ...stamped];
+          return next.length > 2000 ? next.slice(-2000) : next;
+        });
+      }
+      if (active || entries.length > 0) {
+        const result = await api.getTrafficCount(runId);
+        updateTotal(result.count || 0);
+      }
+    } catch {}
+  }, [active, runId, updateTotal]);
+  const pollingActive = active || captureActive;
+  usePolling(pollTraffic, {
+    enabled: pollingActive,
+    immediate: pollingActive,
+    intervalMs: 2000
+  });
 
     // ── Traffic helpers ────────────────────────────────────────────────────────
   const fmtRequest = e => {
@@ -68,7 +114,7 @@ export function WebRunTrafficTab({ runId, traffic, setTraffic, api, lastTrafficI
   
 
   return (
-    <div className="traffic-panel">
+    <div className="traffic-panel" style={{ display: active ? undefined : "none" }}>
       <div className="traffic-toolbar">
             <input className="traffic-filter" type="text" placeholder="Filter by URL, method or status…" value={trafficFilter} onInput={e => setTrafficFilter(e.target.value)} />
             <span className="traffic-count-label">{filteredTraffic.length} shown{trafficTotal > filteredTraffic.length ? ` of ${trafficTotal}` : ""}</span>
@@ -83,6 +129,7 @@ export function WebRunTrafficTab({ runId, traffic, setTraffic, api, lastTrafficI
             setTraffic([]);
             lastTrafficIdRef.current = 0;
             setSelectedTraffic(null);
+            updateTotal(0);
           }}>Clear</button>
           </div>
 
@@ -120,7 +167,7 @@ export function WebRunTrafficTab({ runId, traffic, setTraffic, api, lastTrafficI
             padding: "24px",
             textAlign: "center"
           }}>
-                {run?.status === "running" || isDynamicScanActive(thinkingStatus?.status) ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
+                {runStatus === "running" || captureActive ? "Capturing traffic…" : "No traffic recorded yet. Start a crawl or scan."}
               </div>}
           </div>
 
