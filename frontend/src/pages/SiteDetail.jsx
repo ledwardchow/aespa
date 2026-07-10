@@ -10,14 +10,14 @@ import { fmtDate, truncUrl, apiTranscriptText } from "../lib/utilities";
 import { IconPlus, IconPlay, IconStop } from "../components/Icons";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
-import * as d3 from "d3";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
 import { WebRunTabBar } from "./SiteDetail/WebRunTabBar";
 import { WebRunSitemapTab } from "./SiteDetail/WebRunSitemapTab";
 import { GuidedLoginItem } from "./SiteDetail/GuidedLoginItem";
-import { scopeColor, SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_PALETTE, USER_BOTH_COLOR, isDynamicScanActive, userColor, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
+import { useSitemapGraph } from "./SiteDetail/useSitemapGraph";
+import { SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_PALETTE, USER_BOTH_COLOR, isDynamicScanActive, runWorkflowStatus, workflowBadge, useColResize } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { TestRunForm } from "./SiteDetail/TestRunForm";
 export { useColResize };
@@ -357,9 +357,6 @@ export function TestRunDetail({
   
   
   const [error, setError] = useState(null);
-  const svgRef = useRef(null);
-  const simRef = useRef(null);
-  const prevGraphKeyRef = useRef("");
   const lastRunPollOkRef = useRef(Date.now());
   // Findings state, effects and handlers live in this hook; the SSE stream
   // below writes through the setFindings/setValidateStatus it returns.
@@ -781,97 +778,14 @@ export function TestRunDetail({
     };
   }, [selectedNode, runId]);
 
-  // Compute the fill colour for a graph node based on current view mode.
-  const nodeColorFn = useCallback(d => {
-    if (graphView === "user") return userColor(d, run?.credentials);
-    return scopeColor(d);
-  }, [graphView, run?.credentials]);
-
-  // D3 force graph
-  useEffect(() => {
-    if (!graph || !svgRef.current) return;
-    const structureKey = `${activeTab}:${graphView}:${graph.nodes.length}:${graph.links.length}`;
-
-    // Status-only change (same nodes/links, just colour updates) — update in-place.
-    if (structureKey === prevGraphKeyRef.current && simRef.current) {
-      const simNodes = simRef.current.nodes();
-      graph.nodes.forEach(updated => {
-        const sn = simNodes.find(n => n.id === updated.id);
-        if (sn) Object.assign(sn, updated);
-      });
-      d3.select(svgRef.current).selectAll("circle.node-dot").filter(d => d && d.id != null).attr("fill", nodeColorFn);
-      return;
-    }
-    prevGraphKeyRef.current = structureKey;
-    const svg = d3.select(svgRef.current);
-    svg.selectAll("*").remove();
-    const W = svgRef.current.clientWidth || 800;
-    const H = svgRef.current.clientHeight || 500;
-    const nodes = graph.nodes.map(n => ({
-      ...n
-    }));
-    const links = graph.links.map(l => ({
-      ...l
-    }));
-    const zoom = d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => g.attr("transform", e.transform));
-    svg.call(zoom);
-    const g = svg.append("g");
-
-    // Arrow marker
-    svg.append("defs").append("marker").attr("id", "arrow").attr("viewBox", "0 -4 8 8").attr("refX", 18).attr("refY", 0).attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto").append("path").attr("d", "M0,-4L8,0L0,4").attr("fill", "var(--border-2)");
-    const link = g.append("g").selectAll("line").data(links).join("line").attr("stroke", "var(--border-2)").attr("stroke-width", 1.5).attr("marker-end", "url(#arrow)");
-    const node = g.append("g").selectAll("g").data(nodes).join("g").attr("cursor", "pointer").call(d3.drag().on("start", (e, d) => {
-      if (!e.active) sim.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }).on("drag", (e, d) => {
-      d.fx = e.x;
-      d.fy = e.y;
-    }).on("end", (e, d) => {
-      if (!e.active) sim.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    })).on("click", (e, d) => {
-      e.stopPropagation();
-      setSelNode(d);
-    });
-    node.append("circle").attr("class", "node-dot").attr("r", 10).attr("fill", nodeColorFn).attr("stroke", d => d.status === "failed" ? "#fbbf24" : "var(--bg)").attr("stroke-width", 2);
-    const rootNode = nodes.find(n => n.depth === 0);
-    let baseHost = null;
-    try {
-      if (rootNode) baseHost = new URL(rootNode.url).host;
-    } catch {}
-    node.append("text").attr("dy", 22).attr("text-anchor", "middle").attr("fill", "var(--muted)").attr("font-size", "10px").attr("pointer-events", "none").text(d => {
-      try {
-        const u = new URL(d.url);
-        const label = u.host === baseHost ? u.pathname + u.search + u.hash || "/" : d.url;
-        return label.length > 36 ? label.slice(0, 35) + "…" : label;
-      } catch {
-        return truncUrl(d.url, 36);
-      }
-    });
-
-    // Tooltip on hover
-    node.append("title").text(d => d.url);
-    svg.on("click", () => setSelNode(null));
-    const sim = d3.forceSimulation(nodes).force("link", d3.forceLink(links).id(d => d.id).distance(110).strength(0.8)).force("charge", d3.forceManyBody().strength(-350)).force("center", d3.forceCenter(W / 2, H / 2)).force("x", d3.forceX(W / 2).strength(0.06)).force("y", d3.forceY(H / 2).strength(0.06)).force("collision", d3.forceCollide(22)).on("tick", () => {
-      link.attr("x1", d => d.source.x).attr("y1", d => d.source.y).attr("x2", d => d.target.x).attr("y2", d => d.target.y);
-      node.attr("transform", d => `translate(${d.x},${d.y})`);
-    });
-    simRef.current = sim;
-    return () => sim.stop();
-  }, [graph, activeTab, graphView, nodeColorFn]);
-
-  // Highlight the node whose URL is currently being crawled.
-  // Runs after the D3 graph effect so the SVG is already populated.
-  useEffect(() => {
-    if (!svgRef.current || !graph) return;
-    const svg = d3.select(svgRef.current);
-    svg.selectAll(".node-crawl-pulse").remove();
-    if (!run?.current_url) return;
-    const cur = run.current_url.replace(/\/$/, "");
-    svg.select("g").selectAll("g").filter(d => d && d.url && d.url.replace(/\/$/, "") === cur).insert("circle", ":first-child").attr("class", "node-crawl-pulse").attr("r", 10);
-  }, [run?.current_url, graph]);
+  const { svgRef } = useSitemapGraph({
+    graph,
+    activeTab,
+    graphView,
+    credentials: run?.credentials,
+    currentUrl: run?.current_url,
+    onSelectNode: setSelNode
+  });
 
 
   const onStopThinkingScan = async () => {
