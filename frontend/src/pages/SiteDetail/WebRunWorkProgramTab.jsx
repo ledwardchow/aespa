@@ -1,12 +1,10 @@
-import { useState, useEffect, useRef, useMemo, useReducer } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { OWASP_WEB_LABELS } from "./_constants";
 import { OWASP_WEB_SHORT } from "../ApiCollections/ApiRunEndpointsTab";
 import { OWASP_WEB_CATEGORIES } from "./WebRunSastLeadsTab";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, sourceLabel, markdownText, markdownCodeBlock, slugForFilename, leadsExportFilename, markdownExportFilename, downloadTextFile, WP_STATUS_MARK, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { api } from "../../lib/api";
+import { slugForFilename, downloadTextFile, workProgramToMarkdown } from "../../lib/utilities";
+import { usePolling } from "../../hooks/usePolling";
 
 export function WebRunWorkProgramTab({
   runId,
@@ -21,23 +19,14 @@ export function WebRunWorkProgramTab({
   const [seedMsg, setSeedMsg] = useState(null);
   const [enforce, setEnforce] = useState(null); // latest enforce_progress event
   const esRef = useRef(null);
-  const loadMatrix = () => api.getWebCoverageMatrix(runId).then(m => {
+  const loadMatrix = useCallback(() => api.getWebCoverageMatrix(runId).then(m => {
     setMatrix(m);
     setLoading(false);
-  }).catch(() => setLoading(false));
-  useEffect(() => {
-    loadMatrix();
-  }, [runId]);
+  }).catch(() => setLoading(false)), [runId]);
+  usePolling(loadMatrix, { enabled: scanRunning, intervalMs: 5000 });
   useEffect(() => {
     if (reloadKey > 0) loadMatrix();
-  }, [reloadKey]);
-
-  // Poll during scan.
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(loadMatrix, 5000);
-    return () => clearInterval(t);
-  }, [scanRunning, runId]);
+  }, [reloadKey, loadMatrix]);
 
   // SSE live updates — mirrors ApiRunWorkProgramTab.
   useEffect(() => {
@@ -89,7 +78,7 @@ export function WebRunWorkProgramTab({
       es.close();
       esRef.current = null;
     };
-  }, [scanRunning, runId]);
+  }, [scanRunning, runId, loadMatrix]);
   const onSeed = async () => {
     setSeeding(true);
     setSeedMsg(null);

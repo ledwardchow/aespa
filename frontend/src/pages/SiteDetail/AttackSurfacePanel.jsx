@@ -1,8 +1,5 @@
-import { useState, useRef, useMemo, useReducer } from "react";
-import { useRoute, nav } from "../../lib/router";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { useState } from "react";
+import { truncUrl } from "../../lib/utilities";
 
 export function AttackSurfacePanel({
   summary

@@ -1,9 +1,6 @@
 import { useColResize } from "../SiteDetail";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { parseDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { api } from "../../lib/api";
+import { parseDate } from "../../lib/utilities";
 
 export function ScannerSessionsPanel({
   runId,

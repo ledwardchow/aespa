@@ -4,7 +4,10 @@
   "plugins": ["react", "oxc"],
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    "react-hooks/exhaustive-deps": "error",
+    "react/only-export-components": "off",
+    "no-unused-expressions": "error",
+    "no-unused-vars": "error",
     "no-undef": "error",
     "react/jsx-no-undef": "error"
   }
