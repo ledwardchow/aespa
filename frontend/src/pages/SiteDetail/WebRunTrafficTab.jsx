@@ -1,7 +1,7 @@
 import React, { useState, useRef } from "react";
-import { fmtDate, parseDate } from "../../lib/utilities";
+import { parseDate } from "../../lib/utilities";
 
-export function WebRunTrafficTab({ runId, traffic, setTraffic, activeTab, api, lastTrafficIdRef, trafficColW, startTrafficResize, run, isDynamicScanActive, thinkingStatus, trafficTotal, setTrafficTotal, selectedTraffic, setSelectedTraffic }) {
+export function WebRunTrafficTab({ runId, traffic, setTraffic, api, lastTrafficIdRef, trafficColW, startTrafficResize, run, isDynamicScanActive, thinkingStatus, trafficTotal, selectedTraffic, setSelectedTraffic }) {
     const [trafficFilter, setTrafficFilter] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
     const [trafficSort, setTrafficSort] = useState({

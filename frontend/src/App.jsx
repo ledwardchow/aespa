@@ -1,17 +1,38 @@
-import { ApiCollectionsList, ApiCollectionForm, ApiCollectionDetail, ApiFilesManager, ApiTestRunForm, ApiTestRunDetail, ApiRunLeadsTab, ApiRunEndpointsTab, ApiRunTrafficTab, _buildAgentsFromLog, ApiRunLogTab } from "./pages/ApiCollections";
-import { SastRunsListPage, SastRunDetail, SastLeadsTab } from "./pages/SastRuns";
-import { SiteDetail, SiteForm, useColResize, TestRunDetail, TestRunForm, WebRunWorkProgramTab, ScannerSessionsPanel, AttackSurfacePanel } from "./pages/SiteDetail";
-import { SettingsPage, ScanPolicyPage, ExternalIntegrationsPage, DebugPage, ReportingDebugPage } from "./pages/Settings";
-import { ActiveJobsPage } from "./pages/ActiveJobs";
 import { SitesList } from "./pages/SitesList";
 import React, { useEffect, useState } from "react";
-import * as d3 from "d3";
 
 // ── API client ────────────────────────────────────────────────────────────────
 
-import { api, formatError } from "./lib/api";
+import { api } from "./lib/api";
 import { useRoute } from "./lib/router";
-import { IconSites, IconApis, IconSettings, IconCheck, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconSend } from "./components/Icons";
+import { IconSites, IconApis, IconSettings, IconPlay, IconShield, IconChevronLeft, IconChevronRight, IconBug } from "./components/Icons";
+
+const lazyNamed = (loader, name) => React.lazy(() => loader().then(module => ({
+  default: module[name]
+})));
+const loadApiPages = () => import("./pages/ApiCollections");
+const loadSastPages = () => import("./pages/SastRuns");
+const loadSitePages = () => import("./pages/SiteDetail");
+const loadSettingsPages = () => import("./pages/Settings");
+
+const ApiCollectionsList = lazyNamed(loadApiPages, "ApiCollectionsList");
+const ApiCollectionForm = lazyNamed(loadApiPages, "ApiCollectionForm");
+const ApiCollectionDetail = lazyNamed(loadApiPages, "ApiCollectionDetail");
+const ApiFilesManager = lazyNamed(loadApiPages, "ApiFilesManager");
+const ApiTestRunForm = lazyNamed(loadApiPages, "ApiTestRunForm");
+const ApiTestRunDetail = lazyNamed(loadApiPages, "ApiTestRunDetail");
+const SastRunsListPage = lazyNamed(loadSastPages, "SastRunsListPage");
+const SastRunDetail = lazyNamed(loadSastPages, "SastRunDetail");
+const SiteDetail = lazyNamed(loadSitePages, "SiteDetail");
+const SiteForm = lazyNamed(loadSitePages, "SiteForm");
+const TestRunDetail = lazyNamed(loadSitePages, "TestRunDetail");
+const TestRunForm = lazyNamed(loadSitePages, "TestRunForm");
+const SettingsPage = lazyNamed(loadSettingsPages, "SettingsPage");
+const ScanPolicyPage = lazyNamed(loadSettingsPages, "ScanPolicyPage");
+const ExternalIntegrationsPage = lazyNamed(loadSettingsPages, "ExternalIntegrationsPage");
+const DebugPage = lazyNamed(loadSettingsPages, "DebugPage");
+const ReportingDebugPage = lazyNamed(loadSettingsPages, "ReportingDebugPage");
+const ActiveJobsPage = lazyNamed(() => import("./pages/ActiveJobs"), "ActiveJobsPage");
 
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
@@ -129,27 +150,29 @@ function App() {
 
 
       <div className="main">
-        {route.name === "list" && <SitesList />}
-        {route.name === "site-new" && <SiteForm key="new" />}
-        {route.name === "site-edit" && <SiteForm key={route.id} siteId={route.id} />}
-        {route.name === "site-detail" && <SiteDetail key={route.id} siteId={route.id} />}
-        {route.name === "api-list" && <ApiCollectionsList />}
-        {route.name === "api-new" && <ApiCollectionForm key="api-new" />}
-        {route.name === "api-edit" && <ApiCollectionForm key={route.id} collectionId={route.id} />}
-        {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} />}
-        {route.name === "api-files" && <ApiFilesManager key={route.id} collectionId={route.id} />}
-        {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
-        {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
-        {route.name === "sast-list" && <SastRunsListPage />}
-        {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
-        {route.name === "active-jobs" && <ActiveJobsPage />}
-        {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}
-        {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
-        {route.name === "settings" && <SettingsPage />}
-        {route.name === "scan-policy" && <ScanPolicyPage />}
-        {route.name === "external-integrations" && <ExternalIntegrationsPage />}
-        {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
-        {route.name === "reporting-debug" && <ReportingDebugPage />}
+        <React.Suspense fallback={<div className="content scroll-content"><div className="subtle">Loading…</div></div>}>
+          {route.name === "list" && <SitesList />}
+          {route.name === "site-new" && <SiteForm key="new" />}
+          {route.name === "site-edit" && <SiteForm key={route.id} siteId={route.id} />}
+          {route.name === "site-detail" && <SiteDetail key={route.id} siteId={route.id} />}
+          {route.name === "api-list" && <ApiCollectionsList />}
+          {route.name === "api-new" && <ApiCollectionForm key="api-new" />}
+          {route.name === "api-edit" && <ApiCollectionForm key={route.id} collectionId={route.id} />}
+          {route.name === "api-detail" && <ApiCollectionDetail key={route.id} collectionId={route.id} />}
+          {route.name === "api-files" && <ApiFilesManager key={route.id} collectionId={route.id} />}
+          {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
+          {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "sast-list" && <SastRunsListPage />}
+          {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "active-jobs" && <ActiveJobsPage />}
+          {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}
+          {route.name === "run-detail" && <TestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
+          {route.name === "settings" && <SettingsPage />}
+          {route.name === "scan-policy" && <ScanPolicyPage />}
+          {route.name === "external-integrations" && <ExternalIntegrationsPage />}
+          {route.name === "debug" && <DebugPage showUsername={showUsername} setShowUsername={setShowUsername} username={username} reportingDebugCfg={reportingDebugCfg} setReportingDebugCfg={setReportingDebugCfg} />}
+          {route.name === "reporting-debug" && <ReportingDebugPage />}
+        </React.Suspense>
       </div>
     </div>;
 }

@@ -1,20 +1,39 @@
 import pluginReact from "eslint-plugin-react";
-import babelParser from "@babel/eslint-parser";
+
 export default [
   {
-    files: ["**/*.{js,jsx,mjs,cjs,ts,tsx}"],
+    files: ["src/**/*.{js,jsx,mjs,cjs}"],
     languageOptions: {
-      parser: babelParser,
+      ecmaVersion: "latest",
+      sourceType: "module",
       parserOptions: {
-        requireConfigFile: false,
-        babelOptions: {
-          babelrc: false,
-          configFile: false,
-          presets: ["@babel/preset-react"]
-        },
         ecmaFeatures: {
           jsx: true
         }
+      },
+      globals: {
+        AbortController: "readonly",
+        alert: "readonly",
+        Blob: "readonly",
+        cancelAnimationFrame: "readonly",
+        clearInterval: "readonly",
+        clearTimeout: "readonly",
+        confirm: "readonly",
+        console: "readonly",
+        document: "readonly",
+        EventSource: "readonly",
+        fetch: "readonly",
+        FileReader: "readonly",
+        FormData: "readonly",
+        localStorage: "readonly",
+        navigator: "readonly",
+        prompt: "readonly",
+        requestAnimationFrame: "readonly",
+        setInterval: "readonly",
+        setTimeout: "readonly",
+        TextDecoder: "readonly",
+        URL: "readonly",
+        window: "readonly"
       }
     },
     plugins: {

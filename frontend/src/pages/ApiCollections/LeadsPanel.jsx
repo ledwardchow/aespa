@@ -1,7 +1,5 @@
-import { useState, useRef, useMemo, useReducer } from "react";
-import { useRoute, nav } from "../../lib/router";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, sourceLabel, markdownText, markdownCodeBlock, leadImportPayload, leadsExportFilename, leadsToMarkdown, downloadTextFile, WP_STATUS_MARK, findingImportPayload, parseFindingsMarkdownSections, markdownSection } from "../../lib/utilities";
+import { useState } from "react";
+import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
 
 
 export function LeadsPanel({
@@ -14,7 +12,8 @@ export function LeadsPanel({
   const [expanded, setExpanded] = useState(new Set());
   const toggle = id => setExpanded(prev => {
     const n = new Set(prev);
-    n.has(id) ? n.delete(id) : n.add(id);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
     return n;
   });
   const onExport = () => {

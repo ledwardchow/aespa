@@ -1,5 +1,4 @@
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, ScanModeDefinitions, csv, policyToForm } from "../../lib/policy";
+import { SCAN_MODE_OPTIONS, ScanModeDefinitions } from "../../lib/policy";
 
 
 export function ScannerPolicyFields({
