@@ -1,9 +1,8 @@
-import { useState, useRef, useMemo } from "react";
+import { useState } from "react";
 import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./BurpRestApiSettings";
 import { providerPayload, providerToForm } from "../Settings";
 import { api } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { IconApis, IconPlus, IconCheck, IconStop, IconChevronLeft, IconBug, IconSend } from "../../components/Icons";
+import { IconCheck } from "../../components/Icons";
 
 
 export function LLMProviderForm({

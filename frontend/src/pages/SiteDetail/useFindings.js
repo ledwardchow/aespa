@@ -29,7 +29,8 @@ export function useFindings(runId, activeTab, {
   const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = title => setExpandedGroups(prev => {
     const next = new Set(prev);
-    next.has(title) ? next.delete(title) : next.add(title);
+    if (next.has(title)) next.delete(title);
+    else next.add(title);
     return next;
   });
   const issueImportInputRef = useRef(null);

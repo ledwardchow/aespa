@@ -1,8 +1,6 @@
-import { useState, useEffect, useRef, useMemo, useReducer } from "react";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../../components/Icons";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { api } from "../../lib/api";
+import { usePolling } from "../../hooks/usePolling";
 
 
 export function ApiRunTrafficTab({
@@ -16,7 +14,7 @@ export function ApiRunTrafficTab({
   const [autoScroll, setAutoScroll] = useState(true);
   const lastIdRef = useRef(0);
   const tableRef = useRef(null);
-  const loadMore = async () => {
+  const loadMore = useCallback(async () => {
     try {
       const items = await api.getApiTraffic(runId, lastIdRef.current);
       if (items.length) {
@@ -29,15 +27,8 @@ export function ApiRunTrafficTab({
       const ct = await api.getApiTrafficCount(runId);
       setTotal(ct.count || 0);
     } catch {}
-  };
-  useEffect(() => {
-    loadMore();
   }, [runId]);
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(loadMore, 4000);
-    return () => clearInterval(t);
-  }, [scanRunning, runId]);
+  usePolling(loadMore, { enabled: scanRunning, intervalMs: 4000 });
   useEffect(() => {
     if (autoScroll && tableRef.current) {
       tableRef.current.scrollTop = tableRef.current.scrollHeight;

@@ -1,13 +1,13 @@
 import { OWASP_WEB_LABELS } from "./SiteDetail/_constants";
 import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
-import { useState, useEffect, useRef, useCallback, useContext } from "react";
-import { api, formatError } from "../lib/api";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { api } from "../lib/api";
 import { nav } from "../lib/router";
 import { useAliceChat } from "./SiteDetail/useAliceChat";
 import { useFindings } from "./SiteDetail/useFindings";
 import { useActivity } from "./SiteDetail/useActivity";
-import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, workProgramToMarkdown, markdownBullet, stripMarkdownFence } from "../lib/utilities";
-import { IconApis, IconPlus, IconPlay, IconStop, IconChevronLeft, IconBug, IconSend } from "../components/Icons";
+import { fmtDate, truncUrl, apiTranscriptText } from "../lib/utilities";
+import { IconPlus, IconPlay, IconStop } from "../components/Icons";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import * as d3 from "d3";
@@ -311,12 +311,12 @@ export function TestRunDetail({
   const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
   const toggleAgentId = aid => setCollapsedAgentIds(prev => {
     const next = new Set(prev);
-    next.has(aid) ? next.delete(aid) : next.add(aid);
+    if (next.has(aid)) next.delete(aid);
+    else next.add(aid);
     return next;
   });
   const {
     aliceChats,
-    setAliceChats,
     activeAliceTabId,
     setActiveAliceTabId,
     aliceInputText,
@@ -686,7 +686,7 @@ export function TestRunDetail({
     };
     es.onerror = () => {/* auto-reconnects */};
     return () => es.close();
-  }, [runId]);
+  }, [runId, setActivityLog, setTokenUsage, setValidateBusy, setFindings, setAgents, setValidateStatus, setSitePlanData, upsertAgent]);
 
   // Poll run metadata (including per_user_progress current URLs) while crawling
   // or while the backend is unwinding after a stop request.
@@ -713,7 +713,7 @@ export function TestRunDetail({
       });
     }, 2000);
     return () => clearInterval(iv);
-  }, [run?.status, runId, crawlStopRequested]);
+  }, [run?.status, runId, crawlStopRequested, setAgents]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
@@ -732,7 +732,7 @@ export function TestRunDetail({
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
-  }, [runId, thinkingStatus?.status, thinkingStopRequested]);
+  }, [runId, thinkingStatus?.status, thinkingStopRequested, setFindings]);
 
   useEffect(() => {
     if (activeTab !== "intelligence" && run?.status !== "running") return;
@@ -822,10 +822,10 @@ export function TestRunDetail({
   }, [selectedNode, runId]);
 
   // Compute the fill colour for a graph node based on current view mode.
-  const nodeColorFn = d => {
+  const nodeColorFn = useCallback(d => {
     if (graphView === "user") return userColor(d, run?.credentials);
     return scopeColor(d);
-  };
+  }, [graphView, run?.credentials]);
 
   // D3 force graph
   useEffect(() => {
@@ -900,8 +900,7 @@ export function TestRunDetail({
     });
     simRef.current = sim;
     return () => sim.stop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- nodeColorFn intentionally excluded: it's a new identity each render, and including it re-runs this effect (killing the running sim mid-settle → clustered nodes)
-  }, [graph, activeTab, graphView]);
+  }, [graph, activeTab, graphView, nodeColorFn]);
 
   // Highlight the node whose URL is currently being crawled.
   // Runs after the D3 graph effect so the SVG is already populated.
@@ -1568,7 +1567,7 @@ export function TestRunDetail({
         agentTaskHistory={agentTaskHistory} agentStatusLabel={agentStatusLabel}
       />}
 
-      {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} activeTab={activeTab} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} setTrafficTotal={setTrafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
+      {activeTab === "traffic" && <WebRunTrafficTab runId={runId} traffic={traffic} setTraffic={setTraffic} api={api} lastTrafficIdRef={lastTrafficIdRef} trafficColW={trafficColW} startTrafficResize={startTrafficResize} run={run} isDynamicScanActive={isDynamicScanActive} thinkingStatus={thinkingStatus} trafficTotal={trafficTotal} selectedTraffic={selectedTraffic} setSelectedTraffic={setSelectedTraffic} />}
       {activeTab === "workprogram" && <div className="content scroll-content" style={{
         padding: 0
       }}>

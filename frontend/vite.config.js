@@ -19,9 +19,29 @@ export default defineConfig({
     outDir: '../src/aespa/web',
     emptyOutDir: true,
     minify: 'esbuild',
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         keepNames: true,
+        codeSplitting: {
+          groups: [
+            {
+              name: 'react-vendor',
+              test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+              priority: 30,
+            },
+            {
+              name: 'vendor',
+              test: /node_modules[\\/]/,
+              priority: 20,
+            },
+            {
+              name: 'common',
+              minShareCount: 2,
+              minSize: 0,
+              priority: 10,
+            },
+          ],
+        },
         entryFileNames: 'app.js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: (assetInfo) => {

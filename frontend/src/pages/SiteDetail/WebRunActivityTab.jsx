@@ -451,7 +451,8 @@ export function WebRunActivityTab(props) {
                             const segKey = msg.id + ":t" + si;
                             return renderAliceTraceBox(segKey, seg.text, msg.stepData || {}, aliceExpandedThinkIds.has(segKey), () => setAliceExpandedThinkIds(prev => {
                               const next = new Set(prev);
-                              next.has(segKey) ? next.delete(segKey) : next.add(segKey);
+                              if (next.has(segKey)) next.delete(segKey);
+                              else next.add(segKey);
                               return next;
                             }));
                           })}</React.Fragment>;
