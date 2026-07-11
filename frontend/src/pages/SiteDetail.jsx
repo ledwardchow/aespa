@@ -345,6 +345,7 @@ export function TestRunDetail({
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
   const [trafficTotal, setTrafficTotal] = useState(0);
+  const crawlImportInputRef = useRef(null);
 
   
   
@@ -585,6 +586,23 @@ export function TestRunDetail({
       setError(e.message);
     }
   };
+  const onExportCrawl = () => api.exportCrawl(runId);
+  const onImportCrawlClick = () => crawlImportInputRef.current?.click();
+  const onImportCrawlFile = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const imported = await api.importCrawl(runId, file);
+      const importedGraph = await api.getGraph(runId);
+      setRun(imported);
+      setGraph(importedGraph);
+      setWpReloadKey(key => key + 1);
+      setActiveTab("sitemap");
+    } catch (e) {
+      setError(e.message);
+    }
+  };
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   
   const headerStatus = runWorkflowStatus(run, {
@@ -593,6 +611,7 @@ export function TestRunDetail({
     thinkingStopping: thinkingStopRequested
   });
   const canStart = run && !crawlStopRequested && ["pending", "stopped", "failed", "complete"].includes(run.status);
+  const canImportCrawl = run?.status === "pending" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl = run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
   const canStop = run?.status === "running" && !crawlStopRequested;
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
@@ -603,12 +622,14 @@ export function TestRunDetail({
     <WebRunHeader
       run={run} siteName={siteName} profiles={runProfiles} headerStatus={headerStatus}
       canStart={canStart} canStop={canStop} canStartScan={canStartThinking}
-      canStopScan={canStopThinking} canResume={hasCheckpoint} crawlStopping={crawlStopRequested}
+      canStopScan={canStopThinking} canResume={hasCheckpoint} canImportCrawl={canImportCrawl} crawlStopping={crawlStopRequested}
       scanStopping={thinkingStopRequested} coverageMode={coverageMode} onCoverageMode={setCoverageMode}
       onStart={onStart} onStop={onStop} onStartScan={onStartThinkingScan}
       onStopScan={onStopThinkingScan} onResume={onResumeThinkingScan}
+      onExportCrawl={onExportCrawl} onImportCrawl={onImportCrawlClick}
       aliceRunning={aliceGlobalRunning} onStopAlice={handleAliceStop}
     />
+    <input ref={crawlImportInputRef} type="file" accept="application/json,.json" hidden onChange={onImportCrawlFile} />
 
     <div className="content" style={{
       paddingBottom: 0,
