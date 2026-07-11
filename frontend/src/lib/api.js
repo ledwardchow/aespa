@@ -137,6 +137,13 @@ export const api = {
   stopRun:          (id)          => req(`/api/test-runs/${id}/stop`,    { method:"POST" }),
   restartRun:       (id)          => req(`/api/test-runs/${id}/restart`, { method:"POST" }),
   clearCrawl:       (id)          => req(`/api/test-runs/${id}/crawl/clear`, { method:"POST" }),
+  exportCrawl:      (id)          => { window.location.href = `/api/test-runs/${id}/crawl/export`; },
+  importCrawl:      (id,file)     => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return fetch(`/api/test-runs/${id}/crawl/import`, { method:"POST", body:fd })
+      .then(async r => { const t = await r.text(); const d = t ? JSON.parse(t) : null; if (!r.ok) throw new Error(formatError(d) || `${r.status} ${r.statusText}`); return d; });
+  },
   getGraph:         (id)          => req(`/api/test-runs/${id}/graph`),
   listPages:        (id)          => req(`/api/test-runs/${id}/pages`),
   getPage:          (runId,pgId)  => req(`/api/test-runs/${runId}/pages/${pgId}`),
