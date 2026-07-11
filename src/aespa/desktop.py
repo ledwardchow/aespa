@@ -38,6 +38,7 @@ from AppKit import (
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
+    NSWorkspace,
 )
 from Foundation import NSURL, NSMakeRect, NSMakeSize, NSObject, NSURLRequest
 from WebKit import WKWebView, WKWebViewConfiguration
@@ -57,8 +58,14 @@ except ImportError:  # pragma: no cover
     WKNavigationResponsePolicyAllow = 1
     WKNavigationResponsePolicyDownload = 2
 
-from aespa.browser import configure_browsers_path, download_chromium_if_missing
-from aespa.config import DEFAULT_WEB_DIR
+from aespa.browser import (
+    chromium_present,
+    configure_browsers_path,
+    download_chromium_if_missing,
+)
+from aespa.config import DEFAULT_WEB_DIR, _pkg_version
+
+_LATEST_RELEASE_API = "https://api.github.com/repos/ledwardchow/aespa/releases/latest"
 
 _WINDOW_STYLE = (
     NSWindowStyleMaskTitled
@@ -93,6 +100,34 @@ def _wait_port(port: int, timeout: float = 20.0) -> None:
                 return
         except OSError:
             time.sleep(0.1)
+
+
+def _check_for_update() -> str | None:
+    """Return the release page URL if GitHub has a newer stable release, else None.
+
+    Best-effort: any failure (offline, rate-limited, unparseable tag) returns None
+    so it never blocks or crashes launch. Uses GitHub's /releases/latest, which
+    skips prereleases — we only nudge users toward stable builds.
+    """
+    import json
+    import urllib.request
+
+    def _tuple(v: str) -> tuple[int, ...]:
+        # Tags/versions are MAJOR.MINOR.YYYYMMDD.REVISION — all numeric.
+        return tuple(int(p) for p in v.lstrip("v").split("."))
+
+    try:
+        req = urllib.request.Request(
+            _LATEST_RELEASE_API,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "AESPA"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.load(resp)
+        if _tuple(data["tag_name"]) > _tuple(_pkg_version):
+            return data.get("html_url")
+    except Exception:
+        pass  # ponytail: silent — an update nudge isn't worth a launch failure.
+    return None
 
 
 def _menubar_icon() -> NSImage:
@@ -162,6 +197,8 @@ class Controller(NSObject):
         self._url = url
         self._window = None
         self._quitting = False
+        self._dl_item = None
+        self._dl_sep = None
         return self
 
     def applicationDidFinishLaunching_(self, _notification):
@@ -182,11 +219,61 @@ class Controller(NSObject):
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
         self._status.setMenu_(menu)
+        self._menu = menu
 
         _install_edit_menu()
         self.showWindow_(None)
 
-    def showWindow_(self, _sender):
+        # First-run Chromium download can take minutes with no visible sign.
+        # Show a disabled "Downloading browser…" item while it runs so the user
+        # knows something's happening; the thread always runs (the installer is
+        # the authoritative idempotent check), only the indicator is gated.
+        if not chromium_present():
+            self._dl_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Downloading browser… (first run)", None, ""
+            )
+            self._dl_sep = NSMenuItem.separatorItem()
+            self._menu.insertItem_atIndex_(self._dl_item, 0)
+            self._menu.insertItem_atIndex_(self._dl_sep, 1)
+        threading.Thread(target=self._downloadBrowser, daemon=True).start()
+
+        # Best-effort GitHub release check off the main thread; on a hit it
+        # inserts an "Update available" item at the top of the menubar menu.
+        threading.Thread(target=self._checkUpdate, daemon=True).start()
+
+    def _downloadBrowser(self):
+        download_chromium_if_missing()
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "browserReady:", None, False
+        )
+
+    def browserReady_(self, _):
+        if self._dl_item is not None:
+            self._menu.removeItem_(self._dl_item)
+            self._menu.removeItem_(self._dl_sep)
+            self._dl_item = None
+            self._dl_sep = None
+
+    def _checkUpdate(self):
+        url = _check_for_update()
+        if url:
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "addUpdateItem:", url, False
+            )
+
+    def addUpdateItem_(self, url):
+        self._update_url = url
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Update Available — Download…", "openUpdate:", ""
+        )
+        item.setTarget_(self)
+        self._menu.insertItem_atIndex_(item, 0)
+        self._menu.insertItem_atIndex_(NSMenuItem.separatorItem(), 1)
+
+    def openUpdate_(self, _sender):
+        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(self._update_url))
+
+    def _ensureWindow(self):
         if self._window is None:
             rect = NSMakeRect(0, 0, 1280, 820)
             win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -217,10 +304,19 @@ class Controller(NSObject):
             win.center()
             self._window = win
 
+    def _presentWindow(self):
+        self._ensureWindow()
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        app.unhide_(None)
         app.activateIgnoringOtherApps_(True)
+        if self._window.isMiniaturized():
+            self._window.deminiaturize_(None)
         self._window.makeKeyAndOrderFront_(None)
+        self._window.orderFrontRegardless()
+
+    def showWindow_(self, _sender):
+        self._presentWindow()
 
     def windowShouldClose_(self, sender):
         # Hide instead of close: server + scans keep running. Drop the dock
@@ -230,6 +326,27 @@ class Controller(NSObject):
             NSApplicationActivationPolicyAccessory
         )
         return False
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(
+        self, _sender, _hasVisibleWindows
+    ):
+        # Dock clicks on a running app arrive here. The window may have been
+        # hidden into menubar mode, so route reopen through the normal presenter.
+        self._presentWindow()
+        return True
+
+    def applicationDidBecomeActive_(self, _notification):
+        # Some macOS paths (notably Dock activation after the app was hidden or
+        # the window was miniaturized) activate the app without sending the
+        # narrower reopen callback. If the Dock icon is present, make sure the
+        # UI comes back with the activation.
+        if (
+            self._window is not None
+            and NSApplication.sharedApplication().activationPolicy()
+            == NSApplicationActivationPolicyRegular
+            and (not self._window.isVisible() or self._window.isMiniaturized())
+        ):
+            self._presentWindow()
 
     # --- JS dialogs (WKUIDelegate): alert / confirm / prompt --------------
     def webView_runJavaScriptAlertPanelWithMessage_initiatedByFrame_completionHandler_(
@@ -363,11 +480,8 @@ class Controller(NSObject):
 
 def main() -> None:
     configure_browsers_path()
-    # First-run Chromium download runs in the background so the UI isn't blocked.
-    # ponytail: a scan started before this finishes will fail until it lands;
-    # upgrade path is surfacing download progress in the UI.
-    threading.Thread(target=download_chromium_if_missing, daemon=True).start()
-
+    # The Controller kicks off the first-run Chromium download once its menubar
+    # is up, so the "Downloading browser…" indicator can reflect it.
     port = _free_port()
     threading.Thread(target=_serve, args=(port,), daemon=True).start()
     _wait_port(port)

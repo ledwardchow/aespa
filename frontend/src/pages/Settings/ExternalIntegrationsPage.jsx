@@ -1,8 +1,6 @@
-import { useState, useRef, useMemo } from "react";
+import { useState } from "react";
 import { UpstreamProxySettings } from "./UpstreamProxySettings";
 import { BurpRestApiSettings } from "./BurpRestApiSettings";
-import { nav } from "../../lib/router";
-import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../../components/Icons";
 
 
 export function ExternalIntegrationsPage() {

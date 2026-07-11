@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef, useMemo, useReducer } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { OWASP_WEB_LABELS } from "./_constants";
 import { OWASP_WEB_SHORT } from "../ApiCollections/ApiRunEndpointsTab";
 import { OWASP_WEB_CATEGORIES } from "./WebRunSastLeadsTab";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, sourceLabel, markdownText, markdownCodeBlock, slugForFilename, leadsExportFilename, markdownExportFilename, downloadTextFile, WP_STATUS_MARK, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { api } from "../../lib/api";
+import { slugForFilename, downloadTextFile, workProgramToMarkdown } from "../../lib/utilities";
+import { usePolling } from "../../hooks/usePolling";
+import { useEventStream } from "../../hooks/useEventStream";
+import { LoadingState } from "../../components/LoadingState";
+import { CoverageStatusBadges } from "../../components/CoverageStatusBadges";
 
 export function WebRunWorkProgramTab({
   runId,
@@ -20,35 +21,18 @@ export function WebRunWorkProgramTab({
   const [selectedCell, setSelectedCell] = useState(null);
   const [seedMsg, setSeedMsg] = useState(null);
   const [enforce, setEnforce] = useState(null); // latest enforce_progress event
-  const esRef = useRef(null);
-  const loadMatrix = () => api.getWebCoverageMatrix(runId).then(m => {
+  const loadMatrix = useCallback(() => api.getWebCoverageMatrix(runId).then(m => {
     setMatrix(m);
     setLoading(false);
-  }).catch(() => setLoading(false));
-  useEffect(() => {
-    loadMatrix();
-  }, [runId]);
+  }).catch(() => setLoading(false)), [runId]);
+  usePolling(loadMatrix, { enabled: scanRunning, intervalMs: 5000 });
   useEffect(() => {
     if (reloadKey > 0) loadMatrix();
-  }, [reloadKey]);
-
-  // Poll during scan.
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(loadMatrix, 5000);
-    return () => clearInterval(t);
-  }, [scanRunning, runId]);
+  }, [reloadKey, loadMatrix]);
 
   // SSE live updates — mirrors ApiRunWorkProgramTab.
-  useEffect(() => {
-    if (!scanRunning) return;
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-    const es = new EventSource(`/api/test-runs/${runId}/events`);
-    esRef.current = es;
-    es.onmessage = ev => {
+  useEventStream(`/api/test-runs/${runId}/events`, {
+    onMessage: ev => {
       try {
         const d = JSON.parse(ev.data);
         if (d.type === "coverage_update") {
@@ -84,12 +68,8 @@ export function WebRunWorkProgramTab({
           if (d.phase === "complete") loadMatrix();
         }
       } catch {}
-    };
-    return () => {
-      es.close();
-      esRef.current = null;
-    };
-  }, [scanRunning, runId]);
+    }
+  }, { enabled: scanRunning });
   const onSeed = async () => {
     setSeeding(true);
     setSeedMsg(null);
@@ -113,9 +93,7 @@ export function WebRunWorkProgramTab({
     });
     downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0, 10)}.md`, md, "text/markdown;charset=utf-8");
   };
-  if (loading) return <div className="subtle" style={{
-    padding: 24
-  }}>Loading OWASP Coverage…</div>;
+  if (loading) return <LoadingState label="Loading OWASP Coverage…" />;
   const cats = OWASP_WEB_CATEGORIES;
   const totals = matrix?.totals || {};
   const totalCells = Object.values(totals).reduce((a, b) => a + b, 0);
@@ -135,17 +113,7 @@ export function WebRunWorkProgramTab({
         <h3 style={{
         margin: 0
       }}>OWASP Coverage Matrix</h3>
-        <span className={"badge " + (effectiveCoverageMode === "enforce" ? "warning" : "neutral")}>
-          {effectiveCoverageMode} mode
-        </span>
-        <span className="badge neutral">{pct}% coverage ({coveredCount}/{totalCells} cells)</span>
-        {scanRunning && <span className="badge warning">● Live</span>}
-        {enforce && enforce.phase !== "complete" && <span className="badge warning" title="Enforce mode is resolving remaining coverage cells">
-            Enforcing… {enforce.resolved != null ? `${enforce.resolved}/${enforce.total}` : `${enforce.remaining} left`}
-          </span>}
-        {enforce && enforce.phase === "complete" && <span className="badge success" title={enforce.message || ""}>
-            Enforce done · {enforce.covered || 0} covered, {enforce.skipped || 0} skipped{enforce.budget_exhausted ? " (budget hit)" : ""}
-          </span>}
+        <CoverageStatusBadges mode={effectiveCoverageMode} percent={pct} covered={coveredCount} total={totalCells} live={scanRunning} enforce={enforce} />
         <div style={{
         flex: 1
       }}></div>

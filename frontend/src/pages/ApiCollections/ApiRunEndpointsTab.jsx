@@ -1,12 +1,8 @@
-import { useState, useEffect, useCallback, useContext } from "react";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../../components/Icons";
+import { useState, useEffect } from "react";
+import { api } from "../../lib/api";
 
 
 export function ApiRunEndpointsTab({
-  runId,
   run
 }) {
   const [endpoints, setEndpoints] = useState([]);

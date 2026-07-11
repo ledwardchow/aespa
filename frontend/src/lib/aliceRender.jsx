@@ -27,7 +27,60 @@ const parseToolArgs = text => {
   }
   return Object.keys(args).length > 0 ? args : null;
 };
+
+export const normalizeAliceText = text => {
+  if (!text || typeof text !== "string") return text || "";
+  return text
+    .replace(/<\/?think(?:ing)?>/gi, "")
+    .replace(/\[\[ALICE_SAY\]\]\s*<\/?think(?:ing)?>/gi, "[[ALICE_SAY]]")
+    .replace(/<\/?think(?:ing)?>\s*\[\[\/ALICE_SAY\]\]/gi, "[[/ALICE_SAY]]")
+    .replace(/\n{3,}/g, "\n\n");
+};
+
+const pushVisibleAndThinkSegments = (segments, text, visibleKind) => {
+  if (!text) return;
+  const thinkRe = /<think(?:ing)?\b[^>]*>([\s\S]*?)<\/think(?:ing)?>/gi;
+  let lastIndex = 0;
+  let m;
+  while ((m = thinkRe.exec(text)) !== null) {
+    const before = normalizeAliceText(text.slice(lastIndex, m.index)).trim();
+    if (before) segments.push({
+      kind: visibleKind,
+      text: before
+    });
+    const thought = normalizeAliceText(m[1] || "").trim();
+    if (thought) segments.push({
+      kind: "trace",
+      text: thought
+    });
+    lastIndex = m.index + m[0].length;
+  }
+
+  let tail = text.slice(lastIndex);
+  const openThink = tail.match(/<think(?:ing)?\b[^>]*>/i);
+  if (openThink && openThink.index !== undefined) {
+    const before = normalizeAliceText(tail.slice(0, openThink.index)).trim();
+    if (before) segments.push({
+      kind: visibleKind,
+      text: before
+    });
+    const thought = normalizeAliceText(tail.slice(openThink.index + openThink[0].length)).trim();
+    if (thought) segments.push({
+      kind: "trace",
+      text: thought
+    });
+    return;
+  }
+
+  tail = normalizeAliceText(tail).trim();
+  if (tail) segments.push({
+    kind: visibleKind,
+    text: tail
+  });
+};
+
 const parseAliceThinking = text => {
+  text = normalizeAliceText(text);
   if (!text) return [];
   const blocks = [];
   const lines = text.split("\n");
@@ -410,6 +463,7 @@ const parseAliceThinking = text => {
   return blocks;
 };
 export const renderMarkdown = text => {
+  text = normalizeAliceText(text);
   if (!text) return "";
   if (typeof text !== "string") text = markdownText(text);
   if (!text) return "";
@@ -602,22 +656,12 @@ export const parseAliceTurnSegments = text => {
   ALICE_SAY_RE.lastIndex = 0;
   while ((m = ALICE_SAY_RE.exec(text)) !== null) {
     const before = text.slice(lastIndex, m.index);
-    if (before.trim()) segments.push({
-      kind: "trace",
-      text: before
-    });
-    const said = m[1].trim();
-    if (said) segments.push({
-      kind: "message",
-      text: said
-    });
+    pushVisibleAndThinkSegments(segments, before, "trace");
+    pushVisibleAndThinkSegments(segments, m[1], "message");
     lastIndex = m.index + m[0].length;
   }
   const tail = text.slice(lastIndex);
-  if (tail.trim()) segments.push({
-    kind: "trace",
-    text: tail
-  });
+  pushVisibleAndThinkSegments(segments, tail, "trace");
   return segments;
 };
 
