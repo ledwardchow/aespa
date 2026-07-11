@@ -750,6 +750,7 @@ def _migrate(engine: Engine) -> None:
                 sender TEXT NOT NULL DEFAULT 'alice',
                 type TEXT NOT NULL DEFAULT 'message',
                 text TEXT NOT NULL DEFAULT '',
+                step_data_json TEXT NOT NULL DEFAULT '{}',
                 ts TEXT NOT NULL DEFAULT '',
                 position INTEGER NOT NULL DEFAULT 0,
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
@@ -760,6 +761,7 @@ def _migrate(engine: Engine) -> None:
             "ON alice_chat_message (session_id)"
         ))
         conn.commit()
+    _ensure_column(engine, "alice_chat_message", "step_data_json", "TEXT NOT NULL DEFAULT '{}'")
     # SAST: sast_run and scan_lead tables
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""

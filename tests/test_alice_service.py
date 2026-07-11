@@ -162,6 +162,33 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
         assert mock_reply in done_chunks[0]["message"]
 
 
+@pytest.mark.anyio
+async def test_run_alice_turn_stream_routes_inline_think_tags_to_trace(db_session, test_data):
+    """MiniMax-style <think> blocks should not leak into visible reply chunks."""
+    run = test_data["run"]
+    reply = "<think>private reasoning\nwith details</think>Visible answer only."
+
+    async def mock_call_with_tools(*args, **kwargs):
+        text_block = {"type": "text", "text": reply}
+        return [text_block], "end_turn", [text_block]
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Summarize", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    thinking_text = "".join(c.get("delta", "") for c in chunks if c.get("type") == "thinking_chunk")
+    message_text = "".join(c.get("delta", "") for c in chunks if c.get("type") == "message_chunk")
+    done = [c for c in chunks if c.get("type") == "done"][0]
+
+    assert "private reasoning" in thinking_text
+    assert "private reasoning" not in message_text
+    assert "Visible answer only." in message_text
+    assert "private reasoning" not in done["message"]
+    assert "Visible answer only." in done["message"]
+
+
 def test_alice_chat_api_endpoint(test_client, test_data):
     """Verify that the POST /api/test-runs/{run_id}/alice/run endpoint operates correctly."""
     run = test_data["run"]
@@ -214,7 +241,19 @@ def test_alice_sessions_roundtrip_and_run_token(test_client, test_data):
             "title": "Session 1",
             "messages": [
                 {"id": "m1", "sender": "user", "type": "message", "text": "hi", "ts": "10:00"},
-                {"id": "m2", "sender": "alice", "type": "message", "text": "hello", "ts": "10:01"},
+                {
+                    "id": "m2",
+                    "sender": "alice",
+                    "type": "thinking",
+                    "text": "[Step 1] Calling LLM...",
+                    "ts": "10:01",
+                    "stepData": {
+                        "1": {
+                            "llmMessages": [{"role": "user", "content": "hi"}],
+                            "tools": [{"tool": "context_tool", "input": {"tool": "finding_list"}, "result": "{}"}],
+                        }
+                    },
+                },
             ],
         }],
         "active_tab_id": "tab-default",
@@ -226,7 +265,8 @@ def test_alice_sessions_roundtrip_and_run_token(test_client, test_data):
     assert loaded["run_created_at"] == token   # token is stable across saves
     assert len(loaded["chats"]) == 1
     assert loaded["chats"][0]["id"] == "tab-default"
-    assert [m["text"] for m in loaded["chats"][0]["messages"]] == ["hi", "hello"]
+    assert [m["text"] for m in loaded["chats"][0]["messages"]] == ["hi", "[Step 1] Calling LLM..."]
+    assert loaded["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["tool"] == "context_tool"
     assert loaded["updated_at"] is not None
 
 

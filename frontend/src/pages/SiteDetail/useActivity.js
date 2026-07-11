@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { isDynamicScanActive } from "./_helpers";
 import { parseDate, truncUrl } from "../../lib/utilities";
@@ -17,7 +17,8 @@ export function useActivity(runId, activeTab, {
   const [expandedLogIds, setExpandedLogIds] = useState(new Set());
   const toggleLogId = id => setExpandedLogIds(prev => {
     const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     return next;
   });
   const [activitySubTab, setActivitySubTab] = useState("agents");
@@ -198,7 +199,7 @@ export function useActivity(runId, activeTab, {
     if (agent?.status === "failed") return "FAILED";
     return "COMPLETE";
   };
-  const upsertAgent = (items, patch, histEntry = null) => {
+  const upsertAgent = useCallback((items, patch, histEntry = null) => {
     const normalized = {
       ...patch,
       role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role
@@ -220,7 +221,7 @@ export function useActivity(runId, activeTab, {
       crawlEvents: normalized.crawlEvents || prev.crawlEvents || []
     };
     return updated;
-  };
+  }, []);
 
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {

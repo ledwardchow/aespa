@@ -1,10 +1,9 @@
 import { renderMarkdown } from "../../lib/aliceRender";
 import { ALICE_DEDUP_DIRECTIVE } from "../SastRuns";
-import { useState, useEffect, useRef, useMemo, useReducer } from "react";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, sourceLabel, markdownText, markdownCodeBlock, leadImportPayload, leadsToMarkdown, markdownExportFilename, downloadTextFile, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
+import { useState, useRef, useCallback } from "react";
+import { api } from "../../lib/api";
+import { markdownExportFilename, downloadTextFile, findingsToMarkdown, parseFindingsMarkdown } from "../../lib/utilities";
+import { usePolling } from "../../hooks/usePolling";
 
 
 export function ApiRunFindingsTab({
@@ -22,7 +21,7 @@ export function ApiRunFindingsTab({
   const [editDraft, setEditDraft] = useState(null); // working copy
   const [editBusy, setEditBusy] = useState(false);
   const issueImportInputRef = useRef(null);
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api.getApiFindings(runId);
       setFindings(data);
@@ -31,21 +30,13 @@ export function ApiRunFindingsTab({
     } finally {
       setLoading(false);
     }
-  };
-  useEffect(() => {
-    load();
   }, [runId]);
-
-  // Poll while scan is running.
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(load, 8000);
-    return () => clearInterval(t);
-  }, [scanRunning, runId]);
+  usePolling(load, { enabled: scanRunning, intervalMs: 8000 });
   const toggle = id => {
     setExpanded(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -431,4 +422,3 @@ export function ApiRunFindingsTab({
 }
 
 // ── ApiRunEndpointsTab — per-endpoint prerequisites display ───────────────────
-
