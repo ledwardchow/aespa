@@ -1,4 +1,4 @@
-import { useColResize } from "../SiteDetail";
+import { useColResize } from "./_helpers";
 import { AttackSurfacePanel } from "./AttackSurfacePanel";
 import { truncUrl } from "../../lib/utilities";
 

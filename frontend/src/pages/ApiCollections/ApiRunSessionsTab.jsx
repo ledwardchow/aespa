@@ -10,5 +10,5 @@ export function ApiRunSessionsTab({
   const [data, setData] = useState(null);
   const load = useCallback(() => api.getApiScannerSessions(runId).then(setData).catch(() => {}), [runId]);
   usePolling(load, { enabled: scanRunning, intervalMs: 4000 });
-  return <ScannerSessionsPanel runId={runId} data={data} refresh={load} updateSession={(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b).then(load)} />;
+  return <ScannerSessionsPanel data={data} refresh={load} onUpdate={(sessionId, b) => api.updateApiScannerSession(runId, sessionId, b)} />;
 }
