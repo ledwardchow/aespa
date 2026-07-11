@@ -128,11 +128,9 @@ npm ci            # first time only
 npm run build     # regenerates src/aespa/web/
 ```
 
-Commit the regenerated `src/aespa/web/` alongside your source changes so deployments stay a simple `git clone && uv run aespa`. For live-reload during development, run `npm run dev` (proxies API calls to a `uv run aespa` backend on port 8000).
-
 ### Run notes
 
-Crawls work well on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models, I've had the best results on Sonnet 4.6.
+Crawls work well enough on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models; for best results, use Sonnet, or the budget option is Minimax M3.
 
 If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 

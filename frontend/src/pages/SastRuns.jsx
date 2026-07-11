@@ -1,12 +1,11 @@
-import { useState, useEffect, useRef, useCallback, useContext } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { LeadsPanel } from "./ApiCollections/LeadsPanel";
-import { api, formatError } from "../lib/api";
+import { api } from "../lib/api";
 import { nav } from "../lib/router";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../lib/aliceSession";
-import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../components/Icons";
+import { usePolling } from "../hooks/usePolling";
 
 // ── SastRunDetail ─────────────────────────────────────────────────────────────
 
@@ -202,28 +201,12 @@ export function SastProgressTab({
   const [log, setLog] = useState([]);
   const [subTab, setSubTab] = useState("activity");
   const bottomRef = useRef(null);
-  const loadActivity = () => api.getSastScanLog(runId).then(setLog).catch(() => {});
-  const loadAgents = () => api.getSastAgentLog(runId).then(setLog).catch(() => {});
-  const load = () => subTab === "activity" ? loadActivity() : loadAgents();
+  const load = useCallback(() => {
+    const request = subTab === "activity" ? api.getSastScanLog(runId) : api.getSastAgentLog(runId);
+    return request.then(setLog).catch(() => {});
+  }, [runId, subTab]);
 
-  // Initial load + polling
-  useEffect(() => {
-    load();
-  }, [
-	runId,
-	subTab,
-	load
-]);
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
-  }, [
-	scanRunning,
-	runId,
-	subTab,
-	load
-]);
+  usePolling(load, { enabled: scanRunning, intervalMs: 3000 });
 
   // Auto-scroll to bottom while running
   useEffect(() => {

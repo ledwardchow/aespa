@@ -545,6 +545,53 @@ def test_list_pages_empty(client: TestClient):
     assert r.json() == []
 
 
+def test_export_and_import_crawl_into_new_run(client: TestClient):
+    site = _make_site(client)
+    source = _make_run(client, site["id"]).json()
+    target = _make_run(client, site["id"]).json()
+    # The finding-import endpoint creates a realistic crawled page without
+    # requiring a Playwright crawl in this service-level test.
+    created = client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
+        "title": "Imported page seed",
+        "affected_url": "https://target.local/account",
+    }])
+    assert created.status_code == 200
+
+    exported = client.get(f"/api/test-runs/{source['id']}/crawl/export")
+    assert exported.status_code == 200
+    archive = exported.json()
+    assert archive["format"] == "aespa-crawl-export"
+    assert archive["crawl"]["pages"][0]["url"] == "https://target.local/account"
+
+    imported = client.post(
+        f"/api/test-runs/{target['id']}/crawl/import",
+        files={"file": ("crawl.json", exported.content, "application/json")},
+    )
+    assert imported.status_code == 200
+    assert imported.json()["status"] == "complete"
+    assert imported.json()["pages_discovered"] == 1
+    pages = client.get(f"/api/test-runs/{target['id']}/pages")
+    assert [page["url"] for page in pages.json()] == ["https://target.local/account"]
+
+
+def test_import_crawl_rejects_another_site(client: TestClient):
+    source_site = _make_site(client)
+    source = _make_run(client, source_site["id"]).json()
+    client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
+        "title": "Imported page seed", "affected_url": "https://target.local/account",
+    }])
+    archive = client.get(f"/api/test-runs/{source['id']}/crawl/export")
+    other_site = _make_site(client, name="Other", base_url="https://other.local")
+    target = _make_run(client, other_site["id"]).json()
+
+    imported = client.post(
+        f"/api/test-runs/{target['id']}/crawl/import",
+        files={"file": ("crawl.json", archive.content, "application/json")},
+    )
+    assert imported.status_code == 400
+    assert "different site" in imported.json()["detail"]
+
+
 def test_clear_crawl_resets_run_without_restarting(monkeypatch):
     from aespa import models as _models  # noqa: F401
     from aespa.main import create_app

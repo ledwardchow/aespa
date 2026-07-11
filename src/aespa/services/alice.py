@@ -146,6 +146,44 @@ def _extract_user_directive(history: list[dict]) -> str:
     return "Prioritize general penetration testing."
 
 
+def _split_visible_and_thinking_text(text: str) -> tuple[list[str], str]:
+    """Split model-emitted <think> blocks from user-visible assistant text.
+
+    Some OpenAI-compatible reasoning models, including MiniMax-style outputs,
+    emit reasoning in ordinary text blocks rather than structured thinking
+    blocks.  Route complete and trailing/open think tags into ALICE's collapsed
+    trace stream so they do not become visible chat-bubble prose.
+    """
+    import re as _re
+
+    thinking_parts: list[str] = []
+
+    def _capture(match) -> str:
+        inner = (match.group(1) or "").strip()
+        if inner:
+            thinking_parts.append(inner)
+        return ""
+
+    visible = _re.sub(
+        r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
+        _capture,
+        text,
+        flags=_re.DOTALL | _re.IGNORECASE,
+    )
+
+    # If the provider streams or returns an unclosed <think> block, treat the
+    # remainder as reasoning instead of leaking it into the reply bubble.
+    open_match = _re.search(r"<think(?:ing)?\b[^>]*>", visible, flags=_re.IGNORECASE)
+    if open_match:
+        tail = visible[open_match.end():].strip()
+        if tail:
+            thinking_parts.append(tail)
+        visible = visible[:open_match.start()]
+
+    visible = _re.sub(r"</think(?:ing)?>", "", visible, flags=_re.IGNORECASE).strip()
+    return thinking_parts, visible
+
+
 def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     """Return the full THINKING_AGENT_TOOLS list filtered to ALICE's allowed set.
 
@@ -890,12 +928,20 @@ async def _execute_alice_tool(
 
         with Session(get_engine()) as s:
             finding = s.get(_SF, finding_id)
-            # Accept the finding if it belongs to this run, whether it was
-            # recorded against the web-scan (test_run_id) or API-scan
-            # (api_test_run_id) — run_id is the same value in both contexts.
-            if finding is None or (
-                finding.test_run_id != run_id and finding.api_test_run_id != run_id
-            ):
+            if finding is None:
+                return f"remove_finding: finding #{finding_id} not found for this run."
+
+            # Web TestRun.id and ApiTestRun.id live in independent integer
+            # spaces.  Match against the column for the active ALICE mode only,
+            # otherwise an API cleanup task for run #1 could delete a web
+            # finding from TestRun #1 (or vice versa) if the model supplies the
+            # wrong finding id.
+            belongs_to_run = (
+                finding.api_test_run_id == api_run_id
+                if api_run_id is not None
+                else finding.test_run_id == run_id and finding.api_test_run_id is None
+            )
+            if not belongs_to_run:
                 return f"remove_finding: finding #{finding_id} not found for this run."
             title = finding.title
             s.delete(finding)
@@ -1193,8 +1239,6 @@ async def run_alice_turn_stream(
             # markers in the thinking stream) so it breaks the collapsed trace
             # into a box-above / box-below. The final tool-less turn's text and
             # the done summary become the prominent reply bubble.
-            import re as _re
-
             has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
@@ -1202,22 +1246,11 @@ async def run_alice_turn_stream(
                     continue
 
                 # Parse out <think>/<thinking> reasoning if model embeds it inline
-                # (minimax m3, DeepSeek-R1, QwQ, etc. use the short <think> form).
-                think_match = _re.search(
-                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
-                    text_content, _re.DOTALL | _re.IGNORECASE,
-                )
-                if think_match:
-                    think_part = think_match.group(1).strip()
-                    outer_text = _re.sub(
-                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
-                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
-                    ).strip()
-                    if think_part:
-                        accumulated_thought += think_part
-                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                else:
-                    outer_text = text_content
+                # (MiniMax, DeepSeek-R1, QwQ, etc. use text tags).
+                think_parts, outer_text = _split_visible_and_thinking_text(text_content)
+                for think_part in think_parts:
+                    accumulated_thought += think_part
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
 
                 if not outer_text:
                     await asyncio.sleep(0)
@@ -2219,28 +2252,15 @@ async def run_api_alice_turn_stream(
             # Stream text blocks. Commentary on a step that also calls a tool is
             # "intermediate" — emit it as a chat bubble (wrapped in [[ALICE_SAY]]
             # markers in the thinking stream) so it breaks the collapsed trace.
-            import re as _re
-
             has_tools = bool(tool_use_blocks)
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
                     continue
-                think_match = _re.search(
-                    r"<think(?:ing)?\b[^>]*>(.*?)</think(?:ing)?>",
-                    text_content, _re.DOTALL | _re.IGNORECASE,
-                )
-                if think_match:
-                    think_part = think_match.group(1).strip()
-                    outer_text = _re.sub(
-                        r"<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>", "",
-                        text_content, flags=_re.DOTALL | _re.IGNORECASE,
-                    ).strip()
-                    if think_part:
-                        accumulated_thought += think_part
-                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
-                else:
-                    outer_text = text_content
+                think_parts, outer_text = _split_visible_and_thinking_text(text_content)
+                for think_part in think_parts:
+                    accumulated_thought += think_part
+                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': think_part})}\n\n"
 
                 if not outer_text:
                     await asyncio.sleep(0)

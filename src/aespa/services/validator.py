@@ -107,7 +107,18 @@ async def start_validation(run_id: int, finding_ids: list[int] | None = None) ->
             name=f"validate-{run_id}",
         )
     _validation_tasks[run_id] = task
-    task.add_done_callback(lambda _: _validation_tasks.pop(run_id, None))
+
+    def _on_validation_done(_task: asyncio.Task) -> None:
+        _validation_tasks.pop(run_id, None)
+        try:
+            events_svc.emit(run_id, {
+                "type": "validation_status_update",
+                **get_validation_status(run_id),
+            })
+        except Exception:
+            log.debug("Failed to emit final validation status for run_id=%s", run_id, exc_info=True)
+
+    task.add_done_callback(_on_validation_done)
 
 
 def request_stop(run_id: int) -> bool:

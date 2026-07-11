@@ -4,7 +4,6 @@ import { PROVIDER_DEFAULT_BASE_URLS, DEFAULT_PROVIDER_FORM, DEFAULT_LLM_FORM, AP
 import { AGENT_ROLE_LABELS } from "./Settings/LLMModelForm";
 import { DEFAULT_BURP_REST_API_FORM } from "./Settings/SpecialistAgentSettings";
 import { api } from "../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../lib/policy";
 
 import { ScannerPolicyFields } from "./Settings/ScannerPolicyFields";
 import { ScannerPolicySettings } from "./Settings/ScannerPolicySettings";

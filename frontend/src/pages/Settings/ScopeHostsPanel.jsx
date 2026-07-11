@@ -1,6 +1,5 @@
-import { useState, useRef, useMemo } from "react";
+import { useState } from "react";
 import { api } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
 
 
 export function ScopeHostsPanel({

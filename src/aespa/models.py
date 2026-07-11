@@ -871,6 +871,7 @@ class AliceChatMessage(SQLModel, table=True):
     sender: str                            # "user" | "alice"
     type: str = Field(default="message")   # "message" | "thinking"
     text: str = Field(default="")
+    step_data_json: str = Field(default="{}")
     ts: str = Field(default="")
     position: int = Field(default=0)       # ordering within session
     updated_at: datetime = Field(default_factory=_utcnow)
