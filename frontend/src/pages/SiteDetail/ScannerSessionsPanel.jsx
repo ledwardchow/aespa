@@ -1,9 +1,7 @@
-import { useColResize } from "../SiteDetail";
-import { api } from "../../lib/api";
+import { useColResize } from "./_helpers";
 import { parseDate } from "../../lib/utilities";
 
 export function ScannerSessionsPanel({
-  runId,
   data,
   refresh,
   onUpdate
@@ -20,12 +18,11 @@ export function ScannerSessionsPanel({
       return iso;
     }
   };
-  const doUpdate = onUpdate ? (sessionId, b) => onUpdate(sessionId, b) : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
   const renameSession = async session => {
     const next = prompt("Session label", session.label);
     if (next === null) return;
     try {
-      await doUpdate(session.id, {
+      await onUpdate(session.id, {
         label: next
       });
       await refresh();
@@ -37,7 +34,7 @@ export function ScannerSessionsPanel({
     const verb = isActive ? "Reactivate" : "Deactivate";
     if (!confirm(`${verb} session "${session.label}"?`)) return;
     try {
-      await doUpdate(session.id, {
+      await onUpdate(session.id, {
         is_active: isActive
       });
       await refresh();

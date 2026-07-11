@@ -1,4 +1,4 @@
-import { useColResize } from "../SiteDetail";
+import { useColResize } from "./_helpers";
 import { truncUrl } from "../../lib/utilities";
 
 export function TargetIntelligencePanel({

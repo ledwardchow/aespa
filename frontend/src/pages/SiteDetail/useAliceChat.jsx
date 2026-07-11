@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { api } from "../../lib/api";
 import { getAliceSession, aliceSessionSubscribe, aliceSessionAbort, aliceSessionConnect, aliceSessionStart } from "../../lib/aliceSession";
 
@@ -10,6 +10,7 @@ import { getAliceSession, aliceSessionSubscribe, aliceSessionAbort, aliceSession
 // `onActivate` fires when a directive is submitted so the caller can expand the
 // A.L.I.C.E. agent panel.
 export function useAliceChat(runId, { onActivate } = {}) {
+  const identity = useMemo(() => ({ runKind: "web", runId }), [runId]);
   const ALICE_WELCOME_MESSAGE = "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start Pentest at the top right, or you can tell me to work on something specific!";
   const _aliceDefaultChats = () => [{
     id: "tab-default",
@@ -61,7 +62,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
       // Helper: patch messages with the latest recovery-key text.
       const applyRecovery = (chats, tabId) => {
         try {
-          const rec = JSON.parse(localStorage.getItem(`alice_recover_${runId}:${tabId}`) || "null");
+          const rec = JSON.parse(localStorage.getItem(`alice_recover_web:${runId}:${tabId}`) || "null");
           if (!rec || !rec.thinkMsgId) return chats;
           return chats.map(tab => {
             if (tab.id !== tabId) return tab;
@@ -138,7 +139,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, identity]);
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
   const [aliceThinkingTabId, setAliceThinkingTabId] = useState(null);
@@ -160,14 +161,14 @@ export function useAliceChat(runId, { onActivate } = {}) {
       setAliceGlobalRunning(true);
       setAliceThinkingTabId(tab_id);
       // Pre-populate session so the subscriber can find the right messages.
-      const sess = getAliceSession(runId, tab_id);
+      const sess = getAliceSession(identity, tab_id);
       sess.thinkMsgId = think_msg_id;
       sess.replyMsgId = reply_msg_id;
       const done = () => {
         setAliceThinkingTabId(null);
         setAliceGlobalRunning(false);
       };
-      aliceSessionConnect(runId, tab_id, {
+      aliceSessionConnect(identity, tab_id, {
         thinkMsgId: think_msg_id,
         replyMsgId: reply_msg_id,
         cursor: 0,
@@ -178,11 +179,11 @@ export function useAliceChat(runId, { onActivate } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, identity]);
   // Subscribe to in-flight stream on mount/tab-switch so navigating back
   // shows the spinner and receives live chunks from the singleton reader loop.
   useEffect(() => {
-    const session = getAliceSession(runId, activeAliceTabId);
+    const session = getAliceSession(identity, activeAliceTabId);
     if (session.active) {
       setAliceThinkingTabId(activeAliceTabId);
     }
@@ -197,7 +198,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     let recStepData = session.stepData;
     if (!recThinkId || !recThought && !recMessage) {
       try {
-        const saved = JSON.parse(localStorage.getItem(`alice_recover_${runId}:${activeAliceTabId}`) || "null");
+        const saved = JSON.parse(localStorage.getItem(`alice_recover_web:${runId}:${activeAliceTabId}`) || "null");
         if (saved && saved.thinkMsgId) {
           recThinkId = recThinkId || saved.thinkMsgId;
           recReplyId = recReplyId || saved.replyMsgId;
@@ -227,7 +228,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
         };
       }));
     }
-    const unsub = aliceSessionSubscribe(runId, activeAliceTabId, {
+    const unsub = aliceSessionSubscribe(identity, activeAliceTabId, {
       onChunk: event => {
         const {
           thinkMsgId,
@@ -292,7 +293,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
       }
     });
     return unsub;
-  }, [runId, activeAliceTabId]);
+  }, [runId, activeAliceTabId, identity]);
   const _aliceSaveTimer = useRef(null);
   const _aliceServerLoaded = useRef(false);
   useEffect(() => {
@@ -404,7 +405,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     document.addEventListener("mouseup", onUp);
   }, [aliceChatHeight]);
   const handleAliceStop = () => {
-    aliceSessionAbort(runId, activeAliceTabId);
+    aliceSessionAbort(identity, activeAliceTabId);
     api.stopAliceRun(runId).catch(() => {});
     setAliceThinkingTabId(null);
     setAliceGlobalRunning(false);
@@ -485,7 +486,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     // Delegate all I/O to the module-level singleton so the stream survives
     // component unmounts caused by hash navigation.
     // State updates are handled by the useEffect subscriber above.
-    aliceSessionStart(runId, currentTabId, {
+    aliceSessionStart(identity, currentTabId, {
       userText,
       historyPayload,
       thinkMsgId,
