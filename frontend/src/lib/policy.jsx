@@ -7,29 +7,11 @@ export const SCAN_MODE_OPTIONS = [
   ["aggressive", "Aggressive"],
   ["destructive", "Destructive"],
 ];
-export const SCAN_MODE_DEFINITIONS = {
-  passive:"Passive checks only. Requests pages to inspect headers, cookies, and obvious access-control signals without running LLM-planned attack probes.",
-  safe_active:"Bounded active testing. Allows non-destructive HTTP probes and common payloads for issues such as XSS, injection markers, IDOR, and auth checks.",
-  aggressive:"Noisier active testing. Allows broader fuzzing, more HTTP methods, and higher-risk payloads that may trigger alerts or affect application state.",
-  destructive:"Highest-risk testing. Allows potentially state-changing probes; use only with explicit authorization and approval controls.",
-};
 export const scanModeLabel = (mode) => (SCAN_MODE_OPTIONS.find(([v])=>v===mode)||[])[1] || mode;
-export function ScanModeDefinitions({ selected }) {
-  return (
-    <div className="scan-mode-definitions">
-      {SCAN_MODE_OPTIONS.map(([value, label]) => (
-        <div key={value} className={"scan-mode-definition" + (selected === value ? " selected" : "")}>
-          <span className={"scan-mode-badge mode-" + value}>{label}</span>
-          <span>{SCAN_MODE_DEFINITIONS[value]}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
 export const csv = (value, transform=(x)=>x) => String(value||"")
   .split(",").map(x=>transform(x.trim())).filter(Boolean);
 export const defaultPolicyForm = () => ({
-  scan_mode:"safe_active",
+  scan_mode:"aggressive",
   max_probes_per_page:50,
   thinking_max_steps:120,
   request_timeout_s:10,
@@ -39,7 +21,7 @@ export const defaultPolicyForm = () => ({
   allowed_schemes:"http, https",
   methods_passive:"GET, HEAD",
   methods_safe_active:"GET, POST, HEAD",
-  methods_aggressive:"GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+  methods_aggressive:"GET, POST, PUT, PATCH, HEAD, OPTIONS",
   methods_destructive:"GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
   blocked_headers:"host, cookie",
   follow_redirects:true,
@@ -62,7 +44,7 @@ export const policyToForm = (p) => {
     allowed_schemes:(p.allowed_schemes || ["http","https"]).join(", "),
     methods_passive:(mbm.passive || ["GET","HEAD"]).join(", "),
     methods_safe_active:(mbm.safe_active || ["GET","POST","HEAD"]).join(", "),
-    methods_aggressive:(mbm.aggressive || ["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"]).join(", "),
+    methods_aggressive:(mbm.aggressive || ["GET","POST","PUT","PATCH","HEAD","OPTIONS"]).join(", "),
     methods_destructive:(mbm.destructive || ["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"]).join(", "),
     blocked_headers:(p.blocked_headers || ["host","cookie"]).join(", "),
     follow_redirects:p.follow_redirects ?? true,
@@ -90,4 +72,3 @@ export const policyPayload = (form) => ({
   allow_subdomains:!!form.allow_subdomains,
   require_approval_for_destructive:!!form.require_approval_for_destructive,
 });
-

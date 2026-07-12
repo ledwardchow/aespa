@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ValidatorSettings } from "./ValidatorSettings";
 import { ScannerPolicySettings } from "./ScannerPolicySettings";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings";
+import { ReportingSettings } from "./ReportingSettings";
 
 
 export function ScanPolicyPage() {
@@ -21,6 +22,7 @@ export function ScanPolicyPage() {
         <button className={"tab-btn" + (tab === "scanner" ? " active" : "")} onClick={() => setTab("scanner")}>Scanner</button>
         <button className={"tab-btn" + (tab === "specialists" ? " active" : "")} onClick={() => setTab("specialists")}>Specialist Agents</button>
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
+        <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
       </div>
       <div className="scroll-content" style={{
         flex: 1,
@@ -33,6 +35,7 @@ export function ScanPolicyPage() {
         {tab === "scanner" && <ScannerPolicySettings />}
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}
+        {tab === "reporting" && <ReportingSettings />}
       </div>
     </div></>;
 }

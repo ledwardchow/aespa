@@ -2203,6 +2203,7 @@ async def analyse_probes(
     url: str,
     results: list[dict],
     on_batch_complete=None,
+    max_concurrent_batches: int = 1,
 ) -> list[dict]:
     """Ask the LLM to analyse probe results and return a list of findings.
 
@@ -2212,14 +2213,31 @@ async def analyse_probes(
     if not results:
         return []
 
-    findings: list[dict] = []
     batches = _chunk_probe_results(results)
-    for turn_num, batch in enumerate(batches, start=1):
+
+    async def _analyse(turn_num: int, batch: list[str]) -> list[dict]:
         batch_findings = await _analyse_probe_batch(config, url, batch)
-        findings.extend(batch_findings)
         if on_batch_complete is not None:
             await on_batch_complete(turn_num, len(batch), batch_findings)
-    return findings
+        return batch_findings
+
+    if max_concurrent_batches <= 1:
+        batch_findings = [
+            await _analyse(turn_num, batch)
+            for turn_num, batch in enumerate(batches, start=1)
+        ]
+    else:
+        semaphore = asyncio.Semaphore(max_concurrent_batches)
+
+        async def _limited(turn_num: int, batch: list[str]) -> list[dict]:
+            async with semaphore:
+                return await _analyse(turn_num, batch)
+
+        batch_findings = await asyncio.gather(*(
+            _limited(turn_num, batch)
+            for turn_num, batch in enumerate(batches, start=1)
+        ))
+    return [finding for batch in batch_findings for finding in batch]
 
 
 def _format_probe_result(result: dict) -> str:

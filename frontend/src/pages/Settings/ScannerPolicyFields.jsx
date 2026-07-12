@@ -1,4 +1,4 @@
-import { SCAN_MODE_OPTIONS, ScanModeDefinitions } from "../../lib/policy";
+import { SCAN_MODE_OPTIONS } from "../../lib/policy";
 
 
 export function ScannerPolicyFields({
@@ -16,7 +16,6 @@ export function ScannerPolicyFields({
         {SCAN_MODE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
     </div>
-    <ScanModeDefinitions selected={form.scan_mode} />
     <div className="divider" />
     <div className="form-section-title">Limits</div>
     <div className="two-col">
