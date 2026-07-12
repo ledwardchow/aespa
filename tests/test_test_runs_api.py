@@ -1,4 +1,6 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
+import json
+
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -562,16 +564,42 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     archive = exported.json()
     assert archive["format"] == "aespa-crawl-export"
     assert archive["crawl"]["pages"][0]["url"] == "https://target.local/account"
+    # Simulate the category information emitted by a normal crawl.  Import must
+    # restore both the sitemap's per-page flags and the coverage-matrix cells.
+    archive["crawl"]["pages"][0]["owasp_applicable_json"] = '{"A01": true, "A02": false}'
+    archive["crawl"]["owasp_categories"] = [{
+        "page_url": "https://target.local/account", "category": "A01",
+    }]
+    archive["crawl"]["traffic"] = [{
+        "source": "playwright", "method": "GET", "url": "https://target.local/account",
+        "request_headers": '{"Authorization": "Bearer retained"}', "request_body": None,
+        "status": 200, "response_headers": '{"Set-Cookie": "session=retained"}',
+        "response_body": "account page", "duration_ms": 12, "username": "alice",
+    }]
+    archive["crawl"]["scanner_sessions"] = [{
+        "label": "configured_primary", "kind": "mixed", "username": "alice",
+        "credential_username": "alice", "source": "crawler",
+        "cookies_json": '{"session": "retained"}',
+        "extra_headers_json": '{"Authorization": "Bearer retained"}',
+        "session_metadata": '{"origin": "crawl"}', "token_hint": "retained",
+        "is_active": True,
+    }]
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
-        files={"file": ("crawl.json", exported.content, "application/json")},
+        files={"file": ("crawl.json", json.dumps(archive), "application/json")},
     )
     assert imported.status_code == 200
     assert imported.json()["status"] == "complete"
     assert imported.json()["pages_discovered"] == 1
     pages = client.get(f"/api/test-runs/{target['id']}/pages")
     assert [page["url"] for page in pages.json()] == ["https://target.local/account"]
+    detail = client.get(f"/api/test-runs/{target['id']}/pages/{pages.json()[0]['id']}")
+    assert detail.json()["owasp_applicable"] == {"A01": True, "A02": False}
+    sessions = client.get(f"/api/test-runs/{target['id']}/scanner-sessions").json()
+    assert sessions["counts"] == {"total": 1, "mixed": 1, "active": 1}
+    assert sessions["sessions"][0]["cookie_names"] == ["session"]
+    assert sessions["sessions"][0]["header_names"] == ["Authorization"]
 
 
 def test_import_crawl_rejects_another_site(client: TestClient):
