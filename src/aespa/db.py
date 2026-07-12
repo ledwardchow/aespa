@@ -115,6 +115,26 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
         pass  # never block startup on a best-effort cleanup
 
 
+def _normalize_threshold_skipped_findings(engine: Engine) -> None:
+    """Correct historical threshold skips that were mislabeled unconfirmed."""
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                _text(
+                    "UPDATE scan_finding "
+                    "SET validation_status='skipped', "
+                    "    validation_note=REPLACE(validation_note, 'Skipped:', 'Not validated:') "
+                    "WHERE validation_status='unconfirmed' "
+                    "  AND validation_note LIKE 'Skipped: severity % is below the configured threshold %'"
+                )
+            )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
 def _cleanup_orphaned_sast_extractions() -> None:
     """Reconcile leaked ``<data_dir>/sast_extract/<id>/`` dirs from crashed scans.
 
@@ -211,7 +231,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_config", "project_id", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
-    _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'safe_active'")
+    _ensure_column(engine, "test_run", "scan_mode", "TEXT NOT NULL DEFAULT 'aggressive'")
     _ensure_column(engine, "test_run", "scanner_policy_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "credential", "login_url", "TEXT")
     _ensure_column(engine, "credential", "auth_mode", "TEXT NOT NULL DEFAULT 'auto'")
@@ -269,6 +289,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scanner_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _backfill_run_kind(engine)
     _reset_orphaned_validating_findings(engine)
+    _normalize_threshold_skipped_findings(engine)
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS page_owasp_test (
@@ -294,10 +315,12 @@ def _migrate(engine: Engine) -> None:
                 id INTEGER PRIMARY KEY,
                 capture_enabled INTEGER NOT NULL DEFAULT 0,
                 panel_enabled INTEGER NOT NULL DEFAULT 0,
+                batch_max_concurrent INTEGER NOT NULL DEFAULT 4,
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """))
         conn.commit()
+    _ensure_column(engine, "reporting_debug_config", "batch_max_concurrent", "INTEGER NOT NULL DEFAULT 4")
     with engine.connect() as conn:
         conn.execute(__import__("sqlalchemy").text("""
             CREATE TABLE IF NOT EXISTS upstream_proxy_config (
@@ -707,6 +730,7 @@ def _migrate(engine: Engine) -> None:
                 enabled INTEGER NOT NULL DEFAULT 1,
                 max_steps INTEGER NOT NULL DEFAULT 20,
                 min_severity TEXT NOT NULL DEFAULT 'low',
+                end_scan_max_concurrent INTEGER NOT NULL DEFAULT 4,
                 auto_validate_inline INTEGER NOT NULL DEFAULT 1,
                 require_concrete_disproof INTEGER NOT NULL DEFAULT 1,
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
@@ -718,6 +742,12 @@ def _migrate(engine: Engine) -> None:
         "specialist_agent_config",
         "trigger_specialist_on_burp",
         "INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        engine,
+        "adversarial_validator_config",
+        "end_scan_max_concurrent",
+        "INTEGER NOT NULL DEFAULT 4",
     )
     _ensure_column(
         engine,

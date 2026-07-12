@@ -248,6 +248,7 @@ def import_findings(
     allowed_severities = {"critical", "high", "medium", "low", "info"}
     allowed_validation = {
         "unvalidated",
+        "skipped",
         "validating",
         "confirmed",
         "unconfirmed",
@@ -637,4 +638,3 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
         )
     event.set()
     return {"status": "confirmed", "credential_id": credential_id}
-

@@ -153,7 +153,7 @@ export function downloadTextFile(filename, content, type) {
 
 export function findingsToMarkdown(findings, meta = {}) {
   const sevOrder = {critical:0,high:1,medium:2,low:3,info:4};
-  const valOrder = {confirmed:0,validating:1,unvalidated:2,unconfirmed:3,false_positive:4,low_confidence:4};
+  const valOrder = {confirmed:0,validating:1,unvalidated:2,skipped:3,unconfirmed:4,false_positive:5,low_confidence:5};
   const sorted = [...(findings || [])].sort((a, b) => {
     const sev = (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99);
     if (sev !== 0) return sev;
@@ -368,5 +368,4 @@ export function stripMarkdownFence(value) {
   const match = text.match(/^(`{3,4})\n([\s\S]*)\n\1$/);
   return match ? match[2] : text;
 }
-
 

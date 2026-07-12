@@ -143,8 +143,8 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
         "crawl": {
             "progress": {
                 "per_user_progress": run.per_user_progress,
-                "started_at": run.started_at,
-                "completed_at": run.completed_at,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
             },
             "pages": [{field: getattr(page, field) for field in page_fields} for page in pages],
             "links": [
@@ -373,6 +373,7 @@ def list_test_runs(
 def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobSummary]:
     from aespa.models import Site
     from aespa.services import scanner as scanner_svc
+    from aespa.services import validator as validator_svc
 
     runs = session.exec(select(TestRun).order_by(TestRun.created_at.desc())).all()
     jobs: list[ActiveJobSummary] = []
@@ -408,6 +409,24 @@ def list_active_jobs(session: Session = Depends(get_session)) -> list[ActiveJobS
                     job_type="Dynamic Scan",
                     status=thinking.get("status", "running"),
                     findings_count=thinking.get("findings_count"),
+                    started_at=run.started_at,
+                    created_at=run.created_at,
+                )
+            )
+
+        if validator_svc.is_validating(run.id):
+            validation = validator_svc.get_validation_status(run.id)
+            jobs.append(
+                ActiveJobSummary(
+                    run_id=run.id,
+                    site_id=run.site_id,
+                    site_name=site_name,
+                    run_name=run.name,
+                    job_type="Validation",
+                    status="running",
+                    pages_done=(validation["total"] - validation["validating"] - validation["unvalidated"]),
+                    total_pages=validation["total"],
+                    findings_count=validation["total"],
                     started_at=run.started_at,
                     created_at=run.created_at,
                 )
@@ -913,6 +932,11 @@ async def import_test_run_crawl(
         session.rollback()
         raise HTTPException(status_code=400, detail=f"Invalid crawl export data: {exc}") from exc
 
+    # A real crawl leaves a recon summary behind.  Build it from the restored
+    # pages and intelligence now so the Attack Surface panel is immediately
+    # useful—without requiring a Dynamic Scan to run first.
+    task_graph_svc.build_recon_summary(run_id, session=session)
+
     # Older runs can have coverage cells even when their page applicability JSON
     # was not retained.  Fold those categories back into the imported page data,
     # then seed a fresh workprogram without copying coverage progress/results.
@@ -949,9 +973,6 @@ async def import_test_run_crawl(
     progress = crawl.get("progress")
     run.per_user_progress = progress.get("per_user_progress") if isinstance(progress, dict) else None
     run.error_message = None
-    # The scanner deliberately rebuilds this summary from the imported crawl at
-    # start, exactly as it would immediately after a real crawl.
-    run.recon_summary = None
     session.add(run)
     session.commit()
     session.refresh(run)
@@ -1215,9 +1236,14 @@ def get_recon_summary(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    """Return the stored attack-surface summary for this run, or 404 if not yet built."""
+    """Return the attack-surface summary, deriving it for legacy imported crawls."""
     run = _get_run_or_404(session, run_id)
     if not run.recon_summary:
+        has_crawl = session.exec(
+            select(CrawledPage.id).where(CrawledPage.test_run_id == run_id)
+        ).first()
+        if has_crawl is not None:
+            return task_graph_svc.build_recon_summary(run_id, session=session)
         raise HTTPException(status_code=404, detail="Recon summary not yet available for this run.")
     import json as _json
     return _json.loads(run.recon_summary)

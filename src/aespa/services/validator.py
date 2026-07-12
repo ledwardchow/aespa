@@ -48,6 +48,9 @@ _UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 REQUEST_TIMEOUT = 10.0
+_INTERRUPTED_VALIDATION_NOTE = (
+    "Validation was interrupted before a verdict (process restart); reset for re-validation."
+)
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -68,6 +71,7 @@ def get_validation_status(run_id: int) -> dict:
     confirmed   = sum(1 for f in findings if f.validation_status == "confirmed")
     false_pos   = sum(1 for f in findings if f.validation_status == "false_positive")
     unconfirmed = sum(1 for f in findings if f.validation_status == "unconfirmed")
+    skipped     = sum(1 for f in findings if f.validation_status == "skipped")
     validating  = sum(1 for f in findings if f.validation_status == "validating")
     unvalidated = sum(1 for f in findings if f.validation_status == "unvalidated")
     if run_id in _stop_requested:
@@ -83,6 +87,7 @@ def get_validation_status(run_id: int) -> dict:
         "confirmed": confirmed,
         "false_positives": false_pos,
         "unconfirmed": unconfirmed,
+        "skipped": skipped,
         "validating": validating,
         "unvalidated": unvalidated,
         "status": status,
@@ -91,7 +96,12 @@ def get_validation_status(run_id: int) -> dict:
 
 # ── Public entry points ───────────────────────────────────────────────────────
 
-async def start_validation(run_id: int, finding_ids: list[int] | None = None) -> None:
+async def start_validation(
+    run_id: int,
+    finding_ids: list[int] | None = None,
+    *,
+    use_reporting_concurrency: bool = False,
+) -> None:
     """Start validation as a background task. If a task is already running for this run, no-op."""
     if run_id in _validation_tasks:
         return
@@ -103,7 +113,11 @@ async def start_validation(run_id: int, finding_ids: list[int] | None = None) ->
     # validator's agent_status rows from leaking into a colliding api/sast run.
     with events_svc.run_kind_scope("web"):
         task = asyncio.create_task(
-            _validation_task(run_id, finding_ids=finding_ids),
+            _validation_task(
+                run_id,
+                finding_ids=finding_ids,
+                use_reporting_concurrency=use_reporting_concurrency,
+            ),
             name=f"validate-{run_id}",
         )
     _validation_tasks[run_id] = task
@@ -119,6 +133,28 @@ async def start_validation(run_id: int, finding_ids: list[int] | None = None) ->
             log.debug("Failed to emit final validation status for run_id=%s", run_id, exc_info=True)
 
     task.add_done_callback(_on_validation_done)
+
+
+async def resume_interrupted_validations() -> None:
+    """Re-enqueue only validation work orphaned by a previous process shutdown."""
+    with Session(get_engine()) as s:
+        findings = s.exec(
+            select(ScanFinding.id, ScanFinding.test_run_id)
+            .where(ScanFinding.api_test_run_id == None)  # noqa: E711
+            .where(ScanFinding.validation_status == "unvalidated")
+            .where(ScanFinding.validation_note == _INTERRUPTED_VALIDATION_NOTE)
+        ).all()
+
+    by_run: dict[int, list[int]] = {}
+    for finding_id, run_id in findings:
+        if finding_id is not None and run_id is not None:
+            by_run.setdefault(run_id, []).append(finding_id)
+    for run_id, finding_ids in by_run.items():
+        log.info(
+            "Resuming %d interrupted validation(s) for run_id=%s",
+            len(finding_ids), run_id,
+        )
+        await start_validation(run_id, finding_ids=finding_ids)
 
 
 def request_stop(run_id: int) -> bool:
@@ -223,10 +259,19 @@ async def validate_finding_inline(
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
 
-async def _validation_task(run_id: int, finding_ids: list[int] | None = None) -> None:
+async def _validation_task(
+    run_id: int,
+    finding_ids: list[int] | None = None,
+    *,
+    use_reporting_concurrency: bool = False,
+) -> None:
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
-        await _do_validate(run_id, finding_ids=finding_ids)
+        await _do_validate(
+            run_id,
+            finding_ids=finding_ids,
+            use_reporting_concurrency=use_reporting_concurrency,
+        )
     except asyncio.CancelledError:
         log.info("Validation stopped for run_id=%s", run_id)
         _reset_validating_findings(run_id, "Validation stopped by user.")
@@ -240,7 +285,31 @@ async def _validation_task(run_id: int, finding_ids: list[int] | None = None) ->
 
 # ── Core validation ───────────────────────────────────────────────────────────
 
-async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> None:
+async def _run_validation_batch(
+    findings: list[ScanFinding],
+    max_concurrent: int,
+    validate_one,
+) -> None:
+    """Run a validation batch with bounded concurrency."""
+    if max_concurrent <= 1:
+        for finding in findings:
+            await validate_one(finding)
+        return
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _validate_limited(finding: ScanFinding) -> None:
+        async with semaphore:
+            await validate_one(finding)
+
+    await asyncio.gather(*(_validate_limited(finding) for finding in findings))
+
+async def _do_validate(
+    run_id: int,
+    finding_ids: list[int] | None = None,
+    *,
+    use_reporting_concurrency: bool = False,
+) -> None:
     # Load run configuration.
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
@@ -307,15 +376,33 @@ async def _do_validate(run_id: int, finding_ids: list[int] | None = None) -> Non
     ] or None
     user_sessions: dict[str, dict] = {cs["username"]: cs for cs in cred_sessions.values()}
 
-    # Validate each finding sequentially.
-    for finding in findings:
+    async def _validate_safely(finding: ScanFinding) -> None:
         if run_id in _stop_requested:
-            _reset_validating_findings(run_id, "Validation stopped by user.")
             return
-        await _validate_one(
-            run_id, finding, llm_cfg, user_sessions, users_list,
-            scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
-        )
+        try:
+            await _validate_one(
+                run_id, finding, llm_cfg, user_sessions, users_list,
+                scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
+            )
+        except Exception as exc:
+            log.exception("Validation failed for finding id=%s", finding.id)
+            await _persist_verdict(
+                run_id,
+                finding.id,
+                "unconfirmed",
+                f"Validation failed before a verdict: {exc}",
+                validation_results=[],
+                source="validation_error",
+            )
+
+    await _run_validation_batch(
+        findings,
+        validator_cfg.end_scan_max_concurrent if use_reporting_concurrency else 1,
+        _validate_safely,
+    )
+
+    if run_id in _stop_requested:
+        _reset_validating_findings(run_id, "Validation stopped by user.")
 
 
 async def _run_adversarial_validator_loop(
@@ -584,8 +671,8 @@ async def _validate_one(
         await _persist_verdict(
             run_id,
             finding.id,
-            "unconfirmed",
-            f"Skipped: severity '{finding.severity}' is below the configured threshold '{validator_cfg.min_severity}'.",
+            "skipped",
+            f"Not validated: severity '{finding.severity}' is below the configured threshold '{validator_cfg.min_severity}'.",
             validation_results=[],
             source="severity_threshold",
         )
@@ -1612,14 +1699,19 @@ async def _get_or_create_sessions(
     creds: list[Credential],
     requires_auth: bool,
 ) -> dict[int, dict]:
-    # Prefer sessions already established by an active scan.
-    active = scanner_svc.get_active_sessions(run_id)
-    if active:
-        log.info("Validator: reusing %d active scanner sessions for run_id=%s", len(active), run_id)
-        return active
+    # An inline validator can see only the scan's primary session in memory while
+    # the crawl has already persisted the other roles in the vault.  Do not
+    # short-circuit on the active map: access-control validation needs the union
+    # of every available identity.
+    sessions: dict[int, dict] = {}
+    active = scanner_svc.get_active_sessions(run_id) or {}
+    for key, value in active.items():
+        if isinstance(key, int) and isinstance(value, dict):
+            sessions[key] = value
 
-    # Check if there are stored sessions for this run in the database.
-    # If there are, we can load them instead of trying to bootstrap or fail.
+    # Also load sessions captured during crawl/guided login.  They remain
+    # available after a scan has ended, and can include identities that were not
+    # selected as the dynamic scanner's primary account.
     from aespa.services import scanner_sessions as session_svc
     try:
         vault = session_svc.load_session_vault(run_id)
@@ -1627,39 +1719,43 @@ async def _get_or_create_sessions(
         log.warning("Validator: failed to load session vault for run_id=%s: %s", run_id, e)
         vault = {}
 
-    if vault:
-        stored_sessions: dict[int, dict] = {}
-        synthetic_id = -1
-        for label, stored in vault.items():
-            if stored.get("kind") == "anonymous":
+    synthetic_id = -1
+    for label, stored in vault.items():
+        if stored.get("kind") == "anonymous":
+            continue
+        credential_id = stored.get("credential_id")
+        if isinstance(credential_id, int) and credential_id > 0:
+            # A live scan's session is likely newer, so keep it if both sources
+            # describe the same configured credential.
+            if credential_id in sessions:
                 continue
-            credential_id = stored.get("credential_id")
-            if isinstance(credential_id, int) and credential_id > 0:
-                key = credential_id
-            else:
-                while synthetic_id in stored_sessions:
-                    synthetic_id -= 1
-                key = synthetic_id
+            key = credential_id
+        else:
+            while synthetic_id in sessions:
                 synthetic_id -= 1
-            stored_sessions[key] = {
-                "username": stored.get("username") or label,
-                "label": stored.get("label") or label,
-                "cookies": stored.get("cookies") or {},
-                "extra_headers": stored.get("extra_headers") or {},
-            }
-        if stored_sessions:
-            log.info("Validator: loaded %d stored sessions from database for run_id=%s", len(stored_sessions), run_id)
-            return stored_sessions
+            key = synthetic_id
+            synthetic_id -= 1
+        sessions[key] = {
+            "username": stored.get("username") or label,
+            "label": stored.get("label") or label,
+            "cookies": stored.get("cookies") or {},
+            "extra_headers": stored.get("extra_headers") or {},
+        }
 
-    if not requires_auth or not creds:
-        return {}
+    if sessions:
+        log.info("Validator: collected %d active/stored sessions for run_id=%s", len(sessions), run_id)
 
-    log.info("Validator: bootstrapping %d sessions for run_id=%s", len(creds), run_id)
-    cred_sessions: dict[int, dict] = {}
-    for cred in creds:
+    # Configured credentials are explicit user intent.  Try any identities that
+    # were not recoverable from active or stored sessions even when an older
+    # site's `requires_auth` flag is false; that flag must not erase configured
+    # role coverage during access-control validation.
+    missing_creds = [cred for cred in creds if cred.id not in sessions]
+    if missing_creds:
+        log.info("Validator: bootstrapping %d missing session(s) for run_id=%s", len(missing_creds), run_id)
+    for cred in missing_creds:
         try:
             cookies, token = await scanner_svc._export_cred_session(base_url, login_url, cred)
-            cred_sessions[cred.id] = {
+            sessions[cred.id] = {
                 "username": cred.username,
                 "label": getattr(cred, "label", None),
                 "cookies": cookies,
@@ -1668,4 +1764,4 @@ async def _get_or_create_sessions(
             log.info("  Bootstrapped session for user=%s", cred.username)
         except Exception as e:
             log.warning("  Failed to bootstrap session for user=%s: %s", cred.username, e)
-    return cred_sessions
+    return sessions
