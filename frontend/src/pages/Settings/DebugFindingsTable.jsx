@@ -1,7 +1,5 @@
 import { renderMarkdown } from "../../lib/aliceRender";
-import { useState, useRef, useMemo } from "react";
-import { nav } from "../../lib/router";
-import { IconSites, IconApis, IconSettings, IconPlus, IconCheck, IconPlay, IconStop, IconShield, IconChevronLeft, IconChevronRight, IconBug, IconMessageSquare, IconSend, IconBrain } from "../../components/Icons";
+import { useState } from "react";
 
 
 export function DebugFindingsTable({

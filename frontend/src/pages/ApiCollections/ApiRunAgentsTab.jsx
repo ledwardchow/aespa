@@ -1,10 +1,8 @@
 import { _buildAgentsFromLog } from "./_buildAgentsFromLog";
-import { useState, useEffect, useRef, useCallback, useContext } from "react";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox } from "../../lib/aliceRender";
-import { IconApis, IconPlus, IconPlay, IconShield, IconChevronRight, IconMessageSquare, IconSend } from "../../components/Icons";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { api } from "../../lib/api";
+import { renderAliceBlocks, renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, normalizeAliceText } from "../../lib/aliceRender";
+import { IconSend } from "../../components/Icons";
 
 
 export function ApiRunAgentsTab({
@@ -16,7 +14,8 @@ export function ApiRunAgentsTab({
   const [collapsedAgentIds, setCollapsedAgentIds] = useState(new Set());
   const toggleAgentId = id => setCollapsedAgentIds(prev => {
     const n = new Set(prev);
-    n.has(id) ? n.delete(id) : n.add(id);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
     return n;
   });
 
@@ -53,28 +52,6 @@ export function ApiRunAgentsTab({
   activeAliceTabIdRef.current = activeAliceTabId;
   const sessionsRef = useRef(aliceChats);
   sessionsRef.current = aliceChats;
-
-  // ── On mount: load sessions, agent log, check alice status ────────────────
-  useEffect(() => {
-    api.getApiAliceSessions(runId).then(data => {
-      const chats = data.chats || [];
-      if (chats.length) {
-        setAliceChats(chats);
-        const aid = data.active_tab_id || "tab-default";
-        setActiveAliceTabId(aid);
-        activeAliceTabIdRef.current = aid;
-      }
-    }).catch(() => {});
-    api.getApiAgentLog(runId).then(rows => {
-      setAgents(_buildAgentsFromLog(rows));
-    }).catch(() => {});
-    api.getApiAliceStatus(runId).then(st => {
-      if (st?.running) {
-        setAliceRunning(true);
-        connectAliceStream(0);
-      }
-    }).catch(() => {});
-  }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps -- connectAliceStream declared below; keying on runId matches original behavior
 
   // ── SSE: real-time agent_status events ───────────────────────────────────
   useEffect(() => {
@@ -197,7 +174,7 @@ export function ApiRunAgentsTab({
       try {
         const event = JSON.parse(ev.data);
         if ((event.type === "thinking_chunk" || event.type === "message_chunk") && event.delta && event.tab_id && event.msg_id) {
-          textAcc[event.msg_id] = (textAcc[event.msg_id] || "") + event.delta;
+          textAcc[event.msg_id] = normalizeAliceText((textAcc[event.msg_id] || "") + event.delta);
           const text = textAcc[event.msg_id];
           setAliceChats(prev => prev.map(s => s.id !== event.tab_id ? s : {
             ...s,
@@ -256,6 +233,21 @@ export function ApiRunAgentsTab({
             } : m)
           }));
         } else if (event.type === "done") {
+          setAliceChats(prev => prev.map(s => s.id !== event.tab_id ? s : {
+            ...s,
+            messages: s.messages.map(m => {
+              if (m.id === event.think_msg_id) return {
+                ...m,
+                text: normalizeAliceText(event.thought || m.text),
+                stepData: stepAcc[event.think_msg_id] || m.stepData || {}
+              };
+              if (m.id === event.reply_msg_id && event.message) return {
+                ...m,
+                text: normalizeAliceText(event.message)
+              };
+              return m;
+            })
+          }));
           setAliceRunning(false);
           es.close();
           streamRef.current = null;
@@ -268,6 +260,28 @@ export function ApiRunAgentsTab({
       setAliceRunning(false);
     };
   }, [runId]);
+
+  // ── On mount: load sessions, agent log, check alice status ────────────────
+  useEffect(() => {
+    api.getApiAliceSessions(runId).then(data => {
+      const chats = data.chats || [];
+      if (chats.length) {
+        setAliceChats(chats);
+        const aid = data.active_tab_id || "tab-default";
+        setActiveAliceTabId(aid);
+        activeAliceTabIdRef.current = aid;
+      }
+    }).catch(() => {});
+    api.getApiAgentLog(runId).then(rows => {
+      setAgents(_buildAgentsFromLog(rows));
+    }).catch(() => {});
+    api.getApiAliceStatus(runId).then(st => {
+      if (st?.running) {
+        setAliceRunning(true);
+        connectAliceStream(0);
+      }
+    }).catch(() => {});
+  }, [runId, connectAliceStream]);
 
   // ── ALICE send / stop ─────────────────────────────────────────────────────
   const handleAliceSend = async () => {
@@ -471,7 +485,8 @@ export function ApiRunAgentsTab({
                     const segKey = msg.id + ":t" + si;
                     return renderAliceTraceBox(segKey, seg.text, msg.stepData || {}, aliceExpandedThinkIds.has(segKey), () => setAliceExpandedThinkIds(prev => {
                       const n = new Set(prev);
-                      n.has(segKey) ? n.delete(segKey) : n.add(segKey);
+                      if (n.has(segKey)) n.delete(segKey);
+                      else n.add(segKey);
                       return n;
                     }));
                   });

@@ -1,6 +1,7 @@
 """Tests for API-run A.L.I.C.E. context tool and run routing."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -356,6 +357,184 @@ def test_report_finding_no_link_when_url_matches_nothing(db_session):
         })
         assert res["ok"] is True
         assert res["coverage_cell"] is None
+    finally:
+        db_mod._engine = orig
+
+
+def test_alice_remove_finding_is_scoped_to_api_run_kind(db_session):
+    """API-mode ALICE must not delete a web finding from a colliding TestRun id."""
+    import aespa.db as db_mod
+    from aespa.models import (
+        ApiCollection,
+        ApiTestRun,
+        LLMConfig,
+        ScanFinding,
+        Site,
+        TestRun,
+    )
+    from aespa.services.alice import _execute_alice_tool
+
+    site = Site(name="Web", base_url="https://web.example.com")
+    coll = ApiCollection(name="API", base_url="https://api.example.com")
+    db_session.add(site)
+    db_session.add(coll)
+    db_session.commit()
+    db_session.refresh(site)
+    db_session.refresh(coll)
+
+    web_run = TestRun(site_id=site.id, name="web")
+    api_run = ApiTestRun(collection_id=coll.id, name="api")
+    db_session.add(web_run)
+    db_session.add(api_run)
+    db_session.commit()
+    db_session.refresh(web_run)
+    db_session.refresh(api_run)
+    assert web_run.id == api_run.id
+
+    web_finding = ScanFinding(
+        test_run_id=web_run.id,
+        owasp_category="A01",
+        severity="high",
+        title="web duplicate",
+        description="web issue",
+        affected_url="https://web.example.com/account",
+        evidence="evidence",
+    )
+    api_finding = ScanFinding(
+        api_test_run_id=api_run.id,
+        owasp_category="API1",
+        owasp_api_category="API1",
+        severity="high",
+        title="api duplicate",
+        description="api issue",
+        affected_url="https://api.example.com/v1/account",
+        evidence="evidence",
+    )
+    db_session.add(web_finding)
+    db_session.add(api_finding)
+    db_session.commit()
+    db_session.refresh(web_finding)
+    db_session.refresh(api_finding)
+    web_finding_id = web_finding.id
+    api_finding_id = api_finding.id
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        blocked = asyncio.run(_execute_alice_tool(
+            run_id=api_run.id,
+            llm_cfg=LLMConfig(),
+            base_url=coll.base_url,
+            site_id=-1,
+            tool_name="remove_finding",
+            tool_input={"finding_id": web_finding_id, "reason": "duplicate"},
+            step=1,
+            api_run_id=api_run.id,
+        ))
+        assert "not found for this run" in blocked
+        assert db_session.get(ScanFinding, web_finding_id) is not None
+
+        removed = asyncio.run(_execute_alice_tool(
+            run_id=api_run.id,
+            llm_cfg=LLMConfig(),
+            base_url=coll.base_url,
+            site_id=-1,
+            tool_name="remove_finding",
+            tool_input={"finding_id": api_finding_id, "reason": "duplicate"},
+            step=2,
+            api_run_id=api_run.id,
+        ))
+        assert "deleted successfully" in removed
+        db_session.expire_all()
+        assert db_session.get(ScanFinding, api_finding_id) is None
+    finally:
+        db_mod._engine = orig
+
+
+def test_alice_remove_finding_is_scoped_to_web_run_kind(db_session):
+    """Web-mode ALICE must not delete an API finding from a colliding ApiTestRun id."""
+    import aespa.db as db_mod
+    from aespa.models import (
+        ApiCollection,
+        ApiTestRun,
+        LLMConfig,
+        ScanFinding,
+        Site,
+        TestRun,
+    )
+    from aespa.services.alice import _execute_alice_tool
+
+    site = Site(name="Web 2", base_url="https://web2.example.com")
+    coll = ApiCollection(name="API 2", base_url="https://api2.example.com")
+    db_session.add(site)
+    db_session.add(coll)
+    db_session.commit()
+    db_session.refresh(site)
+    db_session.refresh(coll)
+
+    web_run = TestRun(site_id=site.id, name="web")
+    api_run = ApiTestRun(collection_id=coll.id, name="api")
+    db_session.add(web_run)
+    db_session.add(api_run)
+    db_session.commit()
+    db_session.refresh(web_run)
+    db_session.refresh(api_run)
+    assert web_run.id == api_run.id
+
+    web_finding = ScanFinding(
+        test_run_id=web_run.id,
+        owasp_category="A01",
+        severity="high",
+        title="web duplicate",
+        description="web issue",
+        affected_url="https://web2.example.com/account",
+        evidence="evidence",
+    )
+    api_finding = ScanFinding(
+        api_test_run_id=api_run.id,
+        owasp_category="API1",
+        owasp_api_category="API1",
+        severity="high",
+        title="api duplicate",
+        description="api issue",
+        affected_url="https://api2.example.com/v1/account",
+        evidence="evidence",
+    )
+    db_session.add(web_finding)
+    db_session.add(api_finding)
+    db_session.commit()
+    db_session.refresh(web_finding)
+    db_session.refresh(api_finding)
+    web_finding_id = web_finding.id
+    api_finding_id = api_finding.id
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    try:
+        blocked = asyncio.run(_execute_alice_tool(
+            run_id=web_run.id,
+            llm_cfg=LLMConfig(),
+            base_url=site.base_url,
+            site_id=site.id,
+            tool_name="remove_finding",
+            tool_input={"finding_id": api_finding_id, "reason": "duplicate"},
+            step=1,
+        ))
+        assert "not found for this run" in blocked
+        assert db_session.get(ScanFinding, api_finding_id) is not None
+
+        removed = asyncio.run(_execute_alice_tool(
+            run_id=web_run.id,
+            llm_cfg=LLMConfig(),
+            base_url=site.base_url,
+            site_id=site.id,
+            tool_name="remove_finding",
+            tool_input={"finding_id": web_finding_id, "reason": "duplicate"},
+            step=2,
+        ))
+        assert "deleted successfully" in removed
+        db_session.expire_all()
+        assert db_session.get(ScanFinding, web_finding_id) is None
     finally:
         db_mod._engine = orig
 

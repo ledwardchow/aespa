@@ -46,6 +46,20 @@ def configure_browsers_path() -> None:
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browsers_dir()))
 
 
+def chromium_present() -> bool:
+    """Heuristic: is a Chromium build already downloaded? UI hint only.
+
+    ponytail: a loose glob, deliberately NOT used to decide whether to run the
+    installer — that stays authoritative in download_chromium_if_missing (which
+    handles Playwright-upgrade revision bumps a glob would miss). Worst case here
+    is a missing or needless 'downloading' indicator, never a broken download.
+    """
+    if not _bundled():
+        return True
+    target = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", browsers_dir()))
+    return any(target.glob("chromium*"))
+
+
 def download_chromium_if_missing() -> None:
     """Download Chromium into the configured dir if it isn't there. Blocking.
 
