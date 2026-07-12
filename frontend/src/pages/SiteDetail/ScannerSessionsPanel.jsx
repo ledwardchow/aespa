@@ -1,12 +1,7 @@
-import { useColResize } from "../SiteDetail";
-import { api, formatError } from "../../lib/api";
-import { SCAN_MODE_OPTIONS, SCAN_MODE_DEFINITIONS, ScanModeDefinitions, scanModeLabel, csv, defaultPolicyForm, policyToForm, policyPayload } from "../../lib/policy";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { parseDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { useColResize } from "./_helpers";
+import { parseDate } from "../../lib/utilities";
 
 export function ScannerSessionsPanel({
-  runId,
   data,
   refresh,
   onUpdate
@@ -23,12 +18,11 @@ export function ScannerSessionsPanel({
       return iso;
     }
   };
-  const doUpdate = onUpdate ? (sessionId, b) => onUpdate(sessionId, b) : (sessionId, b) => api.updateScannerSession(runId, sessionId, b);
   const renameSession = async session => {
     const next = prompt("Session label", session.label);
     if (next === null) return;
     try {
-      await doUpdate(session.id, {
+      await onUpdate(session.id, {
         label: next
       });
       await refresh();
@@ -40,7 +34,7 @@ export function ScannerSessionsPanel({
     const verb = isActive ? "Reactivate" : "Deactivate";
     if (!confirm(`${verb} session "${session.label}"?`)) return;
     try {
-      await doUpdate(session.id, {
+      await onUpdate(session.id, {
         is_active: isActive
       });
       await refresh();

@@ -673,6 +673,7 @@ def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
         enabled=cfg.enabled,
         max_steps=cfg.max_steps,
         min_severity=cfg.min_severity,
+        end_scan_max_concurrent=cfg.end_scan_max_concurrent,
         auto_validate_inline=cfg.auto_validate_inline,
         require_concrete_disproof=cfg.require_concrete_disproof,
         updated_at=cfg.updated_at,
@@ -688,6 +689,7 @@ def upsert_adversarial_validator_config(
     cfg.enabled = payload.enabled
     cfg.max_steps = payload.max_steps
     cfg.min_severity = payload.min_severity
+    cfg.end_scan_max_concurrent = payload.end_scan_max_concurrent
     cfg.auto_validate_inline = payload.auto_validate_inline
     cfg.require_concrete_disproof = payload.require_concrete_disproof
     cfg.updated_at = _utcnow()
@@ -733,6 +735,7 @@ def get_reporting_debug_config(session: Session) -> ReportingDebugConfigOut:
     return ReportingDebugConfigOut(
         capture_enabled=cfg.capture_enabled,
         panel_enabled=cfg.panel_enabled,
+        batch_max_concurrent=cfg.batch_max_concurrent,
         updated_at=cfg.updated_at,
     )
 
@@ -745,6 +748,7 @@ def upsert_reporting_debug_config(
         cfg = ReportingDebugConfig(id=_SINGLETON_ID)
     cfg.capture_enabled = payload.capture_enabled
     cfg.panel_enabled = payload.panel_enabled
+    cfg.batch_max_concurrent = payload.batch_max_concurrent
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "../../lib/api";
 import { leadsExportFilename, leadsToMarkdown, downloadTextFile } from "../../lib/utilities";
+import { usePolling } from "../../hooks/usePolling";
 
 export function WebRunSastLeadsTab({
   runId,
@@ -17,16 +18,8 @@ export function WebRunSastLeadsTab({
   const prevScanRunning = useRef(scanRunning);
   const loadLeads = useCallback(() => api.getRunLeads(runId).then(setLeads).catch(() => {}), [runId]);
   const loadAvailable = useCallback(() => api.getRunAvailableSastRuns(runId).then(setAvailable).catch(() => {}), [runId]);
-  useEffect(() => {
-    loadLeads();
-    loadAvailable();
-  }, [loadLeads, loadAvailable]);
-  // Refresh while a dynamic scan runs so investigation outcomes show live.
-  useEffect(() => {
-    if (!scanRunning) return;
-    const t = setInterval(loadLeads, 3000);
-    return () => clearInterval(t);
-  }, [scanRunning, loadLeads]);
+  usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
+  usePolling(loadAvailable, { enabled: false });
   // Final refresh when the scan stops so the last investigation outcomes appear.
   useEffect(() => {
     if (prevScanRunning.current && !scanRunning) {
@@ -36,7 +29,8 @@ export function WebRunSastLeadsTab({
   }, [scanRunning, loadLeads]);
   const toggle = id => setExpanded(prev => {
     const n = new Set(prev);
-    n.has(id) ? n.delete(id) : n.add(id);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
     return n;
   });
   const onImport = async () => {

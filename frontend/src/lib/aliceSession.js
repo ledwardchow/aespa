@@ -1,12 +1,15 @@
 // ── A.L.I.C.E. Session Manager ─────────────────────────────────────────────
+import { normalizeAliceText } from "./aliceRender";
+import { aliceIdentityKey, aliceTransport } from "./aliceTransport";
+
 // Module-level singleton: keeps the stream reader loop alive even when the
 // TestRunDetail component unmounts (user navigates away). Subscribers
 // (React setState callbacks) are registered/deregistered as the component
 // mounts and unmounts. On re-mount, the component can re-subscribe and
 // immediately get the current live state.
 export const aliceSessionStore = {};
-export function getAliceSession(runId, tabId) {
-  const key = `${runId}:${tabId}`;
+export function getAliceSession(identity, tabId) {
+  const key = `${aliceIdentityKey(identity)}:${tabId}`;
   if (!aliceSessionStore[key]) {
     aliceSessionStore[key] = {
       active: false,
@@ -21,39 +24,40 @@ export function getAliceSession(runId, tabId) {
   }
   return aliceSessionStore[key];
 }
-export function aliceSessionSubscribe(runId, tabId, handlers) {
-  const session = getAliceSession(runId, tabId);
+export function aliceSessionSubscribe(identity, tabId, handlers) {
+  const session = getAliceSession(identity, tabId);
   session.subscribers.add(handlers);
   return () => session.subscribers.delete(handlers);
 }
-export function aliceSessionAbort(runId, tabId) {
-  const key = `${runId}:${tabId}`;
+export function aliceSessionAbort(identity, tabId) {
+  const key = `${aliceIdentityKey(identity)}:${tabId}`;
   const session = aliceSessionStore[key];
   if (session?.abortController) {
     session.abortController.abort();
   }
 }
-export const _aliceFlushRecovery = (runId, tabId, thinkMsgId, replyMsgId, thought, message) => {
+export const _aliceFlushRecovery = (identity, tabId, thinkMsgId, replyMsgId, thought, message, stepData = {}) => {
   try {
-    localStorage.setItem(`alice_recover_${runId}:${tabId}`, JSON.stringify({
+    localStorage.setItem(`alice_recover_${aliceIdentityKey(identity)}:${tabId}`, JSON.stringify({
       thinkMsgId,
       replyMsgId,
-      thought,
-      message
+      thought: normalizeAliceText(thought),
+      message: normalizeAliceText(message),
+      stepData
     }));
   } catch  {}
 };
 
 // Connect to /alice/stream?cursor=N and pump events through the session.
 // Called both for fresh sessions (cursor=0) and reconnects after a page refresh.
-export async function aliceSessionConnect(runId, tabId, {
+export async function aliceSessionConnect(identity, tabId, {
   thinkMsgId,
   replyMsgId,
   cursor = 0,
   onFinish,
   onFail
 }) {
-  const session = getAliceSession(runId, tabId);
+  const session = getAliceSession(identity, tabId);
   if (session.active) return;
   session.active = true;
   session.thinkMsgId = thinkMsgId;
@@ -65,7 +69,7 @@ export async function aliceSessionConnect(runId, tabId, {
   const controller = new AbortController();
   session.abortController = controller;
   try {
-    const response = await fetch(`/api/test-runs/${runId}/alice/stream?cursor=${cursor}`, {
+    const response = await fetch(aliceTransport(identity).streamUrl(cursor), {
       signal: controller.signal
     });
     if (!response.ok) throw new Error(`HTTP error ${response.status}`);
@@ -88,9 +92,9 @@ export async function aliceSessionConnect(runId, tabId, {
         if (!trimmed.startsWith("data: ")) continue;
         try {
           const event = JSON.parse(trimmed.slice(6));
-          if (event.type === "thinking_chunk" && event.delta) session.accumulatedThought += event.delta;else if (event.type === "message_chunk" && event.delta) session.accumulatedMessage += event.delta;else if (event.type === "done") {
-            if (event.thought) session.accumulatedThought = event.thought;
-            if (event.message) session.accumulatedMessage = event.message;
+          if (event.type === "thinking_chunk" && event.delta) session.accumulatedThought = normalizeAliceText(session.accumulatedThought + event.delta);else if (event.type === "message_chunk" && event.delta) session.accumulatedMessage = normalizeAliceText(session.accumulatedMessage + event.delta);else if (event.type === "done") {
+            if (event.thought) session.accumulatedThought = normalizeAliceText(event.thought);
+            if (event.message) session.accumulatedMessage = normalizeAliceText(event.message);
           } else if (event.type === "step_llm_call") {
             if (!session.stepData[event.step]) session.stepData[event.step] = {
               llmMessages: [],
@@ -117,7 +121,7 @@ export async function aliceSessionConnect(runId, tabId, {
               tools[tools.length - 1].result = event.result;
             }
           }
-          _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, session.accumulatedThought, session.accumulatedMessage);
+          _aliceFlushRecovery(identity, tabId, thinkMsgId, replyMsgId, session.accumulatedThought, session.accumulatedMessage, session.stepData);
           session.subscribers.forEach(h => h.onChunk && h.onChunk(event));
         } catch  {}
       }
@@ -135,7 +139,7 @@ export async function aliceSessionConnect(runId, tabId, {
 
 // Start a new ALICE turn: POST to /alice/run (starts background task on server),
 // then open the event stream so the client receives events in real time.
-export async function aliceSessionStart(runId, tabId, {
+export async function aliceSessionStart(identity, tabId, {
   userText,
   historyPayload,
   thinkMsgId,
@@ -144,9 +148,9 @@ export async function aliceSessionStart(runId, tabId, {
   onFail
 }) {
   // Seed recovery immediately so a fast refresh can find the message IDs.
-  _aliceFlushRecovery(runId, tabId, thinkMsgId, replyMsgId, "", "");
+  _aliceFlushRecovery(identity, tabId, thinkMsgId, replyMsgId, "", "");
   try {
-    const resp = await fetch(`/api/test-runs/${runId}/alice/run`, {
+    const resp = await fetch(aliceTransport(identity).runUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -164,7 +168,7 @@ export async function aliceSessionStart(runId, tabId, {
     if (onFail) onFail(err);
     return;
   }
-  await aliceSessionConnect(runId, tabId, {
+  await aliceSessionConnect(identity, tabId, {
     thinkMsgId,
     replyMsgId,
     cursor: 0,

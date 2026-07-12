@@ -1,9 +1,6 @@
-import { useColResize } from "../SiteDetail";
+import { useColResize } from "./_helpers";
 import { AttackSurfacePanel } from "./AttackSurfacePanel";
-import { useRoute, nav } from "../../lib/router";
-import { aliceSessionSubscribe, _aliceFlushRecovery } from "../../lib/aliceSession";
-import { fmtDate, truncUrl, apiTranscriptText, markdownListValue, slugForFilename, leadsExportFilename, markdownExportFilename, findingsToMarkdown, workProgramToMarkdown, parseFindingsMarkdown, markdownBullet, stripMarkdownFence } from "../../lib/utilities";
-import * as d3 from "d3";
+import { truncUrl } from "../../lib/utilities";
 
 export function TaskGraphPanel({
   data,

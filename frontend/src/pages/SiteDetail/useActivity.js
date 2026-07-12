@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
 import { isDynamicScanActive } from "./_helpers";
 import { parseDate, truncUrl } from "../../lib/utilities";
@@ -17,7 +17,8 @@ export function useActivity(runId, activeTab, {
   const [expandedLogIds, setExpandedLogIds] = useState(new Set());
   const toggleLogId = id => setExpandedLogIds(prev => {
     const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     return next;
   });
   const [activitySubTab, setActivitySubTab] = useState("agents");
@@ -186,6 +187,20 @@ export function useActivity(runId, activeTab, {
       if (latest.done) return `Completed crawl as ${latest.username || "anonymous"} (${latest.pagesVisited || 0} pg)`;
       return `Crawling ${truncUrl(latest.url || "", 88)} as ${latest.username || "anonymous"}`;
     }
+    // Lifecycle updates are emitted by the backend after the Test Lead has
+    // delegated probe analysis (and again once every finalisation phase ends).
+    // They must take precedence over the last per-step activity-log entry,
+    // otherwise the UI incorrectly keeps showing "Step N: LLM deciding…".
+    const lifecycleTasks = new Set([
+      // Keep scans that were already running during the wording update visible.
+      "Handed probe analysis to Reporting",
+      "Testing complete - handed traffic to reporting agent for analysis...",
+      "Scan complete",
+      "Scan stopped"
+    ]);
+    if (agent?.id === "scanner" && lifecycleTasks.has(agent.currentTask)) {
+      return agent.currentTask;
+    }
     if (agent?.id === "scanner" && testLeadHistory().length) {
       if (agent.status !== "active") return "Standing by";
       return testLeadHistory()[testLeadHistory().length - 1].task;
@@ -198,7 +213,7 @@ export function useActivity(runId, activeTab, {
     if (agent?.status === "failed") return "FAILED";
     return "COMPLETE";
   };
-  const upsertAgent = (items, patch, histEntry = null) => {
+  const upsertAgent = useCallback((items, patch, histEntry = null) => {
     const normalized = {
       ...patch,
       role: patch.id === "crawler" ? "Crawler" : patch.id === "scanner" ? "Test Lead" : patch.role
@@ -220,7 +235,7 @@ export function useActivity(runId, activeTab, {
       crawlEvents: normalized.crawlEvents || prev.crawlEvents || []
     };
     return updated;
-  };
+  }, []);
 
   // Seed activity log from persisted DB entries on mount so it survives navigation.
   useEffect(() => {
@@ -245,13 +260,18 @@ export function useActivity(runId, activeTab, {
     }).catch(() => {});
   }, [runId]);
 
-  // Seed agents panel from persisted DB entries on mount.
-  // Also fetches the live scan status so stale "active" agents left by a
-  // force-killed process are reconciled back to "idle" immediately.
+  // Seed agents panel from persisted DB entries on mount. Reconcile stale
+  // active agents, while preserving validators whose managed validation task
+  // is still running after the pentest itself has completed.
   useEffect(() => {
-    Promise.all([api.getAgentLog(runId), api.getThinkingStatus(runId)]).then(([entries, scanStatus]) => {
+    Promise.all([
+      api.getAgentLog(runId),
+      api.getThinkingStatus(runId),
+      api.getValidateStatus(runId)
+    ]).then(([entries, scanStatus, validationStatus]) => {
       if (!entries || entries.length === 0) return;
       const scanRunning = isDynamicScanActive(scanStatus?.status);
+      const validationRunning = validationStatus?.status === "running";
       const agentsMap = new Map();
       for (const e of entries) {
         const entryTs = e.created_at ? parseDate(e.created_at).toLocaleTimeString("en-US", {
@@ -279,10 +299,15 @@ export function useActivity(runId, activeTab, {
         });
         agentsMap.set(e.agent_id, existing);
       }
-      // If no scan is running, reset any stale "active" agents to "idle".
+      // If no scan is running, reset stale "active" agents to "idle". A
+      // validator is an exception: it can legitimately continue after scan
+      // completion when the user clicked Validate Issues.
       if (!scanRunning) {
         for (const [id, agent] of agentsMap) {
-          if (agent.status === "active" && id !== "crawler") {
+          const activeValidator = validationRunning && (
+            id.startsWith("validator-") || agent.role === "Validator"
+          );
+          if (agent.status === "active" && id !== "crawler" && !activeValidator) {
             agentsMap.set(id, {
               ...agent,
               status: "idle"

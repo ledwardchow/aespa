@@ -4,6 +4,27 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #227] July 12 Update — scan lifecycle, reporting concurrency, crawl export/import
+
+**Branch:** `develop → main`
+
+### Scan lifecycle, reporting, and validation
+
+- **Clear Test Lead handoff and true scan completion** (`services/scanner.py`, `useActivity.js`): once testing ends, the Test Lead now logs *"Testing complete - handed traffic to reporting agent for analysis..."*. The UI remains active through Reporting's probe analysis and receives a final *"Scan complete"* event only after reporting and scan finalisation finish.
+- **Reliable, visible validator work** (`services/validator.py`, `api/test_runs.py`, `ActiveJobs.jsx`): validator sessions are recovered from the vault and configured credentials when possible; reporting-created findings are queued for managed validation; interrupted work is recovered at startup; and a run now shows one Validation active job while validators are working, including after a refresh.
+- **Concurrent end-of-scan validators** (`models.py`, `schemas.py`, `db.py`, `ValidatorSettings.jsx`): final validation is bounded by a configurable concurrency limit (default **4**). Manual/recovery validation remains controlled separately.
+- **Skipped is no longer unconfirmed** (`services/findings.py`, `db.py`, findings UI): informational findings beneath the configured validation threshold are explicitly marked skipped/not validated rather than unconfirmed.
+
+### Concurrent reporting
+
+- **Probe-analysis batches run concurrently** (`services/llm.py`, `services/scanner.py`): Reporting processes final probe batches under a bounded semaphore, preserving ordered output while reducing end-of-scan wait time.
+- **New Reporting settings tab** (`ReportingSettings.jsx`): exposes the reporting batch concurrency limit (default **4**) in Scan Policy settings.
+
+### Crawl data and frontend structure
+
+- **Crawl export/import** (`services/*`, API/UI): crawl data can be exported and imported, including its OWASP classifications.
+- **Run UI modularisation** (`frontend/src/`): further separates the Site Detail/run UI and sitemap components, with related ALICE/validator UI fixes and rebuilt served frontend assets.
+
 ## [PR #222] July 8 Update — frontend component extraction, macOS crawl fix
 
 **Branch:** `frontend-refactor`

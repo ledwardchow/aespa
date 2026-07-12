@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useContext } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { nav } from "../lib/router";
 import { api } from "../lib/api";
-import { IconApis, IconPlus, IconPlay, IconShield, IconChevronRight, IconMessageSquare, IconBrain } from "../components/Icons";
+import { IconPlus } from "../components/Icons";
 import { EmptyState } from "../components/EmptyState";
 
 // ── Sites list ────────────────────────────────────────────────────────────────

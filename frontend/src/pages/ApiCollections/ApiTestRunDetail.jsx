@@ -193,7 +193,7 @@ export function ApiTestRunDetail({
       {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
       {tab === "traffic" && <ApiRunTrafficTab runId={runId} scanRunning={scanRunning} />}
-      {tab === "endpoints" && <ApiRunEndpointsTab runId={runId} run={run} />}
+      {tab === "endpoints" && <ApiRunEndpointsTab run={run} />}
       {tab === "workprogram" && <ApiRunWorkProgramTab runId={runId} scanRunning={scanRunning} run={run} />}
     </div>
   </>;
