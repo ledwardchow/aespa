@@ -292,7 +292,7 @@ class ScannerPolicy(SQLModel, table=True):
     __tablename__ = "scanner_policy"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    scan_mode: str = Field(default="safe_active")
+    scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
     request_timeout_s: float = Field(default=10.0)
@@ -300,7 +300,7 @@ class ScannerPolicy(SQLModel, table=True):
     max_request_body_bytes: int = Field(default=65536)
     response_body_read_limit_bytes: int = Field(default=512 * 1024)
     allowed_schemes: str = Field(default='["http", "https"]')
-    methods_by_mode: str = Field(default='{"passive": ["GET", "HEAD"], "safe_active": ["GET", "POST", "HEAD"], "aggressive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]}')
+    methods_by_mode: str = Field(default='{"passive": ["GET", "HEAD"], "safe_active": ["GET", "POST", "HEAD"], "aggressive": ["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"], "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]}')
     blocked_headers: str = Field(default='["host", "cookie"]')
     follow_redirects: bool = Field(default=True)
     allow_subdomains: bool = Field(default=True)
@@ -381,6 +381,8 @@ class AdversarialValidatorConfig(SQLModel, table=True):
     max_steps: int = Field(default=20)
     # Skip validation for findings below this severity: critical|high|medium|low|info
     min_severity: str = Field(default="low")
+    # Maximum simultaneous validators for the end-of-scan Reporting batch.
+    end_scan_max_concurrent: int = Field(default=4)
     # When True, automatically validate each finding immediately after it is written
     # during a dynamic scan.  When False, validation is only triggered manually.
     auto_validate_inline: bool = Field(default=True)
@@ -410,6 +412,7 @@ class ReportingDebugConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     capture_enabled: bool = Field(default=False)
     panel_enabled: bool = Field(default=False)
+    batch_max_concurrent: int = Field(default=4)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -449,7 +452,7 @@ class TestRun(SQLModel, table=True):
     use_screenshots: bool = Field(default=False)
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=50)
-    scan_mode: str = Field(default="safe_active")
+    scan_mode: str = Field(default="aggressive")
     scanner_policy_json: str = Field(default="{}")
     # Progress
     pages_discovered: int = Field(default=0)
@@ -714,7 +717,7 @@ class ScanFinding(SQLModel, table=True):
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     finding_source: str = Field(default="unknown", index=True)
     # Validation fields
-    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | confirmed | unconfirmed | false_positive
+    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | skipped | confirmed | unconfirmed | false_positive
     validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
     # API test run attribution (nullable — only set for findings from API runs)
     api_test_run_id: Optional[int] = Field(default=None, index=True)

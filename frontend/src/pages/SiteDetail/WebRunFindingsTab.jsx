@@ -73,9 +73,10 @@ export function WebRunFindingsTab(props) {
               confirmed: 0,
               validating: 1,
               unvalidated: 2,
-              unconfirmed: 3,
-              false_positive: 4,
-              low_confidence: 4
+              skipped: 3,
+              unconfirmed: 4,
+              false_positive: 5,
+              low_confidence: 5
             };
             const DETERMINISTIC_GROUP_KEY = "__deterministic__";
             const UNCONFIRMED_GROUP_KEY = "__unconfirmed__";
@@ -141,6 +142,7 @@ export function WebRunFindingsTab(props) {
                     <td>
                       {f.validation_status === "confirmed" && <span className="val-badge val-confirmed">confirmed</span>}
                       {f.validation_status === "unconfirmed" && <span className="val-badge val-unconfirmed">unconfirmed</span>}
+                      {f.validation_status === "skipped" && <span className="val-badge val-skipped">not validated</span>}
                       {f.validation_status === "false_positive" && <span className="val-badge val-fp">low conf</span>}
                       {f.validation_status === "low_confidence" && <span className="val-badge val-fp">low conf</span>}
                       {f.validation_status === "validating" && <span className="val-badge val-validating">…</span>}
@@ -161,7 +163,7 @@ export function WebRunFindingsTab(props) {
                     gap: 4,
                     justifyContent: "flex-end"
                   }}>
-                        {(f.validation_status === "unvalidated" || f.validation_status === "unconfirmed" || f.validation_status === "false_positive" || f.validation_status === "low_confidence") && <button className="btn ghost sm finding-del-btn" title="Validate" onClick={e => onValidateFinding(e, f.id)}>✓</button>}
+                        {(f.validation_status === "unvalidated" || f.validation_status === "skipped" || f.validation_status === "unconfirmed" || f.validation_status === "false_positive" || f.validation_status === "low_confidence") && <button className="btn ghost sm finding-del-btn" title="Validate" onClick={e => onValidateFinding(e, f.id)}>✓</button>}
                         <button className="btn ghost sm finding-del-btn" title="Edit" onClick={e => onEditFinding(e, f)}>✎</button>
                         <button className="btn ghost sm finding-del-btn" title="Delete" onClick={e => onDeleteFinding(e, f.id)}>🗑</button>
                       </div>
@@ -186,7 +188,7 @@ export function WebRunFindingsTab(props) {
                           ...d,
                           validation_status: e.target.value
                         }))}>
-                                {[["unvalidated", "unvalidated"], ["confirmed", "confirmed"], ["unconfirmed", "unconfirmed"], ["false_positive", "low confidence"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                                {[["unvalidated", "unvalidated"], ["skipped", "not validated"], ["confirmed", "confirmed"], ["unconfirmed", "unconfirmed"], ["false_positive", "low confidence"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                               </select>
                             </label>
                             <label className="finding-edit-field" style={{

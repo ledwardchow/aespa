@@ -15,6 +15,7 @@ ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 # transient state owned by the validator service, not a user-settable label.
 USER_SETTABLE_VALIDATION = {
     "unvalidated",
+    "skipped",
     "confirmed",
     "unconfirmed",
     "false_positive",
