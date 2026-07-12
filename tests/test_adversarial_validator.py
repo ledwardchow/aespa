@@ -21,6 +21,7 @@ def test_adversarial_validator_config_defaults(client: TestClient):
     assert data["enabled"] is True
     assert data["max_steps"] == 20
     assert data["min_severity"] == "low"
+    assert data["end_scan_max_concurrent"] == 4
     assert data["auto_validate_inline"] is True
     assert data["require_concrete_disproof"] is True
     assert "updated_at" in data
@@ -33,6 +34,7 @@ def test_upsert_adversarial_validator_config(client: TestClient):
         "enabled": False,
         "max_steps": 10,
         "min_severity": "high",
+        "end_scan_max_concurrent": 3,
         "auto_validate_inline": False,
         "require_concrete_disproof": False,
     }
@@ -42,6 +44,7 @@ def test_upsert_adversarial_validator_config(client: TestClient):
     assert data["enabled"] is False
     assert data["max_steps"] == 10
     assert data["min_severity"] == "high"
+    assert data["end_scan_max_concurrent"] == 3
     assert data["auto_validate_inline"] is False
     assert data["require_concrete_disproof"] is False
 
@@ -51,6 +54,7 @@ def test_upsert_then_get_round_trip(client: TestClient):
         "enabled": True,
         "max_steps": 35,
         "min_severity": "critical",
+        "end_scan_max_concurrent": 6,
         "auto_validate_inline": True,
         "require_concrete_disproof": True,
     }
@@ -60,6 +64,7 @@ def test_upsert_then_get_round_trip(client: TestClient):
     data = resp.json()
     assert data["max_steps"] == 35
     assert data["min_severity"] == "critical"
+    assert data["end_scan_max_concurrent"] == 6
 
 
 def test_upsert_is_idempotent(client: TestClient):
@@ -67,6 +72,7 @@ def test_upsert_is_idempotent(client: TestClient):
         "enabled": True,
         "max_steps": 5,
         "min_severity": "medium",
+        "end_scan_max_concurrent": 4,
         "auto_validate_inline": False,
         "require_concrete_disproof": True,
     }
@@ -108,6 +114,20 @@ def test_max_steps_rejects_above_50(client: TestClient):
         "enabled": True,
         "max_steps": 51,
         "min_severity": "low",
+        "auto_validate_inline": True,
+        "require_concrete_disproof": True,
+    }
+    resp = client.put("/api/settings/adversarial-validator-config", json=payload)
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", [0, 9])
+def test_end_scan_concurrency_rejects_out_of_range(client: TestClient, value: int):
+    payload = {
+        "enabled": True,
+        "max_steps": 20,
+        "min_severity": "low",
+        "end_scan_max_concurrent": value,
         "auto_validate_inline": True,
         "require_concrete_disproof": True,
     }

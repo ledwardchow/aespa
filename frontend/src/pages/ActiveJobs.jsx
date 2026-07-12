@@ -51,6 +51,8 @@ export function ActiveJobsPage() {
       } else {
         if (j.job_type === "A.L.I.C.E.") {
           await api.stopAliceRun(j.run_id);
+        } else if (j.job_type === "Validation") {
+          await api.stopValidation(j.run_id);
         } else {
           await api.stopRun(j.run_id);
         }

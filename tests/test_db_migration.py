@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa import db
 
@@ -23,6 +23,47 @@ def test_ensure_column_adds_missing_column():
 
         assert "name" in columns
     finally:
+        engine.dispose()
+
+
+def test_normalize_threshold_skips_does_not_mark_them_unconfirmed():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+        from aespa.models import ScanFinding
+
+        SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            finding = ScanFinding(
+                test_run_id=1,
+                page_id=None,
+                owasp_category="A05",
+                severity="info",
+                title="Informational finding",
+                description="Informational only.",
+                validation_status="unconfirmed",
+                validation_note=(
+                    "Skipped: severity 'info' is below the configured threshold 'low'."
+                ),
+            )
+            session.add(finding)
+            session.commit()
+            session.refresh(finding)
+            finding_id = finding.id
+
+        db._normalize_threshold_skipped_findings(engine)
+
+        with Session(engine) as session:
+            normalized = session.get(ScanFinding, finding_id)
+
+        assert normalized.validation_status == "skipped"
+        assert normalized.validation_note.startswith("Not validated:")
+    finally:
+        SQLModel.metadata.drop_all(engine)
         engine.dispose()
 
 

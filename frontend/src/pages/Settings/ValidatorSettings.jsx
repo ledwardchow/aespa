@@ -86,7 +86,19 @@ export function ValidatorSettings() {
             <option value="info">All (including Info)</option>
           </select>
           <div className="field-hint">
-            Findings below this severity are skipped by the validator and left as "unconfirmed".
+            Findings below this severity are skipped by the validator and marked "not validated".
+          </div>
+        </div>
+
+        <div className="form-section-title">End-of-scan Validation</div>
+        <div className="field">
+          <label>Concurrent Reporting validators</label>
+          <input type="number" min="1" max="8" value={form.end_scan_max_concurrent} disabled={dis} onChange={e => upd({
+          end_scan_max_concurrent: Number(e.target.value)
+        })} />
+          <div className="field-hint">
+            Number of Reporting findings to validate in parallel after a scan completes (1–8).
+            Default: 4. Lower this for rate-limited models or fragile targets.
           </div>
         </div>
 

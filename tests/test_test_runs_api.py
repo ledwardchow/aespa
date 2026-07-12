@@ -99,6 +99,28 @@ def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monk
     assert data[0]["findings_count"] == 1
 
 
+def test_list_active_jobs_includes_one_validation_job_per_run(client: TestClient, monkeypatch):
+    from aespa.services import validator as validator_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    monkeypatch.setattr(validator_svc, "is_validating", lambda run_id: run_id == run["id"])
+    monkeypatch.setattr(validator_svc, "get_validation_status", lambda run_id: {
+        "total": 8,
+        "validating": 3,
+        "unvalidated": 1,
+    })
+
+    response = client.get("/api/test-runs/active")
+
+    assert response.status_code == 200
+    validation_jobs = [job for job in response.json() if job["job_type"] == "Validation"]
+    assert len(validation_jobs) == 1
+    assert validation_jobs[0]["run_id"] == run["id"]
+    assert validation_jobs[0]["pages_done"] == 4
+    assert validation_jobs[0]["total_pages"] == 8
+
+
 def test_get_run(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -567,6 +589,7 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     # Simulate the category information emitted by a normal crawl.  Import must
     # restore both the sitemap's per-page flags and the coverage-matrix cells.
     archive["crawl"]["pages"][0]["owasp_applicable_json"] = '{"A01": true, "A02": false}'
+    archive["crawl"]["pages"][0]["has_object_ref"] = True
     archive["crawl"]["owasp_categories"] = [{
         "page_url": "https://target.local/account", "category": "A01",
     }]
@@ -600,6 +623,12 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     assert sessions["counts"] == {"total": 1, "mixed": 1, "active": 1}
     assert sessions["sessions"][0]["cookie_names"] == ["session"]
     assert sessions["sessions"][0]["header_names"] == ["Authorization"]
+    # An imported run has populated crawl timestamps; it must be exportable too.
+    assert client.get(f"/api/test-runs/{target['id']}/crawl/export").status_code == 200
+    recon = client.get(f"/api/test-runs/{target['id']}/recon-summary")
+    assert recon.status_code == 200
+    assert recon.json()["trust_zones"]["public"] == ["https://target.local/account"]
+    assert "idor" in {item["id"] for item in recon.json()["attack_classes"]}
 
 
 def test_import_crawl_rejects_another_site(client: TestClient):
