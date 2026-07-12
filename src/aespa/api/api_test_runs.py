@@ -413,7 +413,7 @@ def import_api_findings(
     if not payload:
         raise HTTPException(status_code=400, detail="No findings to import")
     allowed_severities = {"critical", "high", "medium", "low", "info"}
-    allowed_validation = {"unvalidated", "validating", "confirmed", "unconfirmed", "false_positive"}
+    allowed_validation = {"unvalidated", "validating", "skipped", "confirmed", "unconfirmed", "false_positive"}
     imported: list[ScanFinding] = []
     for item in payload:
         severity = item.severity.lower().strip()

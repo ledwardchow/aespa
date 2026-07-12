@@ -353,7 +353,8 @@ def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
     data = r.json()
-    assert data["scan_mode"] == "safe_active"
+    assert data["scan_mode"] == "aggressive"
+    assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
     assert data["thinking_max_steps"] == 120
     assert data["min_delay_s"] == 0.05

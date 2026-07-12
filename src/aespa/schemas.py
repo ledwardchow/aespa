@@ -567,7 +567,7 @@ SCAN_MODES: tuple[str, ...] = ("passive", "safe_active", "aggressive", "destruct
 DEFAULT_METHODS_BY_MODE: dict[str, list[str]] = {
     "passive": ["GET", "HEAD"],
     "safe_active": ["GET", "POST", "HEAD"],
-    "aggressive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    "aggressive": ["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"],
     "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
 }
 
@@ -575,7 +575,7 @@ DEFAULT_METHODS_BY_MODE: dict[str, list[str]] = {
 class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    scan_mode: ScanModeLiteral = "safe_active"
+    scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
@@ -756,6 +756,7 @@ class ValidatorConfigBase(BaseModel):
     enabled: bool = True
     max_steps: int = Field(default=20, ge=1, le=50)
     min_severity: str = Field(default="low", pattern=r"^(critical|high|medium|low|info)$")
+    end_scan_max_concurrent: int = Field(default=4, ge=1, le=8)
     auto_validate_inline: bool = True
     require_concrete_disproof: bool = True
 
@@ -809,6 +810,7 @@ class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
 class ReportingDebugConfigBase(BaseModel):
     capture_enabled: bool = False
     panel_enabled: bool = False
+    batch_max_concurrent: int = Field(default=4, ge=1, le=8)
 
 
 class ReportingDebugConfigIn(ReportingDebugConfigBase):
@@ -911,7 +913,7 @@ class TestRunSummary(BaseModel):
     use_screenshots: bool
     max_depth: int
     max_pages: int
-    scan_mode: str = "safe_active"
+    scan_mode: str = "aggressive"
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
@@ -1241,6 +1243,7 @@ class ValidationStatusOut(BaseModel):
     confirmed: int
     false_positives: int
     unconfirmed: int = 0
+    skipped: int = 0
     validating: int
     unvalidated: int
     status: str   # idle | running | stopped | complete
