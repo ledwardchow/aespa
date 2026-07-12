@@ -29,7 +29,8 @@ export function useFindings(runId, activeTab, {
   const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
   const toggleGroup = title => setExpandedGroups(prev => {
     const next = new Set(prev);
-    next.has(title) ? next.delete(title) : next.add(title);
+    if (next.has(title)) next.delete(title);
+    else next.add(title);
     return next;
   });
   const issueImportInputRef = useRef(null);
@@ -45,17 +46,20 @@ export function useFindings(runId, activeTab, {
     return () => clearInterval(iv);
   }, [runId, activeTab]);
 
-  // Poll validation status while validating is running
+  // Poll validation status while validating is running. Keep polling while the
+  // local busy flag is true too, because the final SSE event can race with the
+  // backend task registry; the next status read is the authoritative state.
   useEffect(() => {
-    if (validateStatus?.status !== "running" && activeTab !== "findings") return;
+    if (!validateBusy && validateStatus?.status !== "running" && activeTab !== "findings") return;
     const iv = setInterval(() => {
       api.getValidateStatus(runId).then(vs => {
         setValidateStatus(vs);
         if (vs.status !== "running") setValidateBusy(false);
+        if (vs.status !== "running") api.getFindings(runId).then(setFindings).catch(() => {});
       }).catch(() => {});
     }, 3000);
     return () => clearInterval(iv);
-  }, [runId, validateStatus?.status, activeTab]);
+  }, [runId, validateBusy, validateStatus?.status, activeTab]);
 
   // Fetch findings when switching to findings tab
   useEffect(() => {
@@ -223,6 +227,7 @@ export function useFindings(runId, activeTab, {
     validateStatus,
     setValidateStatus,
     validateBusy,
+    setValidateBusy,
     dedupeBusy,
     expandedFinding,
     setExpandedFinding,

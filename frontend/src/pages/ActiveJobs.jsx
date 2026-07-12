@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useContext } from "react";
+import { useState, useCallback } from "react";
 import { truncUrl, fmtDate } from "../lib/utilities";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
 import { EmptyState } from "../components/EmptyState";
+import { usePolling } from "../hooks/usePolling";
 
 // ── Active jobs ───────────────────────────────────────────────────────────────
 
@@ -31,11 +32,7 @@ export function ActiveJobsPage() {
       setError(e.message);
     }
   }, []);
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-  }, [load]);
+  usePolling(load, { intervalMs: 5000 });
   const stopJob = async j => {
     const key = `${j.job_type}-${j.run_id}`;
     setStopping(prev => ({
@@ -54,6 +51,8 @@ export function ActiveJobsPage() {
       } else {
         if (j.job_type === "A.L.I.C.E.") {
           await api.stopAliceRun(j.run_id);
+        } else if (j.job_type === "Validation") {
+          await api.stopValidation(j.run_id);
         } else {
           await api.stopRun(j.run_id);
         }

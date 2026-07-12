@@ -28,6 +28,53 @@ class _FakeClient:
         return self._responses[str(url)]
 
 
+def test_reporting_handoff_replaces_test_lead_decision_status(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(scanner.events_svc, "emit", lambda run_id, event: emitted.append((run_id, event)))
+
+    scanner._emit_reporting_handoff(42, probe_count=12, batch_count=3)
+
+    assert emitted == [(42, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "active",
+        "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
+        "outcome": "Reporting is analysing 12 probe result(s) across 3 LLM turn(s).",
+        "_persist": True,
+    })]
+
+
+def test_scan_complete_is_emitted_as_the_terminal_phase(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(scanner.events_svc, "emit", lambda run_id, event: emitted.append((run_id, event)))
+
+    scanner._emit_scan_complete(42, finding_count=3)
+
+    assert emitted[-1] == (42, {
+        "type": "scanner_phase",
+        "phase": "scan_complete",
+        "status": "complete",
+        "message": "Scan complete",
+        "data": {"finding_count": 3},
+    })
+
+
+def test_reporting_findings_use_managed_validator_queue(monkeypatch):
+    queued = []
+
+    async def fake_start_validation(run_id, finding_ids=None, **kwargs):
+        queued.append((run_id, finding_ids, kwargs))
+
+    from aespa.services import validator
+    monkeypatch.setattr(validator, "start_validation", fake_start_validation)
+
+    asyncio.run(scanner._queue_reporting_validation(42, [7, 8]))
+    asyncio.run(scanner._queue_reporting_validation(42, []))
+
+    assert queued == [(42, [7, 8], {"use_reporting_concurrency": True})]
+
+
 def test_request_scope_checked_follows_in_scope_redirect(monkeypatch):
     monkeypatch.setattr(scanner, "check_scope", lambda url, site_id, run_id: None)
     client = _FakeClient({

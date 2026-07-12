@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -45,6 +46,159 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
     assert verdict == "unconfirmed"
     assert "no alternate user sessions" in reason
     assert poc_spec is None
+
+
+def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
+    finding = ScanFinding(
+        id=1,
+        test_run_id=1,
+        page_id=None,
+        owasp_category="A05",
+        severity="info",
+        title="Informational header observation",
+        description="Informational finding.",
+    )
+    persisted = []
+
+    async def fake_persist(*args, **kwargs):
+        persisted.append((args, kwargs))
+
+    monkeypatch.setattr(validator, "_persist_verdict", fake_persist)
+    monkeypatch.setattr(validator.events_svc, "emit", lambda *_args, **_kwargs: None)
+
+    asyncio.run(validator._validate_one(
+        1, finding, None, {}, None, None,
+        validator_cfg=SimpleNamespace(min_severity="low", enabled=True),
+    ))
+
+    assert persisted[0][0][2] == "skipped"
+    assert persisted[0][0][3].startswith("Not validated:")
+
+
+def test_validation_batch_respects_concurrency_limit():
+    active = 0
+    peak = 0
+
+    async def fake_validate(_finding):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+
+    findings = [
+        ScanFinding(
+            id=index,
+            test_run_id=1,
+            page_id=None,
+            owasp_category="A05",
+            severity="low",
+            title=str(index),
+            description="test",
+        )
+        for index in range(8)
+    ]
+    asyncio.run(validator._run_validation_batch(findings, 3, fake_validate))
+
+    assert peak == 3
+
+
+def test_resume_interrupted_validations_requeues_only_orphaned_work(monkeypatch):
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    try:
+        monkeypatch.setattr(validator, "get_engine", lambda: engine)
+        with Session(engine) as session:
+            session.add(ScanFinding(
+                test_run_id=42,
+                page_id=None,
+                owasp_category="A01",
+                severity="high",
+                title="Interrupted validation",
+                description="A validation task was interrupted.",
+                validation_status="unvalidated",
+                validation_note=(
+                    "Validation was interrupted before a verdict (process restart); "
+                    "reset for re-validation."
+                ),
+            ))
+            session.add(ScanFinding(
+                test_run_id=42,
+                page_id=None,
+                owasp_category="A01",
+                severity="high",
+                title="Ordinary unvalidated finding",
+                description="This finding was not interrupted.",
+                validation_status="unvalidated",
+            ))
+            session.commit()
+
+        resumed = []
+
+        async def fake_start_validation(run_id, finding_ids=None):
+            resumed.append((run_id, finding_ids))
+
+        monkeypatch.setattr(validator, "start_validation", fake_start_validation)
+        asyncio.run(validator.resume_interrupted_validations())
+
+        assert len(resumed) == 1
+        assert resumed[0][0] == 42
+        assert len(resumed[0][1]) == 1
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_validator_merges_active_primary_with_stored_role_sessions(monkeypatch):
+    """Inline validation must not discard crawl-captured alternate roles."""
+    primary = {
+        "username": "admin",
+        "label": "configured_primary",
+        "cookies": {"sid": "admin"},
+        "extra_headers": {},
+    }
+    monkeypatch.setattr(validator.scanner_svc, "get_active_sessions", lambda _: {1: primary})
+
+    from aespa.services import scanner_sessions
+    monkeypatch.setattr(scanner_sessions, "load_session_vault", lambda _: {
+        "recon_2": {
+            "label": "recon_2", "kind": "cookie", "username": "viewer",
+            "credential_id": 2, "cookies": {"sid": "viewer"}, "extra_headers": {},
+        },
+    })
+
+    sessions = asyncio.run(validator._get_or_create_sessions(
+        1, "https://target.local", None,
+        [SimpleNamespace(id=1, username="admin"), SimpleNamespace(id=2, username="viewer")],
+        requires_auth=True,
+    ))
+
+    assert sessions[1]["username"] == "admin"
+    assert sessions[2]["username"] == "viewer"
+
+
+def test_validator_bootstraps_configured_users_when_auth_flag_is_stale(monkeypatch):
+    credential = SimpleNamespace(id=7, username="viewer", label="Viewer")
+    monkeypatch.setattr(validator.scanner_svc, "get_active_sessions", lambda _: None)
+    from aespa.services import scanner_sessions
+    monkeypatch.setattr(scanner_sessions, "load_session_vault", lambda _: {})
+
+    async def export_session(*_args):
+        return {"sid": "viewer"}, None
+
+    monkeypatch.setattr(validator.scanner_svc, "_export_cred_session", export_session)
+
+    sessions = asyncio.run(validator._get_or_create_sessions(
+        1, "https://target.local", None, [credential], requires_auth=False,
+    ))
+
+    assert sessions[7]["cookies"] == {"sid": "viewer"}
 
 
 def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):

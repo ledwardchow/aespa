@@ -1,4 +1,6 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
+import json
+
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -95,6 +97,28 @@ def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monk
     assert data[0]["job_type"] == "Dynamic Scan"
     assert data[0]["status"] == "analysing"
     assert data[0]["findings_count"] == 1
+
+
+def test_list_active_jobs_includes_one_validation_job_per_run(client: TestClient, monkeypatch):
+    from aespa.services import validator as validator_svc
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    monkeypatch.setattr(validator_svc, "is_validating", lambda run_id: run_id == run["id"])
+    monkeypatch.setattr(validator_svc, "get_validation_status", lambda run_id: {
+        "total": 8,
+        "validating": 3,
+        "unvalidated": 1,
+    })
+
+    response = client.get("/api/test-runs/active")
+
+    assert response.status_code == 200
+    validation_jobs = [job for job in response.json() if job["job_type"] == "Validation"]
+    assert len(validation_jobs) == 1
+    assert validation_jobs[0]["run_id"] == run["id"]
+    assert validation_jobs[0]["pages_done"] == 4
+    assert validation_jobs[0]["total_pages"] == 8
 
 
 def test_get_run(client: TestClient):
@@ -543,6 +567,86 @@ def test_list_pages_empty(client: TestClient):
     r = client.get(f"/api/test-runs/{run['id']}/pages")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_export_and_import_crawl_into_new_run(client: TestClient):
+    site = _make_site(client)
+    source = _make_run(client, site["id"]).json()
+    target = _make_run(client, site["id"]).json()
+    # The finding-import endpoint creates a realistic crawled page without
+    # requiring a Playwright crawl in this service-level test.
+    created = client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
+        "title": "Imported page seed",
+        "affected_url": "https://target.local/account",
+    }])
+    assert created.status_code == 200
+
+    exported = client.get(f"/api/test-runs/{source['id']}/crawl/export")
+    assert exported.status_code == 200
+    archive = exported.json()
+    assert archive["format"] == "aespa-crawl-export"
+    assert archive["crawl"]["pages"][0]["url"] == "https://target.local/account"
+    # Simulate the category information emitted by a normal crawl.  Import must
+    # restore both the sitemap's per-page flags and the coverage-matrix cells.
+    archive["crawl"]["pages"][0]["owasp_applicable_json"] = '{"A01": true, "A02": false}'
+    archive["crawl"]["pages"][0]["has_object_ref"] = True
+    archive["crawl"]["owasp_categories"] = [{
+        "page_url": "https://target.local/account", "category": "A01",
+    }]
+    archive["crawl"]["traffic"] = [{
+        "source": "playwright", "method": "GET", "url": "https://target.local/account",
+        "request_headers": '{"Authorization": "Bearer retained"}', "request_body": None,
+        "status": 200, "response_headers": '{"Set-Cookie": "session=retained"}',
+        "response_body": "account page", "duration_ms": 12, "username": "alice",
+    }]
+    archive["crawl"]["scanner_sessions"] = [{
+        "label": "configured_primary", "kind": "mixed", "username": "alice",
+        "credential_username": "alice", "source": "crawler",
+        "cookies_json": '{"session": "retained"}',
+        "extra_headers_json": '{"Authorization": "Bearer retained"}',
+        "session_metadata": '{"origin": "crawl"}', "token_hint": "retained",
+        "is_active": True,
+    }]
+
+    imported = client.post(
+        f"/api/test-runs/{target['id']}/crawl/import",
+        files={"file": ("crawl.json", json.dumps(archive), "application/json")},
+    )
+    assert imported.status_code == 200
+    assert imported.json()["status"] == "complete"
+    assert imported.json()["pages_discovered"] == 1
+    pages = client.get(f"/api/test-runs/{target['id']}/pages")
+    assert [page["url"] for page in pages.json()] == ["https://target.local/account"]
+    detail = client.get(f"/api/test-runs/{target['id']}/pages/{pages.json()[0]['id']}")
+    assert detail.json()["owasp_applicable"] == {"A01": True, "A02": False}
+    sessions = client.get(f"/api/test-runs/{target['id']}/scanner-sessions").json()
+    assert sessions["counts"] == {"total": 1, "mixed": 1, "active": 1}
+    assert sessions["sessions"][0]["cookie_names"] == ["session"]
+    assert sessions["sessions"][0]["header_names"] == ["Authorization"]
+    # An imported run has populated crawl timestamps; it must be exportable too.
+    assert client.get(f"/api/test-runs/{target['id']}/crawl/export").status_code == 200
+    recon = client.get(f"/api/test-runs/{target['id']}/recon-summary")
+    assert recon.status_code == 200
+    assert recon.json()["trust_zones"]["public"] == ["https://target.local/account"]
+    assert "idor" in {item["id"] for item in recon.json()["attack_classes"]}
+
+
+def test_import_crawl_rejects_another_site(client: TestClient):
+    source_site = _make_site(client)
+    source = _make_run(client, source_site["id"]).json()
+    client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
+        "title": "Imported page seed", "affected_url": "https://target.local/account",
+    }])
+    archive = client.get(f"/api/test-runs/{source['id']}/crawl/export")
+    other_site = _make_site(client, name="Other", base_url="https://other.local")
+    target = _make_run(client, other_site["id"]).json()
+
+    imported = client.post(
+        f"/api/test-runs/{target['id']}/crawl/import",
+        files={"file": ("crawl.json", archive.content, "application/json")},
+    )
+    assert imported.status_code == 400
+    assert "different site" in imported.json()["detail"]
 
 
 def test_clear_crawl_resets_run_without_restarting(monkeypatch):

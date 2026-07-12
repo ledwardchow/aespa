@@ -59,6 +59,7 @@ from aespa.services.settings import (
     get_burp_rest_api_config,
     get_global_http_header_config,
     get_llm_config_for_role,
+    get_reporting_debug_config,
     get_run_scanner_policy,
     get_specialist_agent_config,
     get_upstream_proxy_config,
@@ -3743,6 +3744,69 @@ def get_active_sessions(run_id: int) -> dict[int, dict] | None:
     return _active_sessions.get(run_id)
 
 
+async def _export_cred_session(
+    base_url: str,
+    login_url: str | None,
+    credential: Credential,
+) -> tuple[dict[str, str], str | None]:
+    """Authenticate one configured user and return reusable cookie/token material.
+
+    This is used by the validator after a scan has ended or whenever a configured
+    role was not captured in the run session vault.  It deliberately shares the
+    crawler's authentication dispatcher so auto, TOTP, guided, and adaptive
+    login flows behave consistently across crawl, scan, and validation.
+    """
+    from playwright.async_api import async_playwright
+
+    from aespa.services.crawler import _authenticate
+
+    resolved_login_url = _login_url_for_credential(login_url, credential)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True, args=_playwright_launch_args()
+        )
+        try:
+            context = await browser.new_context(
+                user_agent=_UA,
+                ignore_https_errors=True,
+                **_playwright_proxy(),
+            )
+            try:
+                page = await context.new_page()
+                try:
+                    await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+                except Exception:
+                    pass
+                await _authenticate(page, resolved_login_url, credential)
+
+                cookies = {
+                    cookie["name"]: cookie["value"]
+                    for cookie in await context.cookies()
+                    if cookie.get("name") and cookie.get("value") is not None
+                }
+                token = None
+                for key in (
+                    "access_token", "token", "jwt", "auth_token", "id_token",
+                    "authToken", "accessToken",
+                ):
+                    try:
+                        token = await page.evaluate(
+                            "(k) => localStorage.getItem(k) || sessionStorage.getItem(k)",
+                            key,
+                        )
+                    except Exception:
+                        token = None
+                    if token:
+                        break
+                if not cookies and not token:
+                    raise RuntimeError("Authentication did not produce cookies or a bearer token")
+                return cookies, token
+            finally:
+                await context.close()
+        finally:
+            await browser.close()
+
+
 # ── Thinking-scan public API ──────────────────────────────────────────────────
 
 def is_thinking_running(run_id: int) -> bool:
@@ -3834,6 +3898,55 @@ async def start_thinking_scan_resume(run_id: int) -> None:
 
 def _emit_thinking_status(run_id: int) -> None:
     events_svc.emit(run_id, {"type": "thinking_scan_update", **get_thinking_scan_status(run_id)})
+
+
+def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> None:
+    """Keep the scan active while the Test Lead delegates probe analysis."""
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "active",
+        "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
+        "outcome": (
+            f"Reporting is analysing {probe_count} probe result(s) "
+            f"across {batch_count} LLM turn(s)."
+        ),
+        "_persist": True,
+    })
+
+
+def _emit_scan_complete(run_id: int, finding_count: int) -> None:
+    """Emit the terminal scan events only after every finalisation phase ends."""
+    events_svc.emit(run_id, {
+        "type": "agent_status",
+        "agent_id": "scanner",
+        "role": "Test Lead",
+        "status": "complete",
+        "current_task": "Scan complete",
+        "outcome": f"{finding_count} finding(s) recorded",
+        "_persist": True,
+    })
+    events_svc.emit(run_id, {
+        "type": "scanner_phase",
+        "phase": "scan_complete",
+        "status": "complete",
+        "message": "Scan complete",
+        "data": {"finding_count": finding_count},
+    })
+
+
+async def _queue_reporting_validation(run_id: int, finding_ids: list[int]) -> None:
+    """Send end-of-scan Reporting findings through the managed validator queue."""
+    if not finding_ids:
+        return
+    from aespa.services import validator as validator_svc
+
+    await validator_svc.start_validation(
+        run_id,
+        finding_ids=finding_ids,
+        use_reporting_concurrency=True,
+    )
 
 
 async def _thinking_scan_task(run_id: int) -> None:
@@ -5505,6 +5618,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 f"{deterministic_saved} deterministic finding(s) already recorded…"
             ),
         })
+        _emit_reporting_handoff(run_id, len(all_results), total_batches)
         events_svc.emit(run_id, {
             "type": "agent_status",
             "agent_id": "reporting",
@@ -5548,8 +5662,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "_persist": True,
                 })
 
+            with Session(get_engine()) as _s:
+                reporting_cfg = get_reporting_debug_config(_s)
             raw_findings = await llm_svc.analyse_probes(
-                llm_cfg, base_url, all_results, on_batch_complete=_on_batch_complete
+                llm_cfg, base_url, all_results,
+                on_batch_complete=_on_batch_complete,
+                max_concurrent_batches=reporting_cfg.batch_max_concurrent,
             )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.
@@ -5573,6 +5691,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 result_by_url = {r["url"]: r for r in all_results}
                 saved_count = 0
                 duplicate_count = 0
+                saved_finding_ids: list[int] = []
 
                 for raw in raw_findings:
                     affected = (raw.get("affected_url") or base_url).strip()
@@ -5601,8 +5720,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                         result_by_url=result_by_url,
                     )
                     s.add(finding)
+                    s.flush()
+                    if finding.id is not None:
+                        saved_finding_ids.append(finding.id)
                     saved_count += 1
                 s.commit()
+            # Reporting findings are created after the Test Lead loop has
+            # ended, so they cannot rely on its per-finding inline task. Queue
+            # them as one managed validation job; it is tracked independently
+            # and continues after scan completion.
+            await _queue_reporting_validation(run_id, saved_finding_ids)
             message = f"Analysis complete — {saved_count} finding(s) recorded."
             if duplicate_count:
                 message += f" {duplicate_count} duplicate finding(s) skipped."
@@ -5667,15 +5794,18 @@ async def _do_thinking_scan(run_id: int) -> None:
         _finding_count = len(_s.exec(
             select(ScanFinding).where(ScanFinding.test_run_id == run_id)
         ).all())
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "complete",
-        "current_task": "Scan complete",
-        "outcome": f"{_finding_count} finding(s) recorded",
-        "_persist": True,
-    })
+    if stopped:
+        events_svc.emit(run_id, {
+            "type": "agent_status",
+            "agent_id": "scanner",
+            "role": "Test Lead",
+            "status": "complete",
+            "current_task": "Scan stopped",
+            "outcome": f"Stopped with {_finding_count} finding(s) recorded",
+            "_persist": True,
+        })
+    else:
+        _emit_scan_complete(run_id, _finding_count)
     llm_svc.clear_run_context()
 
 
