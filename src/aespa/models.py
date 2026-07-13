@@ -178,7 +178,8 @@ class ApiTestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     recon_summary_json: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
-    # Soft back-reference to the SAST pre-phase run auto-created when this scan started
+    # Legacy soft back-reference retained for imported databases; new API runs
+    # use explicit run-owned ScanLead imports instead.
     sast_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)

@@ -451,6 +451,75 @@ def test_alice_remove_finding_is_scoped_to_api_run_kind(db_session):
         db_mod._engine = orig
 
 
+def test_api_alice_forge_jwt_persists_api_session(db_session):
+    import aespa.db as db_mod
+    from aespa.models import ApiCollection, ApiTestRun, LLMConfig
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services.scanner_sessions import list_run_sessions
+
+    coll = ApiCollection(name="JWT API", base_url="https://jwt.example.com")
+    db_session.add(coll)
+    db_session.commit()
+    db_session.refresh(coll)
+    run = ApiTestRun(collection_id=coll.id, name="api")
+    db_session.add(run)
+    db_session.commit()
+    db_session.refresh(run)
+
+    orig = db_mod._engine
+    db_mod._engine = db_session.get_bind()
+    vault: dict = {}
+    try:
+        result = asyncio.run(
+            _execute_alice_tool(
+                run_id=run.id,
+                llm_cfg=LLMConfig(),
+                base_url=coll.base_url,
+                site_id=-1,
+                tool_name="forge_jwt",
+                tool_input={
+                    "secret": "test-secret",
+                    "claims": {"sub": "123", "role": "admin"},
+                    "store_as": "api_forged",
+                },
+                step=1,
+                session_vault=vault,
+                api_run_id=run.id,
+            )
+        )
+
+        assert "api_forged" in result
+        assert "api_forged" in vault
+        assert [
+            session.label
+            for session in list_run_sessions(run.id, run_kind="api")
+        ] == ["api_forged"]
+        assert list_run_sessions(run.id, run_kind="web") == []
+    finally:
+        db_mod._engine = orig
+
+
+def test_api_alice_credential_check_uses_api_scope_callback():
+    from aespa.models import LLMConfig
+    from aespa.services.alice import _execute_alice_tool
+
+    result = asyncio.run(
+        _execute_alice_tool(
+            run_id=1,
+            llm_cfg=LLMConfig(),
+            base_url="https://api.example.com",
+            site_id=-1,
+            tool_name="credential_check",
+            tool_input={"url": "https://evil.example/login", "candidates": []},
+            step=1,
+            scope_check_fn=lambda _url: "outside API collection scope",
+            api_run_id=1,
+        )
+    )
+
+    assert result == "[SCOPE BLOCK] outside API collection scope"
+
+
 def test_alice_remove_finding_is_scoped_to_web_run_kind(db_session):
     """Web-mode ALICE must not delete an API finding from a colliding ApiTestRun id."""
     import aespa.db as db_mod
@@ -746,6 +815,25 @@ def test_api_system_prompt_contains_context_tool_commands():
     from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT
     for cmd in ["endpoint_list", "endpoint_detail", "collection_info", "finding_list"]:
         assert cmd in ALICE_API_SYSTEM_PROMPT
+
+
+def test_api_alice_withholds_web_only_dispatch_and_write_tools():
+    from aespa.services.alice import _get_alice_tools
+
+    names = {
+        tool["name"]
+        for tool in _get_alice_tools(exclude={"write_finding", "agent_dispatch"})
+    }
+    assert "write_finding" not in names
+    assert "agent_dispatch" not in names
+    assert "forge_jwt" in names
+    assert "register_account" in names
+
+
+def test_api_system_prompt_does_not_advertise_agent_dispatch():
+    from aespa.services.prompts.alice import ALICE_API_SYSTEM_PROMPT
+
+    assert "agent_dispatch" not in ALICE_API_SYSTEM_PROMPT
 
 
 def test_api_system_prompt_formats_correctly():
