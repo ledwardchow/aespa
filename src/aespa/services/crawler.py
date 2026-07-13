@@ -797,6 +797,7 @@ async def _crawl_as_credential(
                             "in_scope": True,
                             "scan_status": "pending",
                             "accessible_by": ab,
+                            "accessible_anonymously": credential_id is None,
                         },
                         "link": {
                             "source": parent_id,
@@ -1112,6 +1113,7 @@ async def _explore_interactive_states(
                     "id": page_id, "url": page.url, "state_label": page_label, "state_kind": "interactive",
                     "title": snapshot["title"], "depth": state_depth, "status": "crawled", "context": context,
                     "in_scope": True, "scan_status": "pending", "accessible_by": [credential_id] if credential_id else [],
+                    "accessible_anonymously": credential_id is None,
                 }, "link": {"source": parent_id, "target": page_id, "link_text": action["name"], "action_kind": "click"}})
             _save_credential_view(page_id, run_id, credential_id, username, snapshot["screenshot_b64"],
                                   "[Interactive SPA state]", snapshot["text"][:10_000], {})
@@ -2281,6 +2283,7 @@ async def _promote_api_calls(
                         "accessible_by": [credential_id]
                         if credential_id is not None
                         else [],
+                        "accessible_anonymously": credential_id is None,
                     },
                     "link": {
                         "source": source_page_id,

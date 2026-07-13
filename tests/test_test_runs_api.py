@@ -583,6 +583,61 @@ def test_get_graph_empty(client: TestClient):
     assert data["links"] == []
 
 
+def test_get_graph_reports_unauthenticated_access():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, PageCredentialView, Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            public_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/public",
+                accessible_by="[10, 20]",
+            )
+            private_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/private",
+                accessible_by="[10, 20]",
+            )
+            session.add(public_page)
+            session.add(private_page)
+            session.commit()
+            session.refresh(public_page)
+            session.add(
+                PageCredentialView(
+                    test_run_id=run.id,
+                    page_id=public_page.id,
+                    credential_id=None,
+                    username="unauthenticated",
+                )
+            )
+            session.commit()
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+
+        nodes_by_url = {node.url: node for node in graph.nodes}
+        assert nodes_by_url["https://target.local/public"].accessible_anonymously is True
+        assert nodes_by_url["https://target.local/private"].accessible_anonymously is False
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_list_pages_empty(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()

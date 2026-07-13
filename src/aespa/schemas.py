@@ -1011,6 +1011,7 @@ class GraphNode(BaseModel):
     in_scope: bool = True
     scan_status: str = "pending"
     accessible_by: list[int] = []
+    accessible_anonymously: bool = False
 
 
 class GraphLink(BaseModel):
