@@ -82,7 +82,7 @@ export function WebRunSitemapGraph({
 
 function SitemapPageInspector({ node, detail, views, cascade, scopeBusy, onCascade, onClose, onToggleScope, onDelete }) {
   return <div className="graph-panel">
-    <div className="graph-panel-header"><div className="graph-panel-url">{node.url}</div><button className="btn ghost sm" onClick={onClose}>✕</button></div>
+    <div className="graph-panel-header"><div className="graph-panel-url">{node.state_label ? `${node.url} · ${node.state_label}` : node.url}</div><button className="btn ghost sm" onClick={onClose}>✕</button></div>
     {detail ? <div className="graph-panel-body">
       {detail.title && <div className="graph-panel-title">{detail.title}</div>}
       <div className="graph-panel-section-label">Scope</div>

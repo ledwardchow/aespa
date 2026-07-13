@@ -56,6 +56,7 @@ export function SiteDetail({
     setEditForm({
       max_depth: run.max_depth,
       max_pages: run.max_pages,
+      crawler_mode: run.crawler_mode || "url",
       llm_profile_id: run.llm_profile_id || ""
     });
     setEditingRun(run);
@@ -66,6 +67,7 @@ export function SiteDetail({
       const updated = await api.updateRun(editingRun.id, {
         max_depth: Number(editForm.max_depth),
         max_pages: Number(editForm.max_pages),
+        crawler_mode: editForm.crawler_mode,
         llm_profile_id: editForm.llm_profile_id ? Number(editForm.llm_profile_id) : null
       });
       setRuns(rs => rs.map(r => r.id === updated.id ? updated : r));
@@ -118,6 +120,13 @@ export function SiteDetail({
             }))} style={{
               width: 80
             }} />
+            </div>
+            <div className="field" style={{ margin: 0 }}>
+              <label>Crawler mode</label>
+              <select className="select" value={editForm.crawler_mode} onChange={e => setEditForm(f => ({ ...f, crawler_mode: e.target.value }))}>
+                <option value="url">URL</option>
+                <option value="interactive">Interactive SPA</option>
+              </select>
             </div>
             <div className="field" style={{
             margin: 0

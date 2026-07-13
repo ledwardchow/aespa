@@ -126,9 +126,10 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
     site = _get_site_or_404(session, run.site_id)
     pages = list(session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run.id)))
     page_urls = {page.id: page.url for page in pages}
+    page_state_keys = {page.id: page.state_key for page in pages}
     credentials = {cred.id: cred.username for cred in site.credentials}
     page_fields = (
-        "url", "title", "page_text", "screenshot_b64", "llm_context", "depth", "status",
+        "url", "state_key", "state_label", "state_kind", "replay_steps_json", "title", "page_text", "screenshot_b64", "llm_context", "depth", "status",
         "error_message", "in_scope", "scan_status", "req_auth", "takes_input",
         "has_object_ref", "has_business_logic", "accessible_by", "owasp_applicable_json",
     )
@@ -150,8 +151,12 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
             "links": [
                 {
                     "source_url": page_urls.get(link.source_page_id),
+                    "source_state_key": page_state_keys.get(link.source_page_id),
                     "target_url": link.target_url,
+                    "target_state_key": page_state_keys.get(link.target_page_id),
                     "link_text": link.link_text,
+                    "action_kind": link.action_kind,
+                    "action_data_json": link.action_data_json,
                 }
                 for link in session.exec(select(PageLink).where(PageLink.test_run_id == run.id))
                 if page_urls.get(link.source_page_id)
@@ -159,6 +164,7 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
             "credential_views": [
                 {
                     "page_url": page_urls.get(view.page_id),
+                    "page_state_key": page_state_keys.get(view.page_id),
                     "username": credentials.get(view.credential_id, view.username),
                     "screenshot_b64": view.screenshot_b64,
                     "llm_context": view.llm_context,
@@ -346,6 +352,7 @@ def create_test_run(
         use_screenshots=payload.use_screenshots,
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
+        crawler_mode=payload.crawler_mode,
         scan_mode=policy.scan_mode,
         scanner_policy_json="{}",
         llm_config_id=payload.llm_config_id,
@@ -717,6 +724,8 @@ def update_test_run(
         raise HTTPException(status_code=409, detail="Cannot edit settings while crawl is running")
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
+    if payload.crawler_mode is not None:
+        run.crawler_mode = payload.crawler_mode
     if payload.llm_config_id is not None:
         # Validate the model exists
         from aespa.models import LLMConfig
@@ -839,9 +848,10 @@ async def import_test_run_crawl(
     site = _get_site_or_404(session, run.site_id)
     crawl = _validate_crawl_archive(payload, site.base_url)
 
+    pages_by_identity: dict[str, CrawledPage] = {}
     pages_by_url: dict[str, CrawledPage] = {}
     allowed_page_fields = {
-        "url", "title", "page_text", "screenshot_b64", "llm_context", "depth", "status",
+        "url", "state_key", "state_label", "state_kind", "replay_steps_json", "title", "page_text", "screenshot_b64", "llm_context", "depth", "status",
         "error_message", "in_scope", "scan_status", "req_auth", "takes_input",
         "has_object_ref", "has_business_logic", "accessible_by", "owasp_applicable_json",
     }
@@ -849,7 +859,8 @@ async def import_test_run_crawl(
         for item in crawl["pages"]:
             if not isinstance(item, dict) or not isinstance(item.get("url"), str) or not item["url"]:
                 raise ValueError("page URL missing")
-            if item["url"] in pages_by_url:
+            page_identity = item.get("state_key") or item["url"]
+            if page_identity in pages_by_identity:
                 continue
             page = CrawledPage(
                 test_run_id=run_id,
@@ -857,25 +868,34 @@ async def import_test_run_crawl(
             )
             session.add(page)
             session.flush()
-            pages_by_url[page.url] = page
+            pages_by_identity[page_identity] = page
+            pages_by_url.setdefault(page.url, page)
 
         for item in crawl.get("links", []):
-            if not isinstance(item, dict) or item.get("source_url") not in pages_by_url or not isinstance(item.get("target_url"), str):
+            if not isinstance(item, dict) or not isinstance(item.get("target_url"), str):
                 continue
-            target = pages_by_url.get(item["target_url"])
+            source = pages_by_identity.get(item.get("source_state_key")) or pages_by_url.get(item.get("source_url"))
+            if source is None:
+                continue
+            target = pages_by_identity.get(item.get("target_state_key")) or pages_by_url.get(item["target_url"])
             session.add(PageLink(
-                test_run_id=run_id, source_page_id=pages_by_url[item["source_url"]].id,
+                test_run_id=run_id, source_page_id=source.id,
                 target_page_id=target.id if target else None, target_url=item["target_url"],
                 link_text=item.get("link_text"),
+                action_kind=item.get("action_kind") or "navigate",
+                action_data_json=item.get("action_data_json") or "{}",
             ))
 
         credential_ids = {credential.username: credential.id for credential in site.credentials}
         for item in crawl.get("credential_views", []):
-            if not isinstance(item, dict) or item.get("page_url") not in pages_by_url:
+            if not isinstance(item, dict):
+                continue
+            page = pages_by_identity.get(item.get("page_state_key")) or pages_by_url.get(item.get("page_url"))
+            if page is None:
                 continue
             username = item.get("username") if isinstance(item.get("username"), str) else None
             session.add(PageCredentialView(
-                test_run_id=run_id, page_id=pages_by_url[item["page_url"]].id,
+                test_run_id=run_id, page_id=page.id,
                 credential_id=credential_ids.get(username), username=username,
                 **{key: item.get(key) for key in ("screenshot_b64", "llm_context", "page_text", "req_auth", "takes_input", "has_object_ref", "has_business_logic", "owasp_applicable_json")},
             ))
@@ -1060,6 +1080,8 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
         GraphNode(
             id=p.id,
             url=p.url,
+            state_label=p.state_label,
+            state_kind=p.state_kind,
             title=p.title,
             depth=p.depth,
             status=p.status,
@@ -1072,7 +1094,7 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
     ]
     page_ids = {p.id for p in pages}
     edges = [
-        GraphLink(source=link.source_page_id, target=link.target_page_id, link_text=link.link_text)
+        GraphLink(source=link.source_page_id, target=link.target_page_id, link_text=link.link_text, action_kind=link.action_kind)
         for link in links
         if link.target_page_id is not None
         and link.source_page_id in page_ids
