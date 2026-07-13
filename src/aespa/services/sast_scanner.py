@@ -457,11 +457,11 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             run = s.get(SastRun, sast_run_id)
             if run is None:
                 raise ValueError(f"SastRun {sast_run_id} not found")
-            # Collection is optional: API SAST runs key on a collection; standalone
-            # (web-oriented) runs have none and carry their own uploaded archive.
+            # New SAST runs are standalone. Collection/document linkage remains
+            # readable for legacy and imported rows.
             coll = s.get(ApiCollection, run.collection_id) if run.collection_id else None
-            # Resolve the source archive. Prefer the ApiDocument (the API path);
-            # fall back to the standalone archive stored on the run itself.
+            # Resolve the source archive. Legacy rows may still use ApiDocument;
+            # new standalone runs store the archive path on the run itself.
             doc: ApiDocument | None = None
             if run.document_id:
                 doc = s.get(ApiDocument, run.document_id)
@@ -674,8 +674,8 @@ def create_sast_run(
 ) -> SastRun:
     """Create and persist a SastRun row. Does NOT start the scan.
 
-    Pass ``collection_id`` + ``document_id`` for an API-style run, or
-    ``source_archive_path`` + ``source_filename`` for a standalone run.
+    New runs use ``source_archive_path`` + ``source_filename``. Collection and
+    document linkage remains supported for legacy/import compatibility.
     """
     run = SastRun(
         collection_id=collection_id,
@@ -708,8 +708,8 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
     # Tag every event this run emits as run_kind='sast'.  Run ids collide across
     # web / api / sast, so the scope is authoritative.  This also overrides any
-    # surrounding 'api' scope when run as an API scan's SAST pre-phase, since the
-    # task created below snapshots this 'sast' context.
+    # surrounding caller scope, since the task created below snapshots this
+    # authoritative 'sast' context.
     with events_svc.run_kind_scope("sast"):
         with Session(get_engine()) as s:
             run = s.get(SastRun, sast_run_id)
@@ -739,11 +739,9 @@ async def start_sast_scan(sast_run_id: int) -> None:
 
 
 async def run_sast_scan(sast_run_id: int) -> None:
-    """Start and AWAIT the SAST scan to completion.
+    """Start and await a SAST scan to completion.
 
-    Used by the API scan pre-phase — the caller awaits this directly so leads
-    are ready before the dynamic loop starts.  Failures are swallowed so the
-    dynamic scan always proceeds regardless.
+    Safe to call when already running. Task failures are logged and swallowed.
     """
     await start_sast_scan(sast_run_id)
     task = _sast_tasks.get(sast_run_id)

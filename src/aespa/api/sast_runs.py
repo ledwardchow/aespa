@@ -1,4 +1,4 @@
-"""API routes for SAST runs: /api/sast-runs/* and /api/api-collections/{id}/sast-runs."""
+"""API routes for standalone SAST runs and explicit lead imports."""
 from __future__ import annotations
 
 import io
@@ -17,8 +17,7 @@ from aespa.config import get_settings
 from aespa.db import get_session
 from aespa.models import (
     AgentLog,
-    ApiCollection,
-    ApiDocument,
+    ApiTestRun,
     SastRun,
     ScanLead,
     ScanLog,
@@ -48,88 +47,6 @@ def _to_summary(run: SastRun) -> SastRunSummary:
     return SastRunSummary.model_validate(run)
 
 
-# ── Create a SAST run under a collection ──────────────────────────────────────
-
-class SastRunCreate(BaseModel):
-    name: str | None = None
-    document_id: int | None = None
-    llm_config_id: int | None = None
-    llm_profile_id: int | None = None
-
-
-@router.post(
-    "/api/api-collections/{collection_id}/sast-runs",
-    response_model=SastRunSummary,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_sast_run(
-    collection_id: int,
-    body: SastRunCreate | None = None,
-    session: Session = Depends(get_session),
-) -> SastRunSummary:
-    coll = session.get(ApiCollection, collection_id)
-    if coll is None:
-        raise HTTPException(status_code=404, detail="API collection not found")
-
-    body = body or SastRunCreate()
-    name = body.name or f"SAST – {coll.name}"
-
-    # Resolve document_id: use supplied, else find most recent source_zip.
-    doc_id: int | None = body.document_id
-    if doc_id is None:
-        doc = session.exec(
-            select(ApiDocument)
-            .where(ApiDocument.collection_id == collection_id)
-            .where(ApiDocument.doc_type == "source_zip")
-            .order_by(ApiDocument.id.desc())  # type: ignore[attr-defined]
-        ).first()
-        if doc is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No source_zip document found for this collection. Upload one first.",
-            )
-        doc_id = doc.id
-
-    if body.llm_profile_id is not None:
-        from aespa.models import LLMProfile
-        if session.get(LLMProfile, body.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
-
-    run = SastRun(
-        collection_id=collection_id,
-        document_id=doc_id,
-        name=name,
-        llm_config_id=body.llm_config_id,
-        llm_profile_id=body.llm_profile_id,
-        status="pending",
-        created_at=datetime.now(_UTC),
-        updated_at=datetime.now(_UTC),
-    )
-    session.add(run)
-    session.commit()
-    session.refresh(run)
-    return _to_summary(run)
-
-
-@router.get(
-    "/api/api-collections/{collection_id}/sast-runs",
-    response_model=list[SastRunSummary],
-)
-def list_sast_runs(
-    collection_id: int,
-    session: Session = Depends(get_session),
-) -> list[SastRunSummary]:
-    coll = session.get(ApiCollection, collection_id)
-    if coll is None:
-        raise HTTPException(status_code=404, detail="API collection not found")
-    runs = session.exec(
-        select(SastRun)
-        .where(SastRun.collection_id == collection_id)
-        .order_by(SastRun.id.desc())  # type: ignore[attr-defined]
-    ).all()
-    return [_to_summary(r) for r in runs]
-
-
 # ── Standalone SAST run (upload archive + create, no collection) ──────────────
 
 @router.post(
@@ -147,7 +64,7 @@ async def create_standalone_sast_run(
     """Create a standalone SAST run from an uploaded source archive.
 
     Not tied to an API collection — used by the SAST screen and consumed by web
-    scans (which import a copy of the resulting leads).
+    or API test runs, which explicitly import copies of the resulting leads.
     """
     content = await file.read()
     if not content:
@@ -380,14 +297,110 @@ def get_api_run_leads(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> list[ScanLeadOut]:
-    """Return open ScanLeads for the collection associated with an API test run."""
-    from aespa.models import ApiTestRun
+    """Return only the SAST-lead copies owned by this API test run."""
     api_run = session.get(ApiTestRun, run_id)
     if api_run is None:
         raise HTTPException(status_code=404, detail="API test run not found")
     leads = session.exec(
         select(ScanLead)
-        .where(ScanLead.collection_id == api_run.collection_id)
+        .where(ScanLead.imported_into_run_type == "api")
+        .where(ScanLead.imported_into_run_id == run_id)
         .order_by(ScanLead.id)
     ).all()
     return [ScanLeadOut.model_validate(lead) for lead in leads]
+
+
+@router.get("/api/api-test-runs/{run_id}/sast-runs/available")
+def list_api_run_available_sast_runs(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    """Completed standalone SAST runs available for explicit lead import."""
+    if session.get(ApiTestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="API test run not found")
+    runs = session.exec(
+        select(SastRun)
+        .where(SastRun.status == "completed")
+        .where(SastRun.leads_count > 0)
+        .order_by(SastRun.id.desc())  # type: ignore[attr-defined]
+    ).all()
+    return [
+        {
+            "id": run.id,
+            "name": run.name,
+            "leads_count": run.leads_count,
+            "source_filename": run.source_filename,
+            "completed_at": (
+                run.completed_at.isoformat() if run.completed_at else None
+            ),
+        }
+        for run in runs
+    ]
+
+
+class ApiImportLeadsRequest(BaseModel):
+    sast_run_id: int
+
+
+@router.post("/api/api-test-runs/{run_id}/import-leads")
+def import_api_run_sast_leads(
+    run_id: int,
+    body: ApiImportLeadsRequest,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Copy one completed SAST run's leads into an API test run."""
+    if session.get(ApiTestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="API test run not found")
+    sast_run = session.get(SastRun, body.sast_run_id)
+    if sast_run is None:
+        raise HTTPException(status_code=404, detail="SAST run not found")
+    if sast_run.status != "completed":
+        raise HTTPException(status_code=409, detail="SAST run is not completed")
+
+    from aespa.services.scan_leads import copy_leads_to_run
+
+    imported = copy_leads_to_run(body.sast_run_id, "api", run_id)
+    return {"imported": imported}
+
+
+@router.delete(
+    "/api/api-test-runs/{run_id}/leads",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def clear_api_run_leads(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete all imported leads owned by an API run, preserving originals."""
+    if session.get(ApiTestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="API test run not found")
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "api")
+        .where(ScanLead.imported_into_run_id == run_id)
+    ).all():
+        session.delete(lead)
+    session.commit()
+
+
+@router.delete(
+    "/api/api-test-runs/{run_id}/leads/{lead_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_api_run_lead(
+    run_id: int,
+    lead_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    """Delete one lead owned by an API run, preserving the SAST original."""
+    if session.get(ApiTestRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="API test run not found")
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.imported_into_run_type != "api"
+        or lead.imported_into_run_id != run_id
+    ):
+        raise HTTPException(status_code=404, detail="Lead not found for this run")
+    session.delete(lead)
+    session.commit()

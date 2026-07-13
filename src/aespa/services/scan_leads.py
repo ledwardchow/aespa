@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import SastRun, ScanFinding, ScanLead
+from aespa.models import ScanFinding, ScanLead
 
 log = logging.getLogger(__name__)
 
@@ -15,11 +15,6 @@ _UTC = timezone.utc
 
 # Confidence threshold — only leads at or above this are kept.
 CONFIDENCE_THRESHOLD = 0.7
-
-# How far back (in seconds) a SAST run is considered "fresh" enough to skip
-# auto-creation of a new one.
-_FRESH_WINDOW_S = 24 * 3600  # 24 hours
-
 
 def create_lead(
     *,
@@ -156,34 +151,6 @@ def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[Scan
             .where(ScanLead.imported_into_run_id == target_run_id)
             .order_by(ScanLead.id)
         ).all())
-
-
-def get_open_leads_for_collection(collection_id: int) -> list[ScanLead]:
-    """Return open ScanLead rows for a collection (consumed by dynamic scans)."""
-    with Session(get_engine(), expire_on_commit=False) as s:
-        return list(s.exec(
-            select(ScanLead)
-            .where(ScanLead.collection_id == collection_id)
-            .where(ScanLead.status == "open")
-            .order_by(ScanLead.severity.desc(), ScanLead.confidence.desc())  # type: ignore[attr-defined]
-        ).all())
-
-
-def needs_fresh_sast(collection_id: int) -> bool:
-    """Return True if the collection should get an auto-created SAST pre-phase.
-
-    True when there is no recent completed SastRun for this collection.
-    """
-    import time as _time
-    cutoff = datetime.fromtimestamp(_time.time() - _FRESH_WINDOW_S, tz=_UTC)
-    with Session(get_engine()) as s:
-        recent = s.exec(
-            select(SastRun)
-            .where(SastRun.collection_id == collection_id)
-            .where(SastRun.status == "completed")
-            .where(SastRun.completed_at >= cutoff)  # type: ignore[arg-type]
-        ).first()
-    return recent is None
 
 
 def _promote_lead_to_finding(
@@ -402,15 +369,6 @@ def update_lead(
             log.debug("update_lead: coverage link failed: %s", exc)
 
     return lead
-
-
-def format_leads_for_context(collection_id: int, cap: int = 20) -> str:
-    """Return a formatted 'Investigation leads' block for the dynamic scan context.
-
-    Used by API scans, keyed on the collection. Returns an empty string if there
-    are no open leads.
-    """
-    return _format_leads_block(get_open_leads_for_collection(collection_id)[:cap])
 
 
 def format_leads_for_run(

@@ -26,7 +26,9 @@ from aespa.models import (
     ApiCollection,
     ApiCredential,
     ApiTestRun,
+    SastRun,
     ScanFinding,
+    ScanLead,
     TrafficEntry,
 )
 
@@ -124,6 +126,90 @@ def _make_run(client, coll_id):
     return r.json()
 
 
+def test_api_runs_import_sast_leads_explicitly_and_independently(client, db_engine):
+    from aespa.services.scan_leads import get_leads_for_run, update_lead
+
+    coll = _make_collection(client)
+    with Session(db_engine) as s:
+        sast_run = SastRun(
+            name="Detached SAST scan",
+            status="completed",
+            leads_count=1,
+        )
+        s.add(sast_run)
+        s.commit()
+        s.refresh(sast_run)
+        sast_run_id = sast_run.id
+        s.add(
+            ScanLead(
+                producer_run_type="sast",
+                    producer_run_id=sast_run_id,
+                title="Reusable SAST lead",
+                description="Must be dynamically reassessed.",
+                confidence=0.9,
+                status="open",
+            )
+        )
+        s.commit()
+
+    first = _make_run(client, coll["id"])
+    assert get_leads_for_run("api", first["id"]) == []
+    available = client.get(
+        f"/api/api-test-runs/{first['id']}/sast-runs/available"
+    )
+    assert available.status_code == 200
+    assert [run["id"] for run in available.json()] == [sast_run_id]
+    imported = client.post(
+        f"/api/api-test-runs/{first['id']}/import-leads",
+        json={"sast_run_id": sast_run_id},
+    )
+    assert imported.status_code == 200
+    assert imported.json() == {"imported": 1}
+    [first_lead] = get_leads_for_run("api", first["id"])
+    update_lead(
+        first_lead.id,
+        status="dismissed",
+        investigated_by_run_type="api",
+        investigated_by_run_id=first["id"],
+    )
+
+    second = _make_run(client, coll["id"])
+    assert get_leads_for_run("api", second["id"]) == []
+    imported = client.post(
+        f"/api/api-test-runs/{second['id']}/import-leads",
+        json={"sast_run_id": sast_run_id},
+    )
+    assert imported.status_code == 200
+    assert imported.json() == {"imported": 1}
+    [second_lead] = get_leads_for_run("api", second["id"])
+    assert second_lead.id != first_lead.id
+    assert second_lead.status == "open"
+    assert second_lead.investigated_by_run_id is None
+
+    listed = client.get(f"/api/api-test-runs/{second['id']}/leads")
+    assert listed.status_code == 200
+    assert [lead["id"] for lead in listed.json()] == [second_lead.id]
+    assert all(
+        lead["imported_into_run_type"] == "api"
+        and lead["imported_into_run_id"] == second["id"]
+        for lead in listed.json()
+    )
+
+    assert client.delete(
+        f"/api/api-test-runs/{second['id']}/leads/{second_lead.id}"
+    ).status_code == 204
+    assert client.get(f"/api/api-test-runs/{second['id']}/leads").json() == []
+    assert client.post(
+        f"/api/api-test-runs/{second['id']}/import-leads",
+        json={"sast_run_id": sast_run_id},
+    ).json() == {"imported": 1}
+    assert client.delete(
+        f"/api/api-test-runs/{second['id']}/leads"
+    ).status_code == 204
+    assert client.get(f"/api/api-test-runs/{second['id']}/leads").json() == []
+    assert len(client.get(f"/api/sast-runs/{sast_run_id}/leads").json()) == 1
+
+
 # ── Tests: seed_sessions_from_credentials ─────────────────────────────────────
 
 def test_seed_sessions_creates_anonymous_and_configured(db_engine, collection, api_run, bearer_cred):
@@ -167,6 +253,132 @@ def test_seed_sessions_no_creds_only_anonymous(db_engine, collection, api_run):
 
     assert count == 1
     assert sessions[0].label == "anonymous"
+
+
+def test_api_crawl_context_uses_fresh_run_owned_sast_leads(
+    db_engine, db_session, collection, api_run
+):
+    """The API scanner must not filter leads using collection-global outcomes."""
+    from aespa.services.api_scanner import _build_api_crawl_context
+    from aespa.services.scan_leads import copy_leads_to_run
+
+    original = ScanLead(
+        collection_id=collection.id,
+        producer_run_type="sast",
+        producer_run_id=88,
+        title="BOLA in account lookup",
+        description="User-controlled account id reaches an unscoped query.",
+        confidence=0.95,
+        status="dismissed",  # outcome leaked by the legacy collection-wide model
+        investigated_by_run_type="api",
+        investigated_by_run_id=3,
+    )
+    db_session.add(original)
+    db_session.commit()
+
+    assert copy_leads_to_run(88, "api", api_run.id) == 1
+    context = _build_api_crawl_context(api_run.id)
+
+    assert "BOLA in account lookup" in context
+    assert "STATIC ANALYSIS INVESTIGATION LEADS" in context
+
+
+@pytest.mark.parametrize("tool_name", ["target_inventory", "search_assets"])
+def test_api_context_blocks_web_inventory_commands(
+    db_engine, collection, api_run, tool_name
+):
+    """API runs must never query web inventory through colliding numeric run ids."""
+    from aespa.services.api_scanner import _make_api_context_tool_fn
+
+    context_tool = _make_api_context_tool_fn(collection.id, api_run.id)
+    result = context_tool(
+        tool_name,
+        {},
+        run_id=api_run.id,
+        base_url=collection.base_url,
+    )
+
+    assert result["tool"] == tool_name
+    assert "unavailable for API scans" in result["error"]
+    assert "target_inventory" not in result["available_tools"]
+    assert "search_assets" not in result["available_tools"]
+
+
+def test_api_test_lead_prompt_does_not_advertise_web_inventory():
+    from aespa.services.prompts.test_lead import _API_THINKING_AGENT_SYSTEM
+
+    assert "target_inventory" not in _API_THINKING_AGENT_SYSTEM
+    assert "search_assets" not in _API_THINKING_AGENT_SYSTEM
+    assert "agent_dispatch" not in _API_THINKING_AGENT_SYSTEM
+    assert "remove_finding" not in _API_THINKING_AGENT_SYSTEM
+
+
+def test_api_test_lead_exposes_only_api_aware_tools():
+    from aespa.services.prompts.test_lead import get_api_test_lead_tools
+
+    names = {tool["name"] for tool in get_api_test_lead_tools()}
+    assert names == {
+        "http_request",
+        "context_tool",
+        "update_lead",
+        "write_finding",
+        "forge_jwt",
+        "decode_jwt",
+        "credential_check",
+        "register_account",
+        "done",
+    }
+    assert names.isdisjoint({"browser", "remove_finding", "agent_dispatch"})
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["site_map", "page_detail", "lead_list", "auth_matrix"]
+)
+def test_api_context_rejects_non_whitelisted_shared_commands(
+    db_engine, collection, api_run, tool_name
+):
+    from aespa.services.api_scanner import _make_api_context_tool_fn
+
+    result = _make_api_context_tool_fn(collection.id, api_run.id)(
+        tool_name, {}, run_id=api_run.id, base_url=collection.base_url
+    )
+
+    assert result["error"] == "unknown or unavailable context tool for API scans"
+    assert tool_name not in result["available_tools"]
+
+
+def test_record_session_can_persist_api_namespace(db_engine, api_run):
+    from aespa.services.scanner import _record_session
+    from aespa.services.scanner_sessions import list_run_sessions
+
+    _record_session(
+        api_run.id,
+        label="forged_api",
+        session_data={
+            "kind": "bearer",
+            "extra_headers": {"Authorization": "Bearer test-token"},
+        },
+        source="test",
+        run_kind="api",
+    )
+
+    assert [s.label for s in list_run_sessions(api_run.id, run_kind="api")] == [
+        "forged_api"
+    ]
+    assert list_run_sessions(api_run.id, run_kind="web") == []
+
+
+@pytest.mark.parametrize("attack_class", ["xss", "file_upload"])
+def test_api_specialist_prompt_does_not_advertise_web_inventory(attack_class):
+    """API specialist prompts must not suggest web-only inventory commands."""
+    from aespa.services import scanner
+
+    api_prompt = scanner._specialist_system_prompt_for_run(
+        attack_class, is_api_run=True
+    )
+
+    assert "target_inventory" not in api_prompt
+    assert "search_assets" not in api_prompt
 
 
 # ── Tests: report_finding via context tool ────────────────────────────────────
