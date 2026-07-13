@@ -92,6 +92,33 @@ def _login_url_for_credential(default_login_url: str, cred) -> str:
     return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
 
+def _crawl_seed_urls(
+    base_url: str,
+    authenticated_landing_url: str | None,
+    base_netloc: str,
+    base_path: str,
+) -> list[str]:
+    """Keep a same-scope post-login landing page alongside the configured root."""
+    candidates: list[str] = []
+    if (
+        authenticated_landing_url
+        and _same_domain(authenticated_landing_url, base_netloc)
+        and _in_base_scope(authenticated_landing_url, base_netloc, base_path)
+        and not _is_session_ending_url(authenticated_landing_url)
+    ):
+        candidates.append(authenticated_landing_url)
+    candidates.append(base_url)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for url in candidates:
+        norm = _norm(url)
+        if norm not in seen:
+            seen.add(norm)
+            result.append(url)
+    return result
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
@@ -474,6 +501,7 @@ async def _crawl_as_credential(
         page = await ctx.new_page()
         observed_api_calls: list[dict] = []
         auth_check_snapshot: dict | None = None
+        authenticated_landing_url: str | None = None
 
         async def _record_api_response(response) -> None:
             try:
@@ -536,14 +564,23 @@ async def _crawl_as_credential(
             await _authenticate(
                 page, credential_login_url, cred, run_id, llm_cfg=llm_cfg
             )
+            authenticated_landing_url = page.url
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
 
         observed_api_calls.clear()
 
-        queued: set[str] = {_norm(base_url)}
-        queue: deque[tuple[str, int, Optional[int]]] = deque([(base_url, 0, None)])
+        seed_urls = _crawl_seed_urls(
+            base_url,
+            authenticated_landing_url,
+            base_netloc,
+            base_path,
+        )
+        queued: set[str] = {_norm(url) for url in seed_urls}
+        queue: deque[tuple[str, int, Optional[int]]] = deque(
+            (url, 0, None) for url in seed_urls
+        )
 
         while queue:
             if run_id in _stop_requested:
@@ -937,6 +974,45 @@ _INTERACTIVE_DANGER_RE = re.compile(
 )
 
 
+async def _locator_is_exposed(locator, *, actionable: bool = False) -> bool:
+    """Check visual exposure through ancestors, including modal backdrops.
+
+    Playwright visibility intentionally ignores opacity and pointer interception,
+    which makes controls inside some closed SPA modals appear visible.
+    """
+    try:
+        return bool(
+            await locator.evaluate(
+                """(el, actionable) => {
+                  if (!el || !el.isConnected) return false;
+                  const rect = el.getBoundingClientRect();
+                  if (rect.width <= 0 || rect.height <= 0) return false;
+                  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+                    const style = getComputedStyle(node);
+                    if (style.display === 'none'
+                        || style.visibility === 'hidden'
+                        || style.visibility === 'collapse'
+                        || Number.parseFloat(style.opacity || '1') <= 0.01
+                        || node.hidden
+                        || node.inert
+                        || node.getAttribute('aria-hidden') === 'true') return false;
+                    if (actionable && style.pointerEvents === 'none') return false;
+                  }
+                  return !actionable
+                    || (!el.disabled && el.getAttribute('aria-disabled') !== 'true');
+                }""",
+                actionable,
+            )
+        )
+    except Exception:
+        # Preserve compatibility with lightweight test doubles and older
+        # Playwright versions that do not expose locator.evaluate.
+        try:
+            return bool(await locator.is_visible())
+        except Exception:
+            return False
+
+
 async def _interactive_controls(page) -> list[dict]:
     """Return conservative, navigation-like controls with replayable locators.
 
@@ -946,18 +1022,37 @@ async def _interactive_controls(page) -> list[dict]:
     try:
         controls = await page.evaluate(
             """() => {
-              const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-                && getComputedStyle(el).visibility !== 'hidden';
+              const exposed = (el, actionable = false) => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+                  const style = getComputedStyle(node);
+                  if (style.display === 'none' || style.visibility === 'hidden'
+                      || style.visibility === 'collapse'
+                      || Number.parseFloat(style.opacity || '1') <= 0.01
+                      || node.hidden || node.inert
+                      || node.getAttribute('aria-hidden') === 'true') return false;
+                  if (actionable && style.pointerEvents === 'none') return false;
+                }
+                return !actionable
+                  || (!el.disabled && el.getAttribute('aria-disabled') !== 'true');
+              };
               const candidates = Array.from(document.querySelectorAll(
-                'button, [role="button"], [role="tab"], [role="menuitem"], summary, [aria-haspopup="dialog"]'
+                'button, [role="button"], [role="tab"], [role="menuitem"], summary, '
+                + '[aria-haspopup="dialog"], a[href="#"], a:not([href]), '
+                + 'a[href^="javascript:"], a[aria-controls]'
               ));
-              return candidates.filter(el => visible(el) && !el.disabled && !el.closest('form')).slice(0, 80).map(el => {
+              return candidates.filter(el => exposed(el, true) && !el.closest('form')).slice(0, 80).map(el => {
                 const tag = el.tagName.toLowerCase();
-                const role = el.getAttribute('role') || (tag === 'summary' ? 'button' : 'button');
+                const role = el.getAttribute('role') || (tag === 'a' ? 'link' : 'button');
                 const name = (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
                   .replace(/\\s+/g, ' ').trim().slice(0, 80);
                 const testid = el.getAttribute('data-testid') || el.getAttribute('data-test') || null;
-                return {role, name, testid, expanded: el.getAttribute('aria-expanded'), selected: el.getAttribute('aria-selected')};
+                return {
+                  tag, role, name, testid, id: el.id || null,
+                  expanded: el.getAttribute('aria-expanded'),
+                  selected: el.getAttribute('aria-selected')
+                };
               });
             }"""
         )
@@ -969,33 +1064,34 @@ async def _interactive_controls(page) -> list[dict]:
         role = str(control.get("role") or "button")
         name = str(control.get("name") or "").strip()
         testid = str(control.get("testid") or "")
+        element_id = str(control.get("id") or "")
         if not name or _INTERACTIVE_DANGER_RE.search(name):
             continue
-        key = (role, name, testid)
+        key = (role, name, testid or element_id)
         if key in seen:
             continue
         seen.add(key)
-        unique.append({
-            "role": role,
-            "name": name,
-            "testid": testid or None,
-            "selector": _interactive_selector(role, name, testid),
-        })
+        unique.append(
+            {
+                "role": role,
+                "name": name,
+                "testid": testid or None,
+                "element_id": element_id or None,
+                "selector": _interactive_selector(testid, element_id),
+            }
+        )
         if len(unique) >= _INTERACTIVE_ACTION_LIMIT:
             break
     return unique
 
 
-def _interactive_selector(role: str, name: str, testid: str) -> str:
-    """Produce the Playwright selector persisted in a replay recipe."""
+def _interactive_selector(testid: str, element_id: str) -> str:
+    """Produce a stable selector, deferring semantic controls to role/name."""
     if testid:
-        return f'[data-testid={json.dumps(testid)}]'
-    escaped_name = json.dumps(name)
-    if role == "tab":
-        return f'[role="tab"]:has-text({escaped_name})'
-    if role == "menuitem":
-        return f'[role="menuitem"]:has-text({escaped_name})'
-    return f'button:has-text({escaped_name}), [role="button"]:has-text({escaped_name})'
+        return f"[data-testid={json.dumps(testid)}]"
+    if element_id:
+        return f"[id={json.dumps(element_id)}]"
+    return ""
 
 
 async def _replay_interactive_steps(page, steps: list[dict]) -> bool:
@@ -1006,10 +1102,16 @@ async def _replay_interactive_steps(page, steps: list[dict]) -> bool:
             elif step.get("testid"):
                 locator = page.get_by_test_id(step["testid"])
             else:
-                locator = page.get_by_role(step.get("role") or "button", name=step.get("name") or "", exact=True)
-            if await locator.count() < 1:
+                locator = page.get_by_role(
+                    step.get("role") or "button",
+                    name=step.get("name") or "",
+                    exact=True,
+                )
+            if await locator.count() != 1:
                 return False
-            await locator.first.click(timeout=4_000)
+            if not await _locator_is_exposed(locator, actionable=True):
+                return False
+            await locator.click(timeout=4_000)
             try:
                 await page.wait_for_timeout(200)
                 await page.wait_for_load_state("domcontentloaded", timeout=2_000)
@@ -1024,8 +1126,19 @@ async def _interactive_state_snapshot(page) -> dict | None:
     try:
         raw = await page.evaluate(
             """() => {
-              const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-                && getComputedStyle(el).visibility !== 'hidden';
+              const visible = el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+                  const style = getComputedStyle(node);
+                  if (style.display === 'none' || style.visibility === 'hidden'
+                      || style.visibility === 'collapse'
+                      || Number.parseFloat(style.opacity || '1') <= 0.01
+                      || node.hidden || node.inert
+                      || node.getAttribute('aria-hidden') === 'true') return false;
+                }
+                return true;
+              };
               const text = el => (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
                 .replace(/\\s+/g, ' ').trim().slice(0, 100);
               const pick = selector => Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, 20).map(text);
@@ -1034,7 +1147,8 @@ async def _interactive_state_snapshot(page) -> dict | None:
                 dialogs: pick('[role="dialog"],[aria-modal="true"]'),
                 forms: Array.from(document.forms).filter(visible).slice(0, 12).map(f =>
                   Array.from(f.querySelectorAll('input,textarea,select')).map(el => el.name || el.type || el.id).join('|')),
-                controls: Array.from(document.querySelectorAll('button,[role="button"],[role="tab"],[role="menuitem"]'))
+                controls: Array.from(document.querySelectorAll(
+                  'button,[role="button"],[role="tab"],[role="menuitem"],a[href="#"],a[aria-controls]'))
                   .filter(visible).slice(0, 30).map(el => `${el.getAttribute('role') || el.tagName}:${text(el)}:${el.getAttribute('aria-selected') || ''}`),
                 title: document.title || '',
               };
@@ -1043,14 +1157,32 @@ async def _interactive_state_snapshot(page) -> dict | None:
         text = await page.evaluate("() => document.body ? document.body.innerText : ''")
         title = await page.title()
         normalized = re.sub(r"\b\d{2,}\b", "#", json.dumps(raw, sort_keys=True))
-        state_key = "spa:" + _norm(page.url) + ":" + hashlib.sha256(normalized.encode()).hexdigest()[:24]
-        label = next(iter(raw.get("dialogs") or []), "") or next(iter(raw.get("headings") or []), "") or title or "Interactive view"
+        state_key = (
+            "spa:"
+            + _norm(page.url)
+            + ":"
+            + hashlib.sha256(normalized.encode()).hexdigest()[:24]
+        )
+        label = (
+            next(iter(raw.get("dialogs") or []), "")
+            or next(iter(raw.get("headings") or []), "")
+            or title
+            or "Interactive view"
+        )
         screenshot_b64 = None
         try:
-            screenshot_b64 = base64.b64encode(await page.screenshot(type="png", full_page=False)).decode()
+            screenshot_b64 = base64.b64encode(
+                await page.screenshot(type="png", full_page=False)
+            ).decode()
         except Exception:
             pass
-        return {"key": state_key, "label": str(label)[:160], "title": title, "text": text or "", "screenshot_b64": screenshot_b64}
+        return {
+            "key": state_key,
+            "label": str(label)[:160],
+            "title": title,
+            "text": text or "",
+            "screenshot_b64": screenshot_b64,
+        }
     except Exception:
         return None
 
@@ -2836,12 +2968,7 @@ async def _direct_load_accessible(
     if resp is not None and resp.status >= 400:
         return False, "", "", None
 
-    try:
-        pw_loc = page.locator("input[type='password']").first
-        on_login = (await pw_loc.count() > 0) and (await pw_loc.is_visible())
-    except Exception:
-        on_login = False
-    if on_login:
+    if await _page_requires_login(page, login_url):
         return False, "", "", None
 
     await page.wait_for_timeout(800)
@@ -2853,7 +2980,7 @@ async def _direct_load_accessible(
         text = await page.evaluate("() => document.body.innerText")
     except Exception:
         text = ""
-    if _looks_like_login_text(text) or not text.strip():
+    if not text.strip():
         return False, title, text, None
     screenshot_b64: Optional[str] = None
     try:
@@ -3322,7 +3449,9 @@ def _response_suggests_session_dropped(resp) -> bool:
 async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
     try:
         pw_loc = page.locator("input[type='password']").first
-        if (await pw_loc.count() > 0) and (await pw_loc.is_visible()):
+        if (await pw_loc.count() > 0) and await _locator_is_exposed(
+            pw_loc, actionable=True
+        ):
             return True
     except Exception:
         pass
@@ -4201,7 +4330,7 @@ async def _reveal_login_form(page) -> None:
     """
     try:
         pw = page.locator("input[type='password']").first
-        if await pw.count() > 0 and await pw.is_visible():
+        if await pw.count() > 0 and await _locator_is_exposed(pw, actionable=True):
             return
     except Exception:
         return
@@ -4209,7 +4338,9 @@ async def _reveal_login_form(page) -> None:
     for sel in _LOGIN_TRIGGER_SELECTORS:
         try:
             loc = page.locator(sel).first
-            if await loc.count() > 0 and await loc.is_visible():
+            if await loc.count() > 0 and await _locator_is_exposed(
+                loc, actionable=True
+            ):
                 await loc.click()
                 await page.wait_for_timeout(800)
                 log.info("  _authenticate: clicked login trigger %r", sel)
@@ -4222,14 +4353,15 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
     """Best-effort form-based login."""
     try:
         await page.goto(login_url, wait_until="domcontentloaded", timeout=15_000)
+
+        # Modal logins with no URL route must be revealed before waiting for
+        # fields; a hidden field may already exist in the DOM indefinitely.
+        await _reveal_login_form(page)
         try:
             await page.wait_for_selector("input", state="visible", timeout=8_000)
         except Exception:
             log.warning("  _authenticate: no <input> visible at %s", login_url)
         await page.wait_for_timeout(300)
-
-        # Modal logins with no URL route: reveal the form before looking for fields.
-        await _reveal_login_form(page)
 
         # Fill username
         username_filled = False
@@ -4258,7 +4390,10 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
 
         # Reveal password field if hidden
         pass_loc = page.locator("input[type='password']").first
-        if not (await pass_loc.count() > 0 and await pass_loc.is_visible()):
+        if not (
+            await pass_loc.count() > 0
+            and await _locator_is_exposed(pass_loc, actionable=True)
+        ):
             for sel in [
                 "button:has-text('Next')",
                 "button:has-text('Continue')",
@@ -4276,7 +4411,9 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         # Fill password
         try:
             pass_loc = page.locator("input[type='password']").first
-            if await pass_loc.count() > 0 and await pass_loc.is_visible():
+            if await pass_loc.count() > 0 and await _locator_is_exposed(
+                pass_loc, actionable=True
+            ):
                 await pass_loc.fill(credential.password)
         except Exception:
             pass
@@ -4311,9 +4448,9 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
         await page.wait_for_timeout(1500)
 
         try:
-            pw_visible = (
-                await page.locator("input[type='password']").first.count() > 0
-                and await page.locator("input[type='password']").first.is_visible()
+            password_locator = page.locator("input[type='password']").first
+            pw_visible = await password_locator.count() > 0 and await _locator_is_exposed(
+                password_locator, actionable=True
             )
         except Exception:
             pw_visible = False
