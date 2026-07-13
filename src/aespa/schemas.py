@@ -883,7 +883,8 @@ class TestRunCreate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     use_screenshots: bool = False
     max_depth: int = Field(default=3, ge=1, le=10)
-    max_pages: int = Field(default=50, ge=5, le=500)
+    max_pages: int = Field(default=500, ge=5, le=500)
+    crawler_mode: Literal["url", "interactive"] = "url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -891,6 +892,7 @@ class TestRunCreate(BaseModel):
 class TestRunUpdate(BaseModel):
     max_depth: int = Field(ge=1, le=10)
     max_pages: int = Field(ge=5, le=500)
+    crawler_mode: Literal["url", "interactive"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -913,6 +915,7 @@ class TestRunSummary(BaseModel):
     use_screenshots: bool
     max_depth: int
     max_pages: int
+    crawler_mode: str = "url"
     scan_mode: str = "aggressive"
     scan_status: str = "idle"
     scan_total_pages: int = 0
@@ -972,6 +975,9 @@ class CrawledPageOut(BaseModel):
     id: int
     test_run_id: int
     url: str
+    state_key: str | None = None
+    state_label: str | None = None
+    state_kind: str = "url"
     title: str | None
     llm_context: str | None
     depth: int
@@ -990,11 +996,14 @@ class CrawledPageOut(BaseModel):
 class CrawledPageDetail(CrawledPageOut):
     page_text: str | None
     screenshot_b64: str | None
+    replay_steps_json: str = "[]"
 
 
 class GraphNode(BaseModel):
     id: int
     url: str
+    state_label: str | None = None
+    state_kind: str = "url"
     title: str | None
     depth: int
     status: str
@@ -1008,6 +1017,7 @@ class GraphLink(BaseModel):
     source: int
     target: int
     link_text: str | None
+    action_kind: str = "navigate"
 
 
 class GraphData(BaseModel):
