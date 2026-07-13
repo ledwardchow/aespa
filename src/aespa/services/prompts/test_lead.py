@@ -15,6 +15,7 @@ Page content:
 
 Return ONLY valid JSON in this exact format (no markdown fences):
 {{
+  "page_label": "Short page function label",
   "context": "2-4 sentence description of the page's purpose and the functionality it offers to users",
   "suggested_links": ["absolute_url_1", "absolute_url_2"],
   "categories": {{
@@ -36,6 +37,14 @@ Return ONLY valid JSON in this exact format (no markdown fences):
     "A10": {{"applicable": false, "reason": "one sentence"}}
   }}
 }}
+
+For page_label: provide a canonical, credential-neutral functional title of no more than 5 words.
+Describe what the user can do or see, not the URL structure. Never include a person's name,
+account identifier, balance, email address, or other user-specific data: this label is shared by
+all credential views in the sitemap. Role/function distinctions are allowed when they represent
+different surfaces (for example, "Admin User Management"). Examples: "Account Overview",
+"Register for Internet Banking", "Account Transfer Form". Do not include punctuation, IDs,
+balances, or generic words such as "Page".
 
 For suggested_links: include up to 10 absolute URLs that appear as actual links on this page \
 (same domain) and reveal the most important or interesting application functionality. Do not \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -77,6 +78,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _page_function_label(value: object) -> str | None:
+    """Keep model-provided page labels compact enough for graph nodes."""
+    label = " ".join(str(value or "").split())
+    # A shared CrawledPage is not owned by the credential that discovered it.
+    # Recover gracefully if a model nevertheless returns e.g. "Zoe's Accounts".
+    label = re.sub(r"^[A-Z][\w-]*[’']s\s+", "", label)
+    words = label.split()
+    return " ".join(words[:5]) if words else None
+
+
 def _login_url_for_credential(default_login_url: str, cred) -> str:
     return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
@@ -132,8 +143,9 @@ async def _crawl_task(run_id: int) -> None:
 
 
 class _CrawlShared:
-    def __init__(self, crawled_norms: dict, pages_done: int) -> None:
+    def __init__(self, crawled_norms: dict, state_keys: dict, pages_done: int) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
+        self.state_keys: dict[str, int] = state_keys  # SPA interaction fingerprint → page_id
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
 
@@ -220,15 +232,17 @@ async def _do_crawl_inner(run_id: int) -> None:
     requires_auth = site.requires_auth
     max_depth = run.max_depth
     max_pages = run.max_pages
+    crawler_mode = run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
     _bp = _parsed.path
     base_path: str = (_bp if _bp.endswith("/") else _bp + "/") if _bp else "/"
 
     log.info(
-        "=== Crawl start: run_id=%s base_url=%s max_depth=%s max_pages=%s creds=%d ===",
+        "=== Crawl start: run_id=%s base_url=%s mode=%s max_depth=%s max_pages=%s creds=%d ===",
         run_id,
         base_url,
+        crawler_mode,
         max_depth,
         max_pages,
         len(creds),
@@ -243,6 +257,7 @@ async def _do_crawl_inner(run_id: int) -> None:
 
     shared = _CrawlShared(
         crawled_norms={_norm(ep.url): ep.id for ep in existing},
+        state_keys={ep.state_key: ep.id for ep in existing if ep.state_key},
         pages_done=len(existing),
     )
 
@@ -290,6 +305,7 @@ async def _do_crawl_inner(run_id: int) -> None:
                 requires_auth=requires_auth,
                 max_depth=max_depth,
                 max_pages=max_pages,
+                crawler_mode=crawler_mode,
                 llm_cfg=llm_cfg,
                 base_netloc=base_netloc,
                 base_path=base_path,
@@ -403,6 +419,7 @@ async def _crawl_as_credential(
     requires_auth: bool,
     max_depth: int,
     max_pages: int,
+    crawler_mode: str,
     llm_cfg,
     base_netloc: str,
     base_path: str,
@@ -740,6 +757,7 @@ async def _crawl_as_credential(
                 _update_page(
                     page_id,
                     url=final_url,
+                    state_label=_page_function_label(cats.get("page_label")),
                     title=title,
                     page_text=text[:10_000],
                     screenshot_b64=screenshot_b64,
@@ -771,6 +789,7 @@ async def _crawl_as_credential(
                         "node": {
                             "id": page_id,
                             "url": final_url,
+                            "state_label": _page_function_label(cats.get("page_label")),
                             "title": title,
                             "depth": depth,
                             "status": "crawled",
@@ -778,6 +797,7 @@ async def _crawl_as_credential(
                             "in_scope": True,
                             "scan_status": "pending",
                             "accessible_by": ab,
+                            "accessible_anonymously": credential_id is None,
                         },
                         "link": {
                             "source": parent_id,
@@ -837,6 +857,26 @@ async def _crawl_as_credential(
                 llm_cfg=llm_cfg,
             )
 
+            # URL crawling intentionally remains the default. In interactive
+            # mode, safely explore client-side views rooted at this document.
+            # This runs after API-call promotion so replay traffic is not
+            # attributed to the URL page currently being processed.
+            if crawler_mode == "interactive" and depth < max_depth:
+                await _explore_interactive_states(
+                    run_id=run_id,
+                    page=page,
+                    root_url=final_url,
+                    root_page_id=page_id,
+                    root_depth=depth,
+                    shared=shared,
+                    max_depth=max_depth,
+                    max_pages=max_pages,
+                    credential_id=credential_id,
+                    username=username,
+                    llm_cfg=llm_cfg,
+                    base_netloc=base_netloc,
+                )
+
             if depth < max_depth:
                 filtered_suggested = _filter_suggested_links(
                     suggested, same_domain_links, base_netloc
@@ -885,6 +925,211 @@ async def _crawl_as_credential(
         "complete",
         f"Finished crawling as {username} — {local_pages} page(s)",
     )
+
+
+# ── Interactive SPA state discovery ──────────────────────────────────────────
+
+_INTERACTIVE_ACTION_LIMIT = 12
+_INTERACTIVE_DANGER_RE = re.compile(
+    r"\b(?:delete|remove|destroy|logout|log\s*out|sign\s*out|purchase|pay|checkout|"
+    r"transfer|send\s+money|revoke|cancel\s+subscription)\b",
+    re.IGNORECASE,
+)
+
+
+async def _interactive_controls(page) -> list[dict]:
+    """Return conservative, navigation-like controls with replayable locators.
+
+    Forms and destructive-looking controls are deliberately excluded. This is a
+    discovery feature, not permission to execute business actions.
+    """
+    try:
+        controls = await page.evaluate(
+            """() => {
+              const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                && getComputedStyle(el).visibility !== 'hidden';
+              const candidates = Array.from(document.querySelectorAll(
+                'button, [role="button"], [role="tab"], [role="menuitem"], summary, [aria-haspopup="dialog"]'
+              ));
+              return candidates.filter(el => visible(el) && !el.disabled && !el.closest('form')).slice(0, 80).map(el => {
+                const tag = el.tagName.toLowerCase();
+                const role = el.getAttribute('role') || (tag === 'summary' ? 'button' : 'button');
+                const name = (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
+                  .replace(/\\s+/g, ' ').trim().slice(0, 80);
+                const testid = el.getAttribute('data-testid') || el.getAttribute('data-test') || null;
+                return {role, name, testid, expanded: el.getAttribute('aria-expanded'), selected: el.getAttribute('aria-selected')};
+              });
+            }"""
+        )
+    except Exception:
+        return []
+    unique: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for control in controls or []:
+        role = str(control.get("role") or "button")
+        name = str(control.get("name") or "").strip()
+        testid = str(control.get("testid") or "")
+        if not name or _INTERACTIVE_DANGER_RE.search(name):
+            continue
+        key = (role, name, testid)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append({
+            "role": role,
+            "name": name,
+            "testid": testid or None,
+            "selector": _interactive_selector(role, name, testid),
+        })
+        if len(unique) >= _INTERACTIVE_ACTION_LIMIT:
+            break
+    return unique
+
+
+def _interactive_selector(role: str, name: str, testid: str) -> str:
+    """Produce the Playwright selector persisted in a replay recipe."""
+    if testid:
+        return f'[data-testid={json.dumps(testid)}]'
+    escaped_name = json.dumps(name)
+    if role == "tab":
+        return f'[role="tab"]:has-text({escaped_name})'
+    if role == "menuitem":
+        return f'[role="menuitem"]:has-text({escaped_name})'
+    return f'button:has-text({escaped_name}), [role="button"]:has-text({escaped_name})'
+
+
+async def _replay_interactive_steps(page, steps: list[dict]) -> bool:
+    for step in steps:
+        try:
+            if step.get("selector"):
+                locator = page.locator(step["selector"])
+            elif step.get("testid"):
+                locator = page.get_by_test_id(step["testid"])
+            else:
+                locator = page.get_by_role(step.get("role") or "button", name=step.get("name") or "", exact=True)
+            if await locator.count() < 1:
+                return False
+            await locator.first.click(timeout=4_000)
+            try:
+                await page.wait_for_timeout(200)
+                await page.wait_for_load_state("domcontentloaded", timeout=2_000)
+            except Exception:
+                pass
+        except Exception:
+            return False
+    return True
+
+
+async def _interactive_state_snapshot(page) -> dict | None:
+    try:
+        raw = await page.evaluate(
+            """() => {
+              const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                && getComputedStyle(el).visibility !== 'hidden';
+              const text = el => (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
+                .replace(/\\s+/g, ' ').trim().slice(0, 100);
+              const pick = selector => Array.from(document.querySelectorAll(selector)).filter(visible).slice(0, 20).map(text);
+              return {
+                headings: pick('h1,h2,h3,[role="heading"]'),
+                dialogs: pick('[role="dialog"],[aria-modal="true"]'),
+                forms: Array.from(document.forms).filter(visible).slice(0, 12).map(f =>
+                  Array.from(f.querySelectorAll('input,textarea,select')).map(el => el.name || el.type || el.id).join('|')),
+                controls: Array.from(document.querySelectorAll('button,[role="button"],[role="tab"],[role="menuitem"]'))
+                  .filter(visible).slice(0, 30).map(el => `${el.getAttribute('role') || el.tagName}:${text(el)}:${el.getAttribute('aria-selected') || ''}`),
+                title: document.title || '',
+              };
+            }"""
+        )
+        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        title = await page.title()
+        normalized = re.sub(r"\b\d{2,}\b", "#", json.dumps(raw, sort_keys=True))
+        state_key = "spa:" + _norm(page.url) + ":" + hashlib.sha256(normalized.encode()).hexdigest()[:24]
+        label = next(iter(raw.get("dialogs") or []), "") or next(iter(raw.get("headings") or []), "") or title or "Interactive view"
+        screenshot_b64 = None
+        try:
+            screenshot_b64 = base64.b64encode(await page.screenshot(type="png", full_page=False)).decode()
+        except Exception:
+            pass
+        return {"key": state_key, "label": str(label)[:160], "title": title, "text": text or "", "screenshot_b64": screenshot_b64}
+    except Exception:
+        return None
+
+
+async def _explore_interactive_states(
+    *, run_id: int, page, root_url: str, root_page_id: int, root_depth: int,
+    shared: _CrawlShared, max_depth: int, max_pages: int, credential_id: Optional[int],
+    username: Optional[str], llm_cfg, base_netloc: str,
+) -> None:
+    """Breadth-first exploration of safe client-side states beneath one URL page."""
+    pending: deque[tuple[list[dict], int, int]] = deque([([], root_page_id, root_depth)])
+    seen_recipes: set[str] = set()
+    while pending and run_id not in _stop_requested:
+        steps, parent_id, state_depth = pending.popleft()
+        if steps:
+            try:
+                await page.goto(root_url, wait_until="domcontentloaded", timeout=15_000)
+            except Exception:
+                continue
+            if not await _replay_interactive_steps(page, steps):
+                continue
+            snapshot = await _interactive_state_snapshot(page)
+            if not snapshot or not _same_domain(page.url, base_netloc):
+                continue
+            async with shared.lock:
+                page_id = shared.state_keys.get(snapshot["key"])
+                is_new = page_id is None
+                if is_new:
+                    if shared.pages_done >= max_pages:
+                        continue
+                    page_id = _save_page_placeholder(run_id, page.url, state_depth)
+                    shared.state_keys[snapshot["key"]] = page_id
+                    shared.pages_done += 1
+            action = steps[-1]
+            _save_link(
+                run_id, parent_id, page_id, page.url, link_text=action["name"],
+                action_kind="click", action_data={"replay_steps": steps},
+            )
+            if is_new:
+                context = "[Interactive SPA state reached by replay]"
+                cats = {"req_auth": None, "takes_input": None, "has_object_ref": None, "has_business_logic": None}
+                try:
+                    context, _unused, cats = await llm_svc.analyse_page(
+                        llm_cfg, page.url, snapshot["title"], snapshot["text"][:8000], snapshot["screenshot_b64"]
+                    )
+                except Exception as exc:
+                    log.debug("Interactive state analysis failed: %s", exc)
+                page_label = _page_function_label(cats.get("page_label")) or snapshot["label"]
+                _update_page(
+                    page_id, url=page.url, state_key=snapshot["key"], state_label=page_label,
+                    state_kind="interactive", replay_steps_json=json.dumps(steps), title=snapshot["title"],
+                    page_text=snapshot["text"][:10_000], screenshot_b64=snapshot["screenshot_b64"],
+                    llm_context=context, status="crawled", depth=state_depth,
+                    req_auth=cats.get("req_auth"), takes_input=cats.get("takes_input"),
+                    has_object_ref=cats.get("has_object_ref"), has_business_logic=cats.get("has_business_logic"),
+                    owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
+                )
+                _update_run(run_id, pages_discovered=shared.pages_done)
+                events_svc.emit(run_id, {"type": "page_added", "username": username, "node": {
+                    "id": page_id, "url": page.url, "state_label": page_label, "state_kind": "interactive",
+                    "title": snapshot["title"], "depth": state_depth, "status": "crawled", "context": context,
+                    "in_scope": True, "scan_status": "pending", "accessible_by": [credential_id] if credential_id else [],
+                    "accessible_anonymously": credential_id is None,
+                }, "link": {"source": parent_id, "target": page_id, "link_text": action["name"], "action_kind": "click"}})
+            _save_credential_view(page_id, run_id, credential_id, username, snapshot["screenshot_b64"],
+                                  "[Interactive SPA state]", snapshot["text"][:10_000], {})
+            _update_accessible_by(page_id, credential_id)
+            current_id = page_id
+        else:
+            current_id = root_page_id
+
+        if state_depth >= max_depth:
+            continue
+        for action in await _interactive_controls(page):
+            recipe = steps + [action]
+            recipe_key = json.dumps(recipe, sort_keys=True)
+            if recipe_key not in seen_recipes:
+                seen_recipes.add(recipe_key)
+                pending.append((recipe, current_id, state_depth + 1))
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -2038,6 +2283,7 @@ async def _promote_api_calls(
                         "accessible_by": [credential_id]
                         if credential_id is not None
                         else [],
+                        "accessible_anonymously": credential_id is None,
                     },
                     "link": {
                         "source": source_page_id,
@@ -2789,7 +3035,14 @@ def _update_accessible_by(page_id: int, credential_id: Optional[int]) -> None:
 
 
 def _save_link(
-    run_id: int, source_id: Optional[int], target_id: int, target_url: str
+    run_id: int,
+    source_id: Optional[int],
+    target_id: int,
+    target_url: str,
+    *,
+    link_text: Optional[str] = None,
+    action_kind: str = "navigate",
+    action_data: Optional[dict] = None,
 ) -> None:
     if source_id is None:
         return
@@ -2800,6 +3053,7 @@ def _save_link(
             .where(PageLink.source_page_id == source_id)
             .where(PageLink.target_page_id == target_id)
             .where(PageLink.target_url == target_url)
+            .where(PageLink.action_kind == action_kind)
         ).first()
         if existing:
             return
@@ -2808,6 +3062,9 @@ def _save_link(
             source_page_id=source_id,
             target_page_id=target_id,
             target_url=target_url,
+            link_text=link_text,
+            action_kind=action_kind,
+            action_data_json=json.dumps(action_data or {}),
         )
         s.add(pl)
         s.commit()

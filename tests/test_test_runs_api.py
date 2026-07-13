@@ -31,11 +31,33 @@ def test_create_run_default_name(client: TestClient):
     assert data["pages_discovered"] == 0
 
 
+def test_create_run_defaults_to_500_pages(client: TestClient):
+    site = _make_site(client)
+    response = client.post(f"/api/sites/{site['id']}/test-runs", json={})
+    assert response.status_code == 201
+    assert response.json()["max_pages"] == 500
+
+
 def test_create_run_custom_name(client: TestClient):
     site = _make_site(client)
     r = _make_run(client, site["id"], name="Initial recon")
     assert r.status_code == 201
     assert r.json()["name"] == "Initial recon"
+
+
+def test_create_run_can_enable_interactive_spa_crawler(client: TestClient):
+    site = _make_site(client)
+    created = _make_run(client, site["id"], crawler_mode="interactive")
+    assert created.status_code == 201
+    assert created.json()["crawler_mode"] == "interactive"
+
+    updated = client.patch(f"/api/test-runs/{created.json()['id']}", json={
+        "max_depth": 2,
+        "max_pages": 10,
+        "crawler_mode": "url",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["crawler_mode"] == "url"
 
 
 def test_create_run_uses_global_scan_policy(client: TestClient):
@@ -559,6 +581,61 @@ def test_get_graph_empty(client: TestClient):
     data = r.json()
     assert data["nodes"] == []
     assert data["links"] == []
+
+
+def test_get_graph_reports_unauthenticated_access():
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, PageCredentialView, Site, TestRun
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = TestRun(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            public_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/public",
+                accessible_by="[10, 20]",
+            )
+            private_page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/private",
+                accessible_by="[10, 20]",
+            )
+            session.add(public_page)
+            session.add(private_page)
+            session.commit()
+            session.refresh(public_page)
+            session.add(
+                PageCredentialView(
+                    test_run_id=run.id,
+                    page_id=public_page.id,
+                    credential_id=None,
+                    username="unauthenticated",
+                )
+            )
+            session.commit()
+
+            graph = test_runs_api.get_graph(run.id, session=session)
+
+        nodes_by_url = {node.url: node for node in graph.nodes}
+        assert nodes_by_url["https://target.local/public"].accessible_anonymously is True
+        assert nodes_by_url["https://target.local/private"].accessible_anonymously is False
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_list_pages_empty(client: TestClient):

@@ -1324,6 +1324,7 @@ def _run_thinking_context_tool(
         for page in pages_snapshot:
             haystack = " ".join([
                 str(page.get("url") or ""),
+                str(page.get("state_label") or ""),
                 str(page.get("title") or ""),
                 str(page.get("context") or ""),
                 " ".join(_thinking_page_flags(page)),
@@ -1344,6 +1345,8 @@ def _run_thinking_context_tool(
                     "page_id": p["id"],
                     "kind": _thinking_page_kind(p),
                     "url": p["url"],
+                    "state_label": p.get("state_label") or "",
+                    "state_kind": p.get("state_kind") or "url",
                     "title": p.get("title") or "",
                     "flags": _thinking_page_flags(p),
                     "context_excerpt": _compact_log_value(p.get("context"), 220),
@@ -1373,7 +1376,23 @@ def _run_thinking_context_tool(
             "page_id": page["id"],
             "url": page["url"],
             "kind": _thinking_page_kind(page),
+            "state_label": page.get("state_label") or "",
+            "state_kind": page.get("state_kind") or "url",
         }
+        if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
+            try:
+                replay_steps = json.loads(page["replay_steps_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                replay_steps = []
+            if replay_steps:
+                detail["browser_replay"] = {
+                    "url": page["url"],
+                    "steps": [{"op": "goto", "url": page["url"]}] + [
+                        {"op": "click", "selector": step["selector"]}
+                        for step in replay_steps
+                        if isinstance(step, dict) and step.get("selector")
+                    ],
+                }
         if "title" in include_set:
             detail["title"] = page.get("title") or ""
         if "flags" in include_set:
@@ -4221,6 +4240,10 @@ async def _do_thinking_scan(run_id: int) -> None:
             {
                 "id": p.id,
                 "url": p.url,
+                "state_key": p.state_key,
+                "state_label": p.state_label or "",
+                "state_kind": p.state_kind,
+                "replay_steps_json": p.replay_steps_json,
                 "title": p.title or "",
                 "context": p.llm_context or "",
                 "page_text": p.page_text or "",
