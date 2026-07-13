@@ -5,8 +5,10 @@ import { usePolling } from "../../hooks/usePolling";
 
 export function WebRunSastLeadsTab({
   runId,
-  scanRunning
+  scanRunning,
+  runKind = "web"
 }) {
+  const isApi = runKind === "api";
   const [available, setAvailable] = useState([]);
   const [leads, setLeads] = useState([]);
   const [selected, setSelected] = useState("");
@@ -16,8 +18,8 @@ export function WebRunSastLeadsTab({
   const [msg, setMsg] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
   const prevScanRunning = useRef(scanRunning);
-  const loadLeads = useCallback(() => api.getRunLeads(runId).then(setLeads).catch(() => {}), [runId]);
-  const loadAvailable = useCallback(() => api.getRunAvailableSastRuns(runId).then(setAvailable).catch(() => {}), [runId]);
+  const loadLeads = useCallback(() => (isApi ? api.getApiRunLeads(runId) : api.getRunLeads(runId)).then(setLeads).catch(() => {}), [isApi, runId]);
+  const loadAvailable = useCallback(() => (isApi ? api.getApiRunAvailableSastRuns(runId) : api.getRunAvailableSastRuns(runId)).then(setAvailable).catch(() => {}), [isApi, runId]);
   usePolling(loadLeads, { enabled: scanRunning, intervalMs: 3000 });
   usePolling(loadAvailable, { enabled: false });
   // Final refresh when the scan stops so the last investigation outcomes appear.
@@ -39,9 +41,11 @@ export function WebRunSastLeadsTab({
     setError(null);
     setMsg(null);
     try {
-      const r = await api.importSastLeads(runId, {
+      const r = await (isApi ? api.importApiSastLeads(runId, {
         sast_run_id: +selected
-      });
+      }) : api.importSastLeads(runId, {
+        sast_run_id: +selected
+      }));
       setMsg(r.imported > 0 ? `Imported ${r.imported} lead(s).` : "Already imported (no new leads).");
       await loadLeads();
     } catch (e) {
@@ -56,7 +60,7 @@ export function WebRunSastLeadsTab({
     setError(null);
     setMsg(null);
     try {
-      await api.clearRunLeads(runId);
+      await (isApi ? api.clearApiRunLeads(runId) : api.clearRunLeads(runId));
       setLeads([]);
     } catch (e) {
       setError(e.message);
@@ -67,7 +71,7 @@ export function WebRunSastLeadsTab({
   const onDeleteRow = async leadId => {
     setError(null);
     try {
-      await api.deleteRunLead(runId, leadId);
+      await (isApi ? api.deleteApiRunLead(runId, leadId) : api.deleteRunLead(runId, leadId));
       setLeads(prev => prev.filter(l => l.id !== leadId));
     } catch (e) {
       setError(e.message);
@@ -87,8 +91,10 @@ export function WebRunSastLeadsTab({
     dismissed: "neutral",
     inconclusive: "neutral"
   })[s] || "neutral";
-  return <div className="findings-panel">
-      <div className="findings-status-bar">
+  return <div className={"findings-panel" + (isApi ? " flush" : "")}>
+      <div className="findings-status-bar" style={{
+        flexWrap: "wrap"
+      }}>
         <span className="badge neutral" style={{
         fontSize: 12
       }}>{leads.length} lead{leads.length !== 1 ? "s" : ""}</span>
@@ -99,10 +105,15 @@ export function WebRunSastLeadsTab({
         flex: 1
       }}></div>
         <div className="row" style={{
-        gap: 8
+        gap: 8,
+        flexWrap: "wrap",
+        maxWidth: "100%"
       }}>
           <select value={selected} onChange={e => setSelected(e.target.value)} style={{
-          minWidth: 240
+          minWidth: 0,
+          width: 240,
+          maxWidth: "100%",
+          flex: "1 1 240px"
         }}>
             <option value="">Import from SAST scan…</option>
             {available.map(r => <option key={r.id} value={r.id}>
@@ -112,8 +123,8 @@ export function WebRunSastLeadsTab({
           <button className="btn sm" disabled={!selected || busy} onClick={onImport}>
             {busy ? "Importing…" : "Import leads"}
           </button>
-          {leads.length > 0 && <button className="btn sm" onClick={() => downloadTextFile(leadsExportFilename(`web-run-${runId}`), leadsToMarkdown(leads, {
-          runName: `Web run #${runId}`,
+          {leads.length > 0 && <button className="btn sm" onClick={() => downloadTextFile(leadsExportFilename(`${isApi ? "api" : "web"}-run-${runId}`), leadsToMarkdown(leads, {
+          runName: `${isApi ? "API" : "Web"} run #${runId}`,
           generatedAt: new Date()
         }), "text/markdown;charset=utf-8")}>Export leads</button>}
           {leads.length > 0 && <button className="btn danger-outline sm" disabled={clearBusy} onClick={onClearAll}>
@@ -199,7 +210,7 @@ export function WebRunSastLeadsTab({
                 }}><b>Investigation note:</b> {l.note}</div>}
                       {l.linked_finding_id && <div style={{
                   marginBottom: 8
-                }}><b>Linked finding:</b> <a href={`#/runs/${runId}/findings`} style={{
+                  }}><b>Linked finding:</b> <a href={`#/${isApi ? "api-runs" : "runs"}/${runId}/findings`} style={{
                     color: "var(--success, #4caf50)"
                   }}>Finding #{l.linked_finding_id}</a></div>}
                       {l.investigated_by_run_id && <div style={{

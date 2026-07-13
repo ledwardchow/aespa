@@ -48,6 +48,12 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == run_id)
     ).all():
         session.delete(cell)
+    for lead in session.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == "api")
+        .where(ScanLead.imported_into_run_id == run_id)
+    ).all():
+        session.delete(lead)
     for ss in session.exec(
         select(ScannerSession)
         .where(ScannerSession.test_run_id == run_id)
