@@ -550,4 +550,3 @@ def create_api_test_run(
     session.commit()
     session.refresh(run)
     return ApiTestRunSummary.model_validate(run)
-

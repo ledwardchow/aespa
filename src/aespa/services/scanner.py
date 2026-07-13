@@ -886,6 +886,7 @@ def _record_session(
     source: str,
     credential_id: int | None = None,
     metadata: dict | None = None,
+    run_kind: str = "web",
 ) -> None:
     session_svc.upsert_session(
         run_id,
@@ -900,6 +901,7 @@ def _record_session(
         cookies=session_data.get("cookies") or {},
         extra_headers=session_data.get("extra_headers") or {},
         metadata=metadata or session_data.get("metadata") or {},
+        run_kind=run_kind,
     )
 
 
@@ -1324,6 +1326,7 @@ def _run_thinking_context_tool(
         for page in pages_snapshot:
             haystack = " ".join([
                 str(page.get("url") or ""),
+                str(page.get("state_label") or ""),
                 str(page.get("title") or ""),
                 str(page.get("context") or ""),
                 " ".join(_thinking_page_flags(page)),
@@ -1344,6 +1347,8 @@ def _run_thinking_context_tool(
                     "page_id": p["id"],
                     "kind": _thinking_page_kind(p),
                     "url": p["url"],
+                    "state_label": p.get("state_label") or "",
+                    "state_kind": p.get("state_kind") or "url",
                     "title": p.get("title") or "",
                     "flags": _thinking_page_flags(p),
                     "context_excerpt": _compact_log_value(p.get("context"), 220),
@@ -1373,7 +1378,23 @@ def _run_thinking_context_tool(
             "page_id": page["id"],
             "url": page["url"],
             "kind": _thinking_page_kind(page),
+            "state_label": page.get("state_label") or "",
+            "state_kind": page.get("state_kind") or "url",
         }
+        if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
+            try:
+                replay_steps = json.loads(page["replay_steps_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                replay_steps = []
+            if replay_steps:
+                detail["browser_replay"] = {
+                    "url": page["url"],
+                    "steps": [{"op": "goto", "url": page["url"]}] + [
+                        {"op": "click", "selector": step["selector"]}
+                        for step in replay_steps
+                        if isinstance(step, dict) and step.get("selector")
+                    ],
+                }
         if "title" in include_set:
             detail["title"] = page.get("title") or ""
         if "flags" in include_set:
@@ -3045,6 +3066,27 @@ def _next_specialist_agent_id(run_id: int, attack_class: str) -> str:
     return f"specialist-{attack_class}-{seq}"
 
 
+def _specialist_system_prompt_for_run(attack_class: str, *, is_api_run: bool) -> str:
+    prompt = _SPECIALIST_SYSTEM_PROMPTS.get(attack_class, _SPECIALIST_SYSTEM_PROMPT)
+    if not is_api_run:
+        return prompt
+    prompt = prompt.replace(
+        "Check context_tool target_inventory for pre-identified xss_sink items first — "
+        "these are direct leads with known injection points and rendering pages.",
+        "Review the dispatched endpoint schema and probe evidence for likely XSS "
+        "injection points before testing.",
+    ).replace(
+        "Use context_tool to check target_inventory for pre-identified upload endpoints.",
+        "Use the dispatched API endpoint schema to identify upload fields.",
+    )
+    if attack_class == "xss":
+        inventory_start = prompt.find("Step 0 — check for pre-identified sinks:")
+        first_probe = prompt.find("Step 1 — inject a unique canary string", inventory_start)
+        if inventory_start >= 0 and first_probe >= 0:
+            prompt = prompt[:inventory_start] + prompt[first_probe:]
+    return prompt
+
+
 
 async def _run_specialist_agent(
     *,
@@ -3060,6 +3102,7 @@ async def _run_specialist_agent(
     scanner_policy,
     max_steps: int,
     site_id: int,
+    is_api_run: bool = False,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -3312,6 +3355,11 @@ async def _run_specialist_agent(
         if tool_name == "context_tool":
             ctx_tool = str(tool_input.get("tool") or "")
             ctx_args = tool_input.get("args") if isinstance(tool_input.get("args"), dict) else {}
+            if is_api_run and ctx_tool in {"target_inventory", "search_assets"}:
+                return (
+                    f"{ctx_tool} is unavailable for API scans because it contains "
+                    "web-crawl inventory. Use the API endpoint details in your brief instead."
+                )
             try:
                 output = _run_thinking_context_tool(
                     ctx_tool, ctx_args,
@@ -3342,9 +3390,13 @@ async def _run_specialist_agent(
             "_persist": True,
         })
 
+        specialist_system_prompt = _specialist_system_prompt_for_run(
+            attack_class, is_api_run=is_api_run
+        )
+
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
-            system_message=_SPECIALIST_SYSTEM_PROMPTS.get(attack_class, _SPECIALIST_SYSTEM_PROMPT),
+            system_message=specialist_system_prompt,
             initial_user_message=initial_message,
             tool_executor=_tool_executor,
             stop_check=lambda: (
@@ -3406,6 +3458,7 @@ def _schedule_specialist_agent(
     specialist_config,  # SpecialistAgentConfigOut
     recon_summary: dict | None,
     site_id: int = 0,
+    is_api_run: bool = False,
 ) -> str | None:
     """Gate-check and schedule a specialist agent as a background asyncio task.
 
@@ -3453,6 +3506,7 @@ def _schedule_specialist_agent(
                 scanner_policy=scanner_policy,
                 max_steps=max_steps,
                 site_id=site_id,
+                is_api_run=is_api_run,
             ),
             name=f"specialist-{run_id}-{agent_id}",
         )
@@ -4221,6 +4275,10 @@ async def _do_thinking_scan(run_id: int) -> None:
             {
                 "id": p.id,
                 "url": p.url,
+                "state_key": p.state_key,
+                "state_label": p.state_label or "",
+                "state_kind": p.state_kind,
+                "replay_steps_json": p.replay_steps_json,
                 "title": p.title or "",
                 "context": p.llm_context or "",
                 "page_text": p.page_text or "",
@@ -5853,6 +5911,8 @@ async def _do_agentic_thinking_loop(
     # API-mode overrides — when provided these replace the web-scan defaults
     is_api_run: bool = False,   # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
+    tools_override: list[dict] | None = None,
+    scope_check_fn=None,  # callable(url) -> error string | None; API collection scope
     context_tool_fn=None,   # callable(tool_name, args, **kw) -> dict; replaces _run_thinking_context_tool
     post_finding_fn=None,   # callable(ScanFinding) -> None; called after every persisted finding
     post_probe_fn=None,     # callable(url, method, owasp_category) -> None; called after every http_request
@@ -5874,6 +5934,11 @@ async def _do_agentic_thinking_loop(
     _reauth_count = [0]  # total re-auth attempts this scan
     _REAUTH_THRESHOLD = 5
     _REAUTH_MAX = 2
+
+    def _active_scope_check(url: str) -> str | None:
+        if scope_check_fn is not None:
+            return scope_check_fn(url)
+        return check_scope(url, site_id, run_id)
 
     # Snapshot the primary (default) browser-session cookies so anonymous or
     # other-user browser steps can be isolated and default steps restored without
@@ -5929,6 +5994,7 @@ async def _do_agentic_thinking_loop(
                     source="dynamic_scan_reauth",
                     credential_id=creds[0].id,
                     metadata={"login_url": _cred_login_url},
+                    run_kind="api" if is_api_run else "web",
                 )
             events_svc.emit(run_id, {
                 "type": "scanner_phase",
@@ -6301,7 +6367,7 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
-            _scope_err = check_scope(br_url, site_id, run_id)
+            _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
             steps_list = tool_input.get("steps") or []
@@ -6366,7 +6432,7 @@ async def _do_agentic_thinking_loop(
             # redirect can't drag the LLM onto an out-of-scope host. (Same-origin
             # cookies stay host-scoped by the browser; this stops the LLM acting on
             # off-scope content.)
-            _br_final_scope_err = check_scope(final_url, site_id, run_id)
+            _br_final_scope_err = _active_scope_check(final_url)
             if _br_final_scope_err:
                 log.info(
                     "Agentic scan: browser navigation to %s redirected out of scope "
@@ -6524,6 +6590,7 @@ async def _do_agentic_thinking_loop(
                         "claims": jwt_claims,
                         "header": jwt_header or {"typ": "JWT", "alg": "HS256"},
                     },
+                    run_kind="api" if is_api_run else "web",
                 )
                 jwt_resp_body = json.dumps({"store_as": jwt_label, "claims": jwt_claims})
                 jwt_resp_status = 200
@@ -6573,7 +6640,7 @@ async def _do_agentic_thinking_loop(
             # the LLM can credential_check an off-host login endpoint and a success
             # would be saved into THIS site's credential store with a foreign
             # login_url. Mirror the http_request/browser_navigate scope gate.
-            _cc_scope_err = check_scope(cc_url, site_id, run_id)
+            _cc_scope_err = _active_scope_check(cc_url)
             if _cc_scope_err:
                 return f"[SCOPE BLOCK] {_cc_scope_err}"
             cc_candidates = tool_input.get("candidates")
@@ -6642,6 +6709,7 @@ async def _do_agentic_thinking_loop(
                             session_data=session_vault[cc_created_label],
                             source="dynamic_scan_credential_check",
                             metadata={"login_url": cc_url},
+                            run_kind="api" if is_api_run else "web",
                         )
                         _mark_session_pending(cc_created_label)
                     if cc_success:
@@ -6723,6 +6791,9 @@ async def _do_agentic_thinking_loop(
             ra_url = str(tool_input.get("url") or "").strip()
             if not ra_url:
                 return "register_account: missing URL"
+            ra_scope_err = _active_scope_check(ra_url)
+            if ra_scope_err:
+                return f"[SCOPE BLOCK] {ra_scope_err}"
             ra_hdrs = (
                 tool_input.get("headers")
                 if isinstance(tool_input.get("headers"), dict) else {}
@@ -6773,19 +6844,39 @@ async def _do_agentic_thinking_loop(
                     ra_sel_session.get("cookies")
                     if ra_sel_session and ra_sel_session.get("cookies") else None
                 )
+                ra_method = str(tool_input.get("method") or "POST").upper()
                 if ra_fmt == "form":
                     ra_merged.setdefault(
                         "Content-Type", "application/x-www-form-urlencoded"
                     )
-                    ra_r = await hx.request(
-                        str(tool_input.get("method") or "POST").upper(),
-                        ra_url, data=ra_body, headers=ra_merged, cookies=ra_sel_cookies,
+                    ra_r, ra_redirect_blocked = await _request_scope_checked(
+                        hx,
+                        ra_method,
+                        ra_url,
+                        site_id=site_id,
+                        run_id=run_id,
+                        scope_check=scope_check_fn,
+                        data=ra_body,
+                        headers=ra_merged,
+                        cookies=ra_sel_cookies,
                     )
                 else:
                     ra_merged.setdefault("Content-Type", "application/json")
-                    ra_r = await hx.request(
-                        str(tool_input.get("method") or "POST").upper(),
-                        ra_url, json=ra_body, headers=ra_merged, cookies=ra_sel_cookies,
+                    ra_r, ra_redirect_blocked = await _request_scope_checked(
+                        hx,
+                        ra_method,
+                        ra_url,
+                        site_id=site_id,
+                        run_id=run_id,
+                        scope_check=scope_check_fn,
+                        json=ra_body,
+                        headers=ra_merged,
+                        cookies=ra_sel_cookies,
+                    )
+                if ra_redirect_blocked is not None:
+                    return (
+                        f"[SCOPE BLOCK] register_account redirected to "
+                        f"{ra_redirect_blocked[0]!r}: {ra_redirect_blocked[1]}"
                     )
                 ra_resp_status = ra_r.status_code
                 ra_resp_hdrs = dict(ra_r.headers)
@@ -6811,6 +6902,7 @@ async def _do_agentic_thinking_loop(
                         session_data=session_vault[ra_created_label],
                         source="dynamic_scan_register_account",
                         metadata={**ra_account["metadata"], "status": ra_r.status_code},
+                        run_kind="api" if is_api_run else "web",
                     )
                     if ra_extra_hdrs or ra_resp_cookies:
                         _mark_session_pending(ra_created_label)
@@ -6873,6 +6965,7 @@ async def _do_agentic_thinking_loop(
                 specialist_config=specialist_config,
                 recon_summary=recon_summary,
                 site_id=site_id,
+                is_api_run=is_api_run,
             )
             task_graph_svc.complete_task_after_result(
                 run_id, active_task_id,
@@ -6949,7 +7042,7 @@ async def _do_agentic_thinking_loop(
         hr_url = str(tool_input.get("url") or "").strip()
         if not hr_url:
             return "http_request: missing URL"
-        _scope_err = check_scope(hr_url, site_id, run_id)
+        _scope_err = _active_scope_check(hr_url)
         if _scope_err:
             return f"[SCOPE BLOCK] {_scope_err}"
         hr_headers = tool_input.get("headers") or {}
@@ -7008,7 +7101,13 @@ async def _do_agentic_thinking_loop(
             # "anonymous"/other-user probe is not silently authenticated.
             with _client_session_cookies(hx, hr_sel_session):
                 hr_r, hr_redirect_blocked = await _request_scope_checked(
-                    hx, hr_method, hr_url, site_id=site_id, run_id=run_id, **hr_req_kwargs
+                    hx,
+                    hr_method,
+                    hr_url,
+                    site_id=site_id,
+                    run_id=run_id,
+                    scope_check=scope_check_fn,
+                    **hr_req_kwargs,
                 )
             hr_duration_ms = int((time.perf_counter() - hr_started) * 1000)
             hr_raw = hr_r.text[:BODY_READ_LIMIT]
@@ -7027,6 +7126,7 @@ async def _do_agentic_thinking_loop(
                     run_id, label=hr_lbl, session_data=session_vault[hr_lbl],
                     source="dynamic_scan_http_response",
                     metadata={"method": hr_method, "url": hr_url},
+                    run_kind="api" if is_api_run else "web",
                 )
                 _mark_session_pending(hr_lbl)
             hr_resp_body = _redact_sensitive_text(hr_raw)
@@ -7220,6 +7320,7 @@ async def _do_agentic_thinking_loop(
         done_check=_agentic_done_check,
         resume_messages=resume_messages,
         on_checkpoint=_on_checkpoint_callback,
+        tools=tools_override,
     )
     return progressive_findings_count
 

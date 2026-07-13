@@ -139,7 +139,6 @@ ALICE_API_SYSTEM_PROMPT = (
     "- forge_jwt / decode_jwt: create or inspect JWT tokens.\n"
     "- credential_check: test a small bounded list of credentials against a login endpoint.\n"
     "- register_account: create a disposable test account if registration is available.\n"
-    "- agent_dispatch: delegate a confirmed high-confidence lead to a Specialist Agent.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
     "- done: end the interaction when the user's instruction is fully completed and you have "
     "recorded any discovered findings.\n\n"

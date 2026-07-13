@@ -37,9 +37,8 @@ _run_kind_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 @contextlib.contextmanager
 def run_kind_scope(kind: str) -> Iterator[None]:
     """Tag every event emitted within this context (and any task spawned from
-    it) with ``run_kind=kind``.  Nests correctly: a SAST pre-phase awaited
-    inside an API scan can open its own ``run_kind_scope('sast')`` and the
-    surrounding ``'api'`` scope is restored on exit."""
+    it) with ``run_kind=kind``. Nested scopes restore the surrounding kind on
+    exit."""
     token = _run_kind_ctx.set(kind)
     try:
         yield
