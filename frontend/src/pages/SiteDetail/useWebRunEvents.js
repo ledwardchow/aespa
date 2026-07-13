@@ -22,7 +22,8 @@ export function useWebRunEvents(options) {
           if (exists) return prev;
           const node = {
             ...evt.node,
-            accessible_by: evt.node.accessible_by || []
+            accessible_by: evt.node.accessible_by || [],
+            accessible_anonymously: !!evt.node.accessible_anonymously
           };
           const newLinks = evt.link ? [...prev.links, evt.link] : prev.links;
           return {
