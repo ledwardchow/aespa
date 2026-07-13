@@ -15,9 +15,14 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-aespa-notary}"
 command -v create-dmg >/dev/null || { echo "Missing create-dmg — run: brew install create-dmg"; exit 1; }
 [ -d "$APP" ] || { echo "Not found: $APP — run ./build_mac.sh first."; exit 1; }
 
-# Sign the app FIRST — the dmg's own signature does not cover its contents, and
-# the notary scans every Mach-O inside. Without this the app ships unsigned.
-./sign_app.sh
+# A ticket stapled to the dmg does not get copied to the app when it is dragged
+# to Applications. Notarize and staple the app before putting it in the image so
+# both artifacts can pass Gatekeeper checks without reaching Apple's servers.
+if [ "${SKIP_NOTARIZE:-}" = "1" ]; then
+  ./sign_app.sh
+else
+  APP="$APP" NOTARY_PROFILE="$NOTARY_PROFILE" ./notarize_only_mac.sh
+fi
 
 # Reuse the same identity to sign the dmg wrapper.
 if [ -z "${SIGN_ID:-}" ]; then
@@ -41,13 +46,14 @@ create-dmg \
   "$DMG" "$APP"
 
 if [ "${SKIP_NOTARIZE:-}" = "1" ]; then
-  echo "==> SKIP_NOTARIZE=1 — leaving $DMG un-notarized."
+  echo "==> SKIP_NOTARIZE=1 — leaving the app and dmg un-notarized."
 else
-  echo "==> Notarizing the dmg (covers the app inside too; a few minutes)"
+  echo "==> Notarizing the dmg (a few minutes)"
   OUT=$(xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1) || true
   echo "$OUT"
   if printf '%s\n' "$OUT" | grep -q "status: Accepted"; then
     xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
   else
     SUBID=$(printf '%s\n' "$OUT" | awk '/id:/{print $2; exit}')
     echo "==> Notarization not accepted. Failure log:"
