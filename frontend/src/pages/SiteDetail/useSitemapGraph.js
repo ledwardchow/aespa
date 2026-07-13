@@ -76,7 +76,7 @@ export function useSitemapGraph({
       try {
         const url = new URL(node.url);
         const address = url.host === baseHost ? url.pathname + url.search + url.hash || "/" : node.url;
-        const label = node.state_label ? `${address} · ${node.state_label}` : address;
+        const label = node.state_label || address;
         return label.length > 36 ? label.slice(0, 35) + "…" : label;
       } catch {
         return truncUrl(node.url, 36);

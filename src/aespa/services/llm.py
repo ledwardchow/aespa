@@ -570,9 +570,7 @@ def _normalize_thinking_action(action: Any) -> Any:
     return normalized
 
 
-PageCategories = (
-    dict  # keys: req_auth, takes_input, has_object_ref, has_business_logic → bool|None
-)
+PageCategories = dict
 
 _EMPTY_CATS: PageCategories = {
     "req_auth": None,
@@ -739,6 +737,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         if not isinstance(data, dict):
             return raw.strip(), [], dict(_EMPTY_CATS)
         context = str(data.get("context") or raw)
+        label = " ".join(str(data.get("page_label") or "").split())
         links = data.get("suggested_links") or []
         if not isinstance(links, list):
             links = []
@@ -761,6 +760,7 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
             elif entry is not None:
                 owasp[cat] = bool(entry)
         cats["owasp_applicable"] = owasp
+        cats["page_label"] = " ".join(label.split()[:5]) if label else ""
         return context, safe_links, cats
     except Exception:
         return raw.strip(), [], dict(_EMPTY_CATS)

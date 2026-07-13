@@ -78,6 +78,16 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _page_function_label(value: object) -> str | None:
+    """Keep model-provided page labels compact enough for graph nodes."""
+    label = " ".join(str(value or "").split())
+    # A shared CrawledPage is not owned by the credential that discovered it.
+    # Recover gracefully if a model nevertheless returns e.g. "Zoe's Accounts".
+    label = re.sub(r"^[A-Z][\w-]*[’']s\s+", "", label)
+    words = label.split()
+    return " ".join(words[:5]) if words else None
+
+
 def _login_url_for_credential(default_login_url: str, cred) -> str:
     return (getattr(cred, "login_url", None) or default_login_url or "").strip()
 
@@ -747,6 +757,7 @@ async def _crawl_as_credential(
                 _update_page(
                     page_id,
                     url=final_url,
+                    state_label=_page_function_label(cats.get("page_label")),
                     title=title,
                     page_text=text[:10_000],
                     screenshot_b64=screenshot_b64,
@@ -778,6 +789,7 @@ async def _crawl_as_credential(
                         "node": {
                             "id": page_id,
                             "url": final_url,
+                            "state_label": _page_function_label(cats.get("page_label")),
                             "title": title,
                             "depth": depth,
                             "status": "crawled",
@@ -1085,8 +1097,9 @@ async def _explore_interactive_states(
                     )
                 except Exception as exc:
                     log.debug("Interactive state analysis failed: %s", exc)
+                page_label = _page_function_label(cats.get("page_label")) or snapshot["label"]
                 _update_page(
-                    page_id, url=page.url, state_key=snapshot["key"], state_label=snapshot["label"],
+                    page_id, url=page.url, state_key=snapshot["key"], state_label=page_label,
                     state_kind="interactive", replay_steps_json=json.dumps(steps), title=snapshot["title"],
                     page_text=snapshot["text"][:10_000], screenshot_b64=snapshot["screenshot_b64"],
                     llm_context=context, status="crawled", depth=state_depth,
@@ -1096,7 +1109,7 @@ async def _explore_interactive_states(
                 )
                 _update_run(run_id, pages_discovered=shared.pages_done)
                 events_svc.emit(run_id, {"type": "page_added", "username": username, "node": {
-                    "id": page_id, "url": page.url, "state_label": snapshot["label"], "state_kind": "interactive",
+                    "id": page_id, "url": page.url, "state_label": page_label, "state_kind": "interactive",
                     "title": snapshot["title"], "depth": state_depth, "status": "crawled", "context": context,
                     "in_scope": True, "scan_status": "pending", "accessible_by": [credential_id] if credential_id else [],
                 }, "link": {"source": parent_id, "target": page_id, "link_text": action["name"], "action_kind": "click"}})

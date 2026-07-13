@@ -490,6 +490,7 @@ class CrawledPage(SQLModel, table=True):
     url: str = Field(index=True)
     # URL is evidence/a navigation hint, not necessarily identity for SPA views.
     state_key: Optional[str] = Field(default=None, index=True)
+    # Canonical, credential-neutral functionality label used in the site map.
     state_label: Optional[str] = Field(default=None)
     state_kind: str = Field(default="url")  # url | interactive | api
     replay_steps_json: str = Field(default="[]")
