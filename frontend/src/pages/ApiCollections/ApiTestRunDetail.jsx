@@ -19,7 +19,7 @@ const API_RUN_TABS = [{
   label: "Findings"
 }, {
   key: "leads",
-  label: "Scan Leads"
+  label: "SAST Leads"
 }, {
   key: "sessions",
   label: "Sessions"

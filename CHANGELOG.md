@@ -4,6 +4,28 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [develop → main] July 13 Update — routeless crawling, detached SAST leads, API scan isolation
+
+**Branch:** `develop → main`
+
+### Routeless SPA crawling
+
+- **New routeless crawler mode** (`services/crawler.py`, run models/API/UI): test runs can crawl single-page applications whose meaningful states do not change the browser URL. The crawler records distinct UI states, navigation actions, and state-aware page identities so these applications produce a useful sitemap and dynamic-scan context instead of collapsing into one route.
+- **Clearer sitemap identity and ownership** (`SiteDetail/*`, crawler/LLM helpers): scraped-page titles no longer inherit possessive user labels, page metadata exposes crawler mode, and sitemap nodes retain the correct credential/user colouring as live events arrive.
+
+### Standalone SAST and fresh per-run leads
+
+- **SAST is detached from API collections** (`api/sast_runs.py`, `services/sast_scanner.py`, API collection UI): API scans no longer auto-create or await a collection-bound SAST pre-phase. SAST runs are standalone, while source ZIP uploads on API collections remain available solely for deriving endpoints and routes.
+- **Explicit imports for API test runs** (`api/sast_runs.py`, `services/scan_leads.py`, API run UI): completed SAST results can be imported into an API test run just like a web run. Every import creates run-owned lead copies, so each test run independently reassesses every lead without mutating the source SAST result or inheriting another run's outcome.
+- **Run-scoped lead management**: API lead listing, ALICE context, scanner context, deletion, and cleanup now filter by run type and run id. This removes duplicate collection-wide leads and prevents repeated or stale results from appearing in unrelated API runs.
+- **Responsive SAST lead UI** (`frontend/src/styles/run.css`, shared lead tab): the API run lead panel now wraps and shrinks within the viewport instead of overflowing horizontally.
+
+### API scanner isolation and session safety
+
+- **API-aware tool surface and scope checks** (`services/api_scanner.py`, `services/prompts/test_lead.py`): API Test Leads receive a restricted API tool set, reject web-only inventory commands, and apply API collection scope checks to requests and redirects. API ALICE also withholds unsafe web-oriented finding and specialist paths.
+- **Run-kind-safe sessions** (`services/scanner.py`, `services/alice.py`): credentials, JWTs, registrations, and captured bearer/cookie sessions are persisted under the correct web/API run kind, avoiding collisions between independently numbered run tables.
+- **Coverage and regression tests**: expanded API scanner, API ALICE, scan-lead, crawler, LLM, and test-run API coverage; rebuilt the served Vite assets and refreshed architecture/tool-reference documentation.
+
 ## [PR #227] July 12 Update — scan lifecycle, reporting concurrency, crawl export/import
 
 **Branch:** `develop → main`

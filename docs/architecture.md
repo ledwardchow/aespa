@@ -4,7 +4,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 
 - **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
-- **SAST assistance** — an agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. It runs three ways: as an automatic **pre-phase** before an API scan (collection-bound), as a **standalone** scan started from the SAST screen, and as a source of leads **imported into a web scan**. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
+- **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
 
 ---
 
@@ -56,7 +56,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
     - [Scope enforcement](#scope-enforcement) · [ALICE on API runs](#alice-on-api-runs)
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
-    - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Automatic SAST pre-phase](#automatic-sast-pre-phase) · [Concurrency](#concurrency)
+    - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Concurrency](#concurrency)
 
 ---
 
@@ -80,7 +80,7 @@ src/aespa/
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
 │   ├── api_collections.py # /api/api-collections/* — collections, documents, endpoints
 │   ├── api_test_runs.py   # /api/api-collections/{id}/test-runs/* — API scan runs
-│   ├── sast_runs.py       # /api/sast-runs/* and /api/api-collections/{id}/sast-runs
+│   ├── sast_runs.py       # /api/sast-runs/* and dynamic-run lead import routes
 │   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
     ├── sites.py           # CRUD service layer for Site and Credential
@@ -337,8 +337,8 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ApiCredential` | A parsed credential row tied to a collection (scheme, label, auth endpoint) |
 | `ApiTestRun` | A single API scan session; linked to an `ApiCollection`; carries `coverage_mode` and `sast_run_id` |
 | `ApiEndpointTest` | One cell in the OWASP API Top-10 coverage matrix (endpoint × category, status, finding IDs) |
-| `SastRun` | A static-analysis scan over a source ZIP; tracks `leads_count`. `collection_id` is **optional** — API pre-phase runs link a collection + `document_id`; standalone runs carry their own archive via `source_archive_path` / `source_filename` |
-| `ScanLead` | A high-confidence SAST lead. Keyed to its producing `SastRun` (`producer_run_id`). An *original* lead leaves `imported_into_run_id` NULL; a *copy* imported into a dynamic run sets `imported_into_run_type`/`imported_into_run_id` to that run (web scans consume copies; API scans consume by collection) |
+| `SastRun` | A standalone static-analysis scan over a source ZIP; tracks `leads_count` and carries its archive via `source_archive_path` / `source_filename`. Legacy collection linkage fields remain nullable for compatibility. |
+| `ScanLead` | A high-confidence SAST lead. Keyed to its producing `SastRun` (`producer_run_id`). An *original* lead leaves `imported_into_run_id` NULL; a *copy* imported into a dynamic run sets `imported_into_run_type`/`imported_into_run_id` to that run. Web and API scans both consume independent run-owned copies. |
 
 ### `CrawledPage` flags (set by LLM during crawl)
 
@@ -829,7 +829,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/api-test-runs/{id}/traffic` | `api_test_runs.py` | API scan HTTP traffic log |
 | `/api/api-test-runs/{id}/alice/*` | `api_test_runs.py` | ALICE chat for API runs (same surface as web ALICE) |
 | `/api/sast-runs` | `sast_runs.py` | `POST` (multipart) create a **standalone** SAST run from an uploaded source ZIP; `GET` lists all SAST runs |
-| `/api/api-collections/{id}/sast-runs` | `sast_runs.py` | Create a SAST run under a collection |
+| `/api/api-test-runs/{id}/import-leads` | `sast_runs.py` | Import independent copies from a completed SAST run into an API test run |
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
@@ -896,7 +896,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 
 #### SAST run view
 
-A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan (no collection). Collection-bound runs are also listed under a collection's **SAST Runs** panel.
+A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan. API collection file management does not expose SAST controls; its source ZIP support is only for deriving endpoint inventory.
 
 | Panel | Content |
 |---|---|
@@ -922,7 +922,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 
 - **Shared tables carry a `run_kind` column** (`'web'` / `'api'` / `'sast'`): `agent_log`, `scan_log`, `scanner_session`, `alice_chat_session`. Every query filters on it.
 - **Findings use separate FK columns**: `ScanFinding.test_run_id` (web) vs `api_test_run_id` (API), both nullable. `ScanLead` copies key on `imported_into_run_id` for the same reason.
-- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak). The SAST pre-phase opens its own `run_kind_scope("sast")` inside an API scan.
+- **Event emission is scoped, not id-guessed**: `events.run_kind_scope("web"|"api"|"sast")` is the *sole* authoritative source of an event's kind. It is a context variable that `asyncio.create_task` snapshots, so every event a scan emits — directly or from any child task — inherits the right kind even when ids collide. Every background-task entry point that can emit `agent_status`/`scanner_phase` (the web/api/sast scanners, the crawler, the validator, ALICE) MUST open a scope; an emit that escapes every scope deterministically defaults to `'web'`. There is deliberately no per-id fallback registry — keying on a colliding run id is exactly what leaked events into the wrong run's Agents tab (issue #169 / the SAST Agents leak).
 - **Deletion is scoped per kind** (`services/run_cleanup.py` + the inline web cascade in `api/test_runs.py`) so deleting a run removes exactly its own rows and nothing leaks into a later run that reuses the freed id. SQLite reuses the max id after the highest row is deleted, which is what makes this collision practical, not theoretical.
 
 ---
@@ -1098,7 +1098,7 @@ An **`ApiCollection`** is the top-level resource for API scanning. It groups:
 | `postman` | Postman Collection v2/v2.1 item-tree walker |
 | `credentials` | Line-by-line parser: bearer tokens, `key: value` pairs, curl `-H`/`-b` flag lines |
 | `freetext` | LLM extraction of endpoint list + auth notes (capped at 40,000 chars) |
-| `source_zip` | Safe ZIP extraction + framework-heuristic route scanner (Django urls.py, Flask `@app.route`, Express router, etc.); see §17 for the SAST pre-phase |
+| `source_zip` | Safe ZIP extraction + framework-heuristic route scanner (Django urls.py, Flask `@app.route`, Express router, etc.). This derives API inventory only; it does not start or attach a SAST scan. |
 
 Re-parse is idempotent — existing endpoints from the same document are deleted and replaced.
 
@@ -1132,13 +1132,16 @@ The entry point `start_api_scan(api_run_id)` launches `_api_scan_task` as a back
 _api_scan_task(api_run_id)
   └─ _do_api_thinking_scan(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
-       2. SAST pre-phase — auto-create + await SastRun if source_zip present and no fresh run (see §17)
-       3. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
-       4. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
-       5. _build_api_crawl_context — build LLM opening context from collection metadata + SAST leads
-       6. _do_agentic_thinking_loop (shared with web scanner)
+       2. seed_sessions_from_credentials — load ApiCredentials into scanner session vault
+       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs
+       4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
+       5. _do_agentic_thinking_loop (shared with web scanner)
+            • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
+              remove_finding, and agent_dispatch are withheld
             • _api_context_tool_fn routes endpoint_list / endpoint_detail / collection_info / finding_list
-              to API-specific handlers; all other context tool sub-commands go to the shared web handler
+              to API-specific handlers and a strict safe subset to the shared handler; all other
+              commands are rejected, including web-crawl target_inventory / search_assets
+            • _api_check_scope is applied to every target request and redirect hop
             • _make_post_probe_fn updates the coverage matrix cell for each probe (endpoint, category)
             • _make_post_finding_fn stamps api_test_run_id and OWASP category on each finding
        7. (enforce mode only) _enforce_coverage_loop — drive uncovered cells to terminal state
@@ -1152,7 +1155,11 @@ _api_scan_task(api_run_id)
 
 ### ALICE on API runs
 
-API test runs expose the same `/alice/*` endpoints as web test runs. `alice.py`'s `_run_thinking_context_tool` detects API-run context and routes `collection_info`, `endpoint_list`, and `endpoint_detail` to the API-specific handlers. The ALICE system prompt includes OWASP API Top-10 category descriptions and API context tool documentation.
+API test runs expose the same `/alice/*` endpoints as web test runs. API ALICE routes
+`collection_info`, `endpoint_list`, and `endpoint_detail` to API-specific handlers and
+persists captured sessions under `run_kind="api"`. Specialist dispatch is withheld in API
+mode until the Specialist executor is fully API-aware. The API system prompt includes
+OWASP API Top-10 category descriptions and API context tool documentation.
 
 ---
 
@@ -1160,30 +1167,20 @@ API test runs expose the same `/alice/*` endpoints as web test runs. `alice.py`'
 
 **Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is an agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. A `SastRun` can be created three ways:
-
-1. **API pre-phase** — auto-created before a dynamic API scan when the collection has a `source_zip` document (collection-bound; see *Automatic SAST pre-phase* below).
-2. **Standalone** — created from the SAST screen by uploading a ZIP. `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). `POST /api/sast-runs` (multipart).
-3. **Imported into a web scan** — a completed run's leads are *copied* into a web `TestRun`, which then investigates the copies (see *Lead consumption* below).
-
-The scan loop itself is identical in all three cases; only how the archive is located and how the resulting leads are consumed differs.
+The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
 ### Architecture overview
 
 ```
 start_sast_scan(sast_run_id)
   └─ _sast_scan_task(sast_run_id)
-       1. Load SastRun; resolve the archive: the source_zip ApiDocument
-          (API pre-phase) OR run.source_archive_path (standalone).
-          collection_id may be NULL.
+       1. Load SastRun and resolve its standalone `source_archive_path`.
        2. _safe_unzip - extract archive into a deterministic per-run
           directory at `<data_dir>/sast_extract/<id>/` (path-jailed:
           entries that would escape the root are rejected). A startup
           sweep (db._cleanup_orphaned_sast_extractions) reconciles any
           dirs leaked by a previous hard crash.
-       3. _build_initial_message — construct LLM opening context. When a
-          collection exists, seed it with the parsed ApiEndpoint rows;
-          for standalone runs there are no endpoints, so the agent
+       3. _build_initial_message — construct LLM opening context; the agent
           discovers entry points itself with the file tools
        4. _make_tool_executor — build the tool executor with path-jailed file tools
        5. llm.thinking_agentic_loop with read-only file tools + write_lead / filter_lead / done
@@ -1238,22 +1235,10 @@ At scan end:
 
 The dynamic loop investigates leads via the shared `update_lead` action, which sets the outcome and — for a confirmed lead with no finding attached — auto-promotes it to a `ScanFinding` (keyed on `test_run_id` for web runs, `api_test_run_id` for API runs). How leads reach the loop's opening context differs by surface:
 
-- **API scans** consume *in place* by collection: `get_open_leads_for_collection(collection_id)` / `format_leads_for_context(collection_id)`, injected by `api_scanner._build_api_crawl_context`.
+- **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically. `_build_api_crawl_context` and API A.L.I.C.E. inject only `format_leads_for_run("api", run_id)`.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). At scan start `scanner._do_thinking_scan` injects them via `format_leads_for_run("web", run_id)`. Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
-Leads are exportable to markdown from the UI (originals on the SAST run view, copies on a web run's SAST Leads tab); the export embeds a hidden JSON block for future re-import.
-
-### Automatic SAST pre-phase
-
-When an API test run starts and the collection has a `source_zip` document, `api_scanner._do_api_thinking_scan` checks `needs_fresh_sast(collection_id)` (returns `True` if no completed SAST run exists within the last 24 hours). If needed:
-
-1. A `SastRun` is auto-created linked to the current `ApiTestRun`
-2. `ApiTestRun.sast_run_id` is written (back-reference)
-3. `run_sast_scan(sast_run_id)` is awaited to completion
-4. `scanner_phase` SSE events with `phase: sast_prephase` are emitted at start and complete
-5. The dynamic loop then reads open `ScanLead` rows via `get_open_leads_for_collection`
-
-SAST pre-phase failures are logged and do not block the dynamic scan.
+Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import.
 
 ### Concurrency
 

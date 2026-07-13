@@ -6,9 +6,9 @@ scanner with API-specific overrides:
 
   * ``_API_THINKING_AGENT_SYSTEM`` system prompt (OWASP API Top 10 focused)
   * ``_api_context_tool_fn``  — delegates ``endpoint_list / endpoint_detail /
-      collection_info / finding_list`` to the API context tool and routes all
-      other sub-commands (history_search, traffic_search, …) to the shared
-      web-scanner context tool
+      collection_info / finding_list`` to the API context tool and routes a
+      safe subset (history_search, traffic_search, …) to the shared scanner
+      context tool
   * ``_make_post_finding_fn`` post-save hook — maps the OWASP category to the
     OWASP API Top-10 field on every finding and updates the coverage matrix
     (``api_test_run_id`` is already set at creation time in API mode)
@@ -29,7 +29,6 @@ from aespa.db import get_engine
 from aespa.models import (
     ApiCollection,
     ApiCredential,
-    ApiDocument,
     ApiEndpoint,
     ApiEndpointTest,
     ApiTestRun,
@@ -37,7 +36,10 @@ from aespa.models import (
 )
 from aespa.services import events as events_svc
 from aespa.services import scanner_sessions
-from aespa.services.prompts.test_lead import _API_THINKING_AGENT_SYSTEM
+from aespa.services.prompts.test_lead import (
+    _API_THINKING_AGENT_SYSTEM,
+    get_api_test_lead_tools,
+)
 
 log = logging.getLogger(__name__)
 
@@ -863,14 +865,17 @@ _API_CONTEXT_COMMANDS = frozenset(
 _SHARED_CONTEXT_COMMANDS = frozenset(
     {
         "history_search",
-        "target_inventory",
-        "search_assets",
         "traffic_search",
         "compare_responses",
         "mutate_request",
         "extract_entities",
     }
 )
+
+# These web-crawl inventory commands key their data solely by TestRun id. API
+# run ids occupy a separate integer sequence and can collide with TestRun ids,
+# so allowing either command here could expose an unrelated web run's intel.
+_BLOCKED_API_CONTEXT_COMMANDS = frozenset({"target_inventory", "search_assets"})
 
 
 def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
@@ -888,30 +893,40 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
         run_id=None,
         base_url="",
     ) -> dict[str, Any]:
+        if tool_name in _BLOCKED_API_CONTEXT_COMMANDS:
+            return {
+                "tool": tool_name,
+                "error": (
+                    f"{tool_name} is unavailable for API scans because it contains "
+                    "web-crawl inventory. Use endpoint_list or endpoint_detail instead."
+                ),
+                "available_tools": sorted(
+                    _API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS
+                ),
+            }
+
         # API inventory commands
         if tool_name in _API_CONTEXT_COMMANDS:
             return _run_api_context_tool(collection_id, api_run_id, tool_name, args)
 
-        # site_map / page_detail → redirect to endpoint_list
-        if tool_name in ("site_map", "page_detail"):
-            return {
-                "tool": tool_name,
-                "note": "This is an API test run. Use endpoint_list / endpoint_detail instead.",
-                "redirect": _run_api_context_tool(
-                    collection_id, api_run_id, "endpoint_list", args
-                ),
-            }
+        if tool_name in _SHARED_CONTEXT_COMMANDS:
+            return _run_thinking_context_tool(
+                tool_name,
+                args,
+                pages_snapshot=pages_snapshot or [],
+                findings_snapshot=findings_snapshot or [],
+                history=history or [],
+                run_id=run_id,
+                base_url=base_url,
+            )
 
-        # Shared tools (history, traffic, entities, …)
-        return _run_thinking_context_tool(
-            tool_name,
-            args,
-            pages_snapshot=pages_snapshot or [],
-            findings_snapshot=findings_snapshot or [],
-            history=history or [],
-            run_id=run_id,
-            base_url=base_url,
-        )
+        return {
+            "tool": tool_name,
+            "error": "unknown or unavailable context tool for API scans",
+            "available_tools": sorted(
+                _API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS
+            ),
+        }
 
     return _fn
 
@@ -1111,11 +1126,12 @@ def _build_api_crawl_context(api_run_id: int) -> str:
     except Exception:
         pass
 
-    # Append any open SAST leads so the dynamic scanner can investigate them.
+    # Append this run's fresh SAST-lead copies. Collection originals are never
+    # mutated by a dynamic scan, so every run independently reassesses them.
     try:
-        from aespa.services.scan_leads import format_leads_for_context
+        from aespa.services.scan_leads import format_leads_for_run
 
-        leads_block = format_leads_for_context(coll.id)
+        leads_block = format_leads_for_run("api", api_run_id)
         if leads_block:
             lines.append(leads_block)
     except Exception:
@@ -1187,68 +1203,6 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         api_run_id,
         base_url,
     )
-
-    # ── SAST pre-phase (best-effort, awaited before dynamic loop) ─────────────
-    # Auto-create a linked SastRun when the collection has a source_zip and no
-    # recent completed SAST run exists.
-    sast_run_id_for_phase: int | None = None
-    try:
-        from aespa.services import sast_scanner as sast_svc
-        from aespa.services.scan_leads import needs_fresh_sast
-
-        with Session(get_engine()) as s:
-            source_doc = s.exec(
-                select(ApiDocument)
-                .where(ApiDocument.collection_id == run.collection_id)
-                .where(ApiDocument.doc_type == "source_zip")
-                .order_by(ApiDocument.id.desc())  # type: ignore[attr-defined]
-            ).first()
-
-        if source_doc is not None and needs_fresh_sast(run.collection_id):
-            events_svc.emit(
-                api_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_prephase",
-                    "status": "start",
-                    "message": "Static analysis (SAST) pre-phase starting…",
-                },
-            )
-            sast_run = sast_svc.create_sast_run(
-                collection_id=run.collection_id,
-                name=f"SAST for API run #{api_run_id}",
-                document_id=source_doc.id,
-                llm_config_id=run.llm_config_id,
-                triggered_by_run_type="api",
-                triggered_by_run_id=api_run_id,
-            )
-            sast_run_id_for_phase = sast_run.id
-            # Write the back-reference on the API run.
-            with Session(get_engine()) as s:
-                api_run_row = s.get(ApiTestRun, api_run_id)
-                if api_run_row is not None:
-                    api_run_row.sast_run_id = sast_run.id
-                    api_run_row.updated_at = datetime.now(_UTC)
-                    s.add(api_run_row)
-                    s.commit()
-            # Await the SAST scan to completion so leads are ready.
-            await sast_svc.run_sast_scan(sast_run_id_for_phase)
-            events_svc.emit(
-                api_run_id,
-                {
-                    "type": "scanner_phase",
-                    "phase": "sast_prephase",
-                    "status": "complete",
-                    "message": "SAST pre-phase complete. Proceeding with dynamic scan.",
-                },
-            )
-    except Exception as _sast_exc:
-        log.warning(
-            "SAST pre-phase failed or skipped for api_run_id=%s: %s",
-            api_run_id,
-            _sast_exc,
-        )
-        # Best-effort: always continue with the dynamic scan.
 
     # Seed scanner sessions from credentials.
     seed_sessions_from_credentials(api_run_id)
@@ -1383,6 +1337,8 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
             login_url="",
             # API overrides
             system_message_override=_API_THINKING_AGENT_SYSTEM,
+            tools_override=get_api_test_lead_tools(),
+            scope_check_fn=lambda url: _api_check_scope(url, api_run_id),
             context_tool_fn=context_tool_fn,
             post_finding_fn=post_finding_fn,
             post_probe_fn=post_probe_fn,
@@ -1577,7 +1533,7 @@ async def start_api_scan(api_run_id: int) -> None:
 
 
 async def stop_api_scan(api_run_id: int) -> bool:
-    """Stop an in-progress API scan (and any linked SAST pre-phase)."""
+    """Stop an in-progress API scan."""
     task = _scan_tasks.get(api_run_id)
     if task is not None:
         _stop_requested.add(api_run_id)
@@ -1587,18 +1543,6 @@ async def stop_api_scan(api_run_id: int) -> bool:
             from aespa.services.scanner import _thinking_stop_requested
 
             _thinking_stop_requested.add(api_run_id)
-        except Exception:
-            pass
-        # Cancel any linked SAST pre-phase that may still be running.
-        try:
-            from aespa.services import sast_scanner as sast_svc
-
-            with Session(get_engine()) as s:
-                from aespa.models import ApiTestRun as _ATR
-
-                api_run = s.get(_ATR, api_run_id)
-                if api_run is not None and api_run.sast_run_id:
-                    await sast_svc.stop_sast_scan(api_run.sast_run_id)
         except Exception:
             pass
         _update_run_status(api_run_id, "cancelled")
