@@ -10,13 +10,20 @@ export const isDynamicScanActive = status => DYNAMIC_SCAN_ACTIVE_STATUSES.includ
 
 // Per-user palette (index into credentials array)
 export const USER_PALETTE = ["#f97316", "#06b6d4", "#a855f7", "#f59e0b", "#10b981", "#ec4899"];
-export const USER_BOTH_COLOR = "#6366f1"; // accessible to all users
-const USER_NONE_COLOR = "#6b7691"; // not tagged (pre-multi-user crawl)
+export const USER_ANONYMOUS_COLOR = "#6b7691";
+export const USER_MULTIPLE_COLOR = "#84cc16";
+export const USER_ALL_COLOR = "#6366f1";
+const USER_NONE_COLOR = "#374151"; // not tagged (pre-multi-user crawl)
 export const userColor = (d, credentials) => {
+  const credentialList = credentials || [];
   const ab = d.accessible_by || [];
-  if (!credentials || credentials.length === 0 || ab.length === 0) return USER_NONE_COLOR;
-  if (ab.length >= credentials.length) return USER_BOTH_COLOR;
-  const idx = credentials.findIndex(c => ab.includes(c.id));
+  const credentialCount = credentialList.length;
+  const accessCount = ab.length + (d.accessible_anonymously ? 1 : 0);
+  if (accessCount === 0) return USER_NONE_COLOR;
+  if (accessCount >= credentialCount + 1) return USER_ALL_COLOR;
+  if (accessCount > 1) return USER_MULTIPLE_COLOR;
+  if (d.accessible_anonymously) return USER_ANONYMOUS_COLOR;
+  const idx = credentialList.findIndex(c => ab.includes(c.id));
   return idx >= 0 ? USER_PALETTE[idx % USER_PALETTE.length] : USER_NONE_COLOR;
 };
 export function runWorkflowStatus(run, opts = {}) {

@@ -75,13 +75,14 @@ export function useSitemapGraph({
     node.append("text").attr("dy", 22).attr("text-anchor", "middle").attr("fill", "var(--muted)").attr("font-size", "10px").attr("pointer-events", "none").text(node => {
       try {
         const url = new URL(node.url);
-        const label = url.host === baseHost ? url.pathname + url.search + url.hash || "/" : node.url;
+        const address = url.host === baseHost ? url.pathname + url.search + url.hash || "/" : node.url;
+        const label = node.state_label || address;
         return label.length > 36 ? label.slice(0, 35) + "…" : label;
       } catch {
         return truncUrl(node.url, 36);
       }
     });
-    node.append("title").text(node => node.url);
+    node.append("title").text(node => node.state_label ? `${node.url}\n${node.state_label}` : node.url);
     svg.on("click", () => onSelectNode(null));
     simulation.on("tick", () => {
       link.attr("x1", node => node.source.x).attr("y1", node => node.source.y).attr("x2", node => node.target.x).attr("y2", node => node.target.y);

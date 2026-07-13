@@ -3,6 +3,11 @@ import asyncio
 from aespa.services import crawler
 
 
+def test_page_function_label_removes_credential_possessive():
+    assert crawler._page_function_label("Zoe's Accounts Overview") == "Accounts Overview"
+    assert crawler._page_function_label("Admin User Management") == "Admin User Management"
+
+
 class _FakeLocator:
     def __init__(self, count=0, visible=False):
         self._count = count

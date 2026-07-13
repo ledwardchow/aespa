@@ -15,6 +15,7 @@ from aespa.models import (
 )
 from aespa.services.scan_leads import (
     copy_leads_to_run,
+    format_leads_for_run,
     get_leads_for_run,
     list_leads_for_run,
     update_lead,
@@ -279,6 +280,33 @@ def test_copy_leads_to_run_is_idempotent(engine):
     assert len(get_leads_for_run("web", 7)) == 2
 
 
+def test_explicit_imports_are_fresh_and_independent_for_each_api_run(engine):
+    """Explicit imports give every API run a fresh independent lead copy."""
+    [original_id] = _make_sast_originals(engine, sast_run_id=10, n=1)
+
+    assert copy_leads_to_run(10, "api", 41) == 1
+    first_copy = get_leads_for_run("api", 41)[0]
+    update_lead(
+        first_copy.id,
+        status="dismissed",
+        note="not reproducible in run 41",
+        investigated_by_run_type="api",
+        investigated_by_run_id=41,
+    )
+
+    assert get_leads_for_run("api", 41) == []
+    assert copy_leads_to_run(10, "api", 42) == 1
+    second_copy = get_leads_for_run("api", 42)[0]
+    assert second_copy.id != first_copy.id
+    assert second_copy.status == "open"
+    assert second_copy.note == ""
+    assert second_copy.investigated_by_run_id is None
+    assert "Lead #" + str(second_copy.id) in format_leads_for_run("api", 42)
+
+    with Session(engine) as s:
+        original = s.get(ScanLead, original_id)
+        assert original.status == "open"
+        assert original.investigated_by_run_id is None
 def test_investigating_copy_leaves_original_open(engine):
     [orig_id] = _make_sast_originals(engine, sast_run_id=10, n=1)
     copy_leads_to_run(10, "web", 7)

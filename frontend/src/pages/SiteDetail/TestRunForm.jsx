@@ -9,7 +9,8 @@ export function TestRunForm({
   const [form, setForm] = useState({
     name: "",
     max_depth: 3,
-    max_pages: 50,
+    max_pages: 500,
+    crawler_mode: "url",
     llm_profile_id: null
   });
   const [saving, setSaving] = useState(false);
@@ -38,6 +39,7 @@ export function TestRunForm({
         name: form.name.trim() || null,
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
+        crawler_mode: form.crawler_mode,
         llm_profile_id: form.llm_profile_id || null
       });
       nav(`#/runs/${run.id}`);
@@ -71,6 +73,14 @@ export function TestRunForm({
               max_pages: e.target.value
             })} />
           </div>
+        </div>
+        <div className="field">
+          <label>Crawler mode</label>
+          <select className="select" value={form.crawler_mode} onChange={e => upd({ crawler_mode: e.target.value })}>
+            <option value="url">URL crawl — follow links and routes</option>
+            <option value="interactive">Interactive SPA crawl — also explore safe tabs and dialogs</option>
+          </select>
+          <div className="field-hint">Interactive mode is experimental. It never submits forms and skips destructive-looking controls.</div>
         </div>
         <div className="alert" style={{
           marginTop: 12
