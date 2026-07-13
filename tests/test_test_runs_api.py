@@ -31,11 +31,33 @@ def test_create_run_default_name(client: TestClient):
     assert data["pages_discovered"] == 0
 
 
+def test_create_run_defaults_to_500_pages(client: TestClient):
+    site = _make_site(client)
+    response = client.post(f"/api/sites/{site['id']}/test-runs", json={})
+    assert response.status_code == 201
+    assert response.json()["max_pages"] == 500
+
+
 def test_create_run_custom_name(client: TestClient):
     site = _make_site(client)
     r = _make_run(client, site["id"], name="Initial recon")
     assert r.status_code == 201
     assert r.json()["name"] == "Initial recon"
+
+
+def test_create_run_can_enable_interactive_spa_crawler(client: TestClient):
+    site = _make_site(client)
+    created = _make_run(client, site["id"], crawler_mode="interactive")
+    assert created.status_code == 201
+    assert created.json()["crawler_mode"] == "interactive"
+
+    updated = client.patch(f"/api/test-runs/{created.json()['id']}", json={
+        "max_depth": 2,
+        "max_pages": 10,
+        "crawler_mode": "url",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["crawler_mode"] == "url"
 
 
 def test_create_run_uses_global_scan_policy(client: TestClient):
