@@ -1075,6 +1075,13 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
     links = session.exec(
         select(PageLink).where(PageLink.test_run_id == run_id)
     ).all()
+    anonymously_accessible_page_ids = set(
+        session.exec(
+            select(PageCredentialView.page_id)
+            .where(PageCredentialView.test_run_id == run_id)
+            .where(PageCredentialView.credential_id.is_(None))
+        ).all()
+    )
 
     nodes = [
         GraphNode(
@@ -1089,6 +1096,7 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
             in_scope=p.in_scope,
             scan_status=p.scan_status,
             accessible_by=json.loads(p.accessible_by or "[]"),
+            accessible_anonymously=p.id in anonymously_accessible_page_ids,
         )
         for p in pages
     ]

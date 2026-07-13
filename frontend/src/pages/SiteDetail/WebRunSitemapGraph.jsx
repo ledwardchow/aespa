@@ -2,7 +2,10 @@ import { useState } from "react";
 import { api } from "../../lib/api";
 import { apiTranscriptText } from "../../lib/utilities";
 import { OWASP_WEB_LABELS } from "./_constants";
-import { SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_BOTH_COLOR, USER_PALETTE } from "./_helpers";
+import {
+  SCOPE_IN_COLOR, SCOPE_OUT_COLOR, USER_ALL_COLOR, USER_ANONYMOUS_COLOR,
+  USER_MULTIPLE_COLOR, USER_PALETTE
+} from "./_helpers";
 import { useSelectedSitemapPage } from "./useSelectedSitemapPage";
 import { useSitemapGraph } from "./useSitemapGraph";
 import { WebRunSitemapTab } from "./WebRunSitemapTab";
@@ -65,7 +68,9 @@ export function WebRunSitemapGraph({
       {graph && graph.nodes.length > 0 && <div className="graph-legend">
         {graphView === "user" && run?.credentials?.length > 1 ? <>
           {(run.credentials || []).map((credential, index) => <div key={credential.id} className="legend-item"><span className="legend-dot" style={{ background: USER_PALETTE[index % USER_PALETTE.length] }} />{credential.label || credential.username}</div>)}
-          <div className="legend-item"><span className="legend-dot" style={{ background: USER_BOTH_COLOR }} />All users</div>
+          <div className="legend-item"><span className="legend-dot" style={{ background: USER_ANONYMOUS_COLOR }} />Unauthenticated</div>
+          <div className="legend-item"><span className="legend-dot" style={{ background: USER_MULTIPLE_COLOR }} />Multiple users</div>
+          <div className="legend-item"><span className="legend-dot" style={{ background: USER_ALL_COLOR }} />All users</div>
         </> : <>
           <div className="legend-item"><span className="legend-dot" style={{ background: SCOPE_IN_COLOR }} />In Scope</div>
           <div className="legend-item"><span className="legend-dot" style={{ background: SCOPE_OUT_COLOR }} />Out of Scope</div>
