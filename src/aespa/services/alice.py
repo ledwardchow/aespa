@@ -479,9 +479,7 @@ async def _execute_alice_tool(
     if tool_name == "forge_jwt":
 
         from aespa.services.scanner import (
-            _mark_session_pending,
             _record_session,
-            _session_label,
             _sign_hs256_jwt,
         )
 
@@ -519,8 +517,8 @@ async def _execute_alice_tool(
                     "claims": jwt_claims,
                     "header": jwt_header or {"typ": "JWT", "alg": "HS256"},
                 },
+                run_kind="api" if api_run_id is not None else "web",
             )
-            _mark_session_pending(label)
             # Surface the new session to later steps in this same turn.
             session_vault[label] = {
                 "label": label,
@@ -583,10 +581,21 @@ async def _execute_alice_tool(
     # ── credential_check ──────────────────────────────────────────────────────
     if tool_name == "credential_check":
         from aespa.services import traffic as traffic_svc
-        from aespa.services.scanner import _make_scanner_client
+        from aespa.services.scanner import (
+            _extract_bearer_token_from_body,
+            _make_scanner_client,
+            _record_session,
+            _session_kind,
+            _session_label,
+        )
 
         cred_url = str(tool_input.get("url") or base_url)
-        scope_err = check_scope(cred_url, site_id, run_id)
+        _alice_scope = (
+            scope_check_fn
+            if scope_check_fn
+            else (lambda u: check_scope(u, site_id, run_id))
+        )
+        scope_err = _alice_scope(cred_url)
         if scope_err:
             return f"[SCOPE BLOCK] {scope_err}"
 
@@ -623,12 +632,44 @@ async def _execute_alice_tool(
                             method, cred_url, data=body, headers=req_headers
                         )
                     success = resp.status_code in success_statuses
+                    session_label = None
+                    if success:
+                        token = _extract_bearer_token_from_body(resp.text)
+                        response_cookies = dict(resp.cookies)
+                        extra_headers = (
+                            {"Authorization": f"Bearer {token}"} if token else {}
+                        )
+                        if token or response_cookies:
+                            username = str(cand.get("username") or "credential")
+                            session_label = _session_label(username, session_vault)
+                            session_data = {
+                                "label": session_label,
+                                "kind": _session_kind(
+                                    response_cookies, extra_headers
+                                ),
+                                "username": username,
+                                "source": "alice_credential_check",
+                                "cookies": response_cookies,
+                                "extra_headers": extra_headers,
+                            }
+                            _record_session(
+                                run_id,
+                                label=session_label,
+                                session_data=session_data,
+                                source="alice_credential_check",
+                                metadata={"login_url": cred_url},
+                                run_kind=(
+                                    "api" if api_run_id is not None else "web"
+                                ),
+                            )
+                            session_vault[session_label] = session_data
                     results.append(
                         {
                             "username": cand.get("username"),
                             "password": cand.get("password"),
                             "status": resp.status_code,
                             "success": success,
+                            "session_label": session_label,
                             "location": resp.headers.get("location", ""),
                             "set_cookie": resp.headers.get("set-cookie", "")[:200],
                             "body_excerpt": resp.text[:300],
@@ -649,10 +690,11 @@ async def _execute_alice_tool(
 
         from aespa.services import traffic as traffic_svc
         from aespa.services.scanner import (
+            _extract_bearer_token_from_body,
             _make_scanner_client,
-            _mark_session_pending,
             _record_session,
             _request_scope_checked,
+            _session_kind,
             _session_label,
         )
 
@@ -708,13 +750,18 @@ async def _execute_alice_tool(
                         f"{_reg_redirect_blocked[1]} No session captured."
                     )
                 success = resp.status_code in success_statuses
+                token = _extract_bearer_token_from_body(resp.text) if success else None
+                response_cookies = dict(resp.cookies) if success else {}
+                extra_headers = (
+                    {"Authorization": f"Bearer {token}"} if token else {}
+                )
                 session_data: dict = {
                     "label": store_as,
-                    "kind": "cookie",
+                    "kind": _session_kind(response_cookies, extra_headers),
                     "username": body.get(username_field) or body.get(email_field),
                     "source": "register_account tool",
-                    "extra_headers": {},
-                    "cookies": dict(resp.cookies),
+                    "extra_headers": extra_headers,
+                    "cookies": response_cookies,
                 }
                 if success:
                     _record_session(
@@ -722,14 +769,14 @@ async def _execute_alice_tool(
                         label=store_as,
                         session_data=session_data,
                         source="alice_register",
+                        run_kind="api" if api_run_id is not None else "web",
                     )
-                    _mark_session_pending(store_as)
                     # Surface the new session to later steps in this same turn.
                     session_vault[store_as] = {
                         "label": store_as,
-                        "kind": "cookie",
-                        "cookies": dict(resp.cookies),
-                        "extra_headers": {},
+                        "kind": session_data["kind"],
+                        "cookies": response_cookies,
+                        "extra_headers": extra_headers,
                     }
                 return json.dumps(
                     {
@@ -1651,13 +1698,13 @@ def _run_api_context_tool(
 
     # ── lead_list ─────────────────────────────────────────────────────────────
     if tool_name == "lead_list":
-        from aespa.services.scan_leads import get_open_leads_for_collection
+        from aespa.services.scan_leads import get_leads_for_run
 
         try:
             cap = max(1, min(50, int(args.get("limit") or 20)))
         except (TypeError, ValueError):
             cap = 20
-        leads = get_open_leads_for_collection(collection_id)[:cap]
+        leads = get_leads_for_run("api", run_id)[:cap]
         return {
             "tool": "lead_list",
             "count": len(leads),
@@ -2164,12 +2211,12 @@ async def run_api_alice_turn_stream(
                 + "\n".join(s_lines)
             )
 
-    # Inject any open SAST leads so ALICE can investigate them.
+    # Inject this API run's independent SAST-lead copies.
     leads_block = ""
     try:
-        from aespa.services.scan_leads import format_leads_for_context
+        from aespa.services.scan_leads import format_leads_for_run
 
-        leads_block = format_leads_for_context(collection_id)
+        leads_block = format_leads_for_run("api", api_run_id)
     except Exception:
         pass
 
@@ -2200,7 +2247,7 @@ async def run_api_alice_turn_stream(
     # Withhold the site-oriented write_finding tool, which would persist the
     # finding against the TestRun/Site tables and trigger the site validator with
     # an ApiTestRun id (wrong/colliding cross-table lookup → stuck validation).
-    alice_tools = _get_alice_tools(exclude={"write_finding"})
+    alice_tools = _get_alice_tools(exclude={"write_finding", "agent_dispatch"})
     accumulated_thought = ""
     accumulated_message = ""
     step_count = 0
@@ -2299,7 +2346,7 @@ async def run_api_alice_turn_stream(
                                     "Please continue by calling exactly one tool now — "
                                     "http_request, context_tool (use report_finding to record a finding), "
                                     "forge_jwt, decode_jwt, credential_check, register_account, "
-                                    "agent_dispatch, or done."
+                                    "or done."
                                 ),
                             }
                         ],

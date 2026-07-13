@@ -65,7 +65,7 @@ export function SastRunsListPage() {
       {runs === null && <div className="subtle">Loading…</div>}
       {runs !== null && runs.length === 0 && <EmptyState icon="🔍"
         title="No SAST scans yet"
-        sub={'Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web scan.'} />}
+        sub={'Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web or API test run.'} />}
       {runs && runs.length > 0 && <div className="table-wrap">
           <table>
             <colgroup>
