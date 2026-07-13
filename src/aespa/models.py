@@ -455,7 +455,10 @@ class TestRun(SQLModel, table=True):
     max_pages: int = Field(default=500)
     # ``url`` preserves the legacy link-following crawler. ``interactive`` also
     # records safe, reproducible client-side browser states (tabs, dialogs, etc.).
-    crawler_mode: str = Field(default="url")
+    crawler_mode: str = Field(
+        default="url",
+        sa_column=Column(String, nullable=False, server_default=text("'url'")),
+    )
     scan_mode: str = Field(default="aggressive")
     scanner_policy_json: str = Field(default="{}")
     # Progress
