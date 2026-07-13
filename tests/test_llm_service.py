@@ -370,6 +370,16 @@ The final answer is {"context": "Real JSON", "suggested_links": []}.
     assert data["context"] == "Real JSON"
 
 
+def test_page_analysis_parses_compact_function_label():
+    _context, _links, categories = llm._parse(
+        '{"page_label":"Register for Internet Banking today now",'
+        '"context":"Registration form", "suggested_links": [], "categories": {}}',
+        "https://target.local/register",
+    )
+
+    assert categories["page_label"] == "Register for Internet Banking today"
+
+
 def test_extract_message_text_uses_final_content_before_reasoning():
     message = SimpleNamespace(
         reasoning_content='{"context":"wrong"}',
@@ -2326,4 +2336,3 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
     # Verify last user message has cachePoint
     assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
-
