@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../../lib/api";
-import { nav } from "../../lib/router";
-import { StatusBadge } from "../../components/StatusBadge";
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 
@@ -21,16 +19,13 @@ export function ApiFilesManager({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [reparseState, setReparseState] = useState({}); // docId → "running"|"done"|"failed"
-  const [sastRuns, setSastRuns] = useState([]);
-  const [sastBusy, setSastBusy] = useState(false);
   const fileRef = useRef(null);
   const load = useCallback(async () => {
     try {
-      const [c, d, eps, sr] = await Promise.all([api.getApiCollection(collectionId), api.listApiDocuments(collectionId), api.listApiEndpoints(collectionId), api.listSastRuns(collectionId).catch(() => [])]);
+      const [c, d, eps] = await Promise.all([api.getApiCollection(collectionId), api.listApiDocuments(collectionId), api.listApiEndpoints(collectionId)]);
       setCollection(c);
       setDocs(d);
       setEndpoints(eps);
-      setSastRuns(sr);
     } catch (e) {
       setError(e.message);
     }
@@ -157,7 +152,7 @@ export function ApiFilesManager({
         <div className="subtle" style={{
           marginTop: 6,
           fontSize: 11
-        }}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip (max 25 MB each)</div>
+        }}>OpenAPI / Swagger, Postman, free text, credentials, or a source zip for endpoint extraction (max 25 MB each)</div>
       </div>
       {endpoints.length > 0 && <div className="alert" style={{
         background: "var(--surface-2,#1a2a1a)",
@@ -215,60 +210,6 @@ export function ApiFilesManager({
               </tr>)}
             </tbody>
           </table>
-        </div>}
-
-      {/* SAST runs section — only show when a source_zip is present */
-      docs && docs.some(d => d.doc_type === "source_zip") && <div style={{
-        marginTop: 24
-      }}>
-          <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 10
-        }}>
-            <h3 style={{
-            margin: 0
-          }}>SAST Scans</h3>
-            <button className="btn sm" disabled={sastBusy} onClick={async () => {
-            setSastBusy(true);
-            setError(null);
-            try {
-              const sr = await api.createSastRun(collectionId);
-              await api.startSastScan(sr.id);
-              nav(`#/sast-runs/${sr.id}/progress`);
-            } catch (e) {
-              setError(e.message);
-            } finally {
-              setSastBusy(false);
-            }
-          }}>{sastBusy ? "Starting…" : "Run SAST Scan"}</button>
-          </div>
-          {sastRuns.length === 0 ? <div className="subtle">No SAST scans yet. Click "Run SAST Scan" to analyse the uploaded source code.</div> : <div className="table-wrap">
-              <table>
-                <colgroup><col style={{
-                width: "30%"
-              }} /><col style={{
-                width: "12%"
-              }} /><col style={{
-                width: "8%"
-              }} /><col style={{
-                width: "18%"
-              }} /><col style={{
-                width: "16%"
-              }} /><col /></colgroup>
-                <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
-                <tbody>{sastRuns.map(sr => <tr key={sr.id}>
-                    <td>{sr.name}</td>
-                    <td><StatusBadge status={sr.status} /></td>
-                    <td>{sr.leads_count}</td>
-                    <td>{sr.triggered_by_run_id ? <a href={`#/api-runs/${sr.triggered_by_run_id}/status`}>API run #{sr.triggered_by_run_id}</a> : <span className="subtle">—</span>}</td>
-                    <td>{sr.started_at ? new Date(sr.started_at).toLocaleString() : "—"}</td>
-                    <td><a className="btn ghost sm" href={`#/sast-runs/${sr.id}/progress`}>View →</a></td>
-                  </tr>)}
-                </tbody>
-              </table>
-            </div>}
         </div>}
     </div>
   </>;

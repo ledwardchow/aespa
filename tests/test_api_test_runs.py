@@ -393,7 +393,7 @@ def test_run_kind_is_resolved_by_scope_only():
         assert events_svc._run_kind_for(1, {}) == "api"
     with events_svc.run_kind_scope("sast"):
         assert events_svc._run_kind_for(1, {}) == "sast"
-    # Nested scope — a SAST pre-phase awaited inside an API scan — restores.
+    # Nested scopes restore the outer API kind.
     with events_svc.run_kind_scope("api"):
         with events_svc.run_kind_scope("sast"):
             assert events_svc._run_kind_for(1, {}) == "sast"
