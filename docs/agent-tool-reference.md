@@ -18,11 +18,11 @@ This document lists every tool, what it does, and which agent/scan mode can call
 | Agent | Scan mode | Tool set (source) |
 |---|---|---|
 | **Test Lead** | Web dynamic scan (`scanner.py`) | Full `THINKING_AGENT_TOOLS` |
-| **API Test Lead** | API scan (`api_scanner.py`) | Full `THINKING_AGENT_TOOLS`; `context_tool` routed to API handlers |
-| **Specialist Agent** | Dispatched from any Test Lead / ALICE | `SPECIALIST_AGENT_TOOLS` (+ crypto extras) |
+| **API Test Lead** | API scan (`api_scanner.py`) | `get_api_test_lead_tools()` API-aware subset; strict API context routing |
+| **Specialist Agent** | Dispatched from web Test Lead / web ALICE | `SPECIALIST_AGENT_TOOLS` (+ crypto extras); API dispatch is withheld |
 | **Adversarial Validator** | Post-finding validation (`validator.py`) | `VALIDATOR_AGENT_TOOLS` |
 | **A.L.I.C.E.** | Interactive chat, web + API runs (`alice.py`) | `_ALICE_TOOL_NAMES` subset |
-| **SAST Scanner** | Static analysis pre-phase (`sast_scanner.py`) | `SAST_TOOLS` |
+| **SAST Scanner** | Standalone static analysis (`sast_scanner.py`) | `SAST_TOOLS` |
 | **Reporting Agent** | Post-scan finding pre-screen | No tools — structured-output review pass only |
 
 ---
@@ -68,8 +68,10 @@ next action).
 | `auth_matrix` | Endpoints worth testing across anonymous/user/role boundaries |
 | `extract_entities` | URLs, paths, IDs, UUIDs, emails, JWT hints, error/debug lines from text or a prior step |
 
-**API-run sub-commands.** On API scans (and ALICE on API runs), `_api_context_tool_fn`
-routes a different set. `site_map` / `page_detail` redirect to `endpoint_list`.
+**API-run sub-commands.** Automated API scans use a strict allowlist: API-specific
+inventory commands plus `history_search`, `traffic_search`, `compare_responses`,
+`mutate_request`, and `extract_entities`. Web-only or unknown names are rejected rather
+than falling through to the web handler. API ALICE uses the API-specific commands below.
 
 | Sub-command | Returns |
 |---|---|
@@ -78,7 +80,7 @@ routes a different set. `site_map` / `page_detail` redirect to `endpoint_list`.
 | `collection_info` | Collection metadata, base URL, scope hosts, auth summary |
 | `finding_list` | Findings written this API run |
 | `report_finding` | Persist a confirmed finding on an API run (the API-aware replacement for `write_finding`) |
-| `lead_list` *(ALICE)* | Open `ScanLead` rows from the SAST pre-phase for this collection |
+| `lead_list` *(ALICE)* | Open `ScanLead` copies explicitly imported into this API test run |
 
 ### SAST file tools
 
@@ -104,26 +106,27 @@ The SAST scanner gets its own set instead of the web/API tools. All file tools a
 | Tool | Test Lead | API Test Lead | Specialist | Validator | A.L.I.C.E. | SAST |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | `http_request` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| `browser` | ✓ | ✓ | ✓ | — | ✓ | — |
+| `browser` | ✓ | — | ✓ | — | ✓ | — |
 | `context_tool` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 | `write_finding` | ✓ | ✓¹ | ✓ | — | ✓¹ | — |
-| `remove_finding` | ✓ | ✓ | — | — | ✓ | — |
+| `remove_finding` | ✓ | — | — | — | ✓ | — |
 | `update_lead` | ✓ | ✓ | — | — | ✓ | — |
 | `forge_jwt` | ✓ | ✓ | crypto only² | — | ✓ | — |
 | `decode_jwt` | ✓ | ✓ | crypto only² | — | ✓ | — |
 | `credential_check` | ✓ | ✓ | — | — | ✓ | — |
 | `register_account` | ✓ | ✓ | — | — | ✓ | — |
-| `agent_dispatch` | ✓ | ✓ | —³ | — | ✓ | — |
+| `agent_dispatch` | ✓ | — | —³ | — | ✓⁶ | — |
 | `done` | ✓ | ✓ | ✓ | ✓⁴ | ✓ | ✓ |
 | `compare_responses` | — | — | — | ✓⁵ | — | — |
 | SAST file tools | — | — | — | — | — | ✓ |
 
 **Notes**
-1. On API runs, findings are recorded via the API-aware `context_tool(tool='report_finding')` rather than `write_finding` — the site-oriented `write_finding` is excluded for API ALICE.
+1. The automated API Test Lead uses API-aware top-level `write_finding`; API ALICE uses `context_tool(tool='report_finding')` and withholds top-level `write_finding`.
 2. Specialists get `forge_jwt` / `decode_jwt` only for the `crypto` attack class (`SPECIALIST_AGENT_TOOLS_CRYPTO`); the base specialist set is `http_request`, `browser`, `context_tool`, `write_finding`, `done`.
 3. Specialists cannot call `agent_dispatch` — this prevents recursive specialist dispatch.
 4. The validator's `done` returns a structured `verdict` (`confirmed` / `false_positive` / …) + `reasoning` + optional PoC, not a free-text summary.
 5. The validator gets `compare_responses` as a dedicated top-level tool (not just the `context_tool` sub-command) so it can diff a re-run probe against the original evidence.
+6. `agent_dispatch` is available to web ALICE only. API ALICE withholds it until the Specialist executor is fully API/run-kind aware.
 
 ---
 
@@ -132,6 +135,7 @@ The SAST scanner gets its own set instead of the web/API tools. All file tools a
 | Set | Location |
 |---|---|
 | `THINKING_AGENT_TOOLS` | `services/prompts/test_lead.py` |
+| `get_api_test_lead_tools()` | `services/prompts/test_lead.py` |
 | `SPECIALIST_AGENT_TOOLS` / `SPECIALIST_AGENT_TOOLS_CRYPTO` / `get_specialist_tools()` | `services/prompts/specialist.py` |
 | `VALIDATOR_AGENT_TOOLS` | `services/prompts/validator.py` |
 | `_ALICE_TOOL_NAMES` / `_get_alice_tools()` | `services/alice.py` |

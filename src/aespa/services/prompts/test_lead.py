@@ -725,9 +725,7 @@ _API_THINKING_AGENT_SYSTEM = (
     "   API4.\n"
     "7. For JWT-bearing APIs: decode tokens, look for weak HS256 secrets (try forge_jwt\n"
     "   with common secrets), alg=none rejection, and role/scope claim manipulation.\n"
-    "8. Dispatch a Specialist Agent via agent_dispatch for high-confidence leads on sqli,\n"
-    "   xss, idor, auth_bypass, ssrf, or business_logic. Continue covering other surface\n"
-    "   while specialists run.\n"
+    "8. Investigate high-confidence leads directly with focused HTTP probes.\n"
     "9. Write findings only when you have concrete evidence from a tool result. Set\n"
     "   owasp_category to the most relevant OWASP API Top 10 code (API1–API10).\n"
     "10. Call done only when all in-scope endpoints, auth flows, object references, and\n"
@@ -739,7 +737,8 @@ _API_THINKING_AGENT_SYSTEM = (
     "  probe). This is required for coverage tracking — do not omit it.\n"
     "- context_tool: query the API endpoint inventory without hitting the target.\n"
     "  Available sub-commands: endpoint_list, endpoint_detail, collection_info,\n"
-    "  finding_list, history_search, target_inventory, traffic_search, extract_entities.\n"
+    "  finding_list, history_search, traffic_search, compare_responses, mutate_request,\n"
+    "  extract_entities.\n"
     "  After 3 consecutive calls, execute a probe or write a finding.\n"
     "- write_finding: persist a confirmed finding with concrete evidence. No duplicates.\n"
     "  Set owasp_category to the OWASP API Top 10 code (e.g. API1, API3, API5).\n"
@@ -749,10 +748,8 @@ _API_THINKING_AGENT_SYSTEM = (
     "  calling write_finding. Call update_lead IMMEDIATELY after resolving a lead, in the\n"
     "  same turn as its write_finding and before moving to the next lead — do NOT batch all\n"
     "  update_lead calls at the end of the scan.\n"
-    "- agent_dispatch: dispatch a specialist for sqli/idor/auth_bypass/ssrf/business_logic.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
-    "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
     "- done: end the assessment when all surface is covered.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
@@ -900,9 +897,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
         "name": "context_tool",
         "description": (
             "Retrieve scanner context without hitting the target. "
-            "Available: site_map, page_detail, history_search, finding_list, "
-            "target_inventory, traffic_search, endpoint_detail, compare_responses, "
-            "mutate_request, auth_matrix, extract_entities. "
+            "Use only the surface-specific sub-commands listed in the system prompt. "
             "After 3 consecutive calls, either act or include context_budget_reason "
             "explaining why another targeted context scan round is needed."
         ),
@@ -1164,6 +1159,29 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
 ]
+
+
+_API_TEST_LEAD_TOOL_NAMES = frozenset(
+    {
+        "http_request",
+        "context_tool",
+        "update_lead",
+        "write_finding",
+        "forge_jwt",
+        "decode_jwt",
+        "credential_check",
+        "register_account",
+        "done",
+    }
+)
+
+
+def get_api_test_lead_tools() -> list[dict]:
+    """Return only tools with API-aware executor paths for automated API scans."""
+    return [
+        tool for tool in THINKING_AGENT_TOOLS
+        if tool["name"] in _API_TEST_LEAD_TOOL_NAMES
+    ]
 
 
 # TLS/SSL posture probe. NOT part of the Test Lead toolset: a consolidated TLS
