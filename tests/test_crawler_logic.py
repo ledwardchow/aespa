@@ -336,7 +336,7 @@ def test_page_requires_login_detects_explicit_login_wall_text():
 
 
 class _ModalLoginPage:
-    """Password field is hidden until a login trigger is clicked (modal login)."""
+    """Playwright-visible password field beneath a closed modal backdrop."""
 
     def __init__(self):
         self._form_visible = False
@@ -353,8 +353,15 @@ class _ModalLoginPage:
 
             async def is_visible(self):
                 if selector == "input[type='password']":
-                    return page._form_visible
+                    # Playwright considers opacity-zero descendants visible when
+                    # they retain layout dimensions.
+                    return True
                 return page.clicked is None  # trigger visible until clicked
+
+            async def evaluate(self, script, actionable):  # noqa: ARG002
+                if selector == "input[type='password']":
+                    return page._form_visible
+                return page.clicked is None
 
             async def click(self):
                 page.clicked = selector
@@ -378,6 +385,70 @@ def test_reveal_login_form_noop_when_form_already_visible():
     page._form_visible = True
     asyncio.run(crawler._reveal_login_form(page))
     assert page.clicked is None
+
+
+def test_page_requires_login_ignores_password_inside_closed_modal():
+    page = _ModalLoginPage()
+
+    assert (
+        asyncio.run(crawler._page_requires_login(page, "https://target.local/"))
+        is False
+    )
+
+
+class _InteractiveControlsPage:
+    def __init__(self):
+        self.script = ""
+
+    async def evaluate(self, script):
+        self.script = script
+        return [
+            {
+                "tag": "a",
+                "role": "link",
+                "name": "Open account",
+                "testid": None,
+                "id": None,
+            }
+        ]
+
+
+def test_interactive_controls_include_replayable_non_navigation_links():
+    page = _InteractiveControlsPage()
+
+    controls = asyncio.run(crawler._interactive_controls(page))
+
+    assert 'a[href="#"]' in page.script
+    assert controls == [
+        {
+            "role": "link",
+            "name": "Open account",
+            "testid": None,
+            "element_id": None,
+            "selector": "",
+        }
+    ]
+
+
+def test_crawl_seed_urls_preserve_same_scope_authenticated_landing():
+    assert crawler._crawl_seed_urls(
+        "https://target.local/app/",
+        "https://target.local/app/account",
+        "target.local",
+        "/app/",
+    ) == [
+        "https://target.local/app/account",
+        "https://target.local/app/",
+    ]
+
+
+def test_crawl_seed_urls_reject_external_authenticated_landing():
+    assert crawler._crawl_seed_urls(
+        "https://target.local/app/",
+        "https://identity.example/callback",
+        "target.local",
+        "/app/",
+    ) == ["https://target.local/app/"]
 
 
 def test_auth_check_matches_similar_post_login_page():
