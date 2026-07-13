@@ -451,7 +451,10 @@ class TestRun(SQLModel, table=True):
     # Crawl config
     use_screenshots: bool = Field(default=False)
     max_depth: int = Field(default=3)
-    max_pages: int = Field(default=50)
+    max_pages: int = Field(default=500)
+    # ``url`` preserves the legacy link-following crawler. ``interactive`` also
+    # records safe, reproducible client-side browser states (tabs, dialogs, etc.).
+    crawler_mode: str = Field(default="url")
     scan_mode: str = Field(default="aggressive")
     scanner_policy_json: str = Field(default="{}")
     # Progress
@@ -485,6 +488,12 @@ class CrawledPage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
     url: str = Field(index=True)
+    # URL is evidence/a navigation hint, not necessarily identity for SPA views.
+    state_key: Optional[str] = Field(default=None, index=True)
+    # Canonical, credential-neutral functionality label used in the site map.
+    state_label: Optional[str] = Field(default=None)
+    state_kind: str = Field(default="url")  # url | interactive | api
+    replay_steps_json: str = Field(default="[]")
     title: Optional[str] = Field(default=None)
     page_text: Optional[str] = Field(default=None)   # truncated ~10k chars
     screenshot_b64: Optional[str] = Field(default=None)
@@ -542,6 +551,8 @@ class PageLink(SQLModel, table=True):
     target_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
     target_url: str
     link_text: Optional[str] = Field(default=None)
+    action_kind: str = Field(default="navigate")
+    action_data_json: str = Field(default="{}")
 
 
 class TrafficEntry(SQLModel, table=True):
