@@ -51,7 +51,7 @@ export function WebRunIntelligenceTab({ runId, active, captureActive, onTotalCha
     }
   }, [onTotalChange, runId]);
 
-  return <div style={{ display: active ? undefined : "none" }}>
+  return <div style={{ display: active ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
     {error && <div className="alert error">{error}</div>}
     <TargetIntelligencePanel
       data={data}
