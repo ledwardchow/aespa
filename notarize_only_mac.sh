@@ -34,6 +34,7 @@ fi
 
 echo "==> Stapling the ticket"
 xcrun stapler staple "$APP"
+xcrun stapler validate "$APP"
 
 echo "==> Verifying Gatekeeper acceptance"
 spctl -a -vvv -t install "$APP"
