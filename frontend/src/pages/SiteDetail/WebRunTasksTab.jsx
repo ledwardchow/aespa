@@ -70,7 +70,7 @@ export function WebRunTasksTab({ runId, active, scanActive, reloadKey, onTotalCh
     }
   }, [onTotalChange, runId]);
 
-  return <div style={{ display: active ? undefined : "none" }}>
+  return <div style={{ display: active ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
     {error && <div className="alert error">{error}</div>}
     <TaskGraphPanel
       data={data}
