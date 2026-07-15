@@ -35,6 +35,7 @@ from aespa.models import (
     ScanFinding,
 )
 from aespa.services import events as events_svc
+from aespa.services import llm as llm_svc
 from aespa.services import scanner_sessions
 from aespa.services.prompts.test_lead import (
     _API_THINKING_AGENT_SYSTEM,
@@ -1447,13 +1448,29 @@ async def _api_scan_task(api_run_id: int) -> None:
     except Exception as exc:
         log.exception("API scan error: api_run_id=%s", api_run_id)
         _update_run_status(api_run_id, "failed", str(exc))
+        is_refusal = isinstance(exc, llm_svc.LLMRefusalError)
+        failure_label = "LLM provider refusal" if is_refusal else "Scan failed"
+        failure_message = str(exc)[:2000]
         events_svc.emit(
             api_run_id,
             {
                 "type": "scanner_phase",
-                "phase": "scan_stopped",
+                "phase": "scan_failed",
                 "status": "error",
-                "message": f"API scan failed: {exc}",
+                "message": f"{failure_label}: {failure_message}",
+                "data": {"reason": "provider_refusal" if is_refusal else "error"},
+            },
+        )
+        events_svc.emit(
+            api_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "failed",
+                "current_task": failure_label,
+                "outcome": failure_message,
+                "_persist": True,
             },
         )
     finally:

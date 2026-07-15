@@ -182,9 +182,6 @@ A.L.I.C.E chat:
 Dynamic scan in progress:  
 ![Screenshot](docs/images/agentstatus.png)
 
-Task Graph used by the dynamic scan:  
-![Screenshot](docs/images/taskgraph.png)
-
 Attack Surface  
 ![Screenshot](docs/images/attacksurface.png)
 

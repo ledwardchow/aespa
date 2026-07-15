@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import CrawledPage, ScanFinding, Site
+from aespa.models import AgentLog, CrawledPage, ScanFinding, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
@@ -358,6 +358,61 @@ def test_dynamic_scan_task_does_not_write_error_message(monkeypatch):
             refreshed_run = session.get(RunModel, run_id)
 
         assert refreshed_run.error_message is None
+    finally:
+        scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_dynamic_scan_refusal_is_persisted_on_test_lead_log(monkeypatch):
+    from aespa import db as db_module
+    from aespa import models as _models  # noqa: F401
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    refusal = (
+        "LLM provider refused the scan request at step 84: This content was "
+        "flagged for possible cybersecurity risk (cyber_policy)"
+    )
+
+    async def fake_do_thinking_scan(run_id: int) -> None:
+        raise llm.LLMRefusalError(refusal)
+
+    try:
+        with Session(engine) as session:
+            site = Site(name="Target", base_url="https://target.local")
+            session.add(site)
+            session.commit()
+            session.refresh(site)
+            run = RunModel(site_id=site.id, name="Run #1")
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            run_id = run.id
+
+        monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+        monkeypatch.setattr(db_module, "get_engine", lambda: engine)
+        monkeypatch.setattr(scanner, "_do_thinking_scan", fake_do_thinking_scan)
+
+        scanner._thinking_scan_status.pop(run_id, None)
+        asyncio.run(scanner._thinking_scan_task(run_id))
+
+        with Session(engine) as session:
+            failure = session.exec(
+                select(AgentLog)
+                .where(AgentLog.test_run_id == run_id)
+                .where(AgentLog.agent_id == "scanner")
+                .where(AgentLog.status == "failed")
+            ).one()
+
+        assert scanner._thinking_scan_status[run_id] == "failed"
+        assert failure.role == "Test Lead"
+        assert failure.current_task == "LLM provider refusal"
+        assert failure.outcome == refusal
     finally:
         scanner._thinking_scan_status.pop(locals().get("run_id", 0), None)
         SQLModel.metadata.drop_all(engine)

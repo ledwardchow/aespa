@@ -808,7 +808,7 @@ _THINKING_AGENT_SYSTEM = (
     "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
     "their current statuses.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
-    "- done: call ONLY when the task graph shows zero queued/running tasks AND every input-taking route in site_map has been probed. Writing a finding is a milestone, not an exit — resume probing the next queued target immediately after write_finding returns. An agent_dispatch is an asynchronous handoff — keep probing other routes yourself in parallel. A high step count is NOT a done condition.\n"
+    "- done: call ONLY when every input-taking route in site_map has been probed, all high-priority applicable Work Program areas have meaningful evidence, imported leads are resolved, and no specialist is still running. Writing a finding is a milestone, not an exit — resume probing the next untested surface immediately after write_finding returns. An agent_dispatch is an asynchronous handoff — keep probing other routes yourself in parallel. A high step count is NOT a done condition.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
     "attack surface.\n"
@@ -1076,10 +1076,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
     {
         "name": "done",
         "description": (
-            "Call done ONLY when: (1) the task graph shows no queued or running tasks, "
-            "OR the remaining queued tasks are all scope-blocked; AND (2) every "
-            "input-accepting route in site_map has been probed at least once. Writing "
-            "a finding is a milestone, not an exit — continue to the next queued task "
+            "Call done ONLY when every input-accepting route in site_map has been "
+            "probed, all high-priority applicable Work Program areas have meaningful "
+            "evidence, imported leads are resolved, and no specialist is still running. Writing "
+            "a finding is a milestone, not an exit — continue to the next untested surface "
             "immediately after write_finding returns. An agent_dispatch is an async "
             "handoff — keep probing other routes yourself. A high step count is not a "
             "done condition."
@@ -1255,8 +1255,7 @@ TASK: What is the single most valuable action to take RIGHT NOW?
 Think like a human tester:
 - Use context tools to pull only the specific crawl/history/finding details you need. Do not
   assume route details are available inline unless they appear in the compact context or history.
-- If a target-driven task graph is present in the crawl context, prefer high-priority queued
-  or running tasks and reference the matching hypothesis in your observation/note.
+- Use the attack-surface summary and site_map to prioritize high-risk untested routes.
 - Start broad with site_map when route coverage is unclear, then use page_detail or
   history_search before sending a probe that depends on precise parameters or prior evidence.
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
@@ -1273,9 +1272,9 @@ Think like a human tester:
 - Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
     followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
-- INVENTORY DENSITY & SYSTEMATIC PROBING: Testing a single endpoint for a vulnerability class (e.g. testing one route for IDOR or SQLi) does NOT constitute application coverage. Every distinct route, API endpoint, form, and ID parameter is a separate attack surface. Work through the queued tasks in the "Target-driven task graph" and site_map systematically.
-- POST-FINDING CONTINUATION: Persisting a confirmed issue via finding_write is a step milestone, NOT a signal to finish. After recording a finding, immediately execute the next queued target from the task graph.
-- SPECIALIST HANDOFF: Dispatching a specialist agent is an asynchronous handoff; continue exploring remaining non-specialist routes and queued tasks in parallel while the specialist works in the background.
+- INVENTORY DENSITY & SYSTEMATIC PROBING: Testing a single endpoint for a vulnerability class (e.g. testing one route for IDOR or SQLi) does NOT constitute application coverage. Every distinct route, API endpoint, form, and ID parameter is a separate attack surface. Work through site_map and the Work Program systematically.
+- POST-FINDING CONTINUATION: Persisting a confirmed issue via finding_write is a step milestone, NOT a signal to finish. After recording a finding, immediately execute the next high-priority untested surface.
+- SPECIALIST HANDOFF: Dispatching a specialist agent is an asynchronous handoff; continue exploring remaining non-specialist routes and Work Program gaps in parallel while the specialist works in the background.
 - STEP COUNT IS NOT AN EXIT: A high step count or long context window is NOT a reason to stop. Continue probing remaining un-tested surfaces.
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
@@ -1488,7 +1487,7 @@ Register-account rules:
 - Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
 - Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
 
-To finish the assessment ONLY after probing all queued tasks in the task graph and verifying via site_map that zero un-tested input routes remain:
+To finish the assessment ONLY after verifying via site_map that zero untested input routes remain, resolving imported leads, and covering all high-priority applicable Work Program areas:
 {{
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"

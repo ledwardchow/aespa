@@ -70,12 +70,12 @@ The central unit of work is a run:
 
 - A web `TestRun` progresses `created -> crawling -> crawled -> scanning -> scanned`.
 - `ApiTestRun` and `SastRun` are parallel run types.
-- Each run owns its artifacts: pages, traffic, findings, hypotheses, logs, and related scan data.
+- Each run owns its artifacts: pages, traffic, findings, coverage, logs, and related scan data.
 
 Key service entry points:
 
 - `services/crawler.py`: `start_crawl(run_id)` runs multi-phase Playwright crawling and produces `CrawledPage` plus `TargetIntelItem` intelligence atoms.
-- `services/scanner.py`: `start_thinking_scan(run_id)` runs the agentic dynamic scan loop, builds recon context, seeds hypotheses/tasks, dispatches specialists, and deduplicates/reviews findings.
+- `services/scanner.py`: `start_thinking_scan(run_id)` runs the agentic dynamic scan loop, builds recon context, tracks the OWASP workprogram, dispatches specialists, and deduplicates/reviews findings.
 - `services/api_scanner.py`: `start_api_scan(api_run_id)` runs the agentic API scan and tracks OWASP API Top-10 coverage matrix cells in `ApiEndpointTest`.
 - `services/sast_scanner.py`: runs the agentic loop over an extracted source ZIP, with file tools path-jailed to the extraction root, and emits `ScanLead`s.
 - `services/validator.py`: adversarial validator agent with a disprove-it mandate. It reduces false positives and cannot create findings.
