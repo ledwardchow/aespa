@@ -577,6 +577,9 @@ class PageOwaspTest(SQLModel, table=True):
     )  # not_started|in_progress|covered|skipped|finding
     skip_reason: Optional[str] = Field(default=None)
     finding_ids_json: str = Field(default="[]")  # JSON list of ScanFinding.id
+    test_classes_json: str = Field(
+        default="{}"
+    )  # JSON {test_class: {status, finding_ids, last_updated}}
     last_updated: Optional[datetime] = Field(default_factory=_utcnow)
     created_at: datetime = Field(default_factory=_utcnow)
 

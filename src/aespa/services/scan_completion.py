@@ -15,7 +15,9 @@ from typing import Any, Callable
 
 
 def _fingerprint(value: str) -> str:
-    return hashlib.sha256((value or "").encode("utf-8", errors="replace")).hexdigest()[:16]
+    return hashlib.sha256((value or "").encode("utf-8", errors="replace")).hexdigest()[
+        :16
+    ]
 
 
 @dataclass
@@ -47,7 +49,9 @@ class ScanCompletionPolicy:
         policy = cls()
         if not isinstance(raw, dict):
             return policy
-        policy.sessions = raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        policy.sessions = (
+            raw.get("sessions") if isinstance(raw.get("sessions"), dict) else {}
+        )
         policy.probe_outcomes = (
             raw.get("probe_outcomes")
             if isinstance(raw.get("probe_outcomes"), dict)
@@ -152,6 +156,7 @@ class ScanCompletionPolicy:
         body: Any,
         session_label: str | None,
         owasp_category: str,
+        test_class: str = "",
     ) -> str:
         payload = json.dumps(
             {
@@ -160,6 +165,7 @@ class ScanCompletionPolicy:
                 "body": body,
                 "session": session_label or "",
                 "category": (owasp_category or "").upper(),
+                "test_class": (test_class or "").lower(),
             },
             sort_keys=True,
             default=str,
@@ -178,7 +184,9 @@ class ScanCompletionPolicy:
             "OWASP category, or call done if no useful attack surface remains."
         )
 
-    def record_probe_outcome(self, signature: str, status: int, response_body: str) -> None:
+    def record_probe_outcome(
+        self, signature: str, status: int, response_body: str
+    ) -> None:
         response_fingerprint = _fingerprint(response_body)
         previous = self.probe_outcomes.get(signature) or {}
         same = (
@@ -246,8 +254,13 @@ class ScanCompletionPolicy:
                     "endpoint. A 401 or 403 still counts as an attempt and the invalid "
                     "session will be evicted; do not retry it."
                 )
-                return False, feedback, (
-                    "Completion delayed for one bounded session-use challenge: " + labels
+                return (
+                    False,
+                    feedback,
+                    (
+                        "Completion delayed for one bounded session-use challenge: "
+                        + labels
+                    ),
                 )
             return True, "", "Completion accepted: session-use challenge was declined."
 
@@ -257,9 +270,13 @@ class ScanCompletionPolicy:
             gained = self.progress_generation - self.coverage_challenge_generation
             self.coverage_challenge_active = False
             if gained < 3:
-                return True, "", (
-                    "Completion accepted: coverage challenge produced fewer than three "
-                    f"new progress signals ({gained})."
+                return (
+                    True,
+                    "",
+                    (
+                        "Completion accepted: coverage challenge produced fewer than three "
+                        f"new progress signals ({gained})."
+                    ),
                 )
 
         gaps = coverage_gaps() if coverage_gaps is not None else {}
@@ -277,7 +294,13 @@ class ScanCompletionPolicy:
             for action in actions[:6]:
                 lines.append(
                     f"- {action.get('method', 'GET')} {action.get('url')} "
-                    f"category={action.get('owasp_category')} — {action.get('reason')}"
+                    f"category={action.get('owasp_category')}"
+                    + (
+                        f" test_class={action.get('test_class')}"
+                        if action.get("test_class")
+                        else ""
+                    )
+                    + f" — {action.get('reason')}"
                 )
             feedback = (
                 f"Complete one bounded coverage round ({self.coverage_rounds}/"
@@ -287,9 +310,13 @@ class ScanCompletionPolicy:
                 + "\nIf these probes are blocked or unproductive, call done again; "
                 "completion will not be trapped."
             )
-            return False, feedback, (
-                f"Completion delayed: supplied {min(6, len(actions))} live coverage "
-                f"gaps (round {self.coverage_rounds}/{self.max_coverage_rounds})."
+            return (
+                False,
+                feedback,
+                (
+                    f"Completion delayed: supplied {min(6, len(actions))} live coverage "
+                    f"gaps (round {self.coverage_rounds}/{self.max_coverage_rounds})."
+                ),
             )
 
         return True, "", "Completion accepted: bounded completion checks satisfied."
