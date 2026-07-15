@@ -4,7 +4,7 @@ import { isDynamicScanActive } from "./_helpers";
 import { useEventStream } from "../../hooks/useEventStream";
 
 export function useWebRunEvents(options) {
-  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setTasksReloadKey, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors } = options;
+  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors } = options;
 
   // SSE: receive incremental graph + status updates — no graph polling needed.
   useEventStream(`/api/test-runs/${runId}/events`, {
@@ -121,8 +121,6 @@ export function useWebRunEvents(options) {
         if (evt.phase === "site_plan" && evt.status === "complete" && evt.data) {
           setSitePlanData(evt.data);
         }
-      } else if (evt.type === "task_graph_update") {
-        setTasksReloadKey(Date.now());
       } else if (evt.type === "finding_validation_update") {
         setFindings(prev => prev.map(f => f.id === evt.finding_id ? {
           ...f,

@@ -2,7 +2,7 @@ const WEB_RUN_TABS = [
   { key: "activity", label: "Status" },
   { key: "sitemap", label: "Site Map" },
   { key: "intelligence", label: "Intelligence" },
-  { key: "tasks", label: "Task Graph" },
+  { key: "attack", label: "Attack Surface & Coverage" },
   { key: "sessions", label: "Sessions" },
   { key: "findings", label: "Findings" },
   { key: "traffic", label: "Traffic Log" },
