@@ -211,8 +211,6 @@ def export_site(session: Session, site_id: int) -> dict:
         PageCredentialView,
         PageLink,
         PageOwaspTest,
-        PentestHypothesis,
-        PentestTask,
         ScanCheckpoint,
         ScanFinding,
         ScanLog,
@@ -243,8 +241,6 @@ def export_site(session: Session, site_id: int) -> dict:
         ).all())
         views   = list(session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == rid)).all())
         intel   = list(session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == rid)).all())
-        hyps    = list(session.exec(select(PentestHypothesis).where(PentestHypothesis.test_run_id == rid)).all())
-        tasks   = list(session.exec(select(PentestTask).where(PentestTask.test_run_id == rid)).all())
         findings = list(session.exec(select(ScanFinding).where(ScanFinding.test_run_id == rid)).all())
         logs    = list(session.exec(
             select(ScanLog).where(ScanLog.test_run_id == rid).where(ScanLog.run_kind == "web")
@@ -272,8 +268,6 @@ def export_site(session: Session, site_id: int) -> dict:
             "scanner_sessions": [_row(s) for s in sessions_],
             "page_credential_views": [_row(v) for v in views],
             "target_intel_items": [_row(i) for i in intel],
-            "pentest_hypotheses": [_row(h) for h in hyps],
-            "pentest_tasks": [_row(t) for t in tasks],
             "scan_findings": [_row(f) for f in findings],
             "scan_logs": [_row(lg) for lg in logs],
             "page_owasp_tests": [_row(o) for o in owasp_tests],
@@ -308,8 +302,6 @@ def import_site(session: Session, bundle: dict) -> Site:
         PageCredentialView,
         PageLink,
         PageOwaspTest,
-        PentestHypothesis,
-        PentestTask,
         ScanCheckpoint,
         ScanFinding,
         ScanLog,
@@ -427,29 +419,6 @@ def import_site(session: Session, bundle: dict) -> Site:
             i["test_run_id"] = new_run_id
             _parse_datetimes(i, "discovered_at")
             session.add(TargetIntelItem(**i))
-
-        # ── PentestHypotheses ───────────────────────────────────────────────
-        hyp_id_map: dict[int, int] = {}
-        for h in rb.get("pentest_hypotheses", []):
-            h = dict(h)
-            old_hid = h.pop("id")
-            h["test_run_id"] = new_run_id
-            _parse_datetimes(h, "created_at", "updated_at")
-            hyp = PentestHypothesis(**h)
-            session.add(hyp)
-            session.flush()
-            hyp_id_map[old_hid] = hyp.id  # type: ignore[index]
-
-        # ── PentestTasks ────────────────────────────────────────────────────
-        for t in rb.get("pentest_tasks", []):
-            t = dict(t)
-            t.pop("id")
-            t["test_run_id"] = new_run_id
-            old_hid = t.get("hypothesis_id")
-            if old_hid is not None:
-                t["hypothesis_id"] = hyp_id_map.get(old_hid)
-            _parse_datetimes(t, "created_at", "updated_at")
-            session.add(PentestTask(**t))
 
         # ── ScanFindings ────────────────────────────────────────────────────
         finding_id_map: dict[int, int] = {}
