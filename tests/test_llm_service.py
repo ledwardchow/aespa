@@ -187,6 +187,63 @@ def test_agentic_loop_can_reject_premature_done(monkeypatch):
     )]
 
 
+def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.6-sol",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise RuntimeError(
+            "Error code: 400 - {'error': {'message': 'This content was flagged "
+            "for possible cybersecurity risk.', 'code': 'cyber_policy'}}"
+        )
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMRefusalError, match="cybersecurity risk"):
+        asyncio.run(llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+        ))
+
+    refusal_events = [
+        event for event in emitted
+        if event.get("phase") == "llm_response" and event.get("status") == "error"
+    ]
+    assert len(refusal_events) == 1
+    assert "provider refused" in refusal_events[0]["message"]
+
+
+def test_agentic_loop_propagates_explicit_provider_refusal(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        api_key="test-key",
+        model="gpt-test",
+        max_tokens=2048,
+    )
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise llm.LLMRefusalError("LLM provider refusal: request declined")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMRefusalError, match="request declined"):
+        asyncio.run(llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+        ))
+
+
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     captured: dict[str, object] = {}
 

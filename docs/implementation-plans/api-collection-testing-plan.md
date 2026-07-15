@@ -1,5 +1,7 @@
 # Plan: API Collection Security Testing
 
+> Historical plan: the web hypothesis/task-graph feature referenced below was retired on 2026-07-15. Current scans use recon summaries and the web/API coverage matrices instead.
+
 Feature: a new top-level "API Collection" entity (parallel to Site) that ingests API
 documentation in multiple formats, runs an LLM-driven readiness assessment ("can I fully
 understand & test these APIs?"), itemises every API/endpoint, and drives the existing

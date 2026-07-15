@@ -13,7 +13,7 @@ import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
 import { WebRunIntelligenceTab } from "./SiteDetail/WebRunIntelligenceTab";
-import { WebRunTasksTab } from "./SiteDetail/WebRunTasksTab";
+import { WebRunAttackSurfaceTab } from "./SiteDetail/WebRunAttackSurfaceTab";
 import { WebRunSessionsTab } from "./SiteDetail/WebRunSessionsTab";
 import { WebRunNavigation } from "./SiteDetail/WebRunNavigation";
 import { useWebRunEvents } from "./SiteDetail/useWebRunEvents";
@@ -291,12 +291,11 @@ export function TestRunDetail({
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph] = useState(null);
-  const [activeTab, setActiveTab] = useState(initialTab || "activity");
+  const [activeTab, setActiveTab] = useState(initialTab === "tasks" ? "attack" : initialTab || "activity");
   const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView] = useState("scope"); // "scope" | "user"
   const [intelligenceTotal, setIntelligenceTotal] = useState(0);
-  const [tasksTotal, setTasksTotal] = useState(0);
-  const [tasksReloadKey, setTasksReloadKey] = useState(0);
+  const [attackSurfaceTotal, setAttackSurfaceTotal] = useState(0);
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [crawlUsername, setCrawlUsername] = useState(null);
   const [clearBusy, setClearBusy] = useState(""); // which section is clearing
@@ -460,7 +459,7 @@ export function TestRunDetail({
 
   useWebRunEvents({
     runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent,
-    setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setTasksReloadKey,
+    setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData,
     setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts,
     setGuidedLoginPending, setGuidedLoginErrors
   });
@@ -663,7 +662,7 @@ export function TestRunDetail({
         activeTab={activeTab}
         onSelect={tab => { setActiveTab(tab); nav("#/runs/" + runId + "/" + tab); }}
         activityLive={isDynamicScanActive(thinkingStatus?.status) && activityLog.length > 0}
-        counts={{ intelligence: intelligenceTotal, tasks: tasksTotal, sessions: sessionsTotal, findings: findings.length, traffic: trafficTotal }}
+        counts={{ intelligence: intelligenceTotal, attack: attackSurfaceTotal, sessions: sessionsTotal, findings: findings.length, traffic: trafficTotal }}
         canClearCrawl={canClearCrawl}
         onClearCrawl={onClearCrawl}
         multiUser={run?.credentials?.length > 1}
@@ -715,12 +714,11 @@ export function TestRunDetail({
         onTotalChange={setIntelligenceTotal}
       />
 
-      <WebRunTasksTab
+      <WebRunAttackSurfaceTab
         runId={runId}
-        active={activeTab === "tasks"}
+        active={activeTab === "attack"}
         scanActive={isDynamicScanActive(thinkingStatus?.status)}
-        reloadKey={tasksReloadKey}
-        onTotalChange={setTasksTotal}
+        onTotalChange={setAttackSurfaceTotal}
       />
 
       <WebRunSessionsTab
