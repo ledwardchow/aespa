@@ -4,7 +4,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [develop → main] July 15 Update — evidence-driven scanning, bounded completion, unified coverage UI
+## [PR #237] July 15 Update — evidence-driven scanning, bounded completion, unified coverage UI
 
 **Branch:** `develop → main`
 
