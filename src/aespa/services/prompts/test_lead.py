@@ -772,9 +772,11 @@ _THINKING_AGENT_SYSTEM = (
     + "\n\nTool rules:\n"
     "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
     "  ALWAYS set owasp_category to the OWASP Top 10 2025 code you are testing for (A01–A10).\n"
-    "  This drives the Work Program matrix — do not omit it.\n"
+    "  For A03 also set test_class (for example sqli, reflected_xss, or stored_xss); "
+    "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
-    "interaction is genuinely required.\n"
+    "interaction is genuinely required. For XSS, use dom_check with a unique canary "
+    "attribute or exact text to prove the payload affected the rendered DOM.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
     "finding_list, lead_list, target_inventory, traffic_search, extract_entities, "
@@ -851,6 +853,15 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "matrix; do not omit."
                     ),
                 },
+                "test_class": {
+                    "type": "string",
+                    "description": (
+                        "Concrete vulnerability class exercised by this probe, such as "
+                        "sqli, reflected_xss, stored_xss, command_injection, ssti, idor, "
+                        "or auth_bypass. Required for A03 probes so one injection class "
+                        "does not count as coverage of another."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
@@ -874,9 +885,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot|dom_check, ...}. "
                         "fill: selector+value. click: selector. press: selector+key. "
-                        "wait: state or ms."
+                        "wait: state or ms. dom_check: selector plus optional attribute "
+                        "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),
                 },
                 "capture_session": {
@@ -1183,7 +1195,8 @@ _API_TEST_LEAD_TOOL_NAMES = frozenset(
 def get_api_test_lead_tools() -> list[dict]:
     """Return only tools with API-aware executor paths for automated API scans."""
     return [
-        tool for tool in THINKING_AGENT_TOOLS
+        tool
+        for tool in THINKING_AGENT_TOOLS
         if tool["name"] in _API_TEST_LEAD_TOOL_NAMES
     ]
 
@@ -1371,6 +1384,8 @@ To make one HTTP request:
   "use_session": null,
   "headers": {{}},
   "body": null,
+  "owasp_category": "A03",
+  "test_class": "stored_xss",
     "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
     "hypothesis": "Specific issue or behavior this request is investigating",
     "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
@@ -1394,6 +1409,7 @@ To use the browser:
     {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
     {{"op": "click", "selector": "button[type='submit']"}},
     {{"op": "wait", "state": "networkidle"}},
+    {{"op": "dom_check", "selector": "#transactions", "attribute": "data-aespa-xss", "equals": "canary-123"}},
     {{"op": "snapshot"}}
   ],
   "observation": "Specific signal from prior responses that requires browser/DOM follow-up",
@@ -1403,9 +1419,11 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, press, wait, snapshot.
+- Supported ops: goto, fill, type, click, press, wait, snapshot, dom_check.
 - For press, include selector and key (for example "Enter").
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
+- For dom_check, include a CSS selector and equals. Optionally include attribute;
+  without attribute, the element text is compared. The result explicitly reports PASS/FAIL.
 - Keep browser actions short and targeted; do not browse aimlessly.
 - Browser use_session currently applies bearer tokens as extra HTTP headers for navigation
   and fetches made after the session is selected.
