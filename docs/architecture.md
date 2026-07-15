@@ -325,7 +325,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScanFinding` | A discovered vulnerability with evidence and CVSS score (shared by web and API scans) |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
-| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs) |
+| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs, per-vulnerability-class coverage) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
@@ -547,6 +547,8 @@ targeted scan round will change the next action.
 **File**: `src/aespa/services/web_workprogram.py`
 
 The web scan tracks OWASP Top-10 coverage in a per-page matrix — the web analogue of the API coverage matrix (§16). Each cell is a `PageOwaspTest` row: a `(TestRun, CrawledPage, OWASP category A01–A10)` triple with status `not_started → in_progress → covered / finding / skipped`.
+
+Input-bearing A03 cells additionally persist class-level states in `test_classes_json`. SQLi, reflected XSS, and stored XSS are separate obligations: an HTTP probe must declare `test_class`, and exercising one class does not satisfy the others. The browser tool's constrained `dom_check` operation can compare an element's text or attribute to an exact expected canary and records an explicit PASS/FAIL without allowing arbitrary JavaScript execution.
 
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
@@ -863,6 +865,8 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
 - `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
 - `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
+- `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata so empty or no-tool responses remain diagnosable after reload
+- Resumed agentic checkpoints are repaired when they end on an assistant turn: AESPA appends either an explicit continuation request or matching interrupted `tool_result` blocks before calling providers that prohibit assistant-message prefill
 - `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-crawl with the new account
 - Error events
 
