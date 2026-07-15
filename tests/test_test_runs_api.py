@@ -1,7 +1,9 @@
 """Tests for TestRun CRUD. Does NOT exercise actual crawl (requires Playwright + network)."""
+
 import json
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -10,7 +12,11 @@ from aespa.models import ScannerSession, TargetIntelItem
 
 
 def _make_site(client: TestClient, **kw):
-    defaults = {"name": "Target", "base_url": "https://target.local", "requires_auth": False}
+    defaults = {
+        "name": "Target",
+        "base_url": "https://target.local",
+        "requires_auth": False,
+    }
     return client.post("/api/sites", json={**defaults, **kw}).json()
 
 
@@ -20,6 +26,7 @@ def _make_run(client: TestClient, site_id: int, **kw):
 
 
 # ── CRUD ──────────────────────────────────────────────────────────────────────
+
 
 def test_create_run_default_name(client: TestClient):
     site = _make_site(client)
@@ -51,11 +58,14 @@ def test_create_run_can_enable_interactive_spa_crawler(client: TestClient):
     assert created.status_code == 201
     assert created.json()["crawler_mode"] == "interactive"
 
-    updated = client.patch(f"/api/test-runs/{created.json()['id']}", json={
-        "max_depth": 2,
-        "max_pages": 10,
-        "crawler_mode": "url",
-    })
+    updated = client.patch(
+        f"/api/test-runs/{created.json()['id']}",
+        json={
+            "max_depth": 2,
+            "max_pages": 10,
+            "crawler_mode": "url",
+        },
+    )
     assert updated.status_code == 200
     assert updated.json()["crawler_mode"] == "url"
 
@@ -98,18 +108,25 @@ def test_list_runs_unknown_site(client: TestClient):
     assert r.status_code == 404
 
 
-
-def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monkeypatch):
+def test_list_active_jobs_includes_running_dynamic_scan(
+    client: TestClient, monkeypatch
+):
     from aespa.services import scanner as scanner_svc
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
 
-    monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"])
-    monkeypatch.setattr(scanner_svc, "get_thinking_scan_status", lambda run_id: {
-        "status": "analysing",
-        "findings_count": 1,
-    })
+    monkeypatch.setattr(
+        scanner_svc, "is_thinking_running", lambda run_id: run_id == run["id"]
+    )
+    monkeypatch.setattr(
+        scanner_svc,
+        "get_thinking_scan_status",
+        lambda run_id: {
+            "status": "analysing",
+            "findings_count": 1,
+        },
+    )
 
     r = client.get("/api/test-runs/active")
 
@@ -121,22 +138,32 @@ def test_list_active_jobs_includes_running_dynamic_scan(client: TestClient, monk
     assert data[0]["findings_count"] == 1
 
 
-def test_list_active_jobs_includes_one_validation_job_per_run(client: TestClient, monkeypatch):
+def test_list_active_jobs_includes_one_validation_job_per_run(
+    client: TestClient, monkeypatch
+):
     from aespa.services import validator as validator_svc
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
-    monkeypatch.setattr(validator_svc, "is_validating", lambda run_id: run_id == run["id"])
-    monkeypatch.setattr(validator_svc, "get_validation_status", lambda run_id: {
-        "total": 8,
-        "validating": 3,
-        "unvalidated": 1,
-    })
+    monkeypatch.setattr(
+        validator_svc, "is_validating", lambda run_id: run_id == run["id"]
+    )
+    monkeypatch.setattr(
+        validator_svc,
+        "get_validation_status",
+        lambda run_id: {
+            "total": 8,
+            "validating": 3,
+            "unvalidated": 1,
+        },
+    )
 
     response = client.get("/api/test-runs/active")
 
     assert response.status_code == 200
-    validation_jobs = [job for job in response.json() if job["job_type"] == "Validation"]
+    validation_jobs = [
+        job for job in response.json() if job["job_type"] == "Validation"
+    ]
     assert len(validation_jobs) == 1
     assert validation_jobs[0]["run_id"] == run["id"]
     assert validation_jobs[0]["pages_done"] == 4
@@ -159,27 +186,31 @@ def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
     gen = override()
     session = next(gen)
     try:
-        session.add(TargetIntelItem(
-            test_run_id=run["id"],
-            kind="endpoint",
-            key="/api/accounts",
-            value="https://target.local/api/accounts",
-            url="https://target.local/dashboard",
-            method="GET",
-            source="dom_link",
-            confidence=0.8,
-            evidence="Accounts",
-            item_metadata='{"page_url":"https://target.local/dashboard"}',
-        ))
-        session.add(TargetIntelItem(
-            test_run_id=run["id"],
-            kind="input",
-            key="account_id",
-            value="request_body",
-            url="https://target.local/api/transfers",
-            method="POST",
-            source="api_request",
-        ))
+        session.add(
+            TargetIntelItem(
+                test_run_id=run["id"],
+                kind="endpoint",
+                key="/api/accounts",
+                value="https://target.local/api/accounts",
+                url="https://target.local/dashboard",
+                method="GET",
+                source="dom_link",
+                confidence=0.8,
+                evidence="Accounts",
+                item_metadata='{"page_url":"https://target.local/dashboard"}',
+            )
+        )
+        session.add(
+            TargetIntelItem(
+                test_run_id=run["id"],
+                kind="input",
+                key="account_id",
+                value="request_body",
+                url="https://target.local/api/transfers",
+                method="POST",
+                source="api_request",
+            )
+        )
         session.commit()
     finally:
         session.close()
@@ -198,78 +229,32 @@ def test_get_target_intelligence_returns_counts_and_items(client: TestClient):
     assert endpoint["item_metadata"]["page_url"] == "https://target.local/dashboard"
 
 
-def test_seed_task_graph_from_target_intelligence(client: TestClient):
-    site = _make_site(client)
-    run = _make_run(client, site["id"]).json()
-
-    override = client.app.dependency_overrides[get_session]
-    gen = override()
-    session = next(gen)
-    try:
-        session.add(TargetIntelItem(
-            test_run_id=run["id"],
-            kind="endpoint",
-            key="/api/health",
-            value="https://target.local/api/health",
-            url="https://target.local/api/health",
-            method="GET",
-            source="js_asset",
-            evidence="public asset referenced /api/health",
-        ))
-        session.add(TargetIntelItem(
-            test_run_id=run["id"],
-            kind="response_field",
-            key="password_hash",
-            value="string",
-            url="https://target.local/api/me",
-            method="GET",
-            source="response_body",
-            evidence="profile response contained password_hash",
-        ))
-        session.commit()
-    finally:
-        session.close()
-        try:
-            next(gen)
-        except StopIteration:
-            pass
-
-    r = client.post(f"/api/test-runs/{run['id']}/task-graph/seed")
-
-    assert r.status_code == 200
-    data = r.json()
-    assert data["counts"]["hypotheses"] >= 2
-    assert data["counts"]["tasks"] >= 2
-    titles = {h["title"] for h in data["hypotheses"]}
-    assert "Public operational/config endpoint exposure" in titles
-    assert "Sensitive field exposure" in titles
-    task_targets = {t["target_url"] for t in data["tasks"]}
-    assert "https://target.local/api/health" in task_targets
-    assert "https://target.local/api/me" in task_targets
-
-
 def test_import_findings_creates_findings_and_pages(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
-    payload = [{
-        "owasp_category": "A01",
-        "severity": "high",
-        "title": "Imported authorization bypass",
-        "description": "A protected resource is accessible.",
-        "impact": "Unauthorized data access.",
-        "likelihood": "Likely",
-        "recommendation": "Enforce authorization checks.",
-        "cvss_score": 8.1,
-        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
-        "affected_url": "https://target.local/admin",
-        "evidence": "GET /admin returned 200",
-        "request_evidence": "GET /admin",
-        "response_evidence": "Status: 200",
-        "evidence_items": [{"type": "status", "label": "HTTP status", "value": "200"}],
-        "finding_source": "manual_import",
-        "validation_status": "confirmed",
-        "validation_note": "Imported validated issue.",
-    }]
+    payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Imported authorization bypass",
+            "description": "A protected resource is accessible.",
+            "impact": "Unauthorized data access.",
+            "likelihood": "Likely",
+            "recommendation": "Enforce authorization checks.",
+            "cvss_score": 8.1,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+            "affected_url": "https://target.local/admin",
+            "evidence": "GET /admin returned 200",
+            "request_evidence": "GET /admin",
+            "response_evidence": "Status: 200",
+            "evidence_items": [
+                {"type": "status", "label": "HTTP status", "value": "200"}
+            ],
+            "finding_source": "manual_import",
+            "validation_status": "confirmed",
+            "validation_note": "Imported validated issue.",
+        }
+    ]
 
     r = client.post(f"/api/test-runs/{run['id']}/findings/import", json=payload)
 
@@ -287,14 +272,16 @@ def test_import_findings_creates_findings_and_pages(client: TestClient):
 
 
 def _import_one_finding(client: TestClient, run_id: int) -> dict:
-    payload = [{
-        "owasp_category": "A01",
-        "severity": "high",
-        "title": "Imported authorization bypass",
-        "description": "A protected resource is accessible.",
-        "affected_url": "https://target.local/admin",
-        "validation_status": "confirmed",
-    }]
+    payload = [
+        {
+            "owasp_category": "A01",
+            "severity": "high",
+            "title": "Imported authorization bypass",
+            "description": "A protected resource is accessible.",
+            "affected_url": "https://target.local/admin",
+            "validation_status": "confirmed",
+        }
+    ]
     r = client.post(f"/api/test-runs/{run_id}/findings/import", json=payload)
     assert r.status_code == 200
     return r.json()["findings"][0]
@@ -378,18 +365,20 @@ def test_get_scanner_sessions_redacts_auth_material():
             session.commit()
             session.refresh(run)
 
-            session.add(ScannerSession(
-                test_run_id=run.id,
-                label="configured_primary",
-                kind="mixed",
-                username="alice",
-                credential_id=3,
-                source="test",
-                cookies_json='{"sid":"secret-cookie"}',
-                extra_headers_json='{"Authorization":"Bearer secret-token"}',
-                session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
-                token_hint="secret...token",
-            ))
+            session.add(
+                ScannerSession(
+                    test_run_id=run.id,
+                    label="configured_primary",
+                    kind="mixed",
+                    username="alice",
+                    credential_id=3,
+                    source="test",
+                    cookies_json='{"sid":"secret-cookie"}',
+                    extra_headers_json='{"Authorization":"Bearer secret-token"}',
+                    session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
+                    token_hint="secret...token",
+                )
+            )
             session.commit()
 
             summary = test_runs_api.get_scanner_sessions(run.id, session=session)
@@ -451,7 +440,9 @@ def test_update_scanner_session_renames_and_deactivates():
                 session=session,
             )
 
-            summary = test_runs_api.get_scanner_sessions(run.id, include_inactive=True, session=session)
+            summary = test_runs_api.get_scanner_sessions(
+                run.id, include_inactive=True, session=session
+            )
 
         assert updated.label == "forged_admin"
         assert updated.is_active is False
@@ -467,12 +458,84 @@ def test_get_run_not_found(client: TestClient):
     assert r.status_code == 404
 
 
+def test_task_graph_routes_are_removed(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    assert client.get(f"/api/test-runs/{run['id']}/task-graph").status_code == 404
+    assert client.post(f"/api/test-runs/{run['id']}/task-graph/seed").status_code in {
+        404,
+        405,
+    }
+
+
 def test_delete_run(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
     r = client.delete(f"/api/test-runs/{run['id']}")
     assert r.status_code == 204
     assert client.get(f"/api/test-runs/{run['id']}").status_code == 404
+
+
+def test_delete_run_cleans_legacy_task_rows(client: TestClient):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+
+    override = client.app.dependency_overrides[get_session]
+    gen = override()
+    session = next(gen)
+    try:
+        session.exec(
+            text("""
+            CREATE TABLE pentest_hypothesis (
+                id INTEGER PRIMARY KEY,
+                test_run_id INTEGER NOT NULL
+            )
+        """)
+        )
+        session.exec(
+            text("""
+            CREATE TABLE pentest_task (
+                id INTEGER PRIMARY KEY,
+                test_run_id INTEGER NOT NULL,
+                hypothesis_id INTEGER
+            )
+        """)
+        )
+        session.exec(
+            text(
+                "INSERT INTO pentest_hypothesis (id, test_run_id) VALUES (1, :run_id)"
+            ).bindparams(run_id=run["id"])
+        )
+        session.exec(
+            text(
+                "INSERT INTO pentest_task (id, test_run_id, hypothesis_id) "
+                "VALUES (1, :run_id, 1)"
+            ).bindparams(run_id=run["id"])
+        )
+        session.commit()
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+    assert client.delete(f"/api/test-runs/{run['id']}").status_code == 204
+
+    gen = override()
+    session = next(gen)
+    try:
+        assert session.exec(text("SELECT count(*) FROM pentest_task")).one()[0] == 0
+        assert (
+            session.exec(text("SELECT count(*) FROM pentest_hypothesis")).one()[0] == 0
+        )
+    finally:
+        session.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
 
 
 def test_create_run_invalid_max_depth(client: TestClient):
@@ -517,6 +580,7 @@ def test_run_scan_policy_endpoint_removed(client: TestClient):
 
 # ── Start without LLM config ──────────────────────────────────────────────────
 
+
 def test_start_run_requires_llm_config(client: TestClient):
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
@@ -526,6 +590,7 @@ def test_start_run_requires_llm_config(client: TestClient):
 
 
 # ── Stop a non-running run ────────────────────────────────────────────────────
+
 
 def test_stop_pending_run_rejected(client: TestClient):
     site = _make_site(client)
@@ -541,16 +606,24 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     run = _make_run(client, site["id"]).json()
     stopped_runs = []
 
-    monkeypatch.setattr(scan_api.validator_svc, "request_stop", lambda run_id: stopped_runs.append(run_id) or True)
-    monkeypatch.setattr(scan_api.validator_svc, "get_validation_status", lambda run_id: {
-        "total": 0,
-        "confirmed": 0,
-        "false_positives": 0,
-        "unconfirmed": 0,
-        "validating": 0,
-        "unvalidated": 0,
-        "status": "stopped",
-    })
+    monkeypatch.setattr(
+        scan_api.validator_svc,
+        "request_stop",
+        lambda run_id: stopped_runs.append(run_id) or True,
+    )
+    monkeypatch.setattr(
+        scan_api.validator_svc,
+        "get_validation_status",
+        lambda run_id: {
+            "total": 0,
+            "confirmed": 0,
+            "false_positives": 0,
+            "unconfirmed": 0,
+            "validating": 0,
+            "unvalidated": 0,
+            "status": "stopped",
+        },
+    )
 
     r = client.post(f"/api/test-runs/{run['id']}/validate/stop")
 
@@ -559,19 +632,24 @@ def test_stop_validation_endpoint_accepts_post(client: TestClient, monkeypatch):
     assert r.json()["status"] == "stopped"
 
 
-def test_thinking_scan_start_blocked_when_already_running(client: TestClient, monkeypatch):
+def test_thinking_scan_start_blocked_when_already_running(
+    client: TestClient, monkeypatch
+):
     from aespa.api import scan as scan_api
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()
 
-    monkeypatch.setattr(scan_api.scanner_svc, "is_thinking_running", lambda run_id: True)
+    monkeypatch.setattr(
+        scan_api.scanner_svc, "is_thinking_running", lambda run_id: True
+    )
     r = client.post(f"/api/test-runs/{run['id']}/thinking-scan/start")
     assert r.status_code == 409
     assert r.json()["detail"] == "Dynamic Scan already running"
 
 
 # ── Graph / pages on empty run ────────────────────────────────────────────────
+
 
 def test_get_graph_empty(client: TestClient):
     site = _make_site(client)
@@ -631,8 +709,12 @@ def test_get_graph_reports_unauthenticated_access():
             graph = test_runs_api.get_graph(run.id, session=session)
 
         nodes_by_url = {node.url: node for node in graph.nodes}
-        assert nodes_by_url["https://target.local/public"].accessible_anonymously is True
-        assert nodes_by_url["https://target.local/private"].accessible_anonymously is False
+        assert (
+            nodes_by_url["https://target.local/public"].accessible_anonymously is True
+        )
+        assert (
+            nodes_by_url["https://target.local/private"].accessible_anonymously is False
+        )
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -652,10 +734,15 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     target = _make_run(client, site["id"]).json()
     # The finding-import endpoint creates a realistic crawled page without
     # requiring a Playwright crawl in this service-level test.
-    created = client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
-        "title": "Imported page seed",
-        "affected_url": "https://target.local/account",
-    }])
+    created = client.post(
+        f"/api/test-runs/{source['id']}/findings/import",
+        json=[
+            {
+                "title": "Imported page seed",
+                "affected_url": "https://target.local/account",
+            }
+        ],
+    )
     assert created.status_code == 200
 
     exported = client.get(f"/api/test-runs/{source['id']}/crawl/export")
@@ -665,25 +752,44 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     assert archive["crawl"]["pages"][0]["url"] == "https://target.local/account"
     # Simulate the category information emitted by a normal crawl.  Import must
     # restore both the sitemap's per-page flags and the coverage-matrix cells.
-    archive["crawl"]["pages"][0]["owasp_applicable_json"] = '{"A01": true, "A02": false}'
+    archive["crawl"]["pages"][0]["owasp_applicable_json"] = (
+        '{"A01": true, "A02": false}'
+    )
     archive["crawl"]["pages"][0]["has_object_ref"] = True
-    archive["crawl"]["owasp_categories"] = [{
-        "page_url": "https://target.local/account", "category": "A01",
-    }]
-    archive["crawl"]["traffic"] = [{
-        "source": "playwright", "method": "GET", "url": "https://target.local/account",
-        "request_headers": '{"Authorization": "Bearer retained"}', "request_body": None,
-        "status": 200, "response_headers": '{"Set-Cookie": "session=retained"}',
-        "response_body": "account page", "duration_ms": 12, "username": "alice",
-    }]
-    archive["crawl"]["scanner_sessions"] = [{
-        "label": "configured_primary", "kind": "mixed", "username": "alice",
-        "credential_username": "alice", "source": "crawler",
-        "cookies_json": '{"session": "retained"}',
-        "extra_headers_json": '{"Authorization": "Bearer retained"}',
-        "session_metadata": '{"origin": "crawl"}', "token_hint": "retained",
-        "is_active": True,
-    }]
+    archive["crawl"]["owasp_categories"] = [
+        {
+            "page_url": "https://target.local/account",
+            "category": "A01",
+        }
+    ]
+    archive["crawl"]["traffic"] = [
+        {
+            "source": "playwright",
+            "method": "GET",
+            "url": "https://target.local/account",
+            "request_headers": '{"Authorization": "Bearer retained"}',
+            "request_body": None,
+            "status": 200,
+            "response_headers": '{"Set-Cookie": "session=retained"}',
+            "response_body": "account page",
+            "duration_ms": 12,
+            "username": "alice",
+        }
+    ]
+    archive["crawl"]["scanner_sessions"] = [
+        {
+            "label": "configured_primary",
+            "kind": "mixed",
+            "username": "alice",
+            "credential_username": "alice",
+            "source": "crawler",
+            "cookies_json": '{"session": "retained"}',
+            "extra_headers_json": '{"Authorization": "Bearer retained"}',
+            "session_metadata": '{"origin": "crawl"}',
+            "token_hint": "retained",
+            "is_active": True,
+        }
+    ]
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
@@ -704,16 +810,26 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
     assert client.get(f"/api/test-runs/{target['id']}/crawl/export").status_code == 200
     recon = client.get(f"/api/test-runs/{target['id']}/recon-summary")
     assert recon.status_code == 200
-    assert recon.json()["trust_zones"]["public"] == ["https://target.local/account"]
-    assert "idor" in {item["id"] for item in recon.json()["attack_classes"]}
+    assert recon.json()["schema_version"] == 2
+    assert recon.json()["routes"][0]["canonical_url"] == "https://target.local/account"
+    assert recon.json()["routes"][0]["access"]["classification"] == "unknown"
+    assert {item["type"] for item in recon.json()["signals"]["items"]} == {
+        "object_reference"
+    }
 
 
 def test_import_crawl_rejects_another_site(client: TestClient):
     source_site = _make_site(client)
     source = _make_run(client, source_site["id"]).json()
-    client.post(f"/api/test-runs/{source['id']}/findings/import", json=[{
-        "title": "Imported page seed", "affected_url": "https://target.local/account",
-    }])
+    client.post(
+        f"/api/test-runs/{source['id']}/findings/import",
+        json=[
+            {
+                "title": "Imported page seed",
+                "affected_url": "https://target.local/account",
+            }
+        ],
+    )
     archive = client.get(f"/api/test-runs/{source['id']}/crawl/export")
     other_site = _make_site(client, name="Other", base_url="https://other.local")
     target = _make_run(client, other_site["id"]).json()
@@ -780,9 +896,21 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch):
             session.add(page)
             session.commit()
             session.refresh(page)
-            session.add(PageLink(test_run_id=run.id, source_page_id=page.id, target_url="https://target.local/next"))
-            session.add(PageCredentialView(test_run_id=run.id, page_id=page.id, username="alice"))
-            session.add(TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account"))
+            session.add(
+                PageLink(
+                    test_run_id=run.id,
+                    source_page_id=page.id,
+                    target_url="https://target.local/next",
+                )
+            )
+            session.add(
+                PageCredentialView(
+                    test_run_id=run.id, page_id=page.id, username="alice"
+                )
+            )
+            session.add(
+                TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account")
+            )
             finding = ScanFinding(
                 test_run_id=run.id,
                 page_id=page.id,
@@ -807,10 +935,32 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch):
         assert started == []
 
         with Session(engine) as session:
-            assert session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id)).all() == []
-            assert session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all() == []
-            assert session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run_id)).all() == []
-            assert session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)).all() == []
+            assert (
+                session.exec(
+                    select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+                ).all()
+                == []
+            )
+            assert (
+                session.exec(
+                    select(PageLink).where(PageLink.test_run_id == run_id)
+                ).all()
+                == []
+            )
+            assert (
+                session.exec(
+                    select(PageCredentialView).where(
+                        PageCredentialView.test_run_id == run_id
+                    )
+                ).all()
+                == []
+            )
+            assert (
+                session.exec(
+                    select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+                ).all()
+                == []
+            )
             finding_after = session.get(ScanFinding, finding_id)
             assert finding_after is not None
             assert finding_after.page_id is None
@@ -820,6 +970,7 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch):
 
 
 # ── Cascaded delete when site is deleted ──────────────────────────────────────
+
 
 def test_deleting_site_cleans_up_runs(client: TestClient):
     site = _make_site(client)
