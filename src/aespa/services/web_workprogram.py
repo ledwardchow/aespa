@@ -12,7 +12,13 @@ from typing import Any
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PageOwaspTest, ScanFinding, TestRun
+from aespa.models import (
+    CrawledPage,
+    PageOwaspTest,
+    ScanFinding,
+    TargetIntelItem,
+    TestRun,
+)
 from aespa.services import events as events_svc
 from aespa.services.llm import OWASP_WEB_CATEGORIES, OWASP_WEB_LABELS
 
@@ -424,6 +430,113 @@ def _uncovered_web_cells(run_id: int) -> list[tuple[CrawledPage, str, str]]:
         if page is not None:
             out.append((page, c.owasp_category, c.status))
     return out
+
+
+def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
+    """Return a compact live list of useful uncovered web workprogram cells.
+
+    This is intentionally not a second plan.  It projects canonical workprogram
+    state into a bounded set of concrete next actions suitable for the Test Lead's
+    context window and completion challenge.
+    """
+    limit = max(1, min(50, int(limit or 12)))
+    with Session(get_engine(), expire_on_commit=False) as s:
+        cells = list(
+            s.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+            ).all()
+        )
+        page_ids = {cell.page_id for cell in cells}
+        pages = {
+            page.id: page
+            for page in (
+                s.exec(
+                    select(CrawledPage).where(CrawledPage.id.in_(page_ids))  # type: ignore[attr-defined]
+                ).all()
+                if page_ids
+                else []
+            )
+        }
+        intel = list(
+            s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "endpoint")
+            ).all()
+        )
+
+    totals: dict[str, int] = {status: 0 for status in _STATUS_RANK}
+    for cell in cells:
+        totals[cell.status] = totals.get(cell.status, 0) + 1
+
+    method_by_url: dict[str, str] = {}
+    for item in intel:
+        candidate = str(item.url or item.value or item.key or "").strip()
+        if candidate:
+            method_by_url.setdefault(_normalize_url(candidate), (item.method or "GET").upper())
+
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for cell in cells:
+        if cell.status not in _UNCOVERED_STATES:
+            continue
+        page = pages.get(cell.page_id)
+        if page is None or not page.in_scope or _is_static_asset(page.url):
+            continue
+        url = page.url
+        normalized = _normalize_url(url)
+        method = method_by_url.get(normalized, "GET")
+        signals = []
+        if page.takes_input:
+            signals.append("takes input")
+        if page.has_object_ref:
+            signals.append("contains an object reference")
+        if page.req_auth:
+            signals.append("requires authentication")
+        if page.has_business_logic:
+            signals.append("contains business logic")
+        if page.state_kind == "api" or "/api/" in url:
+            signals.append("API route")
+        reason = (
+            f"{', '.join(signals)}; {cell.status.replace('_', ' ')} for "
+            f"{cell.owasp_category}"
+            if signals
+            else f"applicable cell is {cell.status.replace('_', ' ')}"
+        )
+        # Evidence-first ordering: untouched input/API/object/auth surfaces first,
+        # then stable page/category ordering. No synthetic risk score is exposed.
+        rank = (
+            0 if cell.status == "not_started" else 1,
+            -int(bool(page.takes_input)),
+            -int(page.state_kind == "api" or "/api/" in url),
+            -int(bool(page.has_object_ref)),
+            -int(bool(page.req_auth)),
+            url,
+            cell.owasp_category,
+        )
+        candidates.append(
+            (
+                rank,
+                {
+                    "page_id": page.id,
+                    "url": url,
+                    "method": method,
+                    "owasp_category": cell.owasp_category,
+                    "status": cell.status,
+                    "access": "authenticated" if page.req_auth else "unknown_or_public",
+                    "reason": reason,
+                },
+            )
+        )
+
+    candidates.sort(key=lambda item: item[0])
+    return {
+        "tool": "coverage_gaps",
+        "run_id": run_id,
+        "totals": totals,
+        "next_actions": [item[1] for item in candidates[:limit]],
+        "remaining": len(candidates),
+        "truncated": len(candidates) > limit,
+    }
 
 
 def _build_web_enforce_directive(run_id: int) -> str:
