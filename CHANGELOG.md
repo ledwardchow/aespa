@@ -4,6 +4,33 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [develop → main] July 15 Update — evidence-driven scanning, bounded completion, unified coverage UI
+
+**Branch:** `develop → main`
+
+### Evidence-driven scan engine
+
+- **Recon is now a live attack-surface projection** (`services/recon_summary.py`, scanner/API/models): the synthetic persisted hypothesis/task graph has been removed. The Test Lead now receives compact, evidence-backed canonical routes, methods, parameters, access observations, provenance, signals, and real OWASP coverage gaps derived from crawl and traffic data.
+- **Systematic continuation rules** (`services/prompts/test_lead.py`): web and API Test Leads treat findings and specialist dispatches as milestones rather than exit conditions, continue across the route inventory, and only request completion after input-bearing surfaces have been exercised.
+- **Published scan comparisons** (`docs/results/BankOfEd/`): adds July 14 multi-model scan outputs, consolidated vulnerability results, and a model comparison for GPT-5.6, MiniMax M3, Claude Opus 4.8, and Claude Sonnet 5.
+
+### Bounded completion and reliable resume
+
+- **Completion cannot loop indefinitely** (`services/scan_completion.py`, `services/scanner.py`): a bounded policy mediates `done`, permits only limited session/coverage challenges, warns after prolonged inactivity, and automatically stops after 50 tool calls without meaningful coverage, finding, lead, specialist, or session progress.
+- **Checkpoint repair** (`services/checkpoint.py`, `services/llm.py`): resumed conversations ending on assistant output or interrupted tool use are repaired with a continuation prompt or matching tool results before being sent to providers that reject assistant-message prefill.
+- **Provider diagnostics survive reloads** (`services/llm.py`, activity UI): LLM response/protocol events record provider, model, stop reason, usable content blocks, context size, retry state, and safe Bedrock request/usage metadata, making empty and no-tool responses diagnosable from the run log.
+
+### OWASP coverage and run UI
+
+- **Per-vulnerability-class web coverage** (`services/web_workprogram.py`, models/migration/tests): A03 cells independently track SQL injection, reflected XSS, and stored XSS obligations. Probes declare their test class, while constrained browser `dom_check` assertions record explicit canary pass/fail results without arbitrary JavaScript execution.
+- **Unified Attack Surface & Coverage tab** (`frontend/src/pages/SiteDetail/`): OWASP progress and matrix, route/input inventory, evidence signals, access observations, technologies, and Target Intelligence now live under aligned **OWASP**, **Attack Surface**, and **Intelligence** subtabs. The full-width panels keep their scrollbars at the viewport edge.
+- **Scrollbar regressions fixed**: Intelligence, Sessions, and the retired Task Graph views correctly expose their internal scroll regions.
+
+### Packaging and documentation
+
+- **macOS notarisation stapling fixed** (`make_dmg.sh`, `notarize_only_mac.sh`): the release flow staples the notarisation ticket correctly before distributing the DMG.
+- **Repository documentation refreshed** (`README.md`, `docs/architecture.md`, guides): architecture and scan UI documentation match the new scan model, and the DeepWiki badge links directly to this repository's DeepWiki page.
+
 ## [develop → main] July 13 Update — routeless crawling, detached SAST leads, API scan isolation
 
 **Branch:** `develop → main`
