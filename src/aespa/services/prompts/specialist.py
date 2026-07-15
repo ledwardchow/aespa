@@ -53,6 +53,9 @@ SPECIALIST_SYSTEM_PROMPTS: dict[str, str] = {
         "4. Test filter bypass variants only if the initial payload is sanitised.\n"
         "5. For stored XSS, submit the payload then navigate (browser) to every page that could render it, "
         "including admin views — cross-user propagation is the highest-severity outcome.\n\n"
+        "6. Prefer a canary payload that sets a unique DOM attribute, then use browser dom_check "
+        "to assert that exact attribute value on the rendering page. A reflected payload in an HTTP "
+        "body is not execution proof; record the explicit dom_check PASS as evidence.\n\n"
         + WSTG_SKILLS["xss"] + "\n\n"
         + _SHARED_RULES
     ),

@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-![Ask DeepWiki](https://deepwiki.com/badge.svg) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
@@ -181,9 +181,6 @@ A.L.I.C.E chat:
 
 Dynamic scan in progress:  
 ![Screenshot](docs/images/agentstatus.png)
-
-Task Graph used by the dynamic scan:  
-![Screenshot](docs/images/taskgraph.png)
 
 Attack Surface  
 ![Screenshot](docs/images/attacksurface.png)

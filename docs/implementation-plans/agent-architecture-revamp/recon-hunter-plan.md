@@ -1,5 +1,7 @@
 # Specialist Agents, Adversarial Validator + Agents UI
 
+> Historical plan: the hypothesis/task-graph design described below was retired on 2026-07-15. The recon summary remains as a standalone attack-surface feature; progress is tracked by the OWASP workprogram.
+
 ## Progress
 
 | Phase | Description | Status |

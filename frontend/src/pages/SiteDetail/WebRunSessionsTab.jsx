@@ -24,7 +24,7 @@ export function WebRunSessionsTab({ runId, active, scanActive, onTotalChange }) 
     intervalMs: scanActive ? 4000 : undefined
   });
 
-  return <div style={{ display: active ? undefined : "none" }}>
+  return <div style={{ display: active ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
     <ScannerSessionsPanel
       data={data}
       refresh={() => void load().catch(() => {})}

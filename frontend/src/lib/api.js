@@ -155,8 +155,6 @@ export const api = {
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
   getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
-  getTaskGraph:     (id)          => req(`/api/test-runs/${id}/task-graph`),
-  seedTaskGraph:    (id)          => req(`/api/test-runs/${id}/task-graph/seed`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),
@@ -190,7 +188,6 @@ export const api = {
   clearFindings:        (id)       => req(`/api/test-runs/${id}/findings`,              { method:"DELETE" }),
   clearScanLog:         (id)       => req(`/api/test-runs/${id}/scan-log`,              { method:"DELETE" }),
   clearTargetIntel:     (id)       => req(`/api/test-runs/${id}/target-intelligence`,   { method:"DELETE" }),
-  clearTaskGraph:       (id)       => req(`/api/test-runs/${id}/task-graph`,            { method:"DELETE" }),
   getVersion:       ()            => req("/api/version"),
 };
 

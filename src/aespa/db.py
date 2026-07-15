@@ -284,6 +284,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
     _ensure_column(engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120")
+    _ensure_column(engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
@@ -314,6 +315,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "page_owasp_test", "status", "TEXT NOT NULL DEFAULT 'not_started'")
     _ensure_column(engine, "page_owasp_test", "skip_reason", "TEXT")
     _ensure_column(engine, "page_owasp_test", "finding_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "page_owasp_test", "test_classes_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "page_owasp_test", "last_updated", "DATETIME")  # nullable for existing rows; new rows use model default_factory
     _ensure_column(engine, "test_run", "coverage_mode", "TEXT NOT NULL DEFAULT 'track'")
     with engine.connect() as conn:
@@ -605,77 +607,6 @@ def _migrate(engine: Engine) -> None:
         conn.execute(__import__("sqlalchemy").text(
             "CREATE INDEX IF NOT EXISTS ix_target_intel_item_url "
             "ON target_intel_item (url)"
-        ))
-        conn.commit()
-    # pentest_hypothesis / pentest_task — durable dynamic-scan plan.
-    with engine.connect() as conn:
-        conn.execute(__import__("sqlalchemy").text("""
-            CREATE TABLE IF NOT EXISTS pentest_hypothesis (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
-                title TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                attack_area TEXT NOT NULL DEFAULT '',
-                owasp_category TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'open',
-                priority INTEGER NOT NULL DEFAULT 50,
-                confidence REAL NOT NULL DEFAULT 0.5,
-                rationale TEXT NOT NULL DEFAULT '',
-                created_from TEXT NOT NULL DEFAULT '',
-                related_intel_ids TEXT NOT NULL DEFAULT '[]',
-                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-            )
-        """))
-        conn.execute(__import__("sqlalchemy").text("""
-            CREATE TABLE IF NOT EXISTS pentest_task (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                test_run_id INTEGER NOT NULL REFERENCES test_run(id),
-                hypothesis_id INTEGER REFERENCES pentest_hypothesis(id),
-                title TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                target_url TEXT NOT NULL DEFAULT '',
-                method TEXT NOT NULL DEFAULT 'GET',
-                task_type TEXT NOT NULL DEFAULT 'recon',
-                status TEXT NOT NULL DEFAULT 'queued',
-                priority INTEGER NOT NULL DEFAULT 50,
-                evidence TEXT NOT NULL DEFAULT '',
-                result_summary TEXT NOT NULL DEFAULT '',
-                last_action_step INTEGER,
-                created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-            )
-        """))
-        for table in ("pentest_hypothesis", "pentest_task"):
-            conn.execute(__import__("sqlalchemy").text(
-                f"CREATE INDEX IF NOT EXISTS ix_{table}_test_run_id ON {table} (test_run_id)"
-            ))
-            conn.execute(__import__("sqlalchemy").text(
-                f"CREATE INDEX IF NOT EXISTS ix_{table}_status ON {table} (status)"
-            ))
-            conn.execute(__import__("sqlalchemy").text(
-                f"CREATE INDEX IF NOT EXISTS ix_{table}_priority ON {table} (priority)"
-            ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_title "
-            "ON pentest_hypothesis (title)"
-        ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_hypothesis_attack_area "
-            "ON pentest_hypothesis (attack_area)"
-        ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_task_hypothesis_id "
-            "ON pentest_task (hypothesis_id)"
-        ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_task_title ON pentest_task (title)"
-        ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_task_target_url ON pentest_task (target_url)"
-        ))
-        conn.execute(__import__("sqlalchemy").text(
-            "CREATE INDEX IF NOT EXISTS ix_pentest_task_task_type ON pentest_task (task_type)"
         ))
         conn.commit()
     # scanner_session — durable scanner auth/session material with stable labels.

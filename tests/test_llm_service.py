@@ -187,6 +187,340 @@ def test_agentic_loop_can_reject_premature_done(monkeypatch):
     )]
 
 
+def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    checkpoints: list[list[dict]] = []
+    calls = 0
+
+    async def fake_call_with_tools(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [], "end_turn", []
+        done = {
+            "type": "tool_use",
+            "id": "done-1",
+            "name": "done",
+            "input": {"summary": "complete"},
+            "text": None,
+        }
+        return [done], "tool_use", [done]
+
+    async def checkpoint(messages):
+        checkpoints.append(messages.copy())
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(llm.thinking_agentic_loop(
+        config,
+        system_message="system",
+        initial_user_message="start",
+        tool_executor=lambda *args: None,
+        on_checkpoint=checkpoint,
+    ))
+
+    assert summary == "complete"
+    assistant_messages = [
+        message
+        for message in checkpoints[-1]
+        if message["role"] == "assistant"
+    ]
+    assert all(message["content"] for message in assistant_messages)
+    assert assistant_messages[0]["content"][0]["text"] == (
+        "[The model returned no usable content blocks.]"
+    )
+
+
+def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        diagnostic = {
+            "type": "provider_diagnostic",
+            "provider": "bedrock",
+            "model": config.model,
+            "native_stop_reason": "guardrail_intervened",
+            "transport": {"request_id": "request-123", "http_status": 200},
+        }
+        return [], "guardrail_intervened", [diagnostic]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+        )
+    )
+
+    assert summary == ""
+    warnings = [
+        event
+        for event in emitted
+        if event.get("phase") == "llm_response"
+        and event.get("status") == "warning"
+    ]
+    assert len(warnings) == 3
+    assert warnings[0]["data"]["native_stop_reason"] == "guardrail_intervened"
+    assert warnings[0]["data"]["no_tool_retry"] == 1
+    assert warnings[0]["data"]["provider_diagnostics"][0]["transport"] == {
+        "request_id": "request-123",
+        "http_status": 200,
+    }
+    terminal = [event for event in emitted if event.get("phase") == "llm_protocol"]
+    assert len(terminal) == 1
+    assert terminal[0]["status"] == "error"
+    assert terminal[0]["data"]["termination_reason"] == (
+        "consecutive_no_tool_responses"
+    )
+    assert terminal[0]["data"]["explicit_done"] is False
+
+
+def test_agentic_loop_repairs_trailing_assistant_checkpoint_on_resume(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+    captured_messages: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        captured_messages.extend(messages)
+        done = {
+            "type": "tool_use",
+            "id": "done-after-resume",
+            "name": "done",
+            "input": {"summary": "resumed"},
+            "text": None,
+        }
+        return [done], "tool_use", [done]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+            resume_messages=[
+                {"role": "user", "content": "start"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "provider_diagnostic",
+                            "native_stop_reason": "guardrail_intervened",
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+
+    assert summary == "resumed"
+    assert captured_messages[-1]["role"] == "user"
+    assert "previous model turn ended" in captured_messages[-1]["content"][0][
+        "text"
+    ].lower()
+    repair_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "llm_protocol"
+        and event.get("status") == "warning"
+    ]
+    assert repair_events[0]["data"]["repair_kind"] == "trailing_assistant_turn"
+
+
+def test_agentic_loop_repairs_interrupted_tool_checkpoint_on_resume(monkeypatch):
+    captured_messages: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        captured_messages.extend(messages)
+        done = {
+            "type": "tool_use",
+            "id": "done-after-tool-repair",
+            "name": "done",
+            "input": {"summary": "resumed"},
+            "text": None,
+        }
+        return [done], "tool_use", [done]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    config = LLMConfig(provider="bedrock", model="opus-test", max_tokens=2048)
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=lambda *args: None,
+            resume_messages=[
+                {"role": "user", "content": "start"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "interrupted-call",
+                            "name": "http_request",
+                            "input": {"url": "https://target.local"},
+                        }
+                    ],
+                },
+            ],
+        )
+    )
+
+    repair = captured_messages[-1]
+    assert repair["role"] == "user"
+    assert repair["content"][0]["type"] == "tool_result"
+    assert repair["content"][0]["tool_use_id"] == "interrupted-call"
+
+
+def test_agentic_loop_applies_result_hook_and_bounded_termination(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        api_key="test-key",
+        model="gpt-test",
+        max_tokens=2048,
+    )
+    llm_calls = 0
+    executed = 0
+
+    async def fake_call_with_tools(*args, **kwargs):
+        nonlocal llm_calls
+        llm_calls += 1
+        block = {
+            "type": "tool_use",
+            "id": "call-1",
+            "name": "context_tool",
+            "input": {"tool": "site_map"},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def executor(*args):
+        nonlocal executed
+        executed += 1
+        return "result"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=executor,
+            after_tool_result=lambda _n, _i, result, _s: result + " annotated",
+            termination_check=lambda: "stagnant" if executed else None,
+        )
+    )
+
+    assert summary == "stagnant"
+    assert llm_calls == 1
+    assert executed == 1
+
+
+def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.6-sol",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise RuntimeError(
+            "Error code: 400 - {'error': {'message': 'This content was flagged "
+            "for possible cybersecurity risk.', 'code': 'cyber_policy'}}"
+        )
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMRefusalError, match="cybersecurity risk"):
+        asyncio.run(llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+        ))
+
+    refusal_events = [
+        event for event in emitted
+        if event.get("phase") == "llm_response" and event.get("status") == "error"
+    ]
+    assert len(refusal_events) == 1
+    assert "provider refused" in refusal_events[0]["message"]
+
+
+def test_agentic_loop_propagates_explicit_provider_refusal(monkeypatch):
+    config = LLMConfig(
+        provider="openai",
+        api_key="test-key",
+        model="gpt-test",
+        max_tokens=2048,
+    )
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise llm.LLMRefusalError("LLM provider refusal: request declined")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMRefusalError, match="request declined"):
+        asyncio.run(llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+        ))
+
+
+def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeypatch):
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        model="anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise RuntimeError("ValidationException: messages.51 content is empty")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(RuntimeError, match="content is empty"):
+        asyncio.run(llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+        ))
+
+    error_events = [
+        event for event in emitted
+        if event.get("phase") == "llm_response" and event.get("status") == "error"
+    ]
+    assert len(error_events) == 1
+    assert "LLM API error" in error_events[0]["message"]
+
+
 def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -2073,6 +2407,66 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
     }
 
 
+def test_bedrock_empty_response_preserves_native_diagnostics(monkeypatch):
+    class FakeBedrockClient:
+        def converse(self, **kwargs):  # noqa: ARG002
+            return {
+                "stopReason": "guardrail_intervened",
+                "output": {"message": {"content": []}},
+                "usage": {
+                    "inputTokens": 1234,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 1000,
+                    "cacheWriteInputTokens": 0,
+                },
+                "metrics": {"latencyMs": 42},
+                "trace": {"guardrail": "present"},
+                "ResponseMetadata": {
+                    "RequestId": "bedrock-request-123",
+                    "HTTPStatusCode": 200,
+                    "RetryAttempts": 0,
+                },
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            pass
+
+        def client(self, service_name, **kwargs):  # noqa: ARG002
+            return FakeBedrockClient()
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="global.anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
+
+    assert blocks == []
+    assert stop_reason == "guardrail_intervened"
+    diagnostic = raw_content[-1]
+    assert diagnostic["type"] == "provider_diagnostic"
+    assert diagnostic["native_stop_reason"] == "guardrail_intervened"
+    assert diagnostic["transport"] == {
+        "http_status": 200,
+        "request_id": "bedrock-request-123",
+        "retry_attempts": 0,
+    }
+    assert diagnostic["guardrail_trace_present"] is True
+    assert diagnostic["usage"]["input_tokens"] == 1234
+
+
 def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -2336,3 +2730,98 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
     assert converse_messages[0]["content"][-1] == {"cachePoint": {"type": "default"}}
     # Verify last user message has cachePoint
     assert converse_messages[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+
+
+def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
+    captured: dict[str, object] = {}
+    reasoning = {
+        "reasoningText": {
+            "text": "signed internal reasoning",
+            "signature": "bedrock-signature",
+        }
+    }
+
+    class FakeBedrockClient:
+        def converse(self, **kwargs):
+            captured["converse_kwargs"] = kwargs
+            return {
+                "stopReason": "tool_use",
+                "output": {
+                    "message": {
+                        "content": [
+                            {"reasoningContent": reasoning},
+                            {
+                                "toolUse": {
+                                    "toolUseId": "tool-2",
+                                    "name": "context_tool",
+                                    "input": {"tool": "site_map"},
+                                }
+                            },
+                        ],
+                    },
+                },
+                "usage": {},
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        def client(self, service_name, **kwargs):
+            return FakeBedrockClient()
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(Session=FakeSession))
+    config = LLMConfig(
+        provider="bedrock",
+        api_key=None,
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    messages = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": []},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tool-1",
+                    "content": "",
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "bedrock_reasoning",
+                    "reasoning_content": reasoning,
+                }
+            ],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
+        config,
+        system_message="system",
+        messages=messages,
+        tools=[],
+    ))
+
+    converse_messages = captured["converse_kwargs"]["messages"]
+    assert all(message["content"] for message in converse_messages)
+    assert converse_messages[1]["content"] == [
+        {"text": "[No content was recorded for this turn.]"}
+    ]
+    assert converse_messages[2]["content"][0]["toolResult"]["content"] == [
+        {"text": "[Tool completed without textual output.]"}
+    ]
+    assert converse_messages[3]["content"] == [{"reasoningContent": reasoning}]
+    assert stop_reason == "tool_use"
+    assert blocks[0]["name"] == "context_tool"
+    assert raw_content[0] == {
+        "type": "bedrock_reasoning",
+        "reasoning_content": reasoning,
+    }

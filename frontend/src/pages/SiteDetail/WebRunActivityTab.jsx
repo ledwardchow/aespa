@@ -150,6 +150,10 @@ export function WebRunActivityTab(props) {
                 label: "LLM ⟳",
                 cls: "phase-llm-wait"
               },
+              llm_protocol: {
+                label: "⚠ LLM",
+                cls: "phase-warning"
+              },
               credential_warning: {
                 label: "⚠ Auth",
                 cls: "phase-warning"
@@ -182,13 +186,17 @@ export function WebRunActivityTab(props) {
             const meta = entry.status === "error" ? {
               label: _baseMeta.label,
               cls: "phase-finding"
+            } : entry.status === "warning" ? {
+              label: _baseMeta.label,
+              cls: "phase-warning"
             } : _baseMeta;
-            const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : entry.status === "error" ? " ✗" : "";
+            const suffix = entry.status === "complete" ? " ✓" : entry.status === "start" ? " …" : entry.status === "error" ? " ✗" : entry.status === "warning" ? " ⚠" : "";
             // Augment llm_request message to surface agentic context count
             const displayMessage = entry.phase === "llm_request" && entry.data?.message_count != null ? entry.message.replace(/\(.*messages in context\)/, `(${entry.data.message_count} msgs in context)`) : entry.message;
             const hasThinkingDetail = entry.phase === "thinking_step" && !!(entry.data?.observation || entry.data?.hypothesis || entry.data?.payload_purpose || entry.data?.payload_summary || entry.data?.tool_input || entry.data?.tool_output);
             const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
-            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail);
+            const hasLlmDiagnostics = !!(entry.data?.native_stop_reason || entry.data?.provider_diagnostics?.length || entry.data?.termination_reason);
+            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail || hasLlmDiagnostics);
             const isExpanded = expandedLogIds.has(entry._id);
             return <div key={entry._id}>
                   <div className={"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")} onClick={hasPayload ? () => toggleLogId(entry._id) : undefined}>
@@ -207,6 +215,21 @@ export function WebRunActivityTab(props) {
                     marginTop: entry.data?.prompt ? 8 : 0
                   }}>Response</div>
                         <pre>{entry.data.raw_response}</pre></>}
+                      {hasLlmDiagnostics && <>
+                        <div className="activity-payload-label" style={{ marginTop: entry.data?.raw_response ? 8 : 0 }}>LLM diagnostics</div>
+                        <pre>{JSON.stringify({
+                          provider: entry.data?.provider,
+                          model: entry.data?.model,
+                          native_stop_reason: entry.data?.native_stop_reason,
+                          no_usable_content: entry.data?.no_usable_content,
+                          retry: entry.data?.no_tool_retry,
+                          retry_limit: entry.data?.no_tool_retry_limit,
+                          message_count: entry.data?.message_count,
+                          context_chars: entry.data?.context_chars,
+                          termination_reason: entry.data?.termination_reason,
+                          explicit_done: entry.data?.explicit_done,
+                          provider_diagnostics: entry.data?.provider_diagnostics
+                        }, null, 2)}</pre></>}
                       {hasThinkingDetail && <>
                         {entry.data?.observation && <>
                           <div className="activity-payload-label">Observation</div>

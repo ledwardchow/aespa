@@ -93,7 +93,7 @@ jobs:
           xcrun notarytool store-credentials aespa-notary \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
 
-      - name: Build + sign + notarize dmg
+      - name: Build, sign, notarize, and staple app + dmg
         run: |
           ./build_mac.sh
           ./make_dmg.sh
