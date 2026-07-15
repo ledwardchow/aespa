@@ -55,6 +55,7 @@ from aespa.services.prompts.specialist import (
 from aespa.services.prompts.test_lead import (
     _THINKING_AGENT_SYSTEM,
 )
+from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
     get_burp_rest_api_config,
@@ -1811,6 +1812,13 @@ def _run_thinking_context_tool(
             args, pages_snapshot=pages_snapshot, history=history, limit=limit
         )
 
+    if tool_name == "coverage_gaps":
+        if run_id is None:
+            return {"tool": tool_name, "error": "run_id unavailable"}
+        from aespa.services.web_workprogram import get_web_coverage_gaps
+
+        return get_web_coverage_gaps(run_id, limit=limit)
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
@@ -1827,6 +1835,7 @@ def _run_thinking_context_tool(
             "mutate_request",
             "auth_matrix",
             "extract_entities",
+            "coverage_gaps",
         ],
     }
 
@@ -4173,7 +4182,7 @@ async def _run_specialist_agent(
                 "type": "agent_status",
                 "agent_id": agent_id,
                 "role": "Specialist",
-                "status": "complete",
+                "status": "failed",
                 "current_task": f"Error: {exc}",
                 "outcome": "Error",
                 "_persist": True,
@@ -5611,6 +5620,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     guidance=guidance,
                     post_probe_fn=_web_post_probe_fn,
                     post_finding_fn=_web_post_finding_fn,
+                    coverage_mode=coverage_mode,
                 )
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
@@ -7036,6 +7046,7 @@ async def _do_agentic_thinking_loop(
     post_finding_fn=None,  # callable(ScanFinding) -> None; called after every persisted finding
     post_probe_fn=None,  # callable(url, method, owasp_category) -> None; called after every http_request
     persist_credential_fn=None,  # callable(username, password, login_url) -> None; replaces site-credential persistence
+    coverage_mode: str = "track",
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -7166,44 +7177,54 @@ async def _do_agentic_thinking_loop(
 
     _ssrf_canary[run_id] = _SSRF_CANARY_FINGERPRINT
 
-    pending_session_labels: set[str] = set()
+    completion_policy = ScanCompletionPolicy.from_state(
+        (resume_from or {}).get("completion_state")
+    )
 
     def _mark_session_pending(label: str | None) -> None:
-        if label:
-            pending_session_labels.add(str(label))
+        completion_policy.session_created(label)
 
     def _mark_session_used(label: str | None, status: int) -> None:
-        if label and status not in (0, 401, 403):
-            pending_session_labels.discard(str(label))
+        was_unattempted = bool(
+            label
+            and not (completion_policy.sessions.get(str(label)) or {}).get(
+                "attempted"
+            )
+        )
+        completion_policy.session_attempted(label, status)
+        if label and was_unattempted:
+            invalid = status in (0, 401, 403)
+            _emit_completion_log(
+                f"Session {label} {'invalid and evicted' if invalid else 'exercised'}: "
+                f"status {status}.",
+                status="warning" if invalid else "complete",
+            )
+
+    def _emit_completion_log(message: str, *, status: str = "complete") -> None:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "completion_policy",
+                "status": status,
+                "message": message,
+                "_persist": True,
+            },
+        )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        if pending_session_labels:
-            label_list = ", ".join(sorted(pending_session_labels)[:5])
-            return False, (
-                "Assessment is not complete. You created or captured reusable "
-                f"authenticated session label(s) that have not been exercised yet: "
-                f"{label_list}. Before calling done, call http_request with "
-                f"use_session set to one of those labels against authenticated API "
-                f"endpoints such as /api/profile, /api/accounts, /api/transfers, "
-                f"or another endpoint discovered in the JavaScript/API inventory. "
-                f"If a session fails, report the exact status and then try a different "
-                f"valid session or endpoint."
-            )
-        if history:
-            last = history[-1]
-            last_status = int(last.get("response_status") or 0)
-            last_method = str(last.get("method") or "")
-            if last_status in (401, 403) and any(
-                (sd.get("extra_headers") or {}).get("Authorization")
-                for sd in session_vault.values()
-            ):
-                return False, (
-                    "Assessment is not complete. The previous request ended with "
-                    f"{last_status} ({last_method} {last.get('url')}) while bearer "
-                    "sessions exist in the session vault. Retry the relevant protected "
-                    "endpoint with a concrete use_session label before calling done."
-                )
-        return True, ""
+        coverage_reader = None
+        if not is_api_run and coverage_mode == "track":
+            from aespa.services.web_workprogram import get_web_coverage_gaps
+
+            def coverage_reader() -> dict[str, Any]:
+                return get_web_coverage_gaps(run_id, limit=8)
+        allowed, feedback, log_message = completion_policy.check_done(coverage_reader)
+        _emit_completion_log(
+            f"Step {step}: {log_message}",
+            status="complete" if allowed else "warning",
+        )
+        return allowed, feedback
 
     # ── Build the initial user message ────────────────────────────────────────
     creds_text = ""
@@ -7366,6 +7387,7 @@ async def _do_agentic_thinking_loop(
                 )
                 if updated is None:
                     return f"Lead #{lead_id} not found."
+                completion_policy.record_progress(f"lead:{lead_id}:{lead_status}")
                 return (
                     f"Lead #{lead_id} updated: outcome={outcome}, status={lead_status}."
                     + (f" Linked to finding #{finding_id}." if finding_id else "")
@@ -7413,6 +7435,7 @@ async def _do_agentic_thinking_loop(
             )
             if saved is not None:
                 progressive_findings_count += 1
+                completion_policy.record_progress(f"finding:{saved.id}")
                 findings_snapshot.append(
                     {
                         "id": saved.id,
@@ -7651,6 +7674,7 @@ async def _do_agentic_thinking_loop(
             )
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
+            completion_policy.record_progress(f"browser-route:{final_url}")
             # Evict expired/invalid named sessions from the vault on 401/403
             _br_session_evicted = False
             if (
@@ -8228,6 +8252,7 @@ async def _do_agentic_thinking_loop(
                 is_api_run=is_api_run,
             )
             if dispatched_id:
+                completion_policy.record_progress(f"specialist:{dispatched_id}")
                 events_svc.emit(
                     run_id,
                     {
@@ -8326,6 +8351,23 @@ async def _do_agentic_thinking_loop(
             if isinstance(tool_input.get("use_session"), str)
             else None
         )
+        _hr_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
+        _hr_probe_signature = completion_policy.probe_signature(
+            method=hr_method,
+            url=hr_url,
+            body=hr_body,
+            session_label=hr_use_session,
+            owasp_category=_hr_owasp,
+        )
+        _repeat_message = completion_policy.repeated_probe_message(
+            _hr_probe_signature
+        )
+        if _repeat_message:
+            _emit_completion_log(
+                f"Step {step}: repeated probe suppressed — {hr_method} {hr_url}",
+                status="warning",
+            )
+            return _repeat_message
         hr_sel_session = session_vault.get(hr_use_session) if hr_use_session else None
         events_svc.emit(
             run_id,
@@ -8523,9 +8565,19 @@ async def _do_agentic_thinking_loop(
         )
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status)
-        # Notify coverage tracker with the declared OWASP category (API runs only).
+        completion_policy.record_probe_outcome(
+            _hr_probe_signature, hr_resp_status, hr_resp_body
+        )
+        if _hr_owasp:
+            from aespa.services.web_workprogram import _normalize_url
+
+            completion_policy.record_progress(
+                f"coverage:{_normalize_url(hr_url)}:{_hr_owasp}"
+            )
+        for _path in _js_paths:
+            completion_policy.record_progress(f"route:{_path}")
+        # Notify the web/API coverage tracker with the declared OWASP category.
         if post_probe_fn is not None:
-            _hr_owasp = str(tool_input.get("owasp_category") or "").strip()
             if _hr_owasp:
                 try:
                     post_probe_fn(hr_url, hr_method, _hr_owasp)
@@ -8539,6 +8591,7 @@ async def _do_agentic_thinking_loop(
             and hr_use_session in session_vault
         ):
             del session_vault[hr_use_session]
+            completion_policy.session_evicted(hr_use_session, hr_resp_status)
             _hr_session_evicted = True
             log.info(
                 "Agentic scan: evicted expired session '%s' (401/403 on %s %s)",
@@ -8637,6 +8690,7 @@ async def _do_agentic_thinking_loop(
             step_count=len(messages),
             progressive_findings_count=progressive_findings_count,
             consecutive_context_tools=_consecutive_ctx_tools[0],
+            completion_state=completion_policy.to_state(),
         )
 
     await llm_svc.thinking_agentic_loop(
@@ -8649,6 +8703,10 @@ async def _do_agentic_thinking_loop(
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
         done_check=_agentic_done_check,
+        after_tool_result=lambda _name, _input, result, _step: (
+            completion_policy.observe_tool_result(result)
+        ),
+        termination_check=completion_policy.check_termination,
         resume_messages=resume_messages,
         on_checkpoint=_on_checkpoint_callback,
         tools=tools_override,

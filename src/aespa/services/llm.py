@@ -3163,12 +3163,20 @@ async def _call_with_tools_impl(
             role = msg["role"]
             content = msg["content"]
             if isinstance(content, str):
-                return {"role": role, "content": [{"text": content}]}
+                text = content.strip()
+                return {
+                    "role": role,
+                    "content": [
+                        {"text": text or "[No content was recorded for this turn.]"}
+                    ],
+                }
             cvt: list[dict] = []
-            for blk in content:
+            for blk in content or []:
                 btype = blk.get("type")
                 if btype == "text":
-                    cvt.append({"text": blk.get("text") or ""})
+                    text = str(blk.get("text") or "").strip()
+                    if text:
+                        cvt.append({"text": text})
                 elif btype == "tool_use":
                     cvt.append(
                         {
@@ -3181,16 +3189,51 @@ async def _call_with_tools_impl(
                     )
                 elif btype == "tool_result":
                     result_content = blk.get("content") or ""
+                    if isinstance(result_content, str):
+                        tool_content = [
+                            {
+                                "text": result_content.strip()
+                                or "[Tool completed without textual output.]"
+                            }
+                        ]
+                    else:
+                        tool_content = []
+                        for result_block in result_content or []:
+                            result_text = str(
+                                result_block.get("text")
+                                or (
+                                    result_block.get("text", "")
+                                    if result_block.get("type") == "text"
+                                    else ""
+                                )
+                            ).strip()
+                            if result_text:
+                                tool_content.append({"text": result_text})
+                            elif "json" in result_block:
+                                tool_content.append({"json": result_block["json"]})
+                        if not tool_content:
+                            tool_content = [
+                                {"text": "[Tool completed without textual output.]"}
+                            ]
                     cvt.append(
                         {
                             "toolResult": {
                                 "toolUseId": blk.get("tool_use_id") or "",
-                                "content": [{"text": result_content}]
-                                if isinstance(result_content, str)
-                                else result_content,
+                                "content": tool_content,
                             }
                         }
                     )
+                elif btype == "bedrock_reasoning":
+                    reasoning_content = blk.get("reasoning_content")
+                    if isinstance(reasoning_content, dict) and reasoning_content:
+                        # Bedrock requires reasoning text/signatures to be replayed
+                        # byte-for-byte in subsequent multi-turn requests.
+                        cvt.append({"reasoningContent": reasoning_content})
+            if not cvt:
+                # Legacy checkpoints can contain an empty assistant turn when a
+                # model returned reasoning-only or otherwise unsupported content.
+                # Converse rejects Message.content=[] before the model is invoked.
+                cvt.append({"text": "[No content was recorded for this turn.]"})
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
@@ -3291,33 +3334,38 @@ async def _call_with_tools_impl(
             "content"
         ) or []
         blocks: list[dict] = []
+        raw_content_ant: list[dict] = []
         for blk in out_content:
-            if "text" in blk:
-                blocks.append(
+            if "reasoningContent" in blk:
+                raw_content_ant.append(
                     {
+                        "type": "bedrock_reasoning",
+                        "reasoning_content": blk["reasoningContent"],
+                    }
+                )
+            if "text" in blk:
+                text = str(blk["text"] or "")
+                if text:
+                    normalized = {
                         "type": "text",
                         "id": None,
                         "name": None,
                         "input": None,
-                        "text": blk["text"],
+                        "text": text,
                     }
-                )
+                    blocks.append(normalized)
+                    raw_content_ant.append(normalized)
             elif "toolUse" in blk:
                 tu = blk["toolUse"]
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": tu.get("toolUseId"),
-                        "name": tu.get("name"),
-                        "input": tu.get("input") or {},
-                        "text": None,
-                    }
-                )
-        # Store as Anthropic-format so the messages list stays consistent
-        raw_content_ant = [
-            {"type": b["type"], **{k: v for k, v in b.items() if k != "type"}}
-            for b in blocks
-        ]
+                normalized = {
+                    "type": "tool_use",
+                    "id": tu.get("toolUseId"),
+                    "name": tu.get("name"),
+                    "input": tu.get("input") or {},
+                    "text": None,
+                }
+                blocks.append(normalized)
+                raw_content_ant.append(normalized)
         _bdt_u = data.get("usage", {})
         _record_usage(
             config.model,
@@ -3683,6 +3731,8 @@ async def thinking_agentic_loop(
     emit_fn=None,
     stop_check=None,
     done_check=None,
+    after_tool_result=None,
+    termination_check=None,
     resume_messages: list[dict] | None = None,
     on_checkpoint=None,
     tools: list[dict] | None = None,
@@ -3702,6 +3752,10 @@ async def thinking_agentic_loop(
         invoked after every completed LLM turn so the caller can persist the
         current conversation state to durable storage.
 
+    after_tool_result: optional callable that may annotate a completed tool result.
+    termination_check: optional callable returning a reason when an owning scan's
+        progress policy requires a bounded automatic stop.
+
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
     if resume_messages is not None:
@@ -3716,6 +3770,27 @@ async def thinking_agentic_loop(
         while True:
             if stop_check and stop_check():
                 break
+            if termination_check:
+                try:
+                    termination_reason = termination_check()
+                except Exception as exc:
+                    log.warning("thinking_agentic_loop: termination_check failed: %s", exc)
+                    termination_reason = None
+                if termination_reason:
+                    final_summary = str(termination_reason)
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "scan_stagnation",
+                                    "status": "warning",
+                                    "message": final_summary,
+                                }
+                            )
+                        except Exception:
+                            pass
+                    break
 
             if emit_fn:
                 try:
@@ -3834,7 +3909,10 @@ async def thinking_agentic_loop(
                         f"LLM provider refused the scan request at step "
                         f"{tool_call_count + 1}: {exc}"
                     ) from exc
-                break
+                # A provider/serialization failure is not a successful terminal
+                # condition. Propagate it so the owning scan is marked failed and
+                # can be resumed from the final checkpoint.
+                raise
 
             tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
             text_blocks = [
@@ -3865,8 +3943,16 @@ async def thinking_agentic_loop(
                 except Exception:
                     pass
 
-            # Append the assistant turn to the growing conversation
-            messages.append({"role": "assistant", "content": raw_content})
+            # Append the assistant turn to the growing conversation. Preserve a
+            # non-empty marker when a provider returns no usable blocks so the
+            # checkpoint itself remains valid for every messages API on resume.
+            assistant_content = raw_content or [
+                {
+                    "type": "text",
+                    "text": "[The model returned no usable content blocks.]",
+                }
+            ]
+            messages.append({"role": "assistant", "content": assistant_content})
 
             if not tool_use_blocks:
                 # OpenAI-style reasoning models occasionally narrate the next step instead
@@ -3971,6 +4057,16 @@ async def thinking_agentic_loop(
                         exc,
                     )
                     result_str = f"Tool execution error: {exc}"
+
+                if after_tool_result:
+                    try:
+                        result_str = after_tool_result(
+                            tool_name, tool_input, result_str, tool_call_count
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "thinking_agentic_loop: after_tool_result failed: %s", exc
+                        )
 
                 limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
                 if len(result_str) > limit:
