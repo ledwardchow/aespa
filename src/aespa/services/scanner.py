@@ -7187,9 +7187,7 @@ async def _do_agentic_thinking_loop(
     def _mark_session_used(label: str | None, status: int) -> None:
         was_unattempted = bool(
             label
-            and not (completion_policy.sessions.get(str(label)) or {}).get(
-                "attempted"
-            )
+            and not (completion_policy.sessions.get(str(label)) or {}).get("attempted")
         )
         completion_policy.session_attempted(label, status)
         if label and was_unattempted:
@@ -7219,6 +7217,7 @@ async def _do_agentic_thinking_loop(
 
             def coverage_reader() -> dict[str, Any]:
                 return get_web_coverage_gaps(run_id, limit=8)
+
         allowed, feedback, log_message = completion_policy.check_done(coverage_reader)
         _emit_completion_log(
             f"Step {step}: {log_message}",
@@ -8352,16 +8351,25 @@ async def _do_agentic_thinking_loop(
             else None
         )
         _hr_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
+        from aespa.services.web_workprogram import normalize_web_test_class
+
+        _hr_test_class = normalize_web_test_class(
+            tool_input.get("test_class"),
+            owasp_category=_hr_owasp,
+            evidence=" ".join(
+                str(tool_input.get(key) or "")
+                for key in ("hypothesis", "payload_purpose", "note", "body")
+            ),
+        )
         _hr_probe_signature = completion_policy.probe_signature(
             method=hr_method,
             url=hr_url,
             body=hr_body,
             session_label=hr_use_session,
             owasp_category=_hr_owasp,
+            test_class=_hr_test_class,
         )
-        _repeat_message = completion_policy.repeated_probe_message(
-            _hr_probe_signature
-        )
+        _repeat_message = completion_policy.repeated_probe_message(_hr_probe_signature)
         if _repeat_message:
             _emit_completion_log(
                 f"Step {step}: repeated probe suppressed — {hr_method} {hr_url}",
@@ -8388,6 +8396,7 @@ async def _do_agentic_thinking_loop(
                     "payload_purpose": tool_input.get("payload_purpose"),
                     "payload_summary": _thinking_payload_summary(hr_url, hr_body),
                     "use_session": hr_use_session,
+                    "test_class": _hr_test_class or None,
                 },
             },
         )
@@ -8561,6 +8570,8 @@ async def _do_agentic_thinking_loop(
                 "response_status": hr_resp_status,
                 "response_headers": hr_resp_headers,
                 "response_body": _resp_body_for_history,
+                "owasp_category": _hr_owasp,
+                "test_class": _hr_test_class or None,
             }
         )
         all_results.append(hr_result)
@@ -8572,7 +8583,8 @@ async def _do_agentic_thinking_loop(
             from aespa.services.web_workprogram import _normalize_url
 
             completion_policy.record_progress(
-                f"coverage:{_normalize_url(hr_url)}:{_hr_owasp}"
+                f"coverage:{_normalize_url(hr_url)}:{_hr_owasp}:"
+                f"{_hr_test_class or 'unspecified'}"
             )
         for _path in _js_paths:
             completion_policy.record_progress(f"route:{_path}")
@@ -8580,7 +8592,12 @@ async def _do_agentic_thinking_loop(
         if post_probe_fn is not None:
             if _hr_owasp:
                 try:
-                    post_probe_fn(hr_url, hr_method, _hr_owasp)
+                    if is_api_run:
+                        post_probe_fn(hr_url, hr_method, _hr_owasp)
+                    else:
+                        post_probe_fn(
+                            hr_url, hr_method, _hr_owasp, _hr_test_class or None
+                        )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
         # Evict expired/invalid named sessions from the vault on 401/403
@@ -9940,6 +9957,33 @@ async def _run_thinking_browser_action(
                         await pw_page.wait_for_load_state(state, timeout=timeout_ms)
                 elif op == "snapshot":
                     action_log.append("snapshot")
+                elif op == "dom_check":
+                    selector = str(raw_step.get("selector") or "").strip()
+                    if not selector:
+                        action_log.append("dom_check skipped: missing selector")
+                        continue
+                    expected = str(raw_step.get("equals") or "")[:500]
+                    attribute = str(raw_step.get("attribute") or "").strip()
+                    locator = pw_page.locator(selector).first
+                    count = await pw_page.locator(selector).count()
+                    actual = None
+                    if count:
+                        if attribute:
+                            actual = await locator.get_attribute(
+                                attribute, timeout=5_000
+                            )
+                        else:
+                            actual = await locator.text_content(timeout=5_000)
+                    passed = count > 0 and str(actual or "") == expected
+                    target = f" @{attribute}" if attribute else " text"
+                    action_log.append(
+                        "dom_check "
+                        + ("PASS" if passed else "FAIL")
+                        + f" {selector}{target} expected="
+                        + _compact_log_value(expected, 160)
+                        + " actual="
+                        + _compact_log_value(str(actual or ""), 160)
+                    )
                 else:
                     action_log.append(f"unsupported op: {op or '(missing)'}")
             except Exception as exc:
@@ -10035,8 +10079,10 @@ async def _run_thinking_browser_action(
     )
     duration_ms = int((time.perf_counter() - started) * 1000)
     outcome = "Browser action completed."
-    if any(" failed:" in line for line in action_log):
-        outcome = "Browser action completed with failed steps."
+    if any(
+        " failed:" in line or line.startswith("dom_check FAIL") for line in action_log
+    ):
+        outcome = "Browser action completed with failed steps or DOM checks."
     return {
         "desc": action.get("note") or "Browser action",
         "url": final_url,

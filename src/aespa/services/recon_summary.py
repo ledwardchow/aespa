@@ -372,15 +372,31 @@ def _build_coverage(
     routes: list[dict],
 ) -> dict:
     page_urls = {page.id: _canonical_url(page.url) for page in pages}
+    page_map = {page.id: page for page in pages}
     route_map = {route["canonical_url"]: route for route in routes}
     status_counts = Counter()
     category_counts: dict[str, Counter] = defaultdict(Counter)
+    class_counts: dict[str, Counter] = defaultdict(Counter)
     gaps: dict[str, set[str]] = defaultdict(set)
     route_cells: dict[str, list[PageOwaspTest]] = defaultdict(list)
 
     for cell in cells:
         status_counts[cell.status] += 1
         category_counts[cell.owasp_category][cell.status] += 1
+        try:
+            test_classes = json.loads(cell.test_classes_json or "{}")
+        except Exception:
+            test_classes = {}
+        if isinstance(test_classes, dict):
+            for test_class, state in test_classes.items():
+                if isinstance(state, dict):
+                    class_counts[test_class][state.get("status") or "not_started"] += 1
+        if cell.owasp_category == "A03" and bool(
+            getattr(page_map.get(cell.page_id), "takes_input", False)
+        ):
+            for test_class in ("sqli", "reflected_xss", "stored_xss"):
+                if test_class not in test_classes:
+                    class_counts[test_class]["not_started"] += 1
         canonical = page_urls.get(cell.page_id)
         if canonical:
             route_cells[canonical].append(cell)
@@ -437,6 +453,14 @@ def _build_coverage(
         "completion_percent": round(100 * resolved / total) if total else 0,
         "statuses": {status: status_counts.get(status, 0) for status in _STATUS_ORDER},
         "by_category": by_category,
+        "by_test_class": [
+            {
+                "test_class": test_class,
+                "statuses": dict(counts),
+                "remaining": counts["not_started"] + counts["in_progress"],
+            }
+            for test_class, counts in sorted(class_counts.items())
+        ],
     }
 
 

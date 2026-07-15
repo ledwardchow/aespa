@@ -372,6 +372,39 @@ def test_post_probe_fn_flips_in_progress(db_engine, db_session, run):
     assert cell.status == "in_progress"
 
 
+def test_a03_probe_tracks_specific_test_class(db_engine, db_session, run):
+    page = _make_page(db_session, run, "http://example.com/search", ["A03"])
+    page.takes_input = True
+    db_session.add(page)
+    db_session.commit()
+    seed_web_workprogram(run.id)
+
+    fn = _make_web_post_probe_fn(run.id)
+    fn("http://example.com/search", "GET", "A03", "sqli")
+
+    matrix = get_web_coverage_matrix(run.id)
+    cell = matrix["pages"][0]["cells"]["A03"]
+    assert cell["test_classes"]["sqli"]["status"] == "in_progress"
+    assert cell["test_classes"]["stored_xss"]["status"] == "not_started"
+    assert matrix["class_totals"]["sqli"]["in_progress"] == 1
+
+
+def test_a03_gaps_keep_xss_distinct_from_sqli(db_engine, db_session, run):
+    page = _make_page(db_session, run, "http://example.com/search", ["A03"])
+    page.takes_input = True
+    db_session.add(page)
+    db_session.commit()
+    seed_web_workprogram(run.id)
+    _make_web_post_probe_fn(run.id)("http://example.com/search", "GET", "A03", "sqli")
+
+    gaps = get_web_coverage_gaps(run.id, limit=10)["next_actions"]
+    by_class = {gap["test_class"]: gap for gap in gaps}
+
+    assert {"sqli", "reflected_xss", "stored_xss"} <= set(by_class)
+    assert by_class["stored_xss"]["owasp_category"] == "A03"
+    assert "stored xss" in by_class["stored_xss"]["reason"]
+
+
 # ── 10. _make_web_post_probe_fn is a no-op for blank category ─────────────────
 
 
