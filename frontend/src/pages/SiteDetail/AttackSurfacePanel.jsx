@@ -28,7 +28,7 @@ function CoverageBadges({ statuses = {} }) {
 }
 
 export function AttackSurfacePanel({ summary }) {
-  const [expanded, setExpanded] = useState({ coverage: true, routes: true, access: false, signals: true, meta: false });
+  const [expanded, setExpanded] = useState({ routes: true, access: false, signals: true, meta: false });
   const [query, setQuery] = useState("");
   const [accessFilter, setAccessFilter] = useState("all");
   const toggle = key => setExpanded(previous => ({ ...previous, [key]: !previous[key] }));
@@ -64,26 +64,6 @@ export function AttackSurfacePanel({ summary }) {
       <div className="surface-summary-card"><strong>{inputs.parameters || 0}</strong><span>Parameters</span></div>
       <div className="surface-summary-card"><strong>{coverage.completion_percent || 0}%</strong><span>Coverage resolved</span></div>
     </div>
-
-    <Section id="coverage" title="Coverage Gaps" detail={coverage.seeded ? `${coverage.resolved || 0} of ${coverage.total || 0} cells resolved` : "Workprogram not seeded"} expanded={expanded.coverage} onToggle={toggle}>
-      <CoverageBadges statuses={coverage.statuses} />
-      {(coverage.by_category || []).length ? <div className="surface-coverage-list">
-        {coverage.by_category.map(item => {
-          const resolved = item.total - item.remaining;
-          const percent = item.total ? Math.round(100 * resolved / item.total) : 0;
-          return <div key={item.category} className="surface-coverage-row">
-            <span className="owasp-badge">{item.category}</span>
-            <span className="surface-coverage-name">{item.label}</span>
-            <span className="surface-progress"><span style={{ width: `${percent}%` }} /></span>
-            <span className="surface-coverage-count">{item.remaining} remaining</span>
-            {item.gap_route_total > 0 ? <span className="subtle">{item.gap_route_total} routes</span> : null}
-          </div>;
-        })}
-      </div> : <div className="subtle">Coverage appears here after the OWASP workprogram is seeded.</div>}
-      {(coverage.by_test_class || []).length ? <div className="surface-chip-list" style={{ marginTop: 10 }}>
-        {coverage.by_test_class.map(item => <span key={item.test_class} className="surface-chip">{item.test_class.replace(/_/g, " ")}: {item.remaining} remaining</span>)}
-      </div> : null}
-    </Section>
 
     <Section id="routes" title="Route & Input Inventory" detail={`${filteredRoutes.length} of ${routes.length} routes`} expanded={expanded.routes} onToggle={toggle}>
       <div className="surface-filters">
@@ -134,6 +114,45 @@ export function AttackSurfacePanel({ summary }) {
 
     <Section id="meta" title="Observed Technologies" detail={`${technologies.length} detected`} expanded={expanded.meta} onToggle={toggle}>
       <div className="surface-profile-list">{technologies.map(item => <span key={item.name} className="surface-chip">{item.name} <span className="subtle">via {item.source}</span></span>)}</div>
+    </Section>
+  </div>;
+}
+
+export function CoverageGapsPanel({ summary }) {
+  const [expanded, setExpanded] = useState(true);
+
+  if (!summary) {
+    return <div className="attack-surface-empty">
+      <span className="subtle">No coverage summary is available yet. Complete or import a crawl first.</span>
+    </div>;
+  }
+
+  const coverage = summary.coverage || {};
+  return <div className="coverage-gaps-panel">
+    <Section
+      id="coverage"
+      title="Progress"
+      detail={coverage.seeded ? `${coverage.resolved || 0} of ${coverage.total || 0} cells resolved` : "Workprogram not seeded"}
+      expanded={expanded}
+      onToggle={() => setExpanded(previous => !previous)}
+    >
+      <CoverageBadges statuses={coverage.statuses} />
+      {(coverage.by_category || []).length ? <div className="surface-coverage-list">
+        {coverage.by_category.map(item => {
+          const resolved = item.total - item.remaining;
+          const percent = item.total ? Math.round(100 * resolved / item.total) : 0;
+          return <div key={item.category} className="surface-coverage-row">
+            <span className="owasp-badge">{item.category}</span>
+            <span className="surface-coverage-name">{item.label}</span>
+            <span className="surface-progress"><span style={{ width: `${percent}%` }} /></span>
+            <span className="surface-coverage-count">{item.remaining} remaining</span>
+            {item.gap_route_total > 0 ? <span className="subtle">{item.gap_route_total} routes</span> : null}
+          </div>;
+        })}
+      </div> : <div className="subtle">Coverage appears here after the OWASP workprogram is seeded.</div>}
+      {(coverage.by_test_class || []).length ? <div className="surface-chip-list" style={{ marginTop: 10 }}>
+        {coverage.by_test_class.map(item => <span key={item.test_class} className="surface-chip">{item.test_class.replace(/_/g, " ")}: {item.remaining} remaining</span>)}
+      </div> : null}
     </Section>
   </div>;
 }
