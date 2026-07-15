@@ -315,6 +315,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "page_owasp_test", "status", "TEXT NOT NULL DEFAULT 'not_started'")
     _ensure_column(engine, "page_owasp_test", "skip_reason", "TEXT")
     _ensure_column(engine, "page_owasp_test", "finding_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(engine, "page_owasp_test", "test_classes_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(engine, "page_owasp_test", "last_updated", "DATETIME")  # nullable for existing rows; new rows use model default_factory
     _ensure_column(engine, "test_run", "coverage_mode", "TEXT NOT NULL DEFAULT 'track'")
     with engine.connect() as conn:
