@@ -44,11 +44,13 @@ from aespa.models import (
     Site,
     TestRun,
 )
+from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.web_workprogram import (
     _enforce_web_coverage_loop,
     _make_web_post_finding_fn,
     _make_web_post_probe_fn,
     _uncovered_web_cells,
+    get_web_coverage_gaps,
     get_web_coverage_matrix,
     mark_in_progress_to_covered,
     seed_web_workprogram,
@@ -164,6 +166,61 @@ def test_seed_idempotent(db_engine, db_session, run):
     second = seed_web_workprogram(run.id)
     assert first == 1
     assert second == 0
+
+
+def test_live_coverage_gaps_prioritise_untested_input_api_cells(
+    db_engine, db_session, run
+):
+    ordinary = _make_page(db_session, run, "http://example.com/about", ["A05"])
+    api_page = _make_page(
+        db_session, run, "http://example.com/api/accounts/1", ["A01", "A03"]
+    )
+    api_page.takes_input = True
+    api_page.has_object_ref = True
+    api_page.req_auth = True
+    api_page.state_kind = "api"
+    db_session.add(api_page)
+    db_session.commit()
+    seed_web_workprogram(run.id)
+    update_web_coverage_cell(run.id, ordinary.id, "A05", "in_progress")
+
+    result = get_web_coverage_gaps(run.id, limit=2)
+
+    assert result["totals"]["not_started"] == 2
+    assert result["totals"]["in_progress"] == 1
+    assert len(result["next_actions"]) == 2
+    assert result["next_actions"][0]["page_id"] == api_page.id
+    assert result["next_actions"][0]["owasp_category"] in {"A01", "A03"}
+    assert "takes input" in result["next_actions"][0]["reason"]
+
+
+def test_checkpoint_round_trips_completion_policy_state(db_engine, run):
+    state = {
+        "sessions": {
+            "forged_admin": {
+                "active": False,
+                "attempted": True,
+                "last_status": 401,
+            }
+        },
+        "coverage_rounds": 1,
+    }
+    checkpoint_svc.save_checkpoint(
+        run.id,
+        messages=[{"role": "user", "content": "start"}],
+        history=[],
+        blocked_urls=set(),
+        failed_url_counts={},
+        step_count=1,
+        progressive_findings_count=0,
+        consecutive_context_tools=0,
+        completion_state=state,
+    )
+
+    loaded = checkpoint_svc.load_checkpoint(run.id)
+
+    assert loaded is not None
+    assert loaded["completion_state"] == state
 
 
 # ── 3. update_web_coverage_cell creates new cell ──────────────────────────────

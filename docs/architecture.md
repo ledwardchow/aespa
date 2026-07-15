@@ -495,6 +495,15 @@ The loop terminates when:
 - The LLM calls the `done` action (with a summary)
 - A stop is requested via the API
 - An unrecoverable network error occurs
+- The bounded completion policy observes 50 consecutive tool calls without a new
+  route/category coverage transition, finding, lead resolution, specialist handoff,
+  or session use. It warns after 40 and records the automatic stop in the Test Lead log.
+
+`done` is mediated by a bounded policy rather than an open-ended completeness gate.
+An active session that has never been attempted may trigger one challenge, and Track
+mode may trigger at most two compact live coverage rounds. A 401/403 counts as a
+session attempt and evicts that session. The same completion condition can therefore
+never reject `done` indefinitely.
 
 ### Actions available to the LLM
 
@@ -531,6 +540,7 @@ targeted scan round will change the next action.
 | `mutate_request` | Generate probe variants (input_validation, idor, business_logic) |
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
+| `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 

@@ -38,6 +38,7 @@ def save_checkpoint(
     step_count: int,
     progressive_findings_count: int,
     consecutive_context_tools: int,
+    completion_state: dict[str, Any] | None = None,
 ) -> None:
     """Upsert a checkpoint row for *run_id*.  Called after every LLM turn."""
     try:
@@ -55,6 +56,9 @@ def save_checkpoint(
                 existing.step_count = step_count
                 existing.progressive_findings_count = progressive_findings_count
                 existing.consecutive_context_tools = consecutive_context_tools
+                existing.completion_state_json = json.dumps(
+                    completion_state or {}, default=str
+                )
                 existing.updated_at = now
                 s.add(existing)
             else:
@@ -67,6 +71,9 @@ def save_checkpoint(
                     step_count=step_count,
                     progressive_findings_count=progressive_findings_count,
                     consecutive_context_tools=consecutive_context_tools,
+                    completion_state_json=json.dumps(
+                        completion_state or {}, default=str
+                    ),
                     created_at=now,
                     updated_at=now,
                 )
@@ -88,6 +95,7 @@ def load_checkpoint(run_id: int) -> dict[str, Any] | None:
     * ``step_count``               — int
     * ``progressive_findings_count`` — int
     * ``consecutive_context_tools``  — int
+    * ``completion_state``           — dict (bounded done/progress policy)
     * ``updated_at``               — datetime
     """
     try:
@@ -105,6 +113,7 @@ def load_checkpoint(run_id: int) -> dict[str, Any] | None:
                 "step_count": row.step_count,
                 "progressive_findings_count": row.progressive_findings_count,
                 "consecutive_context_tools": row.consecutive_context_tools,
+                "completion_state": json.loads(row.completion_state_json or "{}"),
                 "updated_at": row.updated_at,
             }
     except Exception:
