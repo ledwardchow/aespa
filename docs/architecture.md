@@ -29,7 +29,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 7. [Dynamic Scan](#7-dynamic-scan)
    - [Bootstrap](#bootstrap) · [Scan resume](#scan-resume) · [Agentic loop](#agentic-loop)
    - [Actions available to the LLM](#actions-available-to-the-llm)
-   - [Context tools](#context-tools-read-only-reconnaissance) · [Task graph](#task-graph) · [Web OWASP Coverage](#web-owasp-coverage-owasp-top-10-matrix)
+   - [Context tools](#context-tools-read-only-reconnaissance) · [Web OWASP Coverage](#web-owasp-coverage-owasp-top-10-matrix)
 8. [Multi-Agent System](#8-multi-agent-system)
    - [Agent types](#agent-types) · [Specialist agents](#specialist-agents)
    - [Adversarial validator](#adversarial-validator) · [Post-scan review](#post-scan-review-reporting-agent)
@@ -108,7 +108,7 @@ src/aespa/
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
-    ├── task_graph.py      # Recon summary, pentest hypothesis & task tracking
+    ├── recon_summary.py   # Structured attack-surface summary from crawl data
     ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── events.py          # WebSocket event emission
@@ -156,7 +156,7 @@ AESPA_PORT         = 8000
 │  scanner    │       └─────────────────────────────────────┘
 │  findings   │
 │  validator  │       ┌─────────────────────────────────────┐
-│  task_graph │       │  Burp Suite Professional            │
+│  recon      │       │  Burp Suite Professional            │
 │  burp_rest  │──────►│  REST API  (default :1337)          │
 │  traffic    │       └─────────────────────────────────────┘
 │  events     │
@@ -167,7 +167,7 @@ AESPA_PORT         = 8000
 │  SQLite database  (aespa.db — via SQLModel / SQLAlchemy)    │
 │  Sites · Credentials · TestRuns · CrawledPages · PageLinks  │
 │  TrafficEntries · ScanFindings · ScannerSessions            │
-│  TargetIntelItems · PentestHypotheses · PentestTasks        │
+│  TargetIntelItems · PageOwaspTests · ScanCheckpoints        │
 │  ScanLogs · AliceChatSessions · AliceChatMessages           │
 │  BurpRestApiConfig · UpstreamProxyConfig                    │
 │  ApiCollections · ApiDocuments · ApiEndpoints               │
@@ -221,7 +221,7 @@ Defines execution parameters linked to a provider:
 |---|---|---|
 | `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
 | `max_probes_per_page` | `50` | Cap on probe attempts per crawled page |
-| `thinking_max_steps` | `120` | Step limit for the dynamic scan loop |
+| `thinking_max_steps` | `120` | Legacy compatibility setting; the active Test Lead loop is deliberately uncapped and does not read this value |
 | `request_timeout` | `10` | HTTP timeout per probe (seconds) |
 | `min_delay` | `0.05` | Minimum delay between probes (rate-limiting) |
 | `max_request_body` | `65536` | Probe body size cap (bytes) |
@@ -325,9 +325,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | `ScanFinding` | A discovered vulnerability with evidence and CVSS score (shared by web and API scans) |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
-| `PentestHypothesis` | Attack hypothesis seeded from crawl intelligence |
-| `PentestTask` | Concrete work item under a hypothesis (URL, method, status) |
-| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs) |
+| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs, per-vulnerability-class coverage) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
@@ -452,14 +450,13 @@ start_thinking_scan(run_id)
           for unsanitized innerHTML/outerHTML/document.write sinks,
           saves TargetIntelItem(kind=xss_sink) and info-severity findings
        3. Authenticate → ScannerSession
-       4. Build recon summary (_build_thinking_context_from_recon_summary)
-          — structures crawl data into trust zones, entry points, and
-          prioritised attack classes; stored on TestRun.recon_summary
-       5. Seed PentestHypotheses + PentestTasks from recon summary
-       6. Build LLM opening context from recon summary
-       7. Detect auth cookies for boundary checks
-       8. Restore checkpoint if this is a resumed scan
-       9. _run_deterministic_site_modules(...) — LLM-free probes
+       4. Build attack-surface projection (_build_thinking_context_from_recon_summary)
+          — canonical routes, real parameters, access observations, evidence
+          signals, and current PageOwaspTest coverage; stored on TestRun.recon_summary
+       5. Build a compact LLM brief from actionable routes and coverage gaps
+       6. Detect auth cookies for boundary checks
+       7. Restore checkpoint if this is a resumed scan
+       8. _run_deterministic_site_modules(...) — LLM-free probes
           (TLS/SSL posture, auth matrix, IDOR matrix)
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
@@ -496,9 +493,17 @@ Two execution modes depending on the configured LLM provider:
 
 The loop terminates when:
 - The LLM calls the `done` action (with a summary)
-- `thinking_max_steps` is reached
 - A stop is requested via the API
 - An unrecoverable network error occurs
+- The bounded completion policy observes 50 consecutive tool calls without a new
+  route/category coverage transition, finding, lead resolution, specialist handoff,
+  or session use. It warns after 40 and records the automatic stop in the Test Lead log.
+
+`done` is mediated by a bounded policy rather than an open-ended completeness gate.
+An active session that has never been attempted may trigger one challenge, and Track
+mode may trigger at most two compact live coverage rounds. A 401/403 counts as a
+session attempt and evicts that session. The same completion condition can therefore
+never reject `done` indefinitely.
 
 ### Actions available to the LLM
 
@@ -535,21 +540,15 @@ targeted scan round will change the next action.
 | `mutate_request` | Generate probe variants (input_validation, idor, business_logic) |
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
-
-### Task graph
-
-The `PentestHypothesis` / `PentestTask` graph (managed in `services/task_graph.py`) gives the LLM and the UI a structured view of what has been explored:
-
-- **Hypothesis**: a high-level attack theory (e.g. "IDOR on /api/orders/{id}")
-- **Task**: a concrete attempt under a hypothesis (target URL, method, status: pending → in_progress → completed/failed)
-
-Hypotheses are derived from the `attack_classes` in the recon summary so the task queue is directly grounded in the attack surface analysis.
+| `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 
 **File**: `src/aespa/services/web_workprogram.py`
 
 The web scan tracks OWASP Top-10 coverage in a per-page matrix — the web analogue of the API coverage matrix (§16). Each cell is a `PageOwaspTest` row: a `(TestRun, CrawledPage, OWASP category A01–A10)` triple with status `not_started → in_progress → covered / finding / skipped`.
+
+Input-bearing A03 cells additionally persist class-level states in `test_classes_json`. SQLi, reflected XSS, and stored XSS are separate obligations: an HTTP probe must declare `test_class`, and exercising one class does not satisfy the others. The browser tool's constrained `dom_check` operation can compare an element's text or attribute to an exact expected canary and records an explicit PASS/FAIL without allowing arbitrary JavaScript execution.
 
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
@@ -601,9 +600,9 @@ Test Lead calls agent_dispatch
        • checks _specialist_at_capacity(run_id)  ← max_concurrent gate
   └─ _run_specialist_agent(
          agent_id, attack_class, target_url, rationale,
-         recon_summary_entry, session_vault, llm_cfg, max_steps
+         session_vault, llm_cfg, max_steps
      )
-       1. Build opening brief from dispatch payload + recon summary entry
+       1. Build opening brief from the explicit dispatch payload
        2. Run focused agentic loop using SPECIALIST_AGENT_TOOLS
           (no agent_dispatch — no recursive dispatch; no JWT/register tools)
        3. Write findings directly to DB under the same run_id
@@ -632,22 +631,35 @@ After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_s
 
 ### Recon summary
 
-`task_graph.build_recon_summary(run_id)` generates a structured `ReconSummary` from crawl data at the start of the dynamic scan. It is stored on `TestRun.recon_summary` and used in three places:
+`recon_summary.build_recon_summary(run_id)` generates a structured attack-surface projection from canonical crawl, intelligence, access-view, traffic-header, and workprogram rows. It is stored on `TestRun.recon_summary` at scan startup and rebuilt without persistence whenever the UI polls, so live coverage and dynamically discovered routes are reflected.
 
-1. **LLM opening context** — the Test Lead receives the attack surface picture as its first message
-2. **Specialist briefing** — when dispatching a specialist, its `recon_summary_entry` provides the relevant `attack_class` rationale and entry points
-3. **Attack Surface UI panel** — rendered in the Tasks tab (Attack Surface sub-tab)
+1. **LLM opening context** — the Test Lead receives a small sample of concrete routes plus the largest real workprogram gaps. The summary is explicitly not a second scan plan or risk ranking.
+2. **Attack Surface & Coverage UI panel** — renders the full route/input inventory, access evidence, live coverage, provenance, and evidence-backed signals.
+
+Specialists use their explicit dispatch target and rationale. They do not consume the UI projection or inherit synthetic attack-class priorities.
 
 The `ReconSummary` schema:
 
 ```json
 {
-  "trust_zones":     { "public": [...], "authenticated_user": [...], "admin": [...] },
-  "entry_points":    [ {"url": "...", "method": "POST", "params": ["email", "password"]}, ... ],
-  "attack_classes":  [ {"class": "idor", "rationale": "...", "priority": 9, "entry_points": [...]}, ... ],
-  "business_logic_pages": [...],
-  "tech_stack":      { "server": "Apache/2.4.58", "language": "PHP 8.3", "db": "MySQL" },
-  "credential_roles": [ {"role": "user", "source": "registration", "count": 1}, ... ]
+  "schema_version": 2,
+  "routes": [
+    {
+      "canonical_url": "https://target/api/accounts/{id}",
+      "example_urls": ["https://target/api/accounts/42"],
+      "methods": ["GET", "POST"],
+      "parameters": ["account_id"],
+      "sources": ["api_observation", "public_asset"],
+      "source_urls": ["https://target/assets/api.js"],
+      "access": {"classification": "authenticated", "labels": ["Customer"]},
+      "coverage": {"statuses": {"not_started": 2}, "remaining_categories": ["A01", "A03"]}
+    }
+  ],
+  "input_surface": {"routes": 12, "parameters": 38, "forms": 4},
+  "access": {"counts": {"anonymous": 8, "authenticated": 14, "mixed": 2, "unknown": 3}},
+  "coverage": {"total": 120, "resolved": 48, "statuses": {}, "by_category": []},
+  "signals": {"total": 9, "shown": 9, "items": []},
+  "technologies": [{"name": "Apache", "source": "response headers"}]
 }
 ```
 
@@ -853,6 +865,8 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
 - `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
 - `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
+- `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata so empty or no-tool responses remain diagnosable after reload
+- Resumed agentic checkpoints are repaired when they end on an assistant turn: AESPA appends either an explicit continuation request or matching interrupted `tool_result` blocks before calling providers that prohibit assistant-message prefill
 - `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-crawl with the new account
 - Error events
 
@@ -865,7 +879,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 | **Status** | Scan controls, run metadata, token usage; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
 | **Site Map** | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
 | **Intelligence** | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, `xss_sink` items |
-| **Task Graph** | Sub-tabs: **Attack Surface** (rendered `ReconSummary` — trust zones, attack classes, tech stack) and **Task Queue** (`PentestHypothesis` tree with `PentestTask` leaves) |
+| **Attack Surface & Coverage** | Live evidence projection — canonical routes/methods/parameters, access observations, workprogram gaps, provenance, signals, and observed technologies |
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
 | **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, validation controls, and export/import (markdown) |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |

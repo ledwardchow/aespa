@@ -13,9 +13,10 @@ def _utcnow() -> datetime:
 
 # ── Site / Credential ─────────────────────────────────────────────────────────
 
+
 class AuthMode(str, Enum):
-    auto = "auto"      # existing single-page Playwright form fill
-    totp = "totp"      # auto + TOTP 2FA code from stored seed
+    auto = "auto"  # existing single-page Playwright form fill
+    totp = "totp"  # auto + TOTP 2FA code from stored seed
     guided = "guided"  # open headed browser, user logs in manually
 
 
@@ -50,12 +51,15 @@ class Credential(SQLModel, table=True):
     login_url: Optional[str] = Field(default=None)
     # ── Advanced auth fields ──────────────────────────────────────────────────
     auth_mode: str = Field(default=AuthMode.auto)
-    totp_seed: Optional[str] = Field(default=None)        # base32 TOTP secret (write-only; not returned by API)
+    totp_seed: Optional[str] = Field(
+        default=None
+    )  # base32 TOTP secret (write-only; not returned by API)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
 
 # ── API Collection ────────────────────────────────────────────────────────────
+
 
 class ApiCollection(SQLModel, table=True):
     """A collection of APIs to be security-tested, defined from uploaded docs.
@@ -70,10 +74,16 @@ class ApiCollection(SQLModel, table=True):
     name: str = Field(index=True, unique=True)
     base_url: str
     description: Optional[str] = Field(default=None)
-    servers: Optional[str] = Field(default=None)      # JSON list of additional server base URLs
+    servers: Optional[str] = Field(
+        default=None
+    )  # JSON list of additional server base URLs
     scope_hosts: Optional[str] = Field(default=None)  # JSON list of in-scope hostnames
-    auth_summary_json: Optional[str] = Field(default=None)  # security schemes from parsed specs
-    readiness_json: Optional[str] = Field(default=None)     # latest readiness assessment result
+    auth_summary_json: Optional[str] = Field(
+        default=None
+    )  # security schemes from parsed specs
+    readiness_json: Optional[str] = Field(
+        default=None
+    )  # latest readiness assessment result
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -91,11 +101,13 @@ class ApiDocument(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     filename: str
-    doc_type: str = Field(default="unknown")  # openapi|swagger|postman|freetext|credentials|source_zip|unknown
+    doc_type: str = Field(
+        default="unknown"
+    )  # openapi|swagger|postman|freetext|credentials|source_zip|unknown
     content_type: Optional[str] = Field(default=None)
-    stored_path: str                          # absolute path to the stored file
+    stored_path: str  # absolute path to the stored file
     size_bytes: int = Field(default=0)
-    status: str = Field(default="uploaded")   # uploaded|parsed|failed
+    status: str = Field(default="uploaded")  # uploaded|parsed|failed
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -111,24 +123,28 @@ class ApiEndpoint(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     source_doc_id: Optional[int] = Field(default=None, foreign_key="api_document.id")
-    method: str                               # GET, POST, PUT, …
-    path: str                                 # /v1/widgets/{id}
+    method: str  # GET, POST, PUT, …
+    path: str  # /v1/widgets/{id}
     base_url: Optional[str] = Field(default=None)
     operation_id: Optional[str] = Field(default=None)
     summary: Optional[str] = Field(default=None)
-    parameters_json: str = Field(default="[]")          # [{name, in, required, schema}]
+    parameters_json: str = Field(default="[]")  # [{name, in, required, schema}]
     request_body_schema_json: str = Field(default="{}")
     response_schema_json: str = Field(default="{}")
-    security_json: str = Field(default="[]")             # [{"BearerAuth": []}]
+    security_json: str = Field(default="[]")  # [{"BearerAuth": []}]
     auth_required: bool = Field(default=False)
     tags_json: str = Field(default="[]")
-    sample_request_json: str = Field(default="{}")       # populated from examples / Postman bodies
+    sample_request_json: str = Field(
+        default="{}"
+    )  # populated from examples / Postman bodies
     in_scope: bool = Field(default=True)
     created_at: datetime = Field(default_factory=_utcnow)
     # Slice 4 — readiness assessment results
-    prereq_can_test: bool = Field(default=True)          # enough info to send a probe
-    prereq_can_test_auth: bool = Field(default=True)     # have credentials for auth-required paths
-    prereq_notes: str = Field(default="[]")              # JSON list of gap strings
+    prereq_can_test: bool = Field(default=True)  # enough info to send a probe
+    prereq_can_test_auth: bool = Field(
+        default=True
+    )  # have credentials for auth-required paths
+    prereq_notes: str = Field(default="[]")  # JSON list of gap strings
 
 
 class ApiCredential(SQLModel, table=True):
@@ -142,16 +158,21 @@ class ApiCredential(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     scheme: str = Field(default="bearer")  # bearer|apikey|basic|cookie|header|login
-    name: str = Field(default="Authorization")   # header/param name; for login: the auth endpoint path
-    value: str                                    # plaintext — local pentesting tool
+    name: str = Field(
+        default="Authorization"
+    )  # header/param name; for login: the auth endpoint path
+    value: str  # plaintext — local pentesting tool
     label: Optional[str] = Field(default=None)
-    scope: str = Field(default="global")          # global|endpoint
+    scope: str = Field(default="global")  # global|endpoint
     endpoint_id: Optional[int] = Field(default=None, foreign_key="api_endpoint.id")
-    auth_endpoint: Optional[str] = Field(default=None)  # for login scheme: path of the token endpoint
+    auth_endpoint: Optional[str] = Field(
+        default=None
+    )  # for login scheme: path of the token endpoint
     created_at: datetime = Field(default_factory=_utcnow)
 
 
 # ── API Test Run ───────────────────────────────────────────────────────────────
+
 
 class ApiTestRun(SQLModel, table=True):
     """A security test run against an ``ApiCollection``.
@@ -168,7 +189,7 @@ class ApiTestRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: int = Field(foreign_key="api_collection.id", index=True)
     name: str
-    status: str = Field(default="pending")   # pending|running|completed|failed|cancelled
+    status: str = Field(default="pending")  # pending|running|completed|failed|cancelled
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
@@ -187,6 +208,7 @@ class ApiTestRun(SQLModel, table=True):
 
 # ── API Endpoint Test (coverage matrix cell) ──────────────────────────────────
 
+
 class ApiEndpointTest(SQLModel, table=True):
     """One coverage-matrix cell: a (ApiTestRun, ApiEndpoint, OWASP API category) triple.
 
@@ -199,14 +221,17 @@ class ApiEndpointTest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     api_test_run_id: int = Field(foreign_key="api_test_run.id", index=True)
     endpoint_id: int = Field(foreign_key="api_endpoint.id", index=True)
-    owasp_api_category: str                      # API1 … API10
-    status: str = Field(default="not_started")   # not_started|in_progress|covered|skipped|finding
+    owasp_api_category: str  # API1 … API10
+    status: str = Field(
+        default="not_started"
+    )  # not_started|in_progress|covered|skipped|finding
     skip_reason: Optional[str] = Field(default=None)
     finding_ids_json: str = Field(default="[]")  # JSON list of ScanFinding.id
     last_updated: datetime = Field(default_factory=_utcnow)
 
 
 # ── LLM config ────────────────────────────────────────────────────────────────
+
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
@@ -241,7 +266,6 @@ class LLMProviderConfig(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
-
 class LLMConfig(SQLModel, table=True):
     """Saved LLM settings profile."""
 
@@ -250,7 +274,9 @@ class LLMConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(default="Default", index=True)
     is_active: bool = Field(default=False, index=True)
-    provider_id: Optional[int] = Field(default=None, foreign_key="llm_provider_config.id", index=True)
+    provider_id: Optional[int] = Field(
+        default=None, foreign_key="llm_provider_config.id", index=True
+    )
     provider: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
@@ -301,7 +327,9 @@ class ScannerPolicy(SQLModel, table=True):
     max_request_body_bytes: int = Field(default=65536)
     response_body_read_limit_bytes: int = Field(default=512 * 1024)
     allowed_schemes: str = Field(default='["http", "https"]')
-    methods_by_mode: str = Field(default='{"passive": ["GET", "HEAD"], "safe_active": ["GET", "POST", "HEAD"], "aggressive": ["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"], "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]}')
+    methods_by_mode: str = Field(
+        default='{"passive": ["GET", "HEAD"], "safe_active": ["GET", "POST", "HEAD"], "aggressive": ["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"], "destructive": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]}'
+    )
     blocked_headers: str = Field(default='["host", "cookie"]')
     follow_redirects: bool = Field(default=True)
     allow_subdomains: bool = Field(default=True)
@@ -434,6 +462,7 @@ class CloudflareAccessConfig(SQLModel, table=True):
 
 # ── Test runs ─────────────────────────────────────────────────────────────────
 
+
 class TestRunStatus(str, Enum):
     pending = "pending"
     running = "running"
@@ -475,7 +504,7 @@ class TestRun(SQLModel, table=True):
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
-    # JSON blob produced by build_recon_summary() at the end of the crawl phase
+    # Cached JSON attack-surface/coverage projection; the UI rebuilds it live.
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage: {model: {input, output, cache_read, cache_write}}
     token_usage_json: Optional[str] = Field(default=None)
@@ -499,21 +528,27 @@ class CrawledPage(SQLModel, table=True):
     state_kind: str = Field(default="url")  # url | interactive | api
     replay_steps_json: str = Field(default="[]")
     title: Optional[str] = Field(default=None)
-    page_text: Optional[str] = Field(default=None)   # truncated ~10k chars
+    page_text: Optional[str] = Field(default=None)  # truncated ~10k chars
     screenshot_b64: Optional[str] = Field(default=None)
     llm_context: Optional[str] = Field(default=None)
     depth: int = Field(default=0)
-    status: str = Field(default="crawled")            # crawled | failed
+    status: str = Field(default="crawled")  # crawled | failed
     error_message: Optional[str] = Field(default=None)
     in_scope: bool = Field(default=True)
-    scan_status: str = Field(default="pending")   # pending | running | complete
+    scan_status: str = Field(default="pending")  # pending | running | complete
     # LLM-assessed page categories (populated after analysis)
-    req_auth: Optional[bool] = Field(default=None)         # Authentication Required
-    takes_input: Optional[bool] = Field(default=None)      # Takes User Input
-    has_object_ref: Optional[bool] = Field(default=None)   # Contains Object Reference
-    has_business_logic: Optional[bool] = Field(default=None)  # Contains Business Functionality
-    accessible_by: str = Field(default="[]")  # JSON list of credential IDs that can access this page
-    owasp_applicable_json: str = Field(default="{}")  # JSON {A01: bool, …} OWASP Top 10:2025 applicability
+    req_auth: Optional[bool] = Field(default=None)  # Authentication Required
+    takes_input: Optional[bool] = Field(default=None)  # Takes User Input
+    has_object_ref: Optional[bool] = Field(default=None)  # Contains Object Reference
+    has_business_logic: Optional[bool] = Field(
+        default=None
+    )  # Contains Business Functionality
+    accessible_by: str = Field(
+        default="[]"
+    )  # JSON list of credential IDs that can access this page
+    owasp_applicable_json: str = Field(
+        default="{}"
+    )  # JSON {A01: bool, …} OWASP Top 10:2025 applicability
     discovered_at: datetime = Field(default_factory=_utcnow)
 
     @property
@@ -536,10 +571,15 @@ class PageOwaspTest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
     page_id: int = Field(foreign_key="crawled_page.id", index=True)
-    owasp_category: str              # A01 … A10
-    status: str = Field(default="not_started")   # not_started|in_progress|covered|skipped|finding
+    owasp_category: str  # A01 … A10
+    status: str = Field(
+        default="not_started"
+    )  # not_started|in_progress|covered|skipped|finding
     skip_reason: Optional[str] = Field(default=None)
     finding_ids_json: str = Field(default="[]")  # JSON list of ScanFinding.id
+    test_classes_json: str = Field(
+        default="{}"
+    )  # JSON {test_class: {status, finding_ids, last_updated}}
     last_updated: Optional[datetime] = Field(default_factory=_utcnow)
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -566,18 +606,22 @@ class TrafficEntry(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    api_test_run_id: Optional[int] = Field(default=None, index=True)  # set for API scan traffic
-    source: str                                   # "playwright" | "httpx"
+    api_test_run_id: Optional[int] = Field(
+        default=None, index=True
+    )  # set for API scan traffic
+    source: str  # "playwright" | "httpx"
     created_at: datetime = Field(default_factory=_utcnow)
     method: str
     url: str
-    request_headers: str = Field(default="{}")    # JSON
+    request_headers: str = Field(default="{}")  # JSON
     request_body: Optional[str] = Field(default=None)
     status: Optional[int] = Field(default=None)
-    response_headers: str = Field(default="{}")   # JSON
+    response_headers: str = Field(default="{}")  # JSON
     response_body: Optional[str] = Field(default=None)
     duration_ms: Optional[int] = Field(default=None)
-    username: Optional[str] = Field(default=None)      # credential username that made the request
+    username: Optional[str] = Field(
+        default=None
+    )  # credential username that made the request
 
 
 class ScannerSession(SQLModel, table=True):
@@ -591,10 +635,16 @@ class ScannerSession(SQLModel, table=True):
     # independent counters and collide.  Without this discriminator a web run and
     # an API run that share an integer id would read/delete each other's sessions.
     run_kind: str = Field(default="web", index=True)  # "web" | "api"
-    label: str = Field(index=True)                 # anonymous | configured_primary | forged_admin | ...
-    kind: str = Field(default="cookie", index=True)  # anonymous | cookie | bearer | mixed
+    label: str = Field(
+        index=True
+    )  # anonymous | configured_primary | forged_admin | ...
+    kind: str = Field(
+        default="cookie", index=True
+    )  # anonymous | cookie | bearer | mixed
     username: Optional[str] = Field(default=None, index=True)
-    credential_id: Optional[int] = Field(default=None, foreign_key="credential.id", index=True)
+    credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id", index=True
+    )
     source: str = Field(default="scanner")
     cookies_json: str = Field(default="{}")
     extra_headers_json: str = Field(default="{}")
@@ -632,59 +682,22 @@ class TargetIntelItem(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    kind: str = Field(index=True)              # endpoint | form | input | script | storage_key | id | token_hint | response_field
-    key: str = Field(default="", index=True)   # stable label, e.g. route path, field name, script URL
-    value: str = Field(default="")             # extracted value or display text
+    kind: str = Field(
+        index=True
+    )  # endpoint | form | input | script | storage_key | id | token_hint | response_field
+    key: str = Field(
+        default="", index=True
+    )  # stable label, e.g. route path, field name, script URL
+    value: str = Field(default="")  # extracted value or display text
     url: Optional[str] = Field(default=None, index=True)
     method: Optional[str] = Field(default=None)
-    source: str = Field(default="crawler")     # dom | api_observation | js_asset | response_body
+    source: str = Field(
+        default="crawler"
+    )  # dom | api_observation | js_asset | response_body
     confidence: float = Field(default=1.0)
     evidence: str = Field(default="")
     item_metadata: str = Field(default="{}")
     discovered_at: datetime = Field(default_factory=_utcnow)
-
-
-class PentestHypothesis(SQLModel, table=True):
-    """Durable attack hypothesis derived from crawl intelligence and scan progress."""
-
-    __tablename__ = "pentest_hypothesis"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    title: str = Field(index=True)
-    description: str = Field(default="")
-    attack_area: str = Field(default="", index=True)
-    owasp_category: str = Field(default="")
-    status: str = Field(default="open", index=True)  # open | testing | confirmed | rejected | unconfirmed
-    priority: int = Field(default=50, index=True)
-    confidence: float = Field(default=0.5)
-    rationale: str = Field(default="")
-    created_from: str = Field(default="")
-    related_intel_ids: str = Field(default="[]")
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
-
-
-class PentestTask(SQLModel, table=True):
-    """Concrete work item in the LLM-directed pentest plan."""
-
-    __tablename__ = "pentest_task"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    test_run_id: int = Field(foreign_key="test_run.id", index=True)
-    hypothesis_id: Optional[int] = Field(default=None, foreign_key="pentest_hypothesis.id", index=True)
-    title: str = Field(index=True)
-    description: str = Field(default="")
-    target_url: str = Field(default="", index=True)
-    method: str = Field(default="GET")
-    task_type: str = Field(default="recon", index=True)
-    status: str = Field(default="queued", index=True)  # queued | running | blocked | done | skipped
-    priority: int = Field(default=50, index=True)
-    evidence: str = Field(default="")
-    result_summary: str = Field(default="")
-    last_action_step: Optional[int] = Field(default=None)
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 class ScanFinding(SQLModel, table=True):
@@ -709,8 +722,8 @@ class ScanFinding(SQLModel, table=True):
             nullable=True,
         ),
     )
-    owasp_category: str = Field(index=True)   # "A01" … "A10"
-    severity: str                              # critical | high | medium | low | info
+    owasp_category: str = Field(index=True)  # "A01" … "A10"
+    severity: str  # critical | high | medium | low | info
     title: str
     description: str
     impact: str = Field(default="")
@@ -718,12 +731,14 @@ class ScanFinding(SQLModel, table=True):
     recommendation: str = Field(default="")
     cvss_score: float = Field(default=0.0)
     cvss_vector: str = Field(default="")
-    affected_url: str = Field(default="")      # specific URL where the issue was observed
-    evidence: str = Field(default="")          # formatted request + response excerpt
+    affected_url: str = Field(default="")  # specific URL where the issue was observed
+    evidence: str = Field(default="")  # formatted request + response excerpt
     request_evidence: str = Field(default="")
     response_evidence: str = Field(default="")
     evidence_json: str = Field(default="[]")
-    merged_instances: str = Field(default="[]")  # JSON list of consolidated cross-URL instances
+    merged_instances: str = Field(
+        default="[]"
+    )  # JSON list of consolidated cross-URL instances
     # Verified proof-of-concept: a runnable one-line validation command and optional
     # setup instructions. Populated only when the command was re-run server-side and
     # proven to reproduce the finding; otherwise left blank.
@@ -732,11 +747,17 @@ class ScanFinding(SQLModel, table=True):
     screenshot_b64: Optional[str] = Field(default=None)  # base64 PNG (form probes only)
     finding_source: str = Field(default="unknown", index=True)
     # Validation fields
-    validation_status: str = Field(default="unvalidated")  # unvalidated | validating | skipped | confirmed | unconfirmed | false_positive
-    validation_note: Optional[str] = Field(default=None)   # LLM reasoning from validation
+    validation_status: str = Field(
+        default="unvalidated"
+    )  # unvalidated | validating | skipped | confirmed | unconfirmed | false_positive
+    validation_note: Optional[str] = Field(
+        default=None
+    )  # LLM reasoning from validation
     # API test run attribution (nullable — only set for findings from API runs)
     api_test_run_id: Optional[int] = Field(default=None, index=True)
-    owasp_api_category: Optional[str] = Field(default=None, index=True)  # "API1" … "API10"
+    owasp_api_category: Optional[str] = Field(
+        default=None, index=True
+    )  # "API1" … "API10"
     created_at: datetime = Field(default_factory=_utcnow)
 
     @property
@@ -759,8 +780,8 @@ class ScanLog(SQLModel, table=True):
     # test_run_id column but draw ids from independent counters.  "web" | "api".
     run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
-    phase: str                              # thinking_step | site_plan | page_plan | …
-    status: str = Field(default="")        # start | complete | running | deciding | …
+    phase: str  # thinking_step | site_plan | page_plan | …
+    status: str = Field(default="")  # start | complete | running | deciding | …
     message: str = Field(default="")
     page_url: Optional[str] = Field(default=None)
     data_json: Optional[str] = Field(default=None)  # JSON blob for extra phase data
@@ -790,6 +811,9 @@ class ScanCheckpoint(SQLModel, table=True):
     step_count: int = Field(default=0)
     progressive_findings_count: int = Field(default=0)
     consecutive_context_tools: int = Field(default=0)
+    # Persisted bounded completion/progress policy; kept separate from the LLM
+    # transcript so resume does not forget session attempts or loop protection.
+    completion_state_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -804,10 +828,10 @@ class AliceChatSession(SQLModel, table=True):
     # See AgentLog.run_kind — separates web-scan and API-scan rows that share the
     # same run_id. "web" | "api".
     run_kind: str = Field(default="web", index=True)
-    session_key: str = Field(index=True)   # client-assigned tab ID, e.g. "tab-default"
+    session_key: str = Field(index=True)  # client-assigned tab ID, e.g. "tab-default"
     title: str = Field(default="Session 1")
-    position: int = Field(default=0)       # tab ordering
-    is_active: bool = Field(default=False) # which tab is currently selected
+    position: int = Field(default=0)  # tab ordering
+    is_active: bool = Field(default=False)  # which tab is currently selected
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -826,14 +850,20 @@ class SastRun(SQLModel, table=True):
     collection_id: Optional[int] = Field(
         default=None, foreign_key="api_collection.id", index=True
     )
-    document_id: Optional[int] = Field(default=None, index=True)  # the source_zip analysed
+    document_id: Optional[int] = Field(
+        default=None, index=True
+    )  # the source_zip analysed
     # Standalone runs store the uploaded archive directly (no ApiDocument).
-    source_archive_path: Optional[str] = Field(default=None)  # absolute path to stored zip
-    source_filename: Optional[str] = Field(default=None)      # original upload filename
+    source_archive_path: Optional[str] = Field(
+        default=None
+    )  # absolute path to stored zip
+    source_filename: Optional[str] = Field(default=None)  # original upload filename
     name: str
-    status: str = Field(default="pending")  # pending|scanning|completed|failed|cancelled
+    status: str = Field(
+        default="pending"
+    )  # pending|scanning|completed|failed|cancelled
     # What triggered this run: None=standalone, or the dynamic run that spawned it
-    triggered_by_run_type: Optional[str] = Field(default=None)   # "api" | "web"
+    triggered_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     triggered_by_run_id: Optional[int] = Field(default=None, index=True)
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
@@ -854,21 +884,27 @@ class ScanLead(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     collection_id: Optional[int] = Field(default=None, index=True)
-    producer_run_type: str = Field(default="sast", index=True)   # "sast" (future: "recon")
-    producer_run_id: int = Field(index=True)                     # SastRun.id that created it
+    producer_run_type: str = Field(
+        default="sast", index=True
+    )  # "sast" (future: "recon")
+    producer_run_id: int = Field(index=True)  # SastRun.id that created it
     source: str = Field(default="sast", index=True)
-    category: str = Field(default="")           # OWASP A0x / API0x (best-effort)
-    severity: str = Field(default="medium")     # high | medium | low
-    confidence: float = Field(default=0.0)      # 0..1 from the triage filter
+    category: str = Field(default="")  # OWASP A0x / API0x (best-effort)
+    severity: str = Field(default="medium")  # high | medium | low
+    confidence: float = Field(default=0.0)  # 0..1 from the triage filter
     title: str = Field(default="")
     description: str = Field(default="")
-    location: str = Field(default="")           # file:line / endpoint hint
-    evidence: str = Field(default="")           # code snippet + data-flow note (from SAST)
-    note: str = Field(default="")               # agent investigation outcome note (update_lead)
-    status: str = Field(default="open", index=True)  # open|investigating|confirmed|dismissed|inconclusive
+    location: str = Field(default="")  # file:line / endpoint hint
+    evidence: str = Field(default="")  # code snippet + data-flow note (from SAST)
+    note: str = Field(default="")  # agent investigation outcome note (update_lead)
+    status: str = Field(
+        default="open", index=True
+    )  # open|investigating|confirmed|dismissed|inconclusive
     investigated_by_run_type: Optional[str] = Field(default=None)  # "api" | "web"
     investigated_by_run_id: Optional[int] = Field(default=None)
-    linked_finding_id: Optional[int] = Field(default=None)  # set when promoted to a finding
+    linked_finding_id: Optional[int] = Field(
+        default=None
+    )  # set when promoted to a finding
     # Set on a *copy* imported into a dynamic run (e.g. a web TestRun). Originals
     # leave these NULL; producer_run_id on a copy still points at the source SAST
     # run for provenance. Copies are owned by (imported_into_run_type, _run_id).
@@ -885,13 +921,13 @@ class AliceChatMessage(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(foreign_key="alice_chat_session.id", index=True)
-    message_key: str = Field(index=True)   # client-assigned message ID
-    sender: str                            # "user" | "alice"
-    type: str = Field(default="message")   # "message" | "thinking"
+    message_key: str = Field(index=True)  # client-assigned message ID
+    sender: str  # "user" | "alice"
+    type: str = Field(default="message")  # "message" | "thinking"
     text: str = Field(default="")
     step_data_json: str = Field(default="{}")
     ts: str = Field(default="")
-    position: int = Field(default=0)       # ordering within session
+    position: int = Field(default=0)  # ordering within session
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -910,8 +946,10 @@ class AgentLog(SQLModel, table=True):
     # and ApiTestRun ids come from separate counters and collide.  "web" | "api".
     run_kind: str = Field(default="web", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
-    agent_id: str = Field(index=True)   # e.g. "scanner", "validator-42", "burp-api-login"
-    role: str                            # Scanner | Specialist | Burp | Validator
-    status: str                          # active | complete | failed
+    agent_id: str = Field(
+        index=True
+    )  # e.g. "scanner", "validator-42", "burp-api-login"
+    role: str  # Scanner | Specialist | Burp | Validator
+    status: str  # active | complete | failed
     current_task: str = Field(default="")
     outcome: Optional[str] = Field(default=None)

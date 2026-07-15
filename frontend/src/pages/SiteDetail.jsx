@@ -12,8 +12,7 @@ import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { WebRunFindingsTab } from "./SiteDetail/WebRunFindingsTab";
 import { WebRunActivityTab } from "./SiteDetail/WebRunActivityTab";
 import { WebRunTrafficTab } from "./SiteDetail/WebRunTrafficTab";
-import { WebRunIntelligenceTab } from "./SiteDetail/WebRunIntelligenceTab";
-import { WebRunTasksTab } from "./SiteDetail/WebRunTasksTab";
+import { WebRunAttackSurfaceTab } from "./SiteDetail/WebRunAttackSurfaceTab";
 import { WebRunSessionsTab } from "./SiteDetail/WebRunSessionsTab";
 import { WebRunNavigation } from "./SiteDetail/WebRunNavigation";
 import { useWebRunEvents } from "./SiteDetail/useWebRunEvents";
@@ -23,7 +22,6 @@ import { WebRunSitemapGraph } from "./SiteDetail/WebRunSitemapGraph";
 import { WebRunCrawlProgress } from "./SiteDetail/WebRunCrawlProgress";
 import { WebRunHeader } from "./SiteDetail/WebRunHeader";
 import { WebRunSastLeadsTab } from "./SiteDetail/WebRunSastLeadsTab";
-import { WebRunWorkProgramTab } from "./SiteDetail/WebRunWorkProgramTab";
 import { isDynamicScanActive, runWorkflowStatus, workflowBadge } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { TestRunForm } from "./SiteDetail/TestRunForm";
@@ -291,12 +289,11 @@ export function TestRunDetail({
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
   const [graph, setGraph] = useState(null);
-  const [activeTab, setActiveTab] = useState(initialTab || "activity");
+  const [activeTab, setActiveTab] = useState(["tasks", "workprogram", "intelligence"].includes(initialTab) ? "attack" : initialTab || "activity");
   const [scopeHosts, setScopeHosts] = useState([]);
   const [graphView, setGraphView] = useState("scope"); // "scope" | "user"
   const [intelligenceTotal, setIntelligenceTotal] = useState(0);
-  const [tasksTotal, setTasksTotal] = useState(0);
-  const [tasksReloadKey, setTasksReloadKey] = useState(0);
+  const [attackSurfaceTotal, setAttackSurfaceTotal] = useState(0);
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [crawlUsername, setCrawlUsername] = useState(null);
   const [clearBusy, setClearBusy] = useState(""); // which section is clearing
@@ -460,7 +457,7 @@ export function TestRunDetail({
 
   useWebRunEvents({
     runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent,
-    setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setTasksReloadKey,
+    setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData,
     setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts,
     setGuidedLoginPending, setGuidedLoginErrors
   });
@@ -663,7 +660,7 @@ export function TestRunDetail({
         activeTab={activeTab}
         onSelect={tab => { setActiveTab(tab); nav("#/runs/" + runId + "/" + tab); }}
         activityLive={isDynamicScanActive(thinkingStatus?.status) && activityLog.length > 0}
-        counts={{ intelligence: intelligenceTotal, tasks: tasksTotal, sessions: sessionsTotal, findings: findings.length, traffic: trafficTotal }}
+        counts={{ attack: attackSurfaceTotal, sessions: sessionsTotal, findings: findings.length, traffic: trafficTotal }}
         canClearCrawl={canClearCrawl}
         onClearCrawl={onClearCrawl}
         multiUser={run?.credentials?.length > 1}
@@ -708,19 +705,17 @@ export function TestRunDetail({
         startFindResize={startFindResize} onDeleteFindingGroup={onDeleteFindingGroup}
       />}
 
-      <WebRunIntelligenceTab
+      <WebRunAttackSurfaceTab
         runId={runId}
-        active={activeTab === "intelligence"}
-        captureActive={run?.status === "running"}
-        onTotalChange={setIntelligenceTotal}
-      />
-
-      <WebRunTasksTab
-        runId={runId}
-        active={activeTab === "tasks"}
+        run={run}
+        active={activeTab === "attack"}
         scanActive={isDynamicScanActive(thinkingStatus?.status)}
-        reloadKey={tasksReloadKey}
-        onTotalChange={setTasksTotal}
+        onTotalChange={setAttackSurfaceTotal}
+        intelligenceTotal={intelligenceTotal}
+        onIntelligenceTotalChange={setIntelligenceTotal}
+        intelligenceCaptureActive={run?.status === "running"}
+        reloadKey={wpReloadKey}
+        initialSubTab={initialTab === "tasks" ? "attack-surface" : initialTab === "intelligence" ? "intelligence" : "owasp"}
       />
 
       <WebRunSessionsTab
@@ -756,11 +751,6 @@ export function TestRunDetail({
         runStatus={run?.status}
         onTotalChange={setTrafficTotal}
       />
-      {activeTab === "workprogram" && <div className="content scroll-content" style={{
-        padding: 0
-      }}>
-          <WebRunWorkProgramTab runId={runId} run={run} reloadKey={wpReloadKey} scanRunning={isDynamicScanActive(thinkingStatus?.status) || run?.status === "crawling" || run?.status === "crawled"} />
-        </div>}
       {activeTab === "leads" && <WebRunSastLeadsTab runId={runId} scanRunning={isDynamicScanActive(thinkingStatus?.status)} />}
     </div></>;
 }

@@ -43,11 +43,11 @@ Requires Python 3.12+ and `uv`. The frontend is a Vite + React application locat
 
 Request flow: `main.py` (app factory, mounts routers + SPA) → `api/*.py` (thin FastAPI routers) → `services/*.py` (all real logic) → SQLModel ORM (`models.py`) → SQLite. API I/O schemas are in `schemas.py`, kept separate from ORM models.
 
-**The central unit of work is a *run*.** A web `TestRun` progresses `created → crawling → crawled → scanning → scanned`. An `ApiTestRun` and a `SastRun` are parallel run types. Each run owns all its artifacts (pages, traffic, findings, hypotheses, logs).
+**The central unit of work is a *run*.** A web `TestRun` progresses `created → crawling → crawled → scanning → scanned`. An `ApiTestRun` and a `SastRun` are parallel run types. Each run owns all its artifacts (pages, traffic, findings, coverage, logs).
 
 Key service entry points:
 - `services/crawler.py` — `start_crawl(run_id)`: multi-phase (unauth first, then one phase per credential), parallel Playwright workers, LLM-guided BFS. Produces `CrawledPage` + `TargetIntelItem` intelligence atoms.
-- `services/scanner.py` — `start_thinking_scan(run_id)`: the agentic dynamic scan loop. Builds a recon summary, seeds `PentestHypothesis`/`PentestTask`, then loops giving the Test Lead LLM a toolset to decide each action. Dispatches specialists and dedups/reviews findings here.
+- `services/scanner.py` — `start_thinking_scan(run_id)`: the agentic dynamic scan loop. Builds a recon summary, tracks the OWASP workprogram, then loops giving the Test Lead LLM a toolset to decide each action. Dispatches specialists and dedups/reviews findings here.
 - `services/api_scanner.py` — `start_api_scan(api_run_id)`: same agentic loop without a browser, tracks the OWASP API Top-10 coverage matrix (`ApiEndpointTest` cells).
 - `services/sast_scanner.py` — agentic loop over an extracted source ZIP (file tools path-jailed to the extraction root); emits `ScanLead`s.
 - `services/validator.py` — adversarial validator agent with a disprove-it mandate; reduces false positives. Cannot create findings.

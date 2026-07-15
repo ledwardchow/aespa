@@ -12,7 +12,13 @@ from typing import Any
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import CrawledPage, PageOwaspTest, ScanFinding, TestRun
+from aespa.models import (
+    CrawledPage,
+    PageOwaspTest,
+    ScanFinding,
+    TargetIntelItem,
+    TestRun,
+)
 from aespa.services import events as events_svc
 from aespa.services.llm import OWASP_WEB_CATEGORIES, OWASP_WEB_LABELS
 
@@ -62,6 +68,65 @@ _STATUS_RANK = {
 
 # Cells in these states still need work; everything else is terminal.
 _UNCOVERED_STATES = ("not_started", "in_progress")
+
+# A03 is too broad to be a useful coverage claim by itself. Input-bearing A03
+# routes retain separate obligations for the common dynamic injection classes.
+_A03_INPUT_TEST_CLASSES = ("sqli", "reflected_xss", "stored_xss")
+
+_TEST_CLASS_ALIASES = {
+    "sql_injection": "sqli",
+    "xss": "xss",
+    "reflected_xss": "reflected_xss",
+    "stored_xss": "stored_xss",
+    "persistent_xss": "stored_xss",
+    "command injection": "command_injection",
+    "template_injection": "ssti",
+}
+
+
+def normalize_web_test_class(
+    value: str | None,
+    *,
+    owasp_category: str = "",
+    evidence: str = "",
+) -> str:
+    """Return a stable vulnerability-class key from explicit or observed context."""
+    explicit = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+    explicit = _TEST_CLASS_ALIASES.get(explicit, explicit)
+    if explicit:
+        return explicit[:64]
+    if _normalize_owasp_category(owasp_category) != "A03":
+        return ""
+    text = str(evidence or "").lower()
+    if "xss" in text and ("stored" in text or "persistent" in text):
+        return "stored_xss"
+    if "xss" in text and "reflected" in text:
+        return "reflected_xss"
+    if any(token in text for token in ("sql", "union select", "sleep(", "or 1=1")):
+        return "sqli"
+    if any(token in text for token in ("<script", "onerror", "onload", "javascript:")):
+        if "stored" in text or "persistent" in text:
+            return "stored_xss"
+        if "reflected" in text:
+            return "reflected_xss"
+        return "xss"
+    if any(
+        token in text
+        for token in ("command injection", "shell injection", "; id", "&& id")
+    ):
+        return "command_injection"
+    if any(token in text for token in ("ssti", "template injection", "{{7*7}}")):
+        return "ssti"
+    return "other_injection"
+
+
+def _load_test_classes(cell: PageOwaspTest) -> dict[str, dict[str, Any]]:
+    try:
+        parsed = json.loads(cell.test_classes_json or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
 
 _ENFORCE_DEFAULT_MAX_ATTEMPTS = 500
 _ENFORCE_DEFAULT_TIME_BUDGET_S = 1800.0
@@ -141,6 +206,7 @@ def update_web_coverage_cell(
     status: str,
     finding_id: int | None = None,
     skip_reason: str | None = None,
+    test_class: str | None = None,
 ) -> None:
     """Upsert a web coverage cell with no-downgrade status semantics.
 
@@ -151,6 +217,9 @@ def update_web_coverage_cell(
     owasp_category = _normalize_owasp_category(
         owasp_category
     )  # "A02 - Crypto…" → "A02"
+    normalized_class = normalize_web_test_class(
+        test_class, owasp_category=owasp_category
+    )
     with Session(get_engine()) as s:
         cell = s.exec(
             select(PageOwaspTest)
@@ -172,8 +241,27 @@ def update_web_coverage_cell(
             if new_rank > current_rank:
                 cell.status = status
                 cell.last_updated = datetime.now(_UTC)
-            elif finding_id is None and skip_reason is None:
+            elif finding_id is None and skip_reason is None and not normalized_class:
                 return
+        if normalized_class:
+            classes = _load_test_classes(cell)
+            class_state = classes.get(normalized_class) or {
+                "status": "not_started",
+                "finding_ids": [],
+            }
+            if _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(
+                str(class_state.get("status") or "not_started"), 0
+            ):
+                class_state["status"] = status
+            class_state["last_updated"] = datetime.now(_UTC).isoformat()
+            class_fids = class_state.get("finding_ids")
+            if not isinstance(class_fids, list):
+                class_fids = []
+            if finding_id is not None and finding_id not in class_fids:
+                class_fids.append(finding_id)
+            class_state["finding_ids"] = class_fids
+            classes[normalized_class] = class_state
+            cell.test_classes_json = json.dumps(classes, sort_keys=True)
         if skip_reason is not None:
             cell.skip_reason = skip_reason
         if finding_id is not None:
@@ -196,6 +284,7 @@ def update_web_coverage_cell(
                 "owasp_category": owasp_category,
                 "status": status,
                 "finding_id": finding_id,
+                "test_class": normalized_class or None,
             },
         )
 
@@ -217,6 +306,12 @@ def mark_in_progress_to_covered(run_id: int) -> None:
         now = datetime.now(_UTC)
         for cell in cells:
             cell.status = "covered"
+            classes = _load_test_classes(cell)
+            for class_state in classes.values():
+                if class_state.get("status") == "in_progress":
+                    class_state["status"] = "covered"
+                    class_state["last_updated"] = now.isoformat()
+            cell.test_classes_json = json.dumps(classes, sort_keys=True)
             cell.last_updated = now
             s.add(cell)
         s.commit()
@@ -227,7 +322,7 @@ def mark_in_progress_to_covered(run_id: int) -> None:
 
 
 def _make_web_post_probe_fn(run_id: int):
-    """Return ``(url, method, owasp_category) → None`` for per-probe in_progress tracking.
+    """Return a callback for per-probe category and test-class tracking.
 
     Matches the probed URL to a CrawledPage and flips the (page, category) cell
     to ``in_progress``.  If no CrawledPage exists for the URL yet (the test lead
@@ -235,7 +330,12 @@ def _make_web_post_probe_fn(run_id: int):
     workprogram can track it.
     """
 
-    def _post_probe(url: str, method: str, owasp_category: str) -> None:  # noqa: ARG001
+    def _post_probe(
+        url: str,
+        method: str,
+        owasp_category: str,
+        test_class: str | None = None,
+    ) -> None:
         cat = (owasp_category or "").strip().upper()
         if not cat:
             return
@@ -270,7 +370,9 @@ def _make_web_post_probe_fn(run_id: int):
                     url,
                     run_id,
                 )
-        update_web_coverage_cell(run_id, page_id, cat, "in_progress")
+        update_web_coverage_cell(
+            run_id, page_id, cat, "in_progress", test_class=test_class
+        )
 
     return _post_probe
 
@@ -369,7 +471,21 @@ def _make_web_post_finding_fn(run_id: int):
 
         if page_id is None:
             return
-        update_web_coverage_cell(run_id, page_id, cat, "finding", finding_id=fid)
+        class_evidence = " ".join(
+            str(getattr(finding, field, None) or "")
+            for field in ("title", "description", "evidence", "request_evidence")
+        )
+        test_class = normalize_web_test_class(
+            None, owasp_category=cat, evidence=class_evidence
+        )
+        update_web_coverage_cell(
+            run_id,
+            page_id,
+            cat,
+            "finding",
+            finding_id=fid,
+            test_class=test_class,
+        )
 
     return _post_finding
 
@@ -424,6 +540,139 @@ def _uncovered_web_cells(run_id: int) -> list[tuple[CrawledPage, str, str]]:
         if page is not None:
             out.append((page, c.owasp_category, c.status))
     return out
+
+
+def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
+    """Return a compact live list of useful uncovered web workprogram cells.
+
+    This is intentionally not a second plan.  It projects canonical workprogram
+    state into a bounded set of concrete next actions suitable for the Test Lead's
+    context window and completion challenge.
+    """
+    limit = max(1, min(50, int(limit or 12)))
+    with Session(get_engine(), expire_on_commit=False) as s:
+        cells = list(
+            s.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+            ).all()
+        )
+        page_ids = {cell.page_id for cell in cells}
+        pages = {
+            page.id: page
+            for page in (
+                s.exec(
+                    select(CrawledPage).where(CrawledPage.id.in_(page_ids))  # type: ignore[attr-defined]
+                ).all()
+                if page_ids
+                else []
+            )
+        }
+        intel = list(
+            s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "endpoint")
+            ).all()
+        )
+
+    totals: dict[str, int] = {status: 0 for status in _STATUS_RANK}
+    for cell in cells:
+        totals[cell.status] = totals.get(cell.status, 0) + 1
+
+    method_by_url: dict[str, str] = {}
+    for item in intel:
+        candidate = str(item.url or item.value or item.key or "").strip()
+        if candidate:
+            method_by_url.setdefault(
+                _normalize_url(candidate), (item.method or "GET").upper()
+            )
+
+    candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    for cell in cells:
+        page = pages.get(cell.page_id)
+        if page is None or not page.in_scope or _is_static_asset(page.url):
+            continue
+        url = page.url
+        normalized = _normalize_url(url)
+        method = method_by_url.get(normalized, "GET")
+        signals = []
+        if page.takes_input:
+            signals.append("takes input")
+        if page.has_object_ref:
+            signals.append("contains an object reference")
+        if page.req_auth:
+            signals.append("requires authentication")
+        if page.has_business_logic:
+            signals.append("contains business logic")
+        if page.state_kind == "api" or "/api/" in url:
+            signals.append("API route")
+        reason = (
+            f"{', '.join(signals)}; {cell.status.replace('_', ' ')} for "
+            f"{cell.owasp_category}"
+            if signals
+            else f"applicable cell is {cell.status.replace('_', ' ')}"
+        )
+        # Evidence-first ordering: untouched input/API/object/auth surfaces first,
+        # then stable page/category ordering. No synthetic risk score is exposed.
+        expected_classes = (
+            _A03_INPUT_TEST_CLASSES
+            if cell.owasp_category == "A03" and page.takes_input
+            else ()
+        )
+        classes = _load_test_classes(cell)
+        class_gaps = [
+            test_class
+            for test_class in expected_classes
+            if (classes.get(test_class) or {}).get("status")
+            in (None, *_UNCOVERED_STATES)
+        ]
+        if not class_gaps and cell.status not in _UNCOVERED_STATES:
+            continue
+        test_classes: tuple[str | None, ...] = (
+            tuple(class_gaps) if expected_classes else (None,)
+        )
+        rank = (
+            0 if cell.status == "not_started" else 1,
+            -int(bool(page.takes_input)),
+            -int(page.state_kind == "api" or "/api/" in url),
+            -int(bool(page.has_object_ref)),
+            -int(bool(page.req_auth)),
+            url,
+            cell.owasp_category,
+        )
+        for test_class in test_classes:
+            class_reason = (
+                f"{reason}; {test_class.replace('_', ' ')} has not been covered"
+                if test_class
+                else reason
+            )
+            candidates.append(
+                (
+                    (*rank, test_class or ""),
+                    {
+                        "page_id": page.id,
+                        "url": url,
+                        "method": method,
+                        "owasp_category": cell.owasp_category,
+                        "test_class": test_class,
+                        "status": cell.status,
+                        "access": "authenticated"
+                        if page.req_auth
+                        else "unknown_or_public",
+                        "reason": class_reason,
+                    },
+                )
+            )
+
+    candidates.sort(key=lambda item: item[0])
+    return {
+        "tool": "coverage_gaps",
+        "run_id": run_id,
+        "totals": totals,
+        "next_actions": [item[1] for item in candidates[:limit]],
+        "remaining": len(candidates),
+        "truncated": len(candidates) > limit,
+    }
 
 
 def _build_web_enforce_directive(run_id: int) -> str:
@@ -747,12 +996,20 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     finding_by_id[fid] for fid in all_fids if fid in finding_by_id
                 ]
             skip_reason = cell.skip_reason
+            test_classes = _load_test_classes(cell)
+            if cat == "A03" and page.takes_input:
+                for expected_class in _A03_INPUT_TEST_CLASSES:
+                    test_classes.setdefault(
+                        expected_class,
+                        {"status": "not_started", "finding_ids": []},
+                    )
             if cat not in g["cells"]:
                 g["cells"][cat] = {
                     "status": status,
                     "skip_reason": skip_reason,
                     "finding_ids": all_fids,
                     "findings": cell_findings,
+                    "test_classes": test_classes,
                 }
             else:
                 # Promote to highest status seen across pages in this group
@@ -765,8 +1022,19 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                     fid for fid in all_fids if fid not in g["cells"][cat]["finding_ids"]
                 )
                 g["cells"][cat]["findings"].extend(cell_findings)
+                for test_class, class_state in test_classes.items():
+                    current = g["cells"][cat]["test_classes"].get(test_class)
+                    if current is None or _STATUS_RANK.get(
+                        str(class_state.get("status") or "not_started"), 0
+                    ) > _STATUS_RANK.get(
+                        str(current.get("status") or "not_started"), 0
+                    ):
+                        g["cells"][cat]["test_classes"][test_class] = class_state
 
     totals: dict[str, int] = {st: 0 for st in _STATUS_RANK}
+    class_totals: dict[str, dict[str, int]] = defaultdict(
+        lambda: {st: 0 for st in _STATUS_RANK}
+    )
     page_rows: list[dict] = []
 
     for pattern, g in sorted(groups.items()):
@@ -774,6 +1042,11 @@ def get_web_coverage_matrix(run_id: int) -> dict:
             continue
         for cell in g["cells"].values():
             totals[cell["status"]] = totals.get(cell["status"], 0) + 1
+            for test_class, class_state in cell.get("test_classes", {}).items():
+                class_status = str(class_state.get("status") or "not_started")
+                class_totals[test_class][class_status] = (
+                    class_totals[test_class].get(class_status, 0) + 1
+                )
         rep = g["pages"][0]
         page_rows.append(
             {
@@ -792,6 +1065,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         "categories": OWASP_WEB_CATEGORIES,
         "pages": page_rows,
         "totals": totals,
+        "class_totals": dict(class_totals),
         "seeded": True,
     }
 
