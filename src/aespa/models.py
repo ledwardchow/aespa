@@ -808,6 +808,9 @@ class ScanCheckpoint(SQLModel, table=True):
     step_count: int = Field(default=0)
     progressive_findings_count: int = Field(default=0)
     consecutive_context_tools: int = Field(default=0)
+    # Persisted bounded completion/progress policy; kept separate from the LLM
+    # transcript so resume does not forget session attempts or loop protection.
+    completion_state_json: str = Field(default="{}")
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
