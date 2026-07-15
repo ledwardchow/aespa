@@ -54,6 +54,44 @@ log = logging.getLogger("aespa.llm")
 
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
 
+
+class LLMRefusalError(RuntimeError):
+    """The provider refused to process an agentic scan request."""
+
+
+_REFUSAL_MARKERS = (
+    "cyber_policy",
+    "content was flagged for possible cybersecurity risk",
+    "responsibleaipolicyviolation",
+    "content_filter",
+    "content filter",
+    "guardrail_intervened",
+    "guardrail intervened",
+    "blocked by a safety",
+    "blocked for safety",
+    "safety policy",
+    "policy violation",
+)
+
+
+def _is_llm_refusal(exc: BaseException) -> bool:
+    """Return True for provider errors that explicitly identify a refusal."""
+    if isinstance(exc, LLMRefusalError):
+        return True
+    parts = [str(exc)]
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            parts.append(str(getattr(response, "text", "") or ""))
+        except Exception:
+            pass
+        try:
+            parts.append(json.dumps(response.json(), default=str))
+        except Exception:
+            pass
+    text = " ".join(parts).lower()
+    return any(marker in text for marker in _REFUSAL_MARKERS)
+
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
@@ -3468,6 +3506,9 @@ async def _call_with_tools_impl(
         resp = await _create_chat_completion(oai_client, call_kwargs)
         choice = resp.choices[0]
         msg = choice.message
+        refusal = getattr(msg, "refusal", None)
+        if refusal:
+            raise LLMRefusalError(f"LLM provider refusal: {refusal}")
         finish = getattr(choice, "finish_reason", None) or "stop"
         blocks = []
         if msg.content:
@@ -3748,6 +3789,7 @@ async def thinking_agentic_loop(
                     tool_call_count + 1,
                     exc,
                 )
+                _is_refusal = _is_llm_refusal(exc)
                 _exc_resp = getattr(exc, "response", None)
                 _exc_code = (
                     _exc_resp.get("Error", {}).get("Code", "")
@@ -3766,6 +3808,11 @@ async def thinking_agentic_loop(
                                 f"Step {tool_call_count + 1}: AWS credentials have expired. "
                                 "Please refresh your AWS credentials and resume the pentest."
                             )
+                        elif _is_refusal:
+                            _msg = (
+                                f"Step {tool_call_count + 1}: LLM provider refused the "
+                                f"scan request — {exc}"
+                            )
                         else:
                             _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
                         emit_fn(
@@ -3782,6 +3829,11 @@ async def thinking_agentic_loop(
                         )
                     except Exception:
                         pass
+                if _is_refusal:
+                    raise LLMRefusalError(
+                        f"LLM provider refused the scan request at step "
+                        f"{tool_call_count + 1}: {exc}"
+                    ) from exc
                 break
 
             tool_use_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
