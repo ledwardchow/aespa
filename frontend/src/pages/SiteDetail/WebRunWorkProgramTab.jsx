@@ -54,7 +54,14 @@ export function WebRunWorkProgramTab({
                 cells[d.owasp_category] = {
                   ...existing,
                   status: d.status,
-                  finding_ids: fids
+                  finding_ids: fids,
+                  test_classes: d.test_class ? {
+                    ...(existing.test_classes || {}),
+                    [d.test_class]: {
+                      ...(existing.test_classes?.[d.test_class] || {}),
+                      status: d.status
+                    }
+                  } : existing.test_classes
                 };
                 return {
                   ...pg,
@@ -221,19 +228,22 @@ export function WebRunWorkProgramTab({
                   padding: "2px 4px"
                 }}><span className="cov-cell cov-na" title="N/A">—</span></td>;
                 const fids = cell.finding_ids || [];
+                const classEntries = Object.entries(cell.test_classes || {});
+                const classSummary = classEntries.map(([name, state]) => `${name}: ${state.status || "not_started"}`).join("\n");
                 const isSelected = selectedCell?.page_id === pg.page_id && selectedCell?.cat === cat;
                 return <td key={cat} style={{
                   textAlign: "center",
                   padding: "2px 4px"
                 }}>
-                        <span className={"cov-cell cov-" + cell.status.replace("_", "-") + (isSelected ? " selected" : "") + (fids.length ? " has-findings" : "")} title={cat + ": " + cell.status + (fids.length ? " (" + fids.length + " finding" + (fids.length > 1 ? "s" : "") + "" : "") + ")\n" + pg.url} style={{
-                    cursor: fids.length ? "pointer" : "default"
-                  }} onClick={() => fids.length && setSelectedCell(isSelected ? null : {
+                        <span className={"cov-cell cov-" + cell.status.replace("_", "-") + (isSelected ? " selected" : "") + (fids.length ? " has-findings" : "")} title={cat + ": " + cell.status + (fids.length ? " (" + fids.length + " finding" + (fids.length > 1 ? "s" : "") + "" : "") + ")\n" + pg.url + (classSummary ? "\n\nTest classes:\n" + classSummary : "")} style={{
+                    cursor: fids.length || classEntries.length ? "pointer" : "default"
+                  }} onClick={() => (fids.length || classEntries.length) && setSelectedCell(isSelected ? null : {
                     page_id: pg.page_id,
                     cat,
                     url: pg.url,
                     fids,
-                    findings: cell.findings
+                    findings: cell.findings,
+                    testClasses: cell.test_classes || {}
                   })}>{fids.length > 0 ? fids.length : ""}</span>
                       </td>;
               })}
@@ -259,6 +269,9 @@ export function WebRunWorkProgramTab({
           }}>{selectedCell.cat} {OWASP_WEB_LABELS[selectedCell.cat] || ""} — {selectedCell.url}</b>
               <button className="btn ghost sm" onClick={() => setSelectedCell(null)}>✕</button>
             </div>
+            {Object.keys(selectedCell.testClasses || {}).length > 0 && <div className="surface-chip-list" style={{ marginBottom: 8 }}>
+              {Object.entries(selectedCell.testClasses).map(([name, state]) => <span key={name} className={`surface-status status-${state.status || "not_started"}`}>{name.replace(/_/g, " ")}: {(state.status || "not_started").replace(/_/g, " ")}</span>)}
+            </div>}
             {selectedCell.findings && selectedCell.findings.length ? selectedCell.findings.map(f => <div key={f.id} style={{
           padding: "6px 0",
           borderTop: "1px solid var(--border)"

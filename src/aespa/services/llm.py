@@ -3263,6 +3263,7 @@ async def _call_with_tools_impl(
                 last_content = last_content + [{"cachePoint": {"type": "default"}}]
             converse_messages[-1] = {**last_msg, "content": last_content}
 
+        bedrock_transport: dict[str, Any] = {}
         if config.api_key:
             # Bearer-token path (SAML / federated credentials stored as api_key).
             # Uses the same HTTP endpoint as _bedrock() so SAML token users work.
@@ -3286,6 +3287,14 @@ async def _call_with_tools_impl(
                 _resp = await _hx.post(url, headers=headers, json=payload)
                 _resp.raise_for_status()
                 data = _resp.json()
+                response_headers = getattr(_resp, "headers", {}) or {}
+                bedrock_transport = {
+                    "http_status": getattr(_resp, "status_code", None),
+                    "request_id": (
+                        response_headers.get("x-amzn-requestid")
+                        or response_headers.get("x-amz-request-id")
+                    ),
+                }
         else:
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
@@ -3328,8 +3337,13 @@ async def _call_with_tools_impl(
 
             loop = _asyncio.get_event_loop()
             data = await loop.run_in_executor(None, _run_converse)
+            response_metadata = data.get("ResponseMetadata") or {}
+            bedrock_transport = {
+                "http_status": response_metadata.get("HTTPStatusCode"),
+                "request_id": response_metadata.get("RequestId"),
+                "retry_attempts": response_metadata.get("RetryAttempts"),
+            }
         stop_reason_raw = data.get("stopReason") or "end_turn"
-        stop_reason = "tool_use" if stop_reason_raw == "tool_use" else "end_turn"
         out_content = ((data.get("output") or {}).get("message") or {}).get(
             "content"
         ) or []
@@ -3374,7 +3388,34 @@ async def _call_with_tools_impl(
             cache_read_tokens=_bdt_u.get("cacheReadInputTokens", 0),
             cache_write_tokens=_bdt_u.get("cacheWriteInputTokens", 0),
         )
-        return blocks, stop_reason, raw_content_ant
+        if not blocks:
+            # Preserve enough native response information to distinguish a
+            # guardrail/context stop from a genuinely empty end turn.
+            raw_content_ant.append(
+                {
+                    "type": "provider_diagnostic",
+                    "provider": "bedrock",
+                    "model": config.model,
+                    "native_stop_reason": stop_reason_raw,
+                    "content_block_types": [
+                        next(iter(block), "unknown")
+                        for block in out_content
+                        if isinstance(block, dict)
+                    ],
+                    "usage": {
+                        "input_tokens": _bdt_u.get("inputTokens", 0),
+                        "output_tokens": _bdt_u.get("outputTokens", 0),
+                        "cache_read_tokens": _bdt_u.get("cacheReadInputTokens", 0),
+                        "cache_write_tokens": _bdt_u.get(
+                            "cacheWriteInputTokens", 0
+                        ),
+                    },
+                    "metrics": data.get("metrics") or {},
+                    "transport": bedrock_transport,
+                    "guardrail_trace_present": bool(data.get("trace")),
+                }
+            )
+        return blocks, str(stop_reason_raw), raw_content_ant
 
     # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
     if config.provider == "bedrock_mantle":
@@ -3758,13 +3799,77 @@ async def thinking_agentic_loop(
 
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
+    resume_repair: dict[str, Any] | None = None
     if resume_messages is not None:
-        messages: list[dict] = resume_messages
+        messages = list(resume_messages)
+        if messages and messages[-1].get("role") == "assistant":
+            assistant_content = messages[-1].get("content")
+            assistant_blocks = (
+                assistant_content if isinstance(assistant_content, list) else []
+            )
+            interrupted_tools = [
+                block
+                for block in assistant_blocks
+                if isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("id")
+            ]
+            if interrupted_tools:
+                repair_content = [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": (
+                            "Tool execution was interrupted before a result was "
+                            "checkpointed. Reassess the action before retrying it."
+                        ),
+                    }
+                    for block in interrupted_tools
+                ]
+                repair_kind = "interrupted_tool_results"
+            else:
+                repair_content = [
+                    {
+                        "type": "text",
+                        "text": (
+                            "The previous model turn ended without a completed tool "
+                            "exchange. Resume the assessment by calling exactly one tool."
+                        ),
+                    }
+                ]
+                repair_kind = "trailing_assistant_turn"
+            messages.append({"role": "user", "content": repair_content})
+            resume_repair = {
+                "repair_kind": repair_kind,
+                "interrupted_tool_count": len(interrupted_tools),
+                "message_count_after_repair": len(messages),
+            }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
     tool_call_count = 0
     final_summary = ""
     consecutive_text_only_turns = 0
+
+    if resume_repair and emit_fn:
+        try:
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_protocol",
+                    "status": "warning",
+                    "message": (
+                        "Repaired resumed LLM checkpoint so the conversation ends "
+                        "with a user message before the next provider call."
+                    ),
+                    "data": {
+                        **resume_repair,
+                        "provider": config.provider,
+                        "model": config.model,
+                    },
+                }
+            )
+        except Exception:
+            pass
 
     try:
         while True:
@@ -3919,25 +4024,59 @@ async def thinking_agentic_loop(
                 b for b in content_blocks if b.get("type") == "text" and b.get("text")
             ]
 
+            provider_diagnostics = [
+                block
+                for block in (raw_content if isinstance(raw_content, list) else [])
+                if isinstance(block, dict)
+                and block.get("type") == "provider_diagnostic"
+            ]
+            no_tool_attempt = consecutive_text_only_turns + 1
+            no_usable_content = not tool_use_blocks and not text_blocks
+            response_data = {
+                "step": tool_call_count + 1,
+                "raw_response": "\n".join(
+                    b.get("text", "") for b in text_blocks
+                )[:4000],
+                "provider": config.provider,
+                "model": config.model,
+                "native_stop_reason": stop_reason,
+                "tool_call_count": len(tool_use_blocks),
+                "text_block_count": len(text_blocks),
+                "no_usable_content": no_usable_content,
+                "message_count": len(messages),
+                "context_chars": len(json.dumps(messages, default=str)),
+                "provider_diagnostics": provider_diagnostics,
+            }
+            if not tool_use_blocks:
+                response_data["no_tool_retry"] = no_tool_attempt
+                response_data["no_tool_retry_limit"] = 3
+
             if emit_fn:
-                action_label = (
-                    ", ".join(b["name"] for b in tool_use_blocks)
-                    if tool_use_blocks
-                    else "end_turn"
-                )
+                if tool_use_blocks:
+                    action_label = ", ".join(b["name"] for b in tool_use_blocks)
+                    response_status = "complete"
+                    response_message = (
+                        f"Step {tool_call_count + 1}: LLM → {action_label} "
+                        f"(stop: {stop_reason})"
+                    )
+                else:
+                    response_status = "warning"
+                    response_kind = (
+                        "empty response" if no_usable_content else "text-only response"
+                    )
+                    response_message = (
+                        f"Step {tool_call_count + 1}: LLM returned {response_kind} "
+                        f"without a tool call (native stop: {stop_reason}); "
+                        f"retry {no_tool_attempt}/3"
+                    )
                 try:
                     emit_fn(
                         {
                             "type": "scanner_phase",
                             "phase": "llm_response",
-                            "status": "complete",
-                            "message": f"Step {tool_call_count + 1}: LLM \u2192 {action_label}",
-                            "data": {
-                                "step": tool_call_count + 1,
-                                "raw_response": "\n".join(
-                                    b.get("text", "") for b in text_blocks
-                                )[:4000],
-                            },
+                            "status": response_status,
+                            "message": response_message,
+                            "data": response_data,
                         }
                     )
                 except Exception:
@@ -3967,6 +4106,29 @@ async def thinking_agentic_loop(
                         "turns; ending assessment.",
                         consecutive_text_only_turns,
                     )
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_protocol",
+                                    "status": "error",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: scan loop terminated "
+                                        "after 3 consecutive responses without a tool call; "
+                                        "the model did not call done."
+                                    ),
+                                    "data": {
+                                        **response_data,
+                                        "termination_reason": (
+                                            "consecutive_no_tool_responses"
+                                        ),
+                                        "explicit_done": False,
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
                     break
                 messages.append(
                     {

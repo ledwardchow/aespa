@@ -80,6 +80,9 @@ export function AttackSurfacePanel({ summary }) {
           </div>;
         })}
       </div> : <div className="subtle">Coverage appears here after the OWASP workprogram is seeded.</div>}
+      {(coverage.by_test_class || []).length ? <div className="surface-chip-list" style={{ marginTop: 10 }}>
+        {coverage.by_test_class.map(item => <span key={item.test_class} className="surface-chip">{item.test_class.replace(/_/g, " ")}: {item.remaining} remaining</span>)}
+      </div> : null}
     </Section>
 
     <Section id="routes" title="Route & Input Inventory" detail={`${filteredRoutes.length} of ${routes.length} routes`} expanded={expanded.routes} onToggle={toggle}>
