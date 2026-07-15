@@ -750,7 +750,7 @@ _API_THINKING_AGENT_SYSTEM = (
     "  update_lead calls at the end of the scan.\n"
     "- forge_jwt / decode_jwt: create or inspect JWTs.\n"
     "- credential_check: test a bounded list of credentials against a login endpoint.\n"
-    "- done: end the assessment when all surface is covered.\n"
+    "- done: call ONLY when every input-taking route in the site map or spec has been probed. A finding write or specialist dispatch is NOT a done condition — resume immediately after each.\n"
     "- No browser tool — REST APIs do not require browser rendering.\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each endpoint × category pair with\n"
@@ -772,12 +772,16 @@ _THINKING_AGENT_SYSTEM = (
     + "\n\nTool rules:\n"
     "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
     "  ALWAYS set owasp_category to the OWASP Top 10 2025 code you are testing for (A01–A10).\n"
-    "  This drives the Work Program matrix — do not omit it.\n"
+    "  For A03 also set test_class (for example sqli, reflected_xss, or stored_xss); "
+    "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
-    "interaction is genuinely required.\n"
+    "interaction is genuinely required. For XSS, use dom_check with a unique canary "
+    "attribute or exact text to prove the payload affected the rendered DOM.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, target_inventory, traffic_search, extract_entities. "
+    "finding_list, lead_list, target_inventory, traffic_search, extract_entities, "
+    "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
+    "route/category cells; use it when choosing the next distinct surface or before done. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
     "include context_budget_reason with a concrete summary and why one more targeted "
     "scan round will change the next action.\n"
@@ -808,7 +812,7 @@ _THINKING_AGENT_SYSTEM = (
     "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
     "their current statuses.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
-    "- done: end the assessment when all areas are covered and it is unlikely further vulnerabilities will be found.\n"
+    "- done: call ONLY when every input-taking route in site_map has been probed, all high-priority applicable Work Program areas have meaningful evidence, imported leads are resolved, and no specialist is still running. Writing a finding is a milestone, not an exit — resume probing the next untested surface immediately after write_finding returns. An agent_dispatch is an asynchronous handoff — keep probing other routes yourself in parallel. A high step count is NOT a done condition.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
     "attack surface.\n"
@@ -849,6 +853,15 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "matrix; do not omit."
                     ),
                 },
+                "test_class": {
+                    "type": "string",
+                    "description": (
+                        "Concrete vulnerability class exercised by this probe, such as "
+                        "sqli, reflected_xss, stored_xss, command_injection, ssti, idor, "
+                        "or auth_bypass. Required for A03 probes so one injection class "
+                        "does not count as coverage of another."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
@@ -872,9 +885,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot|dom_check, ...}. "
                         "fill: selector+value. click: selector. press: selector+key. "
-                        "wait: state or ms."
+                        "wait: state or ms. dom_check: selector plus optional attribute "
+                        "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),
                 },
                 "capture_session": {
@@ -1076,11 +1090,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
     {
         "name": "done",
         "description": (
-            "End the assessment only after all discovered endpoints, authentication flows, "
-            "IDOR surfaces, business logic paths, and injection points have been exhaustively "
-            "tested. Do not call done simply because specialists have been dispatched — "
-            "continue covering remaining attack surface directly until it is genuinely "
-            "unlikely that further vulnerabilities will be found."
+            "Call done ONLY when every input-accepting route in site_map has been "
+            "probed, all high-priority applicable Work Program areas have meaningful "
+            "evidence, imported leads are resolved, and no specialist is still running. Writing "
+            "a finding is a milestone, not an exit — continue to the next untested surface "
+            "immediately after write_finding returns. An agent_dispatch is an async "
+            "handoff — keep probing other routes yourself. A high step count is not a "
+            "done condition."
         ),
         "input_schema": {
             "type": "object",
@@ -1179,7 +1195,8 @@ _API_TEST_LEAD_TOOL_NAMES = frozenset(
 def get_api_test_lead_tools() -> list[dict]:
     """Return only tools with API-aware executor paths for automated API scans."""
     return [
-        tool for tool in THINKING_AGENT_TOOLS
+        tool
+        for tool in THINKING_AGENT_TOOLS
         if tool["name"] in _API_TEST_LEAD_TOOL_NAMES
     ]
 
@@ -1253,8 +1270,7 @@ TASK: What is the single most valuable action to take RIGHT NOW?
 Think like a human tester:
 - Use context tools to pull only the specific crawl/history/finding details you need. Do not
   assume route details are available inline unless they appear in the compact context or history.
-- If a target-driven task graph is present in the crawl context, prefer high-priority queued
-  or running tasks and reference the matching hypothesis in your observation/note.
+- Use the attack-surface summary and site_map to prioritize high-risk untested routes.
 - Start broad with site_map when route coverage is unclear, then use page_detail or
   history_search before sending a probe that depends on precise parameters or prior evidence.
 - Mine earlier response bodies for tokens (JWT, session), IDs (account, user, transaction),
@@ -1271,10 +1287,10 @@ Think like a human tester:
 - Prefer request sequences that prove server-side enforcement, especially check/verify endpoints
     followed by direct action endpoint calls that omit the supposedly required control.
 - When you find something interesting, follow it up immediately — don't move on too quickly.
-- Do not finish until you have covered the endpoint inventory, authentication boundaries,
-    object ownership, business-logic gates, input validation, error disclosure, and headers,
-    unless the crawl context clearly lacks that attack surface or steps are nearly exhausted.
-- If step count is getting high, prefer discovering new attack surfaces over re-testing already-confirmed findings.
+- INVENTORY DENSITY & SYSTEMATIC PROBING: Testing a single endpoint for a vulnerability class (e.g. testing one route for IDOR or SQLi) does NOT constitute application coverage. Every distinct route, API endpoint, form, and ID parameter is a separate attack surface. Work through site_map and the Work Program systematically.
+- POST-FINDING CONTINUATION: Persisting a confirmed issue via finding_write is a step milestone, NOT a signal to finish. After recording a finding, immediately execute the next high-priority untested surface.
+- SPECIALIST HANDOFF: Dispatching a specialist agent is an asynchronous handoff; continue exploring remaining non-specialist routes and Work Program gaps in parallel while the specialist works in the background.
+- STEP COUNT IS NOT AN EXIT: A high step count or long context window is NOT a reason to stop. Continue probing remaining un-tested surfaces.
 - Be explicit about what made the next request worthwhile. Do not use vague phrases like
     "found something interesting" unless you also name the specific signal and hypothesis.
 
@@ -1368,6 +1384,8 @@ To make one HTTP request:
   "use_session": null,
   "headers": {{}},
   "body": null,
+  "owasp_category": "A03",
+  "test_class": "stored_xss",
     "observation": "Specific signal from prior responses that this follows up, or initial coverage goal",
     "hypothesis": "Specific issue or behavior this request is investigating",
     "payload_purpose": "What the generated query/body/header payload is meant to test, or null",
@@ -1391,6 +1409,7 @@ To use the browser:
     {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
     {{"op": "click", "selector": "button[type='submit']"}},
     {{"op": "wait", "state": "networkidle"}},
+    {{"op": "dom_check", "selector": "#transactions", "attribute": "data-aespa-xss", "equals": "canary-123"}},
     {{"op": "snapshot"}}
   ],
   "observation": "Specific signal from prior responses that requires browser/DOM follow-up",
@@ -1400,9 +1419,11 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, press, wait, snapshot.
+- Supported ops: goto, fill, type, click, press, wait, snapshot, dom_check.
 - For press, include selector and key (for example "Enter").
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
+- For dom_check, include a CSS selector and equals. Optionally include attribute;
+  without attribute, the element text is compared. The result explicitly reports PASS/FAIL.
 - Keep browser actions short and targeted; do not browse aimlessly.
 - Browser use_session currently applies bearer tokens as extra HTTP headers for navigation
   and fetches made after the session is selected.
@@ -1486,7 +1507,7 @@ Register-account rules:
 - Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
 - Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
 
-To finish the assessment (all key areas covered, or steps nearly exhausted):
+To finish the assessment ONLY after verifying via site_map that zero untested input routes remain, resolving imported leads, and covering all high-priority applicable Work Program areas:
 {{
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"
