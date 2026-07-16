@@ -58,7 +58,7 @@ from aespa.services.prompts.test_lead import (
 from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
-    get_burp_rest_api_config,
+    get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
     get_reporting_debug_config,
@@ -3370,7 +3370,7 @@ async def _run_burp_active_scan_for_target(
 ) -> None:
     """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
     with Session(get_engine()) as s:
-        burp_cfg = get_burp_rest_api_config(s)
+        burp_cfg = get_burp_rest_api_config_model(s)
 
     if not burp_cfg.enabled:
         return

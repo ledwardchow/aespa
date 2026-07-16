@@ -489,7 +489,8 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
-    api_key: str | None
+    has_api_key: bool = False
+    api_key: str | None = None
     max_tpm: int | None = None
     max_rpm: int | None = None
     updated_at: datetime
@@ -524,7 +525,8 @@ class LLMConfigOut(BaseModel):
     provider_id: int | None = None
     provider_name: str | None = None
     provider: str
-    api_key: str | None
+    has_api_key: bool = False
+    api_key: str | None = None
     base_url: str | None
     project_id: str | None = None
     model: str
@@ -714,6 +716,8 @@ class BurpRestApiConfigIn(BurpRestApiConfigBase):
 
 
 class BurpRestApiConfigOut(BurpRestApiConfigBase):
+    has_api_key: bool = False
+    api_key: str | None = None
     updated_at: datetime
 
 
@@ -844,6 +848,7 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     project_id: str | None = None
     models: list[str]
+    has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
     max_rpm: int | None = None

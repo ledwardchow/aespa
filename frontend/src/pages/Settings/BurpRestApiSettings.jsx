@@ -84,9 +84,35 @@ export function BurpRestApiSettings() {
         </div>
         <div className="field">
           <label>API key <span className="subtle">(optional)</span></label>
-          <input type="password" value={form.api_key} placeholder="Leave blank if not configured" onChange={e => upd({
-          api_key: e.target.value
-        })} />
+          <div className="row" style={{ gap: "8px" }}>
+            <input
+              type="password"
+              value={form.api_key}
+              placeholder={
+                form.clear_api_key
+                  ? "Key will be removed on save"
+                  : form.has_api_key && !form.api_key
+                  ? "•••••••• (leave blank to keep current key)"
+                  : "Leave blank if not configured"
+              }
+              onChange={e => upd({
+                api_key: e.target.value,
+                clear_api_key: false
+              })}
+              style={{ flex: 1 }}
+            />
+            {form.has_api_key && (
+              form.clear_api_key ? (
+                <button type="button" className="btn ghost" onClick={() => upd({ clear_api_key: false })}>
+                  Undo clear
+                </button>
+              ) : (
+                <button type="button" className="btn ghost" onClick={() => upd({ clear_api_key: true, api_key: "" })}>
+                  Clear key
+                </button>
+              )
+            )}
+          </div>
           <div className="field-hint">Set an API key in Burp REST API settings and paste it here for authentication.</div>
         </div>
         <div className="field">
