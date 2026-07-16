@@ -23,6 +23,7 @@ const ApiTestRunForm = lazyNamed(loadApiPages, "ApiTestRunForm");
 const ApiTestRunDetail = lazyNamed(loadApiPages, "ApiTestRunDetail");
 const SastRunsListPage = lazyNamed(loadSastPages, "SastRunsListPage");
 const SastRunDetail = lazyNamed(loadSastPages, "SastRunDetail");
+const SastRunForm = lazyNamed(loadSastPages, "SastRunForm");
 const SiteDetail = lazyNamed(loadSitePages, "SiteDetail");
 const SiteForm = lazyNamed(loadSitePages, "SiteForm");
 const TestRunDetail = lazyNamed(loadSitePages, "TestRunDetail");
@@ -44,7 +45,7 @@ function App() {
   const onSettings = route.name === "settings";
   const onScanPolicy = route.name === "scan-policy";
   const onExternalIntegrations = route.name === "external-integrations";
-  const onSast = route.name === "sast-list" || route.name === "sast-run-detail";
+  const onSast = ["sast-list", "sast-run-detail", "sast-run-new"].includes(route.name);
   const onDebug = route.name === "debug";
   const onReportingDebug = route.name === "reporting-debug";
   const [appVersion, setAppVersion] = useState("");
@@ -163,6 +164,7 @@ function App() {
           {route.name === "api-run-new" && <ApiTestRunForm key={route.id} collectionId={route.id} />}
           {route.name === "api-run-detail" && <ApiTestRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
           {route.name === "sast-list" && <SastRunsListPage />}
+          {route.name === "sast-run-new" && <SastRunForm key="sast-new" />}
           {route.name === "sast-run-detail" && <SastRunDetail key={route.id} runId={route.id} initialTab={route.tab} />}
           {route.name === "active-jobs" && <ActiveJobsPage />}
           {route.name === "run-new" && <TestRunForm key={route.siteId} siteId={route.siteId} />}

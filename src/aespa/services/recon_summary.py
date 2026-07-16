@@ -33,6 +33,8 @@ _STATUS_ORDER = {
     "finding": 3,
 }
 
+_A03_INPUT_TEST_CLASSES = ("sqli", "reflected_xss", "stored_xss")
+
 
 def build_recon_summary(
     run_id: int,
@@ -378,45 +380,86 @@ def _build_coverage(
     category_counts: dict[str, Counter] = defaultdict(Counter)
     class_counts: dict[str, Counter] = defaultdict(Counter)
     gaps: dict[str, set[str]] = defaultdict(set)
-    route_cells: dict[str, list[PageOwaspTest]] = defaultdict(list)
+    grouped_cells: dict[str, dict[str, dict]] = defaultdict(dict)
 
     for cell in cells:
-        status_counts[cell.status] += 1
-        category_counts[cell.owasp_category][cell.status] += 1
         try:
             test_classes = json.loads(cell.test_classes_json or "{}")
         except Exception:
             test_classes = {}
-        if isinstance(test_classes, dict):
-            for test_class, state in test_classes.items():
-                if isinstance(state, dict):
-                    class_counts[test_class][state.get("status") or "not_started"] += 1
-        if cell.owasp_category == "A03" and bool(
-            getattr(page_map.get(cell.page_id), "takes_input", False)
-        ):
+        if not isinstance(test_classes, dict):
+            test_classes = {}
+        page = page_map.get(cell.page_id)
+        if cell.owasp_category == "A03" and bool(getattr(page, "takes_input", False)):
             for test_class in ("sqli", "reflected_xss", "stored_xss"):
                 if test_class not in test_classes:
-                    class_counts[test_class]["not_started"] += 1
+                    test_classes[test_class] = {"status": "not_started"}
         canonical = page_urls.get(cell.page_id)
         if canonical:
-            route_cells[canonical].append(cell)
-            if cell.status in {"not_started", "in_progress"}:
-                gaps[cell.owasp_category].add(canonical)
+            current = grouped_cells[canonical].get(cell.owasp_category)
+            if current is None:
+                grouped_cells[canonical][cell.owasp_category] = {
+                    "status": cell.status,
+                    "test_classes": dict(test_classes),
+                }
+            else:
+                if _STATUS_ORDER.get(cell.status, 0) > _STATUS_ORDER.get(
+                    current["status"], 0
+                ):
+                    current["status"] = cell.status
+                for test_class, state in test_classes.items():
+                    if not isinstance(state, dict):
+                        continue
+                    previous = current["test_classes"].get(test_class)
+                    state_status = str(state.get("status") or "not_started")
+                    if previous is None or _STATUS_ORDER.get(
+                        state_status, 0
+                    ) > _STATUS_ORDER.get(
+                        str(previous.get("status") or "not_started"), 0
+                    ):
+                        current["test_classes"][test_class] = state
+
+    # Count the same obligations the matrix renders. Equivalent page URLs are
+    # collapsed, absent categories are N/A, and A03 is represented only by its
+    # applicable input test classes rather than its hidden parent row.
+    display_by_route: dict[str, list[tuple[str, str, str | None]]] = defaultdict(list)
+    for canonical, categories in grouped_cells.items():
+        for category, cell in categories.items():
+            if category == "A03":
+                for test_class in _A03_INPUT_TEST_CLASSES:
+                    state = cell["test_classes"].get(test_class)
+                    if state is None:
+                        continue
+                    status = str(state.get("status") or "not_started")
+                    display_by_route[canonical].append((category, status, test_class))
+            else:
+                display_by_route[canonical].append(
+                    (category, str(cell.get("status") or "not_started"), None)
+                )
+
+    for canonical, obligations in display_by_route.items():
+        for category, status, test_class in obligations:
+            status_counts[status] += 1
+            category_counts[category][status] += 1
+            if test_class:
+                class_counts[test_class][status] += 1
+            if status in {"not_started", "in_progress"}:
+                gaps[category].add(canonical)
 
     for canonical, route in route_map.items():
-        related = route_cells.get(canonical, [])
-        statuses = Counter(cell.status for cell in related)
+        obligations = display_by_route.get(canonical, [])
+        statuses = Counter(status for _category, status, _test_class in obligations)
         category_statuses: dict[str, str] = {}
-        for cell in related:
-            current = category_statuses.get(cell.owasp_category)
-            if current is None or _STATUS_ORDER.get(cell.status, 0) > _STATUS_ORDER.get(
+        for category, status, _test_class in obligations:
+            current = category_statuses.get(category)
+            if current is None or _STATUS_ORDER.get(status, 0) > _STATUS_ORDER.get(
                 current, 0
             ):
-                category_statuses[cell.owasp_category] = cell.status
+                category_statuses[category] = status
         route["coverage"] = {
-            "total": len(related),
+            "total": len(obligations),
             "statuses": dict(statuses),
-            "categories": sorted({cell.owasp_category for cell in related}),
+            "categories": sorted({category for category, _status, _class in obligations}),
             "remaining_categories": sorted(
                 category
                 for category, status in category_statuses.items()
