@@ -185,12 +185,7 @@ export function WebRunWorkProgramTab({
           alignItems: "center",
           gap: 4
         }}>
-              <span className={"cov-cell " + cls} style={{
-            display: "inline-block",
-            width: 14,
-            height: 14,
-            borderRadius: 3
-          }}></span>
+              <span className={"cov-cell coverage-legend-cell " + cls}></span>
               {label} ({totals[s] || 0})
             </span>)}
         </div>

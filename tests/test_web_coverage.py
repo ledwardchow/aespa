@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -47,13 +47,16 @@ from aespa.models import (
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services.web_workprogram import (
     _enforce_web_coverage_loop,
+    _make_web_enforce_prober,
     _make_web_post_finding_fn,
     _make_web_post_probe_fn,
     _uncovered_web_cells,
     get_web_coverage_gaps,
     get_web_coverage_matrix,
     mark_in_progress_to_covered,
+    reopen_unjustified_web_skips,
     seed_web_workprogram,
+    skip_web_coverage_obligation,
     update_web_coverage_cell,
 )
 
@@ -619,6 +622,119 @@ def test_enforce_loop_drives_to_terminal(db_engine, db_session, run):
     assert remaining == []
 
 
+def test_enforce_loop_resolves_each_input_a03_test_class(db_engine, db_session, run):
+    page = _make_page(db_session, run, "http://example.com/search", ["A03"])
+    page.takes_input = True
+    db_session.add(page)
+    db_session.commit()
+    seed_web_workprogram(run.id)
+    attempted_classes = []
+
+    async def _prober(page_obj, category, current_status, test_class):
+        attempted_classes.append(test_class)
+        return ("covered", None)
+
+    stats = asyncio.run(_enforce_web_coverage_loop(run.id, _prober))
+
+    assert attempted_classes == ["sqli", "reflected_xss", "stored_xss"]
+    assert stats["covered"] == 3
+    assert stats["remaining"] == 0
+    matrix = get_web_coverage_matrix(run.id)
+    assert matrix["column_totals"]["not_started"] == 0
+    assert matrix["column_totals"]["in_progress"] == 0
+    assert matrix["column_totals"]["covered"] == 3
+
+
+def test_enforce_loop_does_not_disguise_budget_exhaustion_as_skipped(
+    db_engine, db_session, run
+):
+    _make_page(db_session, run, "http://example.com/admin", ["A01", "A05"])
+    seed_web_workprogram(run.id)
+
+    async def _prober(page_obj, category, current_status):
+        return ("covered", None)
+
+    with pytest.raises(RuntimeError, match="unresolved"):
+        asyncio.run(
+            _enforce_web_coverage_loop(
+                run.id, _prober, max_attempts=1, time_budget_s=999
+            )
+        )
+
+    matrix = get_web_coverage_matrix(run.id)
+    assert matrix["totals"]["covered"] == 1
+    assert matrix["totals"]["not_started"] == 1
+    assert matrix["totals"]["skipped"] == 0
+
+
+def test_default_enforce_prober_rejects_applicable_untested_cell(
+    db_engine, db_session, run
+):
+    page = _make_page(db_session, run, "http://example.com/admin", ["A01"])
+    fake = AsyncMock(
+        return_value='{"A01": {"applicable": true, "reason": "admin authorization is testable"}}'
+    )
+    with patch("aespa.services.llm.plain_completion", new=fake):
+        prober = _make_web_enforce_prober(run.id, object())
+        status, reason = asyncio.run(prober(page, "A01", "not_started"))
+
+    assert status == "untested"
+    assert "applicable but not tested" in reason
+
+
+def test_skip_coverage_requires_real_blocker_evidence(db_engine, db_session, run):
+    page = _make_page(db_session, run, "http://example.com/admin", ["A01"])
+    seed_web_workprogram(run.id)
+
+    with pytest.raises(ValueError, match="concrete evidence"):
+        skip_web_coverage_obligation(
+            run.id,
+            url=page.url,
+            owasp_category="A01",
+            test_class=None,
+            disposition="blocked",
+            reason="The route requires an unavailable hardware token",
+        )
+
+    detail = skip_web_coverage_obligation(
+        run.id,
+        url=page.url,
+        owasp_category="A01",
+        test_class=None,
+        disposition="blocked",
+        reason="The route requires an unavailable hardware token",
+        evidence="Three browser attempts stopped at the WebAuthn challenge",
+    )
+    assert detail.startswith("blocked:")
+    assert get_web_coverage_matrix(run.id)["totals"]["skipped"] == 1
+
+
+def test_reopen_unjustified_skips_preserves_only_na_or_blocked(
+    db_engine, db_session, run
+):
+    page = _make_page(db_session, run, "http://example.com/admin", ["A01", "A05"])
+    seed_web_workprogram(run.id)
+    update_web_coverage_cell(
+        run.id,
+        page.id,
+        "A01",
+        "skipped",
+        skip_reason="not covered within scan budget",
+    )
+    update_web_coverage_cell(
+        run.id,
+        page.id,
+        "A05",
+        "skipped",
+        skip_reason="not applicable: no configurable security headers",
+    )
+
+    assert reopen_unjustified_web_skips(run.id) == 1
+    matrix = get_web_coverage_matrix(run.id)
+    assert matrix["pages"][0]["cells"]["A01"]["status"] == "not_started"
+    assert matrix["pages"][0]["cells"]["A05"]["status"] == "skipped"
+
+
 # ── 16. _enforce_web_coverage_loop respects stop_check ───────────────────────
 
 
@@ -638,7 +754,8 @@ def test_enforce_loop_respects_stop(db_engine, db_session, run):
     )
     # Stop was checked before the first call, so 0 cells processed via the loop.
     assert call_count[0] == 0
-    assert stats["budget_exhausted"] is True
+    assert stats["stopped"] is True
+    assert stats["remaining"] == 3
 
 
 # ── 17. start-scan endpoint persists coverage_mode ───────────────────────────

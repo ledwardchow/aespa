@@ -899,12 +899,61 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "interactive/modal login). Reuse it later via use_session."
                     ),
                 },
+                "owasp_category": {
+                    "type": "string",
+                    "description": (
+                        "The OWASP category exercised by this browser interaction. "
+                        "Required in Full mode when the interaction satisfies a "
+                        "Work Program obligation."
+                    ),
+                },
+                "test_class": {
+                    "type": "string",
+                    "description": (
+                        "Concrete vulnerability class exercised. Required for A03 "
+                        "browser probes (sqli, reflected_xss, or stored_xss)."
+                    ),
+                },
                 "observation": {"type": "string"},
                 "hypothesis": {"type": "string"},
                 "payload_purpose": {"type": "string"},
                 "note": {"type": "string"},
             },
             "required": ["steps"],
+        },
+    },
+    {
+        "name": "skip_coverage",
+        "description": (
+            "Resolve one web Work Program obligation without testing it. Use only "
+            "when the test is genuinely nonsensical for this route or a concrete "
+            "technical blocker makes it impossible. Never use for time/budget limits, "
+            "because a route was not reached, or as a substitute for a feasible probe."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "owasp_category": {"type": "string"},
+                "test_class": {"type": "string"},
+                "disposition": {
+                    "type": "string",
+                    "enum": ["not_applicable", "blocked"],
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Specific explanation of why this obligation cannot be tested.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "Concrete blocker evidence, such as repeated 403 responses or "
+                        "a missing required credential. Required when disposition=blocked."
+                    ),
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["url", "owasp_category", "disposition", "reason"],
         },
     },
     {
