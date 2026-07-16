@@ -79,6 +79,28 @@ def _backfill_run_kind(engine: Engine) -> None:
         pass  # never block startup on a best-effort backfill
 
 
+def _backfill_scanner_session_account_labels(engine: Engine) -> None:
+    """Replace historical JWT ``sub:*`` display values with the session label.
+
+    Older scanner versions stored the JWT subject claim in ``username`` even
+    though it is commonly an opaque identifier.  The durable session label is
+    the only human-supplied name available for those existing rows.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                _text(
+                    "UPDATE scanner_session SET account_label=label, username=NULL "
+                    "WHERE account_label IS NULL AND username LIKE 'sub:%'"
+                )
+            )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort backfill
+
+
 def _reset_orphaned_validating_findings(engine: Engine) -> None:
     """Reset findings left stuck in ``validation_status='validating'``.
 
@@ -295,7 +317,9 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "scan_log", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "alice_chat_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
     _ensure_column(engine, "scanner_session", "run_kind", "TEXT NOT NULL DEFAULT 'web'")
+    _ensure_column(engine, "scanner_session", "account_label", "TEXT")
     _backfill_run_kind(engine)
+    _backfill_scanner_session_account_labels(engine)
     _reset_orphaned_validating_findings(engine)
     _normalize_threshold_skipped_findings(engine)
     with engine.connect() as conn:
@@ -618,6 +642,7 @@ def _migrate(engine: Engine) -> None:
                 run_kind TEXT NOT NULL DEFAULT 'web',
                 label TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'cookie',
+                account_label TEXT,
                 username TEXT,
                 credential_id INTEGER REFERENCES credential(id),
                 source TEXT NOT NULL DEFAULT 'scanner',
@@ -630,7 +655,7 @@ def _migrate(engine: Engine) -> None:
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """))
-        for column in ("test_run_id", "run_kind", "label", "kind", "username", "credential_id", "is_active"):
+        for column in ("test_run_id", "run_kind", "label", "kind", "account_label", "username", "credential_id", "is_active"):
             conn.execute(__import__("sqlalchemy").text(
                 f"CREATE INDEX IF NOT EXISTS ix_scanner_session_{column} "
                 f"ON scanner_session ({column})"

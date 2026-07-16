@@ -370,6 +370,7 @@ def test_get_scanner_sessions_redacts_auth_material():
                     test_run_id=run.id,
                     label="configured_primary",
                     kind="mixed",
+                    account_label="Primary administrator",
                     username="alice",
                     credential_id=3,
                     source="test",
@@ -386,6 +387,8 @@ def test_get_scanner_sessions_redacts_auth_material():
         assert summary.counts["total"] == 1
         item = summary.sessions[0]
         assert item.label == "configured_primary"
+        assert item.account_label == "Primary administrator"
+        assert item.username == "alice"
         assert item.cookie_names == ["sid"]
         assert item.header_names == ["Authorization"]
         assert item.session_metadata["login_url"] == "https://target.local/login"

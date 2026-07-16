@@ -527,6 +527,7 @@ def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
         test_run_id=record.test_run_id,
         label=record.label,
         kind=record.kind,
+        account_label=record.account_label,
         username=record.username,
         credential_id=record.credential_id,
         source=record.source,

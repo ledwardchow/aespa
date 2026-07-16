@@ -20,6 +20,7 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
             1,
             label="Configured Primary",
             kind="mixed",
+            account_label="Production admin",
             username="alice",
             credential_id=7,
             source="test",
@@ -44,6 +45,7 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
         assert list(vault) == ["configured_primary"]
         assert vault["configured_primary"]["kind"] == "bearer"
         assert vault["configured_primary"]["source"] == "updated"
+        assert vault["configured_primary"]["account_label"] == "Production admin"
         assert vault["configured_primary"]["username"] == "alice"
         assert vault["configured_primary"]["extra_headers"]["Authorization"] == "Bearer replacement-token-value"
 
@@ -71,6 +73,40 @@ def test_anonymous_session_is_first_class(monkeypatch):
         assert vault["anonymous"]["cookies"] == {}
         assert vault["anonymous"]["extra_headers"] == {}
         assert vault["anonymous"]["source"] == "dynamic_scan"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_upsert_without_identity_preserves_originating_account(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+
+        scanner_sessions.upsert_session(
+            1,
+            label="admin_session",
+            kind="cookie",
+            username="admin@example.test",
+            credential_id=9,
+            cookies={"sid": "first"},
+        )
+        refreshed = scanner_sessions.upsert_session(
+            1,
+            label="admin_session",
+            kind="cookie",
+            cookies={"sid": "refreshed"},
+        )
+
+        assert refreshed.username == "admin@example.test"
+        assert refreshed.credential_id == 9
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
