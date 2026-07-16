@@ -1073,6 +1073,7 @@ class ScannerSessionOut(BaseModel):
     test_run_id: int
     label: str
     kind: str
+    account_label: str | None
     username: str | None
     credential_id: int | None
     source: str

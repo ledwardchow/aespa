@@ -6,7 +6,7 @@ export function ScannerSessionsPanel({
   refresh,
   onUpdate
 }) {
-  const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 130, null, 180, 170, 150]);
+  const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 180, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
   const kinds = Object.entries(counts).filter(([kind]) => !["total", "active", "inactive"].includes(kind)).sort(([a], [b]) => a.localeCompare(b));
@@ -72,7 +72,7 @@ export function ScannerSessionsPanel({
             <tr>
               <th>Label <div className="col-rh" onMouseDown={e => startSessResize(0, e)} onClick={e => e.stopPropagation()} /></th>
               <th>Kind <div className="col-rh" onMouseDown={e => startSessResize(1, e)} onClick={e => e.stopPropagation()} /></th>
-              <th>User <div className="col-rh" onMouseDown={e => startSessResize(2, e)} onClick={e => e.stopPropagation()} /></th>
+              <th>Originating account <div className="col-rh" onMouseDown={e => startSessResize(2, e)} onClick={e => e.stopPropagation()} /></th>
               <th>Auth material <div className="col-rh" onMouseDown={e => startSessResize(3, e)} onClick={e => e.stopPropagation()} /></th>
               <th>Source <div className="col-rh" onMouseDown={e => startSessResize(4, e)} onClick={e => e.stopPropagation()} /></th>
               <th>Updated <div className="col-rh" onMouseDown={e => startSessResize(5, e)} onClick={e => e.stopPropagation()} /></th>
@@ -83,7 +83,7 @@ export function ScannerSessionsPanel({
             {sessions.map(s => <tr key={s.id}>
                 <td><div className="intel-primary mono">{s.label}</div>{!s.is_active && <span className="task-status status-skipped">inactive</span>}</td>
                 <td><span className={"task-status status-" + (s.kind === "anonymous" ? "skipped" : "confirmed")}>{s.kind}</span></td>
-                <td>{s.username || "—"}{s.credential_id ? <div className="intel-meta">credential #{s.credential_id}</div> : ""}</td>
+                <td>{s.account_label || s.username ? <div className="intel-primary">{s.account_label || s.username}</div> : <span className="subtle">Unknown account</span>}{s.credential_id ? <div className="intel-meta">credential #{s.credential_id}</div> : ""}</td>
                 <td>
                   <div className="session-material-row">
                     <span className="intel-kind">Cookies</span>

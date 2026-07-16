@@ -523,6 +523,7 @@ async def test_alice_browser_captures_session_into_vault(db_session, test_data):
                     {"op": "click", "selector": "button[type=submit]"},
                 ],
                 "capture_session": "modal_admin",
+                "capture_username": "admin",
             },
             step=1,
             session_vault=vault,
@@ -530,10 +531,12 @@ async def test_alice_browser_captures_session_into_vault(db_session, test_data):
 
     # Cookies injected into the in-memory vault for the rest of the turn.
     assert vault["modal_admin"]["cookies"] == {"sid": "abc123"}
+    assert vault["modal_admin"]["username"] == "admin"
     assert "[Session captured as 'modal_admin'" in result
     # And persisted to the DB so a fresh vault load sees it.
     reloaded = session_svc.load_session_vault(run.id)
     assert reloaded["modal_admin"]["cookies"] == {"sid": "abc123"}
+    assert reloaded["modal_admin"]["username"] == "admin"
 
 
 @pytest.mark.anyio

@@ -505,9 +505,10 @@ async def _execute_alice_tool(
                 session_data={
                     "label": label,
                     "kind": "bearer",
-                    "username": f"sub:{jwt_claims.get('sub')}"
-                    if jwt_claims.get("sub") is not None
-                    else None,
+                    "account_label": label,
+                    "username": jwt_claims.get("preferred_username")
+                    or jwt_claims.get("email")
+                    or jwt_claims.get("name"),
                     "source": "forge_jwt tool",
                     "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
                     "cookies": {},
@@ -758,6 +759,7 @@ async def _execute_alice_tool(
                 session_data: dict = {
                     "label": store_as,
                     "kind": _session_kind(response_cookies, extra_headers),
+                    "account_label": store_as,
                     "username": body.get(username_field) or body.get(email_field),
                     "source": "register_account tool",
                     "extra_headers": extra_headers,
@@ -775,6 +777,8 @@ async def _execute_alice_tool(
                     session_vault[store_as] = {
                         "label": store_as,
                         "kind": session_data["kind"],
+                        "account_label": session_data["account_label"],
+                        "username": session_data["username"],
                         "cookies": response_cookies,
                         "extra_headers": extra_headers,
                     }
@@ -890,19 +894,35 @@ async def _execute_alice_tool(
             try:
                 cookies = {c["name"]: c["value"] for c in await ctx.cookies()}
                 extra = (selected or {}).get("extra_headers") or {}
+                capture_username = tool_input.get("capture_username")
+                if not isinstance(capture_username, str) or not capture_username.strip():
+                    capture_username = (selected or {}).get("username")
+                if isinstance(capture_username, str):
+                    capture_username = capture_username.strip() or None
+                credential_id = (selected or {}).get("credential_id")
                 rec = session_svc.upsert_session(
                     run_id,
                     label=capture_label.strip(),
                     kind="browser_captured",
+                    account_label=(selected or {}).get("account_label")
+                    or capture_label.strip(),
+                    username=capture_username,
+                    credential_id=credential_id,
                     source="alice_browser",
                     cookies=cookies,
                     extra_headers=extra,
-                    metadata={"captured_from": result.get("url")},
+                    metadata={
+                        "captured_from": result.get("url"),
+                        "derived_from_session": (selected or {}).get("label"),
+                    },
                     run_kind="api" if api_run_id is not None else "web",
                 )
                 session_vault[rec.label] = {
                     "label": rec.label,
                     "kind": "browser_captured",
+                    "account_label": rec.account_label,
+                    "username": rec.username,
+                    "credential_id": rec.credential_id,
                     "cookies": cookies,
                     "extra_headers": extra,
                 }

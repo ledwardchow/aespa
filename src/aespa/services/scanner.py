@@ -1006,6 +1006,7 @@ def _record_session(
             session_data.get("cookies"),
             session_data.get("extra_headers"),
         ),
+        account_label=session_data.get("account_label"),
         username=session_data.get("username"),
         credential_id=credential_id or session_data.get("credential_id"),
         source=source,
@@ -5493,6 +5494,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             configured_primary = {
                 "label": "configured_primary",
                 "kind": _session_kind(cookie_jar, extra_headers),
+                "account_label": creds[0].label,
                 "username": creds[0].username,
                 "credential_id": creds[0].id,
                 "source": "configured credential auth bootstrap",
@@ -5990,9 +5992,10 @@ async def _do_thinking_scan(run_id: int) -> None:
                         session_vault[label] = {
                             "label": label,
                             "kind": "bearer",
-                            "username": f"sub:{claims.get('sub')}"
-                            if claims.get("sub") is not None
-                            else None,
+                            "account_label": label,
+                            "username": claims.get("preferred_username")
+                            or claims.get("email")
+                            or claims.get("name"),
                             "source": "jwt action",
                             "extra_headers": {"Authorization": f"Bearer {token}"},
                             "cookies": {},
@@ -6379,6 +6382,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             session_vault[created_label] = {
                                 "label": created_label,
                                 "kind": _session_kind(response_cookies, extra_headers),
+                                "account_label": store_as,
                                 "username": account["username"],
                                 "source": "register_account",
                                 "extra_headers": extra_headers,
@@ -7911,11 +7915,10 @@ async def _do_agentic_thinking_loop(
                 session_vault[jwt_label] = {
                     "label": jwt_label,
                     "kind": "bearer",
-                    "username": (
-                        f"sub:{jwt_claims.get('sub')}"
-                        if jwt_claims.get("sub") is not None
-                        else None
-                    ),
+                    "account_label": jwt_label,
+                    "username": jwt_claims.get("preferred_username")
+                    or jwt_claims.get("email")
+                    or jwt_claims.get("name"),
                     "source": "forge_jwt tool",
                     "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
                     "cookies": {},
@@ -8278,6 +8281,7 @@ async def _do_agentic_thinking_loop(
                     session_vault[ra_created_label] = {
                         "label": ra_created_label,
                         "kind": _session_kind(ra_resp_cookies, ra_extra_hdrs),
+                        "account_label": ra_store_as,
                         "username": ra_account["username"],
                         "source": "register_account",
                         "extra_headers": ra_extra_hdrs,
