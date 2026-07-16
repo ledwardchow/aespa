@@ -66,6 +66,7 @@ def upsert_session(
     *,
     label: str,
     kind: str,
+    account_label: str | None = None,
     username: str | None = None,
     credential_id: int | None = None,
     source: str = "scanner",
@@ -87,8 +88,15 @@ def upsert_session(
             test_run_id=run_id, run_kind=run_kind, label=normalized_label
         )
         record.kind = kind
-        record.username = username
-        record.credential_id = credential_id
+        # A later capture may refresh the auth material without knowing which
+        # account originally produced it.  Do not erase attribution that was
+        # already established for this durable label.
+        if account_label is not None or record.account_label is None:
+            record.account_label = account_label
+        if username is not None or record.username is None:
+            record.username = username
+        if credential_id is not None or record.credential_id is None:
+            record.credential_id = credential_id
         record.source = source
         record.cookies_json = _json_dump(cookies)
         record.extra_headers_json = _json_dump(extra_headers)
@@ -139,6 +147,7 @@ def load_session_vault(run_id: int, *, run_kind: str = "web") -> dict[str, dict[
         vault[record.label] = {
             "label": record.label,
             "kind": record.kind,
+            "account_label": record.account_label,
             "username": record.username,
             "credential_id": record.credential_id,
             "source": record.source,

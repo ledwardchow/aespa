@@ -837,6 +837,7 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
             api_run_id,
             label=label,
             kind=kind,
+            account_label=cred.label,
             username=cred.label or f"cred_{cred.id}",
             credential_id=cred.id,
             source="api_scanner",

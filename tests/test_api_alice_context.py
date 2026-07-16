@@ -490,10 +490,10 @@ def test_api_alice_forge_jwt_persists_api_session(db_session):
 
         assert "api_forged" in result
         assert "api_forged" in vault
-        assert [
-            session.label
-            for session in list_run_sessions(run.id, run_kind="api")
-        ] == ["api_forged"]
+        sessions = list_run_sessions(run.id, run_kind="api")
+        assert [session.label for session in sessions] == ["api_forged"]
+        assert sessions[0].account_label == "api_forged"
+        assert sessions[0].username is None
         assert list_run_sessions(run.id, run_kind="web") == []
     finally:
         db_mod._engine = orig

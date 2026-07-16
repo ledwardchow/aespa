@@ -26,6 +26,42 @@ def test_ensure_column_adds_missing_column():
         engine.dispose()
 
 
+def test_backfill_scanner_session_account_labels_replaces_opaque_subjects():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE scanner_session (
+                    id INTEGER PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    account_label TEXT,
+                    username TEXT
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO scanner_session (id, label, username)
+                VALUES (1, 'admin_token', 'sub:1'), (2, 'normal', 'alice')
+            """))
+            conn.commit()
+
+        db._backfill_scanner_session_account_labels(engine)
+        db._backfill_scanner_session_account_labels(engine)
+
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, account_label, username
+                FROM scanner_session ORDER BY id
+            """)).all()
+
+        assert rows == [(1, "admin_token", None), (2, None, "alice")]
+    finally:
+        engine.dispose()
+
+
 def test_normalize_threshold_skips_does_not_mark_them_unconfirmed():
     engine = create_engine(
         "sqlite:///:memory:",
