@@ -119,7 +119,7 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 
 ## Versioning
 
-With every conversation turn that makes non-trivial changes or fixes a bug, update the version number in `pyproject.toml`.
+With every conversation turn that makes non-trivial code changes or fixes a bug, update the version number in `pyproject.toml`. Do not update the version number for documentation-only changes or non-substantive edits where source code logic and dependencies were untouched.
 
 The version format is `MAJOR.MINOR.DATE.REVISION`, where `DATE` is `YYYYMMDD`.
 
