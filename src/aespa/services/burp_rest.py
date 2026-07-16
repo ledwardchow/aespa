@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from aespa.schemas import BurpRestApiConfigOut
+from aespa.models import BurpRestApiConfig
 
 log = logging.getLogger("aespa.burp_rest")
 
@@ -44,7 +44,7 @@ class BurpRestApiError(RuntimeError):
     pass
 
 
-def _headers(config: BurpRestApiConfigOut) -> dict[str, str]:
+def _headers(config: BurpRestApiConfig) -> dict[str, str]:
     h: dict[str, str] = {"Content-Type": "application/json"}
     if config.api_key:
         h["Authorization"] = f"Bearer {config.api_key}"
@@ -164,7 +164,7 @@ def _normalise_issue(event: dict) -> dict | None:
 
 
 async def launch_active_scan(
-    config: BurpRestApiConfigOut,
+    config: BurpRestApiConfig,
     url: str,
     *,
     cookies: dict[str, str] | None = None,
@@ -221,7 +221,7 @@ async def launch_active_scan(
     return task_id
 
 
-async def get_scan_status(config: BurpRestApiConfigOut, task_id: int) -> dict:
+async def get_scan_status(config: BurpRestApiConfig, task_id: int) -> dict:
     """Fetch the current scan state from Burp Suite.
 
     Returns the full response dict which includes ``status`` and
@@ -237,7 +237,7 @@ async def get_scan_status(config: BurpRestApiConfigOut, task_id: int) -> dict:
 
 
 async def wait_for_scan(
-    config: BurpRestApiConfigOut,
+    config: BurpRestApiConfig,
     task_id: int,
     *,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
@@ -279,7 +279,7 @@ async def wait_for_scan(
         await asyncio.sleep(interval)
 
 
-async def test_connection(config: BurpRestApiConfigOut) -> tuple[bool, str]:
+async def test_connection(config: BurpRestApiConfig) -> tuple[bool, str]:
     """Probe the Burp REST API with a GET /v0.1/scan/0 and return (ok, message).
 
     Uses the same client settings as the live scan path so the result is

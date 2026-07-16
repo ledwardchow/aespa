@@ -82,10 +82,41 @@ export function LLMProviderForm({
         })}></textarea>
         <div className="field-hint">Enter one model per line, or separate models with commas.</div>
       </div>
-      <div className="field"><label>API Key <span className="field-optional">(optional)</span></label>
-        <input type="password" value={form.api_key} placeholder={form.api_format === "bedrock" ? "Leave blank to use boto3 / AWS_PROFILE / IAM role" : form.api_format === "bedrock_mantle" ? "Bedrock API key, or leave blank for AWS credentials" : "Leave blank if not required"} onChange={e => upd({
-          api_key: e.target.value
-        })} />
+      <div className="field">
+        <label>API Key <span className="field-optional">(optional)</span></label>
+        <div className="row" style={{ gap: "8px" }}>
+          <input
+            type="password"
+            value={form.api_key}
+            placeholder={
+              form.clear_api_key
+                ? "Key will be removed on save"
+                : form.has_api_key && !form.api_key
+                ? "•••••••• (leave blank to keep current key)"
+                : form.api_format === "bedrock"
+                ? "Leave blank to use boto3 / AWS_PROFILE / IAM role"
+                : form.api_format === "bedrock_mantle"
+                ? "Bedrock API key, or leave blank for AWS credentials"
+                : "Leave blank if not required"
+            }
+            onChange={e => upd({
+              api_key: e.target.value,
+              clear_api_key: false
+            })}
+            style={{ flex: 1 }}
+          />
+          {form.has_api_key && (
+            form.clear_api_key ? (
+              <button type="button" className="btn ghost" onClick={() => upd({ clear_api_key: false })}>
+                Undo clear
+              </button>
+            ) : (
+              <button type="button" className="btn ghost" onClick={() => upd({ clear_api_key: true, api_key: "" })}>
+                Clear key
+              </button>
+            )
+          )}
+        </div>
         {form.api_format === "bedrock" && <div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>}
         {form.api_format === "bedrock_mantle" && <div className="field-hint">With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role — the same fallback as the Bedrock Runtime provider.</div>}
       </div>
