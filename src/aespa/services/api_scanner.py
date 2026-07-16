@@ -471,7 +471,7 @@ async def _enforce_coverage_loop(
             "phase": "start",
             "remaining": total,
             "total": total,
-            "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+            "message": f"Full mode: {total} coverage cell(s) to resolve.",
         },
     )
 
@@ -530,7 +530,7 @@ async def _enforce_coverage_loop(
             "skipped": stats["skipped"],
             "budget_exhausted": stats["budget_exhausted"],
             "message": (
-                f"Enforce complete: {stats['covered']} covered, "
+                f"Full coverage complete: {stats['covered']} covered, "
                 f"{stats['finding']} finding, {stats['skipped']} skipped."
             ),
         },
@@ -1197,7 +1197,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
-    llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
+    llm_svc.set_run_context(
+        api_run_id, lambda evt: events_svc.emit(api_run_id, evt), run_kind="api"
+    )
 
     log.info(
         "=== API thinking scan start: api_run_id=%s base_url=%s ===",
@@ -1362,7 +1364,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                 "agent_id": "scanner",
                 "role": "Test Lead",
                 "status": "active",
-                "current_task": "Enforcing coverage — resolving remaining cells…",
+                "current_task": "Completing full coverage — resolving remaining cells…",
                 "outcome": None,
                 "_persist": True,
             },

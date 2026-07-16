@@ -601,4 +601,15 @@ def update_api_scanner_session(
     session.add(record)
     session.commit()
     session.refresh(record)
-    return _scanner_session_out(record)
+    return ScannerSessionOut.model_validate(record)
+
+
+@router.get("/{run_id}/token-usage")
+def get_api_token_usage(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return accumulated LLM token usage for this API test run."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import llm as llm_svc
+    return llm_svc.get_run_token_usage(run_id, run_kind="api")

@@ -2825,3 +2825,44 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
         "type": "bedrock_reasoning",
         "reasoning_content": reasoning,
     }
+
+
+def test_token_usage_tracking_for_sast_and_api():
+    # Verify set_run_context and get_run_token_usage isolate by run_kind
+    run_id = 888888
+    llm.set_run_context(run_id, emit_fn=None, run_kind="sast")
+    llm._record_usage("gpt-4", input_tokens=100, output_tokens=50)
+    llm.clear_run_context()
+
+    llm.set_run_context(run_id, emit_fn=None, run_kind="web")
+    llm._record_usage("gpt-4", input_tokens=200, output_tokens=80)
+    llm.clear_run_context()
+
+    sast_usage = llm.get_run_token_usage(run_id, run_kind="sast")
+    web_usage = llm.get_run_token_usage(run_id, run_kind="web")
+
+    assert sast_usage["total_input"] == 100
+    assert sast_usage["total_output"] == 50
+
+    assert web_usage["total_input"] == 200
+    assert web_usage["total_output"] == 80
+
+
+def test_google_usage_treats_none_counters_as_zero(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(llm, "_record_usage", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    llm._record_google_usage(
+        "gemini-test",
+        SimpleNamespace(
+            prompt_token_count=120,
+            candidates_token_count=None,
+            cached_content_token_count=None,
+        ),
+    )
+    llm._record_google_usage("gemini-test", None)
+
+    assert recorded == [
+        (("gemini-test", 120, 0), {"cache_read_tokens": 0}),
+        (("gemini-test", 0, 0), {"cache_read_tokens": 0}),
+    ]

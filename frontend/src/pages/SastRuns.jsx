@@ -6,6 +6,8 @@ import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader, Crumb, Sep } from "../components/PageHeader";
 import { usePolling } from "../hooks/usePolling";
+import { TokenUsageBar } from "../components/TokenUsageBar";
+
 
 // ── SastRunDetail ─────────────────────────────────────────────────────────────
 
@@ -17,12 +19,104 @@ const SAST_TABS = [{
   label: "Leads"
 }];
 
+// ── SastRunForm ────────────────────────────────────────────────────────────
+export function SastRunForm() {
+  const [file, setFile] = useState(null);
+  const [name, setName] = useState("");
+  const [llmProfileId, setLlmProfileId] = useState("");
+  const [profiles, setProfiles] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    api.listLLMProfiles().then(p => setProfiles(p || [])).catch(e => setError(e.message));
+  }, []);
+
+  const onSubmit = async e => {
+    e.preventDefault();
+    if (!file) {
+      setError("Please select a source ZIP file.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const run = await api.createStandaloneSastRun(file, name.trim() || null, llmProfileId ? +llmProfileId : null);
+      await api.startSastScan(run.id);
+      nav(`#/sast-runs/${run.id}/progress`);
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  };
+
+  return <>
+    <PageHeader title={<><Crumb href="#/sast-runs">SAST</Crumb><Sep />New SAST scan</>} />
+    <div className="content scroll-content">
+      <form className="card" style={{ maxWidth: 560 }} onSubmit={onSubmit}>
+        <div className="form-section-title">New SAST Scan</div>
+        {error && <div className="alert error">{error}</div>}
+
+        <div className="field">
+          <label>Source Archive <span className="field-required">*</span></label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".zip"
+            style={{ display: "none" }}
+            onChange={e => setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+          />
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            >
+              {file ? "Change ZIP file" : "Choose ZIP file"}
+            </button>
+            <span className="subtle" style={{ fontSize: 13 }}>
+              {file ? file.name : "No file selected"}
+            </span>
+          </div>
+        </div>
+
+        <div className="field">
+          <label>Name <span className="subtle">(optional — auto-generated if blank)</span></label>
+          <input
+            type="text"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder={file ? `e.g. SAST – ${file.name}` : "e.g. SAST – source.zip"}
+          />
+        </div>
+
+        <div className="field">
+          <label>LLM profile <span className="subtle">(optional — uses the globally active profile if not set)</span></label>
+          <select
+            value={llmProfileId}
+            onChange={e => setLlmProfileId(e.target.value)}
+          >
+            <option value="">— Use global active profile —</option>
+            {profiles.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="row spread" style={{ marginTop: 16 }}>
+          <button type="button" className="btn ghost" onClick={() => nav("#/sast-runs")}>Cancel</button>
+          <button type="submit" className="btn" disabled={saving || !file}>{saving ? "Creating…" : "Create & Start Scan"}</button>
+        </div>
+      </form>
+    </div>
+  </>;
+}
+
 // ── SastRunsListPage ──────────────────────────────────────────────────────────
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
   const [error, setError] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef(null);
   const load = useCallback(async () => {
     try {
       setRuns(await api.listAllSastRuns());
@@ -33,29 +127,11 @@ export function SastRunsListPage() {
   useEffect(() => {
     load();
   }, [load]);
-  const onUpload = async e => {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = ""; // allow re-selecting the same file
-    if (!file) return;
-    setUploading(true);
-    setError(null);
-    try {
-      const run = await api.createStandaloneSastRun(file);
-      await api.startSastScan(run.id);
-      nav(`#/sast-runs/${run.id}/progress`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setUploading(false);
-    }
-  };
+
   return <>
     <PageHeader title="SAST Scans" actions={<>
-        <input ref={fileInputRef} type="file" accept=".zip" style={{
-          display: "none"
-        }} onChange={onUpload} />
-        <button className="btn primary sm" disabled={uploading} onClick={() => fileInputRef.current && fileInputRef.current.click()}>
-          {uploading ? "Uploading…" : "New SAST Scan"}
+        <button className="btn primary sm" onClick={() => nav("#/sast-runs/new")}>
+          New SAST Scan
         </button>
       </>} />
     <div className="content scroll-content">
@@ -161,6 +237,9 @@ export function SastRunDetail({
   };
   
   const canStart = run && !scanRunning && ["pending", "completed", "failed", "cancelled"].includes(run.status);
+  if (!run) {
+    return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
+  }
   return <>
     <PageHeader
       title={<>
@@ -200,13 +279,31 @@ export function SastProgressTab({
 }) {
   const [log, setLog] = useState([]);
   const [subTab, setSubTab] = useState("activity");
+  const [tokenUsage, setTokenUsage] = useState(null);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const bottomRef = useRef(null);
+
   const load = useCallback(() => {
     const request = subTab === "activity" ? api.getSastScanLog(runId) : api.getSastAgentLog(runId);
     return request.then(setLog).catch(() => {});
   }, [runId, subTab]);
 
   usePolling(load, { enabled: scanRunning, intervalMs: 3000 });
+
+  useEffect(() => {
+    if (!runId) return;
+    api.getSastTokenUsage(runId).then(setTokenUsage).catch(() => {});
+    const es = new EventSource(`/api/sast-runs/${runId}/events`);
+    es.onmessage = e => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === "token_usage_update") {
+          setTokenUsage(evt.totals);
+        }
+      } catch (err) {}
+    };
+    return () => es.close();
+  }, [runId]);
 
   // Auto-scroll to bottom while running
   useEffect(() => {
@@ -243,6 +340,7 @@ export function SastProgressTab({
     flexDirection: "column",
     height: "100%"
   }}>
+    <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
     <div className="activity-log-toolbar" style={{
       flexShrink: 0
     }}>
