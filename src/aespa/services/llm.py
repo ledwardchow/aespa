@@ -94,16 +94,17 @@ def _is_llm_refusal(exc: BaseException) -> bool:
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
+_run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
 
-# Per-run token usage accumulator: {run_id: {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
-_run_token_usage: dict[int, dict[str, dict[str, int]]] = {}
+# Per-run token usage accumulator: {(run_kind, run_id): {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
+_run_token_usage: dict[tuple[str, int], dict[str, dict[str, int]]] = {}
 
-# Tracks which run_ids have already been seeded from DB this process lifetime.
-_run_token_seeded: set[int] = set()
+# Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
+_run_token_seeded: set[tuple[str, int]] = set()
 
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
@@ -128,66 +129,55 @@ class AsyncTokenBucketLimiter:
 
     async def acquire(self, estimated_tokens: int, on_wait=None) -> bool:
         # A single request can never need more than the entire per-minute budget;
-        # without this clamp an estimate larger than ``max_tokens`` could never be
-        # satisfied (refill caps at ``max_tokens``) and ``acquire`` would loop and
-        # sleep forever. Clamp so an over-budget call paces once, then proceeds.
-        estimated_tokens = min(float(estimated_tokens), self.max_tokens)
+        # cap the estimate so we wait at most 60s instead of rejecting.
+        est = min(float(estimated_tokens), self.max_tokens)
         slept = False
         notified = False
         while True:
             async with self._lock:
                 now = time.monotonic()
-
-                # Refill tokens
-                elapsed_tokens = now - self.last_token_update
+                elapsed = now - self.last_token_update
                 self.available_tokens = min(
-                    self.max_tokens,
-                    self.available_tokens + (elapsed_tokens * self.tokens_per_second),
+                    self.max_tokens, self.available_tokens + elapsed * self.tokens_per_second
                 )
                 self.last_token_update = now
 
-                # Refill request slots
-                if self.rpm:
-                    elapsed_requests = now - self.last_request_update
+                if self.max_requests > 0:
+                    req_elapsed = now - self.last_request_update
                     self.available_requests = min(
                         self.max_requests,
-                        self.available_requests
-                        + (elapsed_requests * self.requests_per_second),
+                        self.available_requests + req_elapsed * self.requests_per_second,
                     )
                     self.last_request_update = now
 
-                # Check availability
-                tokens_ready = self.available_tokens >= estimated_tokens
-                requests_ready = not self.rpm or self.available_requests >= 1.0
+                has_tokens = self.available_tokens >= est
+                has_reqs = self.max_requests == 0 or self.available_requests >= 1.0
 
-                if tokens_ready and requests_ready:
-                    self.available_tokens -= estimated_tokens
-                    if self.rpm:
+                if has_tokens and has_reqs:
+                    self.available_tokens -= est
+                    if self.max_requests > 0:
                         self.available_requests -= 1.0
                     return slept
 
-                wait_time_tokens = 0.0
-                if not tokens_ready:
-                    needed_tokens = estimated_tokens - self.available_tokens
-                    wait_time_tokens = needed_tokens / self.tokens_per_second
-
-                wait_time_requests = 0.0
-                if self.rpm and not requests_ready:
-                    needed_requests = 1.0 - self.available_requests
-                    wait_time_requests = needed_requests / self.requests_per_second
-
-                wait_time = max(wait_time_tokens, wait_time_requests)
+                wait_tokens = (
+                    (est - self.available_tokens) / self.tokens_per_second
+                    if not has_tokens
+                    else 0.0
+                )
+                wait_reqs = (
+                    (1.0 - self.available_requests) / self.requests_per_second
+                    if not has_reqs and self.requests_per_second > 0
+                    else 0.0
+                )
+                wait_time = max(wait_tokens, wait_reqs)
                 slept = True
 
-            # Fire the wait notice once, before the first sleep, so the caller can
-            # tell the user it is pacing (not stuck) the moment it starts waiting.
-            if on_wait is not None and not notified:
+            if on_wait and not notified:
                 notified = True
                 try:
                     on_wait(wait_time)
                 except Exception:
                     pass
-
             await asyncio.sleep(wait_time)
 
     async def reconcile(self, estimated_tokens: int, actual_tokens: int) -> None:
@@ -217,6 +207,7 @@ def estimate_tokens(
 
 
 _limiters: dict[str, AsyncTokenBucketLimiter] = {}
+_limiters_lock = asyncio.Lock()
 
 
 def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimiter]:
@@ -248,16 +239,18 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     return _limiters.get(key)
 
 
-def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
+
+def _load_bucket_from_db(run_id: int, run_kind: str = "web") -> dict[str, dict[str, int]]:
     """Load persisted token usage for a run from the DB (best-effort)."""
     try:
         from sqlmodel import Session as _Session
 
         from aespa.db import get_engine
-        from aespa.models import TestRun
+        from aespa.models import ApiTestRun, SastRun, TestRun
 
         with _Session(get_engine()) as s:
-            run = s.get(TestRun, run_id)
+            model_cls = SastRun if run_kind == "sast" else ApiTestRun if run_kind == "api" else TestRun
+            run = s.get(model_cls, run_id)
             if run and run.token_usage_json:
                 return json.loads(run.token_usage_json)
     except Exception:
@@ -265,16 +258,17 @@ def _load_bucket_from_db(run_id: int) -> dict[str, dict[str, int]]:
     return {}
 
 
-def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
+def _persist_bucket_to_db(run_id: int, bucket: dict, run_kind: str = "web") -> None:
     """Write the current in-memory bucket for a run back to the DB (best-effort)."""
     try:
         from sqlmodel import Session as _Session
 
         from aespa.db import get_engine
-        from aespa.models import TestRun
+        from aespa.models import ApiTestRun, SastRun, TestRun
 
         with _Session(get_engine()) as s:
-            run = s.get(TestRun, run_id)
+            model_cls = SastRun if run_kind == "sast" else ApiTestRun if run_kind == "api" else TestRun
+            run = s.get(model_cls, run_id)
             if run:
                 run.token_usage_json = json.dumps(bucket)
                 s.add(run)
@@ -283,19 +277,21 @@ def _persist_bucket_to_db(run_id: int, bucket: dict) -> None:
         pass
 
 
-def set_run_context(run_id: int, emit_fn: Any) -> None:
+def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
     """Set the current run context so LLM calls track token usage automatically.
 
-    Seeds the in-memory bucket from DB on first call for this run_id so that
+    Seeds the in-memory bucket from DB on first call for this (run_kind, run_id) so that
     token counts accumulate correctly across server restarts.
     """
     _run_id_var.set(run_id)
+    _run_kind_var.set(run_kind)
     _emit_fn_var.set(emit_fn)
-    if run_id not in _run_token_seeded:
-        existing = _load_bucket_from_db(run_id)
+    key = (run_kind, run_id)
+    if key not in _run_token_seeded:
+        existing = _load_bucket_from_db(run_id, run_kind)
         if existing:
             # Merge DB data into the (possibly already-populated) in-memory bucket.
-            bucket = _run_token_usage.setdefault(run_id, {})
+            bucket = _run_token_usage.setdefault(key, {})
             for model, counts in existing.items():
                 if model not in bucket:
                     bucket[model] = {
@@ -306,11 +302,12 @@ def set_run_context(run_id: int, emit_fn: Any) -> None:
                     }
                 for k in ("input", "output", "cache_read", "cache_write"):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
-        _run_token_seeded.add(run_id)
+        _run_token_seeded.add(key)
 
 
 def clear_run_context() -> None:
     _run_id_var.set(None)
+    _run_kind_var.set("web")
     _emit_fn_var.set(None)
 
 
@@ -328,7 +325,9 @@ def _record_usage(
     run_id = _run_id_var.get()
     if run_id is None:
         return
-    bucket = _run_token_usage.setdefault(run_id, {})
+    run_kind = _run_kind_var.get()
+    key = (run_kind, run_id)
+    bucket = _run_token_usage.setdefault(key, {})
     entry = bucket.setdefault(
         model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     )
@@ -336,7 +335,7 @@ def _record_usage(
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
-    _persist_bucket_to_db(run_id, bucket)
+    _persist_bucket_to_db(run_id, bucket, run_kind)
     emit_fn = _emit_fn_var.get()
     if emit_fn:
         try:
@@ -365,15 +364,33 @@ def _record_usage(
             pass
 
 
-def get_run_token_usage(run_id: int) -> dict:
+def _record_google_usage(model: str, usage_metadata: Any | None) -> None:
+    """Record Gemini usage, whose optional counters may be explicitly ``None``."""
+
+    def _token_count(name: str) -> int:
+        value = getattr(usage_metadata, name, 0) if usage_metadata else 0
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    cached_tokens = _token_count("cached_content_token_count")
+    prompt_tokens = _token_count("prompt_token_count")
+    _record_usage(
+        model,
+        max(0, prompt_tokens - cached_tokens),
+        _token_count("candidates_token_count"),
+        cache_read_tokens=cached_tokens,
+    )
+
+
+def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
     """Return accumulated token usage for a run.
 
     If the run isn't in the in-memory dict (e.g. after a server restart), falls
     back to the persisted DB value so the REST endpoint always returns data.
     """
-    bucket = _run_token_usage.get(run_id)
+    key = (run_kind, run_id)
+    bucket = _run_token_usage.get(key)
     if bucket is None:
-        bucket = _load_bucket_from_db(run_id)
+        bucket = _load_bucket_from_db(run_id, run_kind)
     return {
         "total_input": sum(v["input"] for v in bucket.values()),
         "total_output": sum(v["output"] for v in bucket.values()),
@@ -1318,12 +1335,7 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
             ),
         ),
     )
-    _um = getattr(resp, "usage_metadata", None)
-    _record_usage(
-        config.model,
-        getattr(_um, "prompt_token_count", 0) if _um else 0,
-        getattr(_um, "candidates_token_count", 0) if _um else 0,
-    )
+    _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
 
 
@@ -3752,11 +3764,8 @@ async def _call_with_tools_impl(
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-        _g_um = getattr(g_resp, "usage_metadata", None)
-        _record_usage(
-            config.model,
-            getattr(_g_um, "prompt_token_count", 0) if _g_um else 0,
-            getattr(_g_um, "candidates_token_count", 0) if _g_um else 0,
+        _record_google_usage(
+            config.model, getattr(g_resp, "usage_metadata", None)
         )
         return blocks, stop_reason, blocks
 

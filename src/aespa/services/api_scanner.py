@@ -1197,7 +1197,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
-    llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
+    llm_svc.set_run_context(
+        api_run_id, lambda evt: events_svc.emit(api_run_id, evt), run_kind="api"
+    )
 
     log.info(
         "=== API thinking scan start: api_run_id=%s base_url=%s ===",

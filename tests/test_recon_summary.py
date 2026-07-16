@@ -294,13 +294,14 @@ def test_build_recon_summary_coverage_is_live_workprogram_projection(monkeypatch
 
     summary = recon_summary_svc.build_recon_summary(run_id)
     assert summary["coverage"]["statuses"]["finding"] == 1
-    assert summary["coverage"]["statuses"]["not_started"] == 1
-    assert summary["coverage"]["completion_percent"] == 50
-    assert summary["coverage"]["by_category"][0]["category"] == "A03"
+    assert summary["coverage"]["statuses"]["not_started"] == 0
+    assert summary["coverage"]["total"] == 1
+    assert summary["coverage"]["completion_percent"] == 100
+    assert [item["category"] for item in summary["coverage"]["by_category"]] == ["A01"]
     route = summary["routes"][0]
     assert route["canonical_url"] == "https://target.local/users/{id}"
-    assert route["coverage"]["statuses"] == {"finding": 1, "not_started": 1}
-    assert route["coverage"]["remaining_categories"] == ["A03"]
+    assert route["coverage"]["statuses"] == {"finding": 1}
+    assert route["coverage"]["remaining_categories"] == []
 
 
 # ── _build_thinking_context_from_recon_summary ─────────────────────────────────

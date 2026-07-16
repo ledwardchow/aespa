@@ -63,6 +63,20 @@ export function WebRunWorkProgramTab({
                     }
                   } : existing.test_classes
                 };
+                if (d.owasp_category === "A03" && d.test_class) {
+                  const classKey = `A03:${d.test_class}`;
+                  const classCell = cells[classKey] || {
+                    status: "not_started",
+                    finding_ids: []
+                  };
+                  const classFids = [...(classCell.finding_ids || [])];
+                  if (d.finding_id && !classFids.includes(d.finding_id)) classFids.push(d.finding_id);
+                  cells[classKey] = {
+                    ...classCell,
+                    status: d.status,
+                    finding_ids: classFids
+                  };
+                }
                 return {
                   ...pg,
                   cells
@@ -91,9 +105,13 @@ export function WebRunWorkProgramTab({
     }
   };
   const onExportMarkdown = () => {
-    const md = workProgramToMarkdown(matrix, {
-      cats: OWASP_WEB_CATEGORIES,
-      labels: OWASP_WEB_LABELS,
+    const exportColumns = matrix?.columns || OWASP_WEB_CATEGORIES.map(key => ({ key, label: OWASP_WEB_LABELS[key] }));
+    const md = workProgramToMarkdown({
+      ...matrix,
+      totals: matrix?.column_totals || matrix?.totals
+    }, {
+      cats: exportColumns.map(column => column.key),
+      labels: Object.fromEntries(exportColumns.map(column => [column.key, column.label])),
       kind: "web",
       runName: run?.name,
       generatedAt: new Date()
@@ -101,8 +119,13 @@ export function WebRunWorkProgramTab({
     downloadTextFile(`${slugForFilename(run?.name || `web-run-${runId}`)}-owasp-coverage-${new Date().toISOString().slice(0, 10)}.md`, md, "text/markdown;charset=utf-8");
   };
   if (loading) return <LoadingState label="Loading OWASP Coverage…" />;
-  const cats = OWASP_WEB_CATEGORIES;
-  const totals = matrix?.totals || {};
+  const columns = matrix?.columns || OWASP_WEB_CATEGORIES.map(key => ({
+    key,
+    category: key,
+    test_class: null,
+    label: OWASP_WEB_LABELS[key]
+  }));
+  const totals = matrix?.column_totals || matrix?.totals || {};
   const totalCells = Object.values(totals).reduce((a, b) => a + b, 0);
   const coveredCount = (totals.covered || 0) + (totals.finding || 0) + (totals.skipped || 0);
   const pct = totalCells > 0 ? Math.round(coveredCount / totalCells * 100) : 0;
@@ -187,21 +210,21 @@ export function WebRunWorkProgramTab({
                 minWidth: 300,
                 width: "35%"
               }}>Page</th>
-                {cats.map(cat => <th key={cat} style={{
+                {columns.map(column => <th key={column.key} style={{
                 padding: "4px 4px",
                 textAlign: "center",
                 minWidth: 70
-              }} title={cat + ": " + (OWASP_WEB_LABELS[cat] || cat)}>
+              }} title={column.category + ": " + column.label}>
                     <div style={{
                   fontWeight: 600
-                }}>{cat}</div>
+                }}>{column.category}</div>
                     <div style={{
                   color: "var(--muted)",
                   fontWeight: 400,
                   fontSize: 10,
                   lineHeight: 1.2,
                   whiteSpace: "pre-line"
-                }}>{(OWASP_WEB_SHORT[cat] || OWASP_WEB_LABELS[cat] || "").replace(/ /g, "\n")}</div>
+                }}>{(column.test_class ? column.label : OWASP_WEB_SHORT[column.key] || column.label || "").replace(/ /g, "\n")}</div>
                   </th>)}
               </tr>
             </thead>
@@ -221,7 +244,8 @@ export function WebRunWorkProgramTab({
                   color: "var(--muted)"
                 }}>{pg.title}</div>}
                   </td>
-                  {cats.map(cat => {
+                  {columns.map(column => {
+                const cat = column.key;
                 const cell = pg.cells?.[cat];
                 if (!cell) return <td key={cat} style={{
                   textAlign: "center",
@@ -240,6 +264,7 @@ export function WebRunWorkProgramTab({
                   }} onClick={() => (fids.length || classEntries.length) && setSelectedCell(isSelected ? null : {
                     page_id: pg.page_id,
                     cat,
+                    label: column.label,
                     url: pg.url,
                     fids,
                     findings: cell.findings,
@@ -266,7 +291,7 @@ export function WebRunWorkProgramTab({
         }}>
               <b style={{
             fontSize: 13
-          }}>{selectedCell.cat} {OWASP_WEB_LABELS[selectedCell.cat] || ""} — {selectedCell.url}</b>
+          }}>{selectedCell.cat} {selectedCell.label || OWASP_WEB_LABELS[selectedCell.cat] || ""} — {selectedCell.url}</b>
               <button className="btn ghost sm" onClick={() => setSelectedCell(null)}>✕</button>
             </div>
             {Object.keys(selectedCell.testClasses || {}).length > 0 && <div className="surface-chip-list" style={{ marginBottom: 8 }}>
