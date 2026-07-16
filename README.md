@@ -173,9 +173,6 @@ Site setup:
 Site Map:  
 ![Screenshot](docs/images/sitemap.png)
 
-Intelligence Log (populated by crawler and scanners):  
-![Screenshot](docs/images/intelligence.png)
-
 A.L.I.C.E chat:  
 ![Screenshot](docs/images/alice.png)
 
@@ -209,6 +206,9 @@ API Scan Findings
 ## Recommended models
 
 - Claude Sonnet 4.6 - Output token cap 70000. Doesn't seem to trigger refusals even without CVP.
-- Minimax M3 - Output token cap 70000, turn off force tool call
-- GLM 5.2 - Output token cap 70000, turn off force tool call
-- GPT 5.4/5.5 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
+- Sonnet 5 works about as well as 4.6 and doesn't trigger refusals.
+- GPT 5.4/5.5/5.6 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
+- Opus 4.8 also triggers refusals if not on CVP, but usually not immediately (it'll complete a "quick" mode scan most of the time)
+- Minimax M3
+- GLM 5.2 
+
