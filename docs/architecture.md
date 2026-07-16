@@ -15,11 +15,14 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 3. [System Overview](#3-system-overview)
 4. [Configuration](#4-configuration)
    - [LLM Configuration (`LLMProviderConfig` & `LLMConfig`)](#llm-configuration-llmproviderconfig--llmconfig-models)
+   - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
    - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
    - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
    - [Adversarial Validator Config](#adversarial-validator-config-adversarialvalidatorconfig-model)
+   - [Global Extra HTTP Header Config](#global-extra-http-header-config-globalhttpheaderconfig-model)
+   - [Reporting Debug Config](#reporting-debug-config-reportingdebugconfig-model)
 5. [Data Models](#5-data-models)
    - [Core entities](#core-entities)
    - [`CrawledPage` flags](#crawledpage-flags-set-by-llm-during-crawl)
@@ -36,7 +39,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [Recon summary](#recon-summary)
 9. [LLM Integration](#9-llm-integration)
    - [Agent tool sets](#agent-tool-sets) · [WSTG skills](#wstg-skills) · [Prompt caching](#prompt-caching)
-   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing)
+   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Token Usage Telemetry](#token-usage-telemetry--telemetry-persistence)
 10. [Burp Suite Integration](#10-burp-suite-integration)
     - [Workflow](#workflow) · [Scope pinning](#scope-pinning) · [Per-class routing](#per-class-routing) · [Connection test](#connection-test)
 11. [Findings & Validation](#11-findings--validation)
@@ -74,7 +77,7 @@ src/aespa/
 │   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists
+│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists, headers
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
 │   ├── events.py          # WebSocket event stream
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
@@ -85,8 +88,8 @@ src/aespa/
 └── services/
     ├── sites.py           # CRUD service layer for Site and Credential
     ├── crawler.py         # LLM-guided parallel web crawl
-    ├── scanner.py         # Dynamic (agentic) scan, specialist dispatch, finding dedup & post-scan review
-    ├── llm.py             # Multi-provider LLM client, agent tools, WSTG skills, rate limiting
+    ├── scanner.py         # Dynamic agentic scan engine, specialist dispatch, finding dedup
+    ├── llm.py             # Multi-provider LLM client, agent tools, rate limiting, token telemetry
     ├── prompts/           # Extracted modular prompt templates
     │   ├── reporting.py   # Reporting / post-scan review prompts
     │   ├── specialist.py  # Specialist agent prompts
@@ -103,16 +106,22 @@ src/aespa/
     ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
     ├── burp_rest.py       # Burp Suite Professional REST API client
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
+    ├── findings.py        # Finding CRUD operations & validation status management
+    ├── recon_summary.py   # Structured attack-surface summary from crawl data
     ├── reporting_debug.py # Reporting-prompt version store & write-up replay harness
+    ├── run_cleanup.py     # Scoped database row deletion per run kind
     ├── sast_scanner.py    # SAST agentic loop over uploaded source archives
+    ├── scan_completion.py # Completion state policy & bounded stopping logic
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
-    ├── recon_summary.py   # Structured attack-surface summary from crawl data
-    ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
+    ├── settings.py        # LLM config / profiles / policy / Burp / proxy / specialist config
+    ├── tls_scan.py        # Pure stdlib + cryptography TLS/SSL security posture probe
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
-    ├── events.py          # WebSocket event emission
-    └── settings.py        # LLM config / scanner policy / Burp / proxy / specialist config
+    ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
+    ├── web_route_inventory.py # Web route inventory classification & dynamic enrichment
+    ├── web_workprogram.py # Web OWASP Top-10 matrix & per-class obligation tracking
+    └── events.py          # WebSocket event emission
 ```
 
 ---
@@ -182,23 +191,24 @@ A **test run** is the central unit of work. It ties together a target site, its 
 
 ## 4. Configuration
 
-### LLM Configuration (`LLMProviderConfig` & `LLMConfig` models)
+### LLM Configuration (`LLMProviderConfig`, `LLMConfig`, & `LLMProfile` models)
 
-LLM settings are split into two entities to separate reusable provider connections/credentials from configuration/execution profiles:
+LLM settings are structured into three entities to separate reusable provider connections, execution profiles, and role-based model routing:
 
 #### 1. Reusable Provider Config (`LLMProviderConfig` model)
 
-Defines API connections and rate limits for different LLM backends:
+Defines API connections, optional project identifiers, and rate limits for LLM backends:
 
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
-| `api_key` | — | Provider API key (stored securely in DB, never exposed in API) |
-| `base_url` | — | Override endpoint URL (e.g., custom OpenAI compatible base URLs or Azure Foundry endpoints) |
+| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
+| `base_url` | — | Override endpoint URL |
+| `project_id` | — | Bedrock Mantle project ID (sent as `OpenAI-Project` header for cost/usage attribution) |
 | `models_json` | `[]` | JSON list of available model names for this provider |
-| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider (activates pacing) |
-| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider (activates pacing) |
+| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider |
+| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider |
 
 #### 2. Saved LLM Profile (`LLMConfig` model)
 
@@ -207,13 +217,26 @@ Defines execution parameters linked to a provider:
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default` | Profile name label |
-| `is_active` | `false` | Master active switch (only one profile active globally) |
+| `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
-| `max_tokens` | `70000` | Max tokens per LLM call (high default to accommodate extended thinking) |
-| `temperature` | — | Unset by default — falls through to the provider/model default |
-| `use_vision` | `false` | Include Playwright screenshots in prompts (requires vision-capable model) |
-| `force_tool_choice` | `true` | Force tool selection via the wire-format `tool_choice: required/any` |
+| `max_tokens` | `70000` | Max tokens per LLM call |
+| `temperature` | — | Unset by default (falls through to provider/model default) |
+| `use_vision` | `false` | Include Playwright screenshots in prompts |
+| `force_tool_choice` | `true` | Force tool selection via wire-format `tool_choice: required/any` |
+
+#### 3. Multi-Role Model Profile (`LLMProfile` model)
+
+Maps agent roles (`crawler`, `test_lead`, `specialist`, `validator`, `reporting`, `alice`, `sast`) to specific `LLMConfig` instances:
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | `Default` | Profile name label |
+| `is_active` | `false` | Global active switch |
+| `default_model_id` | — | Foreign key linking to the default fallback `LLMConfig` |
+| `role_models_json` | `{}` | JSON dictionary mapping role strings to specific `LLMConfig` IDs |
+
+Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm_profile_id` reference. Roles resolve their configuration via `get_llm_config_for_role(role, run_profile_id)`.
 
 ### Scanner Policy (`ScannerPolicy` model)
 
@@ -248,7 +271,7 @@ Singleton row (id = 1). Configures the optional Burp Suite Professional active-s
 
 ### Upstream Proxy Config (`UpstreamProxyConfig` model)
 
-Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HTTP proxy (e.g. Burp Suite's proxy listener or a corporate proxy).
+Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HTTP proxy.
 
 | Field | Default | Description |
 |---|---|---|
@@ -276,6 +299,7 @@ Singleton row (id = 1). Controls when and how Specialist Agents are dispatched d
 | `dispatch_cors` | `false` | Dispatch specialists for CORS leads |
 | `dispatch_crypto` | `true` | Dispatch specialists for cryptography/secrets leads |
 | `dispatch_config` | `false` | Dispatch specialists for misconfiguration leads |
+| `dispatch_file_upload` | `true` | Dispatch specialists for file upload leads |
 | `trigger_specialist_on_burp` | `false` | Also dispatch a specialist alongside each Burp active scan |
 
 ### Adversarial Validator Config (`AdversarialValidatorConfig` model)
@@ -287,18 +311,36 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 | `enabled` | `true` | Use adversarial agent mode; `false` falls back to legacy static-probe validation |
 | `max_steps` | `20` | Step budget per validation pass |
 | `min_severity` | `low` | Skip validation for findings below this severity (`critical`\|`high`\|`medium`\|`low`\|`info`) |
-| `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written during a dynamic scan |
-| `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when the validator finds a concrete innocent explanation; when `false`, failure to reproduce counts as false positive |
+| `end_scan_max_concurrent` | `4` | Maximum simultaneous validators for end-of-scan batch review |
+| `auto_validate_inline` | `true` | Automatically validate each finding immediately after it is written |
+| `require_concrete_disproof` | `true` | Strict mode — only return `false_positive` when concrete innocent explanation is found |
 
-### Cloudflare Access Config (`CloudflareAccessConfig` model)
+### Global Extra HTTP Header Config (`GlobalHttpHeaderConfig` model)
 
-Singleton row (id = 1). Edited from the Debug page. Holds the optional Cloudflare Access application **audience (AUD)** tag used when verifying the proxy-injected `Cf-Access-Jwt-Assertion` header (see §12 — `/api/version`).
+Singleton row (id = 1). Configures a custom HTTP header appended to all outbound scanner and crawler HTTP requests:
 
 | Field | Default | Description |
 |---|---|---|
-| `audience` | `null` | Access application AUD tag. When set, the JWT is verified against it (`jwt.decode(..., audience=...)`), so only tokens issued for this application are accepted. When empty/null, the audience check is skipped — the legacy behaviour, in which any Cloudflare Access tenant's validly-signed token passes the issuer check. Blank input is normalised to `null` on save. |
+| `header_name` | `null` | Header name string |
+| `header_value` | `null` | Header value string |
 
-This is informational only — the app has **no auth by design** (localhost-only); the header is purely for displaying the authenticated user's email in the sidebar when fronted by a reverse proxy.
+### Reporting Debug Config (`ReportingDebugConfig` model)
+
+Singleton row (id = 1). Configures reporting prompt debug capture and replay:
+
+| Field | Default | Description |
+|---|---|---|
+| `capture_enabled` | `false` | Persist reporting prompt executions for debug inspection |
+| `panel_enabled` | `false` | Expose the reporting debug UI panel |
+| `batch_max_concurrent` | `4` | Maximum concurrent LLM workers during post-scan reporting review |
+
+### Cloudflare Access Config (`CloudflareAccessConfig` model)
+
+Singleton row (id = 1). Holds the optional Cloudflare Access application **audience (AUD)** tag used when verifying the proxy-injected `Cf-Access-Jwt-Assertion` header.
+
+| Field | Default | Description |
+|---|---|---|
+| `audience` | `null` | Access application AUD tag. When set, the JWT is verified against it (`jwt.decode(..., audience=...)`). When null, audience checking is skipped. |
 
 ---
 
@@ -312,20 +354,23 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
-| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, rate limits) |
+| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, rate limits, project IDs) |
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
+| `LLMProfile` | Named per-agent-role model routing profile mapping roles to specific `LLMConfig` IDs |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
 | `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
+| `GlobalHttpHeaderConfig` | Singleton — custom HTTP header added to all scanner and crawler requests |
+| `ReportingDebugConfig` | Singleton — reporting prompt execution capture and debug settings |
 | `CloudflareAccessConfig` | Singleton — optional Access AUD tag for verifying the proxy-injected JWT |
-| `TestRun` | A single web scan session; owns all scan artefacts |
+| `TestRun` | A single web scan session; owns all scan artefacts and stores token telemetry in `token_usage_json` |
 | `CrawledPage` | A discovered page/endpoint with LLM-assigned flags |
 | `PageLink` | Directed edge between two `CrawledPage` nodes (site map graph) |
 | `TrafficEntry` | A captured HTTP request/response pair |
 | `ScanFinding` | A discovered vulnerability with evidence and CVSS score (shared by web and API scans) |
 | `ScannerSession` | Reusable auth material (cookies, JWT, metadata) |
 | `TargetIntelItem` | Normalised reconnaissance atom (endpoint, form, input, ID, script, xss_sink) |
-| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs, per-vulnerability-class coverage) |
+| `PageOwaspTest` | One cell in the web OWASP Coverage matrix (`TestRun` × `CrawledPage` × OWASP category, status, finding IDs, per-vulnerability-class coverage in `test_classes_json`) |
 | `ScanLog` | Audit event emitted during crawl/scan phases |
 | `AliceChatSession` | One ALICE chat tab per test run (title, ordering, active flag) |
 | `AliceChatMessage` | One chat bubble inside an `AliceChatSession` (sender, type, text) |
@@ -678,6 +723,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `openai` | `openai` Python SDK |
 | `google` | `google-generativeai` |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
+| `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
 | `azure_openai` | `openai` SDK with Azure base URL |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
@@ -811,11 +857,14 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 |---|---|---|
 | `/api/sites/` | `sites.py` | CRUD for target sites and credentials |
 | `/api/settings/llm-config` | `settings.py` | Get/set LLM provider config |
+| `/api/settings/llm-profiles` | `settings.py` | CRUD for multi-role model routing profiles |
 | `/api/settings/scanner-policy` | `settings.py` | Get/set scanner policy |
 | `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
 | `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
 | `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
+| `/api/settings/global-http-header` | `settings.py` | Get/set global custom HTTP header appended to scanner requests |
+| `/api/settings/reporting-debug` | `reporting_debug.py` | Get/set reporting prompt debug capture settings |
 | `/api/settings/cloudflare-access` | `settings.py` | Get/set the Cloudflare Access AUD verified on the proxy-injected JWT |
 | `/api/test-runs/` | `test_runs.py` | Create runs, check status, retrieve site map graph |
 | `/api/test-runs/{id}/thinking-scan/` | `scan.py` | Start/stop/status/resume for dynamic scan |
@@ -853,11 +902,15 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 
 The web UI is a **single-page application** served from `src/aespa/web/`. It communicates with the backend over:
 - **REST** for CRUD and control operations
-- **WebSocket** (`/ws/events/{run_id}`) for real-time progress
+- **WebSocket** (`/ws/events/{run_id}`) for real-time progress updates
+
+### Telemetry rendering (`TokenUsageBar`)
+
+Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. It renders per-model breakdowns of input, output, and prompt-cache tokens along with estimated usage costs derived from `token_usage_json`.
 
 ### WebSocket event types (emitted by `services/events.py`)
 
-Events are emitted at key points during crawling and scanning, enabling the UI to update live:
+Events are emitted at key points during crawling and scanning:
 
 - Crawl progress (pages discovered, depth reached)
 - Thinking-scan step (action taken, tool called, finding written)
@@ -866,7 +919,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 - `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
 - `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
 - `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
-- `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata so empty or no-tool responses remain diagnosable after reload
+- `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata
 - Resumed agentic checkpoints are repaired when they end on an assistant turn: AESPA appends either an explicit continuation request or matching interrupted `tool_result` blocks before calling providers that prohibit assistant-message prefill
 - `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-crawl with the new account
 - Error events
@@ -877,7 +930,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 
 | Tab | Content |
 |---|---|
-| **Status** | Scan controls, run metadata, token usage; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
+| **Status** | Scan controls, run metadata, `TokenUsageBar` telemetry; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
 | **Site Map** | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
 | **Intelligence** | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, `xss_sink` items |
 | **Attack Surface & Coverage** | Live evidence projection — canonical routes/methods/parameters, access observations, workprogram gaps, provenance, signals, and observed technologies |
@@ -903,7 +956,7 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 
 | Tab | Content |
 |---|---|
-| **Status / Log** | Agent activity log, scan controls, real-time phase events |
+| **Status / Log** | Agent activity log, scan controls, `TokenUsageBar` telemetry, real-time phase events |
 | **OWASP Coverage** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
 | **Findings** | `ScanFinding` list for this API run |
 | **Traffic** | HTTP traffic captured during the API scan |
@@ -911,11 +964,11 @@ Events are emitted at key points during crawling and scanning, enabling the UI t
 
 #### SAST run view
 
-A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan. API collection file management does not expose SAST controls; its source ZIP support is only for deriving endpoint inventory.
+A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan.
 
 | Panel | Content |
 |---|---|
-| **Status / Log** | Agent activity log, scan controls |
+| **Status / Log** | Agent activity log, scan controls, `TokenUsageBar` telemetry |
 | **Leads** | Original `ScanLead` rows with severity, confidence score, location, and evidence; exportable to markdown |
 
 ---
@@ -928,6 +981,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so they are cancelled when the parent scan is stopped; concurrency is capped by `_specialist_running[run_id]` vs `SpecialistAgentConfig.max_concurrent`
 - **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
+- **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed; all schema changes are applied at startup via `db.py`
 - **Auth session vault** — `ScannerSession` rows in the DB store serialised cookies/tokens; `scanner_sessions.py` manages load/save/invalidation
 
