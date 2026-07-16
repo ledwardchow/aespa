@@ -249,8 +249,69 @@ def test_provider_update_changes_runtime_profile_connection(client: TestClient):
     assert r.status_code == 200
 
     active = client.get("/api/settings/llm").json()
-    assert active["api_key"] == "sk-2"
+    assert active["has_api_key"] is True
+    assert active["api_key"] is None
     assert active["base_url"] == "http://localhost:11434/v1"
+
+
+def test_write_only_api_keys_behavior(client: TestClient):
+    # 1. Create provider with API key
+    p_resp = _make_provider(client, name="Secret Provider", api_key="sk-secret-123")
+    assert p_resp.status_code == 200
+    provider = p_resp.json()
+    assert provider["has_api_key"] is True
+    assert provider["api_key"] is None
+
+    # 2. Get list of providers - key should be masked (None), has_api_key True
+    list_r = client.get("/api/settings/llm/providers")
+    assert list_r.status_code == 200
+    p_item = next(p for p in list_r.json() if p["id"] == provider["id"])
+    assert p_item["has_api_key"] is True
+    assert p_item["api_key"] is None
+
+    # 3. Update provider with api_key: null - key is preserved
+    up_resp = client.put(f"/api/settings/llm/providers/{provider['id']}", json={
+        "name": "Secret Provider Renamed",
+        "api_format": "openai",
+        "base_url": "http://localhost:1234/v1/",
+        "models": ["llama-3", "gpt-4o"],
+        "api_key": None,
+    })
+    assert up_resp.status_code == 200
+    assert up_resp.json()["has_api_key"] is True
+
+    # 4. Update provider with api_key: "" - key is cleared
+    clear_resp = client.put(f"/api/settings/llm/providers/{provider['id']}", json={
+        "name": "Secret Provider Renamed",
+        "api_format": "openai",
+        "base_url": "http://localhost:1234/v1/",
+        "models": ["llama-3", "gpt-4o"],
+        "api_key": "",
+    })
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["has_api_key"] is False
+
+    # 5. Burp REST API key write-only test
+    burp_put = client.put("/api/settings/burp-rest-api", json={
+        "enabled": True,
+        "api_url": "http://127.0.0.1:1337",
+        "api_key": "burp-secret-key",
+        "scan_configuration_name": "Audit",
+        "scan_sqli": True,
+        "scan_xss": True,
+        "scan_command_injection": True,
+        "scan_path_traversal": True,
+        "scan_ssrf": True,
+        "scan_xxe": True,
+        "scan_ssti": True,
+    })
+    assert burp_put.status_code == 200
+    assert burp_put.json()["has_api_key"] is True
+    assert burp_put.json()["api_key"] is None
+
+    burp_get = client.get("/api/settings/burp-rest-api")
+    assert burp_get.json()["has_api_key"] is True
+    assert burp_get.json()["api_key"] is None
 
 
 def test_run_llm_config_resolves_provider_fields_on_session_instance():
@@ -482,3 +543,34 @@ def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
     client.post(f"/api/settings/llm/model-configs/{profile_disabled['id']}/activate")
     active = client.get("/api/settings/llm").json()
     assert active["force_tool_choice"] is False
+
+
+def test_export_import_write_only_keys(client: TestClient):
+    # 1. Setup provider with key
+    p = _make_provider(client, name="ExportProvider", api_key="secret-export-key").json()
+
+    # 2. Direct loopback export includes raw key
+    exp_r = client.get("/api/settings/llm/export")
+    assert exp_r.status_code == 200
+    export_data = exp_r.json()
+    exp_p = next(item for item in export_data["providers"] if item["name"] == "ExportProvider")
+    assert exp_p["has_api_key"] is True
+    assert exp_p["api_key"] == "secret-export-key"
+
+    # 3. Export via proxy (e.g. Cloudflare Access headers present) masks raw key
+    proxied_exp_r = client.get("/api/settings/llm/export", headers={"CF-Connecting-IP": "203.0.113.1"})
+    assert proxied_exp_r.status_code == 200
+    proxied_export_data = proxied_exp_r.json()
+    p_exp_p = next(item for item in proxied_export_data["providers"] if item["name"] == "ExportProvider")
+    assert p_exp_p["has_api_key"] is True
+    assert p_exp_p["api_key"] is None
+
+    # 4. Import back proxied exported JSON (with api_key=None) - existing key in DB is preserved
+    imp_r = client.post("/api/settings/llm/import", json=proxied_export_data)
+    assert imp_r.status_code == 200
+
+    # Verify key is still present
+    list_r = client.get("/api/settings/llm/providers")
+    updated_p = next(item for item in list_r.json() if item["id"] == p["id"])
+    assert updated_p["has_api_key"] is True
+    assert updated_p["api_key"] is None

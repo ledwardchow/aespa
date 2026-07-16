@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlmodel import Session
 
 from aespa.db import get_session
@@ -180,9 +180,12 @@ def default_models() -> dict[str, list[str]]:
 
 
 @router.get("/llm/export", response_model=LLMConfigExport)
-def export_llm_config(session: Session = Depends(get_session)) -> LLMConfigExport:
+def export_llm_config(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> LLMConfigExport:
     """Export all LLM providers and profiles as a portable JSON bundle."""
-    return settings_service.export_llm_config(session)
+    return settings_service.export_llm_config(session, request=request)
 
 
 @router.post("/llm/import", response_model=LLMImportResult)
@@ -224,7 +227,7 @@ def upsert_burp_rest_api_config(
 async def test_burp_rest_api_connection(
     session: Session = Depends(get_session),
 ) -> dict:
-    cfg = settings_service.get_burp_rest_api_config(session)
+    cfg = settings_service.get_burp_rest_api_config_model(session)
     ok, message = await burp_rest_svc.test_connection(cfg)
     return {"ok": ok, "message": message}
 
