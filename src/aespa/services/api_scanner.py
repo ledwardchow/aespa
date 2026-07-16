@@ -471,7 +471,7 @@ async def _enforce_coverage_loop(
             "phase": "start",
             "remaining": total,
             "total": total,
-            "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+            "message": f"Full mode: {total} coverage cell(s) to resolve.",
         },
     )
 
@@ -530,7 +530,7 @@ async def _enforce_coverage_loop(
             "skipped": stats["skipped"],
             "budget_exhausted": stats["budget_exhausted"],
             "message": (
-                f"Enforce complete: {stats['covered']} covered, "
+                f"Full coverage complete: {stats['covered']} covered, "
                 f"{stats['finding']} finding, {stats['skipped']} skipped."
             ),
         },
@@ -1364,7 +1364,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                 "agent_id": "scanner",
                 "role": "Test Lead",
                 "status": "active",
-                "current_task": "Enforcing coverage — resolving remaining cells…",
+                "current_task": "Completing full coverage — resolving remaining cells…",
                 "outcome": None,
                 "_persist": True,
             },

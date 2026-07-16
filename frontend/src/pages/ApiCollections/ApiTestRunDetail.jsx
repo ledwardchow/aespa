@@ -177,8 +177,8 @@ export function ApiTestRunDetail({
           }} title="Track: observe coverage as the scan runs. Enforce: drive every applicable endpoint × category to covered or skipped-with-reason.">
               Coverage:
               <select value={coverageMode} disabled={scanBusy} onChange={e => setCoverageMode(e.target.value)}>
-                <option value="track">Track</option>
-                <option value="enforce">Enforce</option>
+                <option value="track">Quick</option>
+                <option value="enforce">Full</option>
               </select>
             </label>
             <button className="btn" disabled={scanBusy} onClick={onStartScan}>

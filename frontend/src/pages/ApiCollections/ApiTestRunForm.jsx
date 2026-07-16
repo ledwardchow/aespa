@@ -66,8 +66,8 @@ export function ApiTestRunForm({
           <select value={form.coverage_mode} onChange={e => upd({
             coverage_mode: e.target.value
           })}>
-            <option value="track">Track — record coverage but don't enforce it</option>
-            <option value="enforce">Enforce — block completion until all endpoints covered</option>
+            <option value="track">Quick — adaptive scan with coverage tracking</option>
+            <option value="enforce">Full — test every applicable coverage obligation</option>
           </select>
         </div>
         <div className="row spread" style={{

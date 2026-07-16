@@ -5317,6 +5317,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         _build_web_enforce_directive,
         _make_web_post_finding_fn,
         _make_web_post_probe_fn,
+        reopen_unjustified_web_skips,
         seed_web_workprogram,
     )
 
@@ -5326,6 +5327,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         log.warning("seed_web_workprogram failed (non-fatal): %s", _wp_exc)
     if coverage_mode == "enforce":
         try:
+            reopen_unjustified_web_skips(run_id)
             _enforce_directive = _build_web_enforce_directive(run_id)
             if _enforce_directive:
                 crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
@@ -6957,7 +6959,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "agent_id": "scanner",
                     "role": "Test Lead",
                     "status": "active",
-                    "current_task": "Enforcing web coverage — resolving remaining cells…",
+                    "current_task": "Completing full web coverage — resolving remaining cells…",
                     "outcome": None,
                     "_persist": True,
                 },
@@ -6969,7 +6971,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                 stop_check=lambda: run_id in _thinking_stop_requested,
             )
         except Exception as _enf_exc:
-            log.warning("enforce_web_coverage_loop failed (non-fatal): %s", _enf_exc)
+            log.exception("enforce_web_coverage_loop failed: %s", _enf_exc)
+            llm_svc.clear_run_context()
+            raise RuntimeError(
+                f"Full mode could not complete web coverage: {_enf_exc}"
+            ) from _enf_exc
+        stopped = run_id in _thinking_stop_requested
     else:
         try:
             mark_in_progress_to_covered(run_id)
@@ -7211,14 +7218,41 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        coverage_reader = None
-        if not is_api_run and coverage_mode == "track":
+        allowed, feedback, log_message = completion_policy.check_done()
+        if allowed and not is_api_run and coverage_mode == "enforce":
             from aespa.services.web_workprogram import get_web_coverage_gaps
 
-            def coverage_reader() -> dict[str, Any]:
-                return get_web_coverage_gaps(run_id, limit=8)
-
-        allowed, feedback, log_message = completion_policy.check_done(coverage_reader)
+            gaps = get_web_coverage_gaps(run_id, limit=50)
+            # A probe moves an obligation to in_progress; finalisation promotes
+            # it to covered. Only never-tested obligations block `done` here.
+            never_tested = [
+                action
+                for action in gaps.get("next_actions") or []
+                if action.get("status") == "not_started"
+            ]
+            if never_tested:
+                lines = [
+                    f"- {action.get('method', 'GET')} {action.get('url')} "
+                    f"category={action.get('owasp_category')}"
+                    + (
+                        f" test_class={action.get('test_class')}"
+                        if action.get("test_class")
+                        else ""
+                    )
+                    for action in never_tested[:8]
+                ]
+                allowed = False
+                feedback = (
+                    "Full mode still has never-tested applicable obligations. "
+                    "Actively test each with http_request or browser and set its "
+                    "owasp_category/test_class. Use skip_coverage only when a test is "
+                    "genuinely not applicable or concretely blocked; time or budget is "
+                    "not a valid skip reason. Remaining examples:\n" + "\n".join(lines)
+                )
+                log_message = (
+                    f"Completion blocked by {len(never_tested)} sampled never-tested "
+                    "Full-mode obligations."
+                )
         _emit_completion_log(
             f"Step {step}: {log_message}",
             status="complete" if allowed else "warning",
@@ -7359,6 +7393,33 @@ async def _do_agentic_thinking_loop(
 
         # Non-context tools reset the consecutive counter
         _consecutive_ctx_tools[0] = 0
+
+        # ── skip_coverage ─────────────────────────────────────────────────────
+        if tool_name == "skip_coverage":
+            if is_api_run or coverage_mode != "enforce":
+                return "skip_coverage is available only for web Full mode."
+            try:
+                from aespa.services.web_workprogram import (
+                    skip_web_coverage_obligation,
+                )
+
+                detail = skip_web_coverage_obligation(
+                    run_id,
+                    url=str(tool_input.get("url") or ""),
+                    owasp_category=str(tool_input.get("owasp_category") or ""),
+                    test_class=str(tool_input.get("test_class") or "") or None,
+                    disposition=str(tool_input.get("disposition") or ""),
+                    reason=str(tool_input.get("reason") or ""),
+                    evidence=str(tool_input.get("evidence") or ""),
+                )
+            except Exception as exc:
+                return f"skip_coverage rejected: {exc}"
+            completion_policy.record_progress(
+                "coverage-skip:"
+                f"{tool_input.get('url')}:{tool_input.get('owasp_category')}:"
+                f"{tool_input.get('test_class') or 'unspecified'}"
+            )
+            return f"Coverage obligation skipped with justification: {detail}"
 
         # ── update_lead ───────────────────────────────────────────────────────
         if tool_name == "update_lead":
@@ -7535,6 +7596,8 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
+            br_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
+            br_test_class = str(tool_input.get("test_class") or "").strip()
             _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
@@ -7670,11 +7733,31 @@ async def _do_agentic_thinking_loop(
                     "response_status": resp_status,
                     "response_headers": resp_headers,
                     "response_body": resp_body,
+                    "owasp_category": br_owasp or None,
+                    "test_class": br_test_class or None,
                 }
             )
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
             completion_policy.record_progress(f"browser-route:{final_url}")
+            if br_owasp:
+                from aespa.services.web_workprogram import _normalize_url
+
+                completion_policy.record_progress(
+                    f"coverage:{_normalize_url(final_url)}:{br_owasp}:"
+                    f"{br_test_class or 'unspecified'}"
+                )
+                if post_probe_fn is not None and not is_api_run:
+                    try:
+                        post_probe_fn(
+                            final_url,
+                            "BROWSER",
+                            br_owasp,
+                            br_test_class or None,
+                            resp_status,
+                        )
+                    except Exception as exc:
+                        log.debug("browser post_probe_fn error: %s", exc)
             if not is_api_run and resp_status:
                 try:
                     from aespa.services.web_route_inventory import enrich_dynamic_route

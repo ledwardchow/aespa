@@ -105,6 +105,7 @@ def _web_coverage_columns() -> list[dict[str, str | None]]:
             )
     return columns
 
+
 _TEST_CLASS_ALIASES = {
     "sql_injection": "sqli",
     "xss": "xss",
@@ -350,6 +351,47 @@ def mark_in_progress_to_covered(run_id: int) -> None:
             s.add(cell)
         s.commit()
     log.info("mark_in_progress_to_covered: run_id=%s promoted=%d", run_id, len(cells))
+
+
+def reopen_unjustified_web_skips(run_id: int) -> int:
+    """Reopen legacy skips that mean "not tested" rather than N/A/blocked."""
+
+    def is_justified(value: Any) -> bool:
+        reason = str(value or "").strip().lower()
+        return reason.startswith("not applicable:") or reason.startswith("blocked:")
+
+    reopened = 0
+    with Session(get_engine()) as s:
+        cells = list(
+            s.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+            ).all()
+        )
+        for cell in cells:
+            changed = False
+            if cell.status == "skipped" and not is_justified(cell.skip_reason):
+                cell.status = "not_started"
+                cell.skip_reason = None
+                changed = True
+                reopened += 1
+            classes = _load_test_classes(cell)
+            for class_state in classes.values():
+                if not isinstance(class_state, dict):
+                    continue
+                if class_state.get("status") == "skipped" and not is_justified(
+                    class_state.get("skip_reason")
+                ):
+                    class_state["status"] = "not_started"
+                    class_state.pop("skip_reason", None)
+                    changed = True
+                    reopened += 1
+            if changed:
+                cell.test_classes_json = json.dumps(classes, sort_keys=True)
+                cell.last_updated = datetime.now(_UTC)
+                s.add(cell)
+        s.commit()
+    log.info("reopen_unjustified_web_skips: run_id=%s reopened=%d", run_id, reopened)
+    return reopened
 
 
 # ── post_probe_fn / post_finding_fn factories ─────────────────────────────────
@@ -630,6 +672,80 @@ def _uncovered_web_obligations(
     return obligations
 
 
+def skip_web_coverage_obligation(
+    run_id: int,
+    *,
+    url: str,
+    owasp_category: str,
+    test_class: str | None,
+    disposition: str,
+    reason: str,
+    evidence: str = "",
+) -> str:
+    """Skip one obligation only for a justified N/A or concrete blocker."""
+    disposition = str(disposition or "").strip().lower()
+    reason = str(reason or "").strip()
+    evidence = str(evidence or "").strip()
+    if disposition not in {"not_applicable", "blocked"}:
+        raise ValueError("disposition must be not_applicable or blocked")
+    if len(reason) < 12:
+        raise ValueError("a specific skip reason of at least 12 characters is required")
+    if disposition == "blocked" and len(evidence) < 12:
+        raise ValueError("blocked coverage requires concrete evidence")
+
+    with Session(get_engine(), expire_on_commit=False) as s:
+        pages = list(
+            s.exec(
+                select(CrawledPage)
+                .where(CrawledPage.test_run_id == run_id)
+                .where(CrawledPage.in_scope == True)  # noqa: E712
+            ).all()
+        )
+    page_id = _match_page_for_url(str(url or "").strip(), pages)
+    if page_id is None:
+        raise ValueError("URL does not match an in-scope Work Program page")
+    page = next(item for item in pages if item.id == page_id)
+    category = _normalize_owasp_category(owasp_category)
+    normalized_class = normalize_web_test_class(test_class, owasp_category=category)
+    with Session(get_engine()) as s:
+        cell = s.exec(
+            select(PageOwaspTest)
+            .where(PageOwaspTest.test_run_id == run_id)
+            .where(PageOwaspTest.page_id == page_id)
+            .where(PageOwaspTest.owasp_category == category)
+        ).first()
+    if cell is None:
+        raise ValueError("category is not an applicable Work Program obligation")
+    if category == "A03" and page.takes_input:
+        if normalized_class not in _A03_INPUT_TEST_CLASSES:
+            raise ValueError(
+                "input-bearing A03 skips require test_class sqli, reflected_xss, "
+                "or stored_xss"
+            )
+        class_status = str(
+            (_load_test_classes(cell).get(normalized_class) or {}).get("status")
+            or "not_started"
+        )
+        if class_status not in _UNCOVERED_STATES:
+            raise ValueError("coverage obligation is already terminal")
+    elif cell.status not in _UNCOVERED_STATES:
+        raise ValueError("coverage obligation is already terminal")
+
+    prefix = "not applicable" if disposition == "not_applicable" else "blocked"
+    detail = f"{prefix}: {reason}"
+    if evidence:
+        detail += f" — evidence: {evidence}"
+    update_web_coverage_cell(
+        run_id,
+        page_id,
+        category,
+        "skipped",
+        skip_reason=detail,
+        test_class=normalized_class or None,
+    )
+    return detail
+
+
 def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
     """Return a compact live list of useful uncovered web workprogram cells.
 
@@ -709,26 +825,31 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
         )
         classes = _load_test_classes(cell)
         class_gaps = [
-            test_class
+            (
+                test_class,
+                str((classes.get(test_class) or {}).get("status") or "not_started"),
+            )
             for test_class in expected_classes
             if (classes.get(test_class) or {}).get("status")
             in (None, *_UNCOVERED_STATES)
         ]
         if not class_gaps and cell.status not in _UNCOVERED_STATES:
             continue
-        test_classes: tuple[str | None, ...] = (
-            tuple(class_gaps) if expected_classes else (None,)
+        test_obligations: tuple[tuple[str | None, str], ...] = (
+            tuple(class_gaps)
+            if expected_classes
+            else ((None, str(cell.status or "not_started")),)
         )
-        rank = (
-            0 if cell.status == "not_started" else 1,
-            -int(bool(page.takes_input)),
-            -int(page.state_kind == "api" or "/api/" in url),
-            -int(bool(page.has_object_ref)),
-            -int(bool(page.req_auth)),
-            url,
-            cell.owasp_category,
-        )
-        for test_class in test_classes:
+        for test_class, obligation_status in test_obligations:
+            rank = (
+                0 if obligation_status == "not_started" else 1,
+                -int(bool(page.takes_input)),
+                -int(page.state_kind == "api" or "/api/" in url),
+                -int(bool(page.has_object_ref)),
+                -int(bool(page.req_auth)),
+                url,
+                cell.owasp_category,
+            )
             class_reason = (
                 f"{reason}; {test_class.replace('_', ' ')} has not been covered"
                 if test_class
@@ -743,7 +864,7 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
                         "method": method,
                         "owasp_category": cell.owasp_category,
                         "test_class": test_class,
-                        "status": cell.status,
+                        "status": obligation_status,
                         "access": "authenticated"
                         if page.req_auth
                         else "unknown_or_public",
@@ -788,8 +909,9 @@ def _build_web_enforce_directive(run_id: int) -> str:
         "A03 is split into independent SQL injection, reflected XSS, and stored "
         "XSS obligations. Set `test_class` as well as `owasp_category='A03'` for "
         "those requests. Do not call `done` until every listed obligation has been "
-        "exercised, or "
-        "you have documented why a category does not apply to a page.",
+        "exercised. Use `skip_coverage` only when an obligation is genuinely "
+        "nonsensical for the route or concrete evidence shows it cannot be tested; "
+        "never skip because it was not reached or the scan has used substantial time.",
         "",
         "Coverage checklist (page → categories still to cover):",
     ]
@@ -840,6 +962,7 @@ async def _enforce_web_coverage_loop(
         "finding": 0,
         "skipped": 0,
         "budget_exhausted": False,
+        "stopped": False,
         "remaining": 0,
     }
 
@@ -852,30 +975,28 @@ async def _enforce_web_coverage_loop(
             "phase": "start",
             "remaining": total,
             "total": total,
-            "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+            "message": f"Full mode: {total} coverage cell(s) to resolve.",
         },
     )
 
     for idx, (page, category, current_status, test_class) in enumerate(obligations):
-        if stop_check() or stats["attempted"] >= max_attempts or now_fn() >= deadline:
+        if stop_check():
+            stats["stopped"] = True
+            break
+        if stats["attempted"] >= max_attempts or now_fn() >= deadline:
             stats["budget_exhausted"] = True
             break
         stats["attempted"] += 1
-        try:
-            if prober_accepts_test_class:
-                status, reason = await prober(
-                    page, category, current_status, test_class
-                )
-            else:
-                # Preserve compatibility with custom three-argument probers.
-                status, reason = await prober(page, category, current_status)
-        except Exception as exc:
-            log.warning(
-                "enforce prober error page=%s cat=%s: %s", page.id, category, exc
-            )
-            status, reason = "skipped", f"prober error: {exc}"
+        if prober_accepts_test_class:
+            status, reason = await prober(page, category, current_status, test_class)
+        else:
+            # Preserve compatibility with custom three-argument probers.
+            status, reason = await prober(page, category, current_status)
         if status not in ("covered", "finding", "skipped"):
-            status, reason = "skipped", reason or "prober returned no decision"
+            raise RuntimeError(
+                f"enforce prober returned invalid status {status!r} for "
+                f"{page.url} {category}"
+            )
         update_web_coverage_cell(
             run_id,
             page.id,
@@ -897,17 +1018,28 @@ async def _enforce_web_coverage_loop(
                 },
             )
 
-    # Close out anything not reached within budget.
-    for page, category, _status, test_class in _uncovered_web_obligations(run_id):
-        update_web_coverage_cell(
+    remaining = _uncovered_web_obligations(run_id)
+    stats["remaining"] = len(remaining)
+    if stats["stopped"]:
+        events_svc.emit(
             run_id,
-            page.id,
-            category,
-            "skipped",
-            skip_reason="coverage budget exhausted",
-            test_class=test_class,
+            {
+                "type": "enforce_progress",
+                "phase": "stopped",
+                "remaining": stats["remaining"],
+                "message": "Full mode stopped by user.",
+            },
         )
-        stats["skipped"] += 1
+        return stats
+    if remaining:
+        sample = ", ".join(
+            f"{page.url} {category}{f'/{test_class}' if test_class else ''}"
+            for page, category, _status, test_class in remaining[:5]
+        )
+        raise RuntimeError(
+            f"Full mode left {len(remaining)} web coverage obligation(s) "
+            f"unresolved: {sample}"
+        )
 
     events_svc.emit(
         run_id,
@@ -919,7 +1051,7 @@ async def _enforce_web_coverage_loop(
             "skipped": stats["skipped"],
             "budget_exhausted": stats["budget_exhausted"],
             "message": (
-                f"Enforce complete: {stats['covered']} covered, "
+                f"Full coverage complete: {stats['covered']} covered, "
                 f"{stats['finding']} finding, {stats['skipped']} skipped."
             ),
         },
@@ -933,9 +1065,8 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
 
     Cells the broad agentic scan already exercised (``in_progress``) are promoted
     to ``covered``. For untouched (``not_started``) cells, a single cached LLM
-    classification call per page decides, per category, whether it is genuinely
-    not-applicable (→ ``skipped`` N/A reason) or applicable but not reached
-    (→ ``skipped`` noting the budget was exhausted).
+    classification call per page may resolve only genuinely non-applicable cells.
+    Applicable untouched cells raise an error instead of being disguised as skipped.
     """
     from aespa.services import llm as llm_svc
 
@@ -962,9 +1093,7 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
             )
         ]
         obligation_keys = {
-            (cat, test_class): (
-                f"A03:{test_class}" if test_class is not None else cat
-            )
+            (cat, test_class): (f"A03:{test_class}" if test_class is not None else cat)
             for cat, test_class in obligations
         }
         cat_lines = "\n".join(
@@ -995,8 +1124,9 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
             m = re.search(r"\{.*\}", cleaned, re.DOTALL)
             parsed = json.loads(m.group(0)) if m else {}
         except Exception as exc:
-            log.debug("enforce classify failed page=%s: %s", page.id, exc)
-            parsed = {}
+            raise RuntimeError(
+                f"could not classify untouched coverage for {page.url}: {exc}"
+            ) from exc
         for obligation, key in obligation_keys.items():
             d = parsed.get(key) if isinstance(parsed, dict) else None
             reason = (d or {}).get("reason", "") if isinstance(d, dict) else ""
@@ -1006,10 +1136,10 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
                     f"not applicable: {reason}".strip().rstrip(":"),
                 )
             else:
-                note = reason or "applicable but not reached by the scan"
+                note = reason or "the obligation is applicable"
                 decisions[obligation] = (
-                    "skipped",
-                    f"not covered within scan budget — {note}",
+                    "untested",
+                    f"applicable but not tested — {note}",
                 )
         return decisions
 
@@ -1023,10 +1153,7 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
             return ("covered", None)
         if page.id not in _cache:
             _cache[page.id] = await _classify_page(page)
-        return _cache[page.id].get(
-            (category, test_class),
-            ("skipped", "applicable but not reached by the scan"),
-        )
+        return _cache[page.id].get((category, test_class), ("untested", None))
 
     return _prober
 
@@ -1209,9 +1336,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
             display_cell = g["cells"].get(str(column["key"]))
             if display_cell is not None:
                 display_status = str(display_cell.get("status") or "not_started")
-                column_totals[display_status] = (
-                    column_totals.get(display_status, 0) + 1
-                )
+                column_totals[display_status] = column_totals.get(display_status, 0) + 1
         rep = g["pages"][0]
         page_rows.append(
             {
