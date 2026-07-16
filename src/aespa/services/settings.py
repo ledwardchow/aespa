@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import Session, select
 
@@ -85,7 +85,8 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         base_url=provider.base_url,
         project_id=provider.project_id,
         models=_provider_models(provider),
-        api_key=provider.api_key,
+        has_api_key=bool(provider.api_key and provider.api_key.strip()),
+        api_key=None,
         max_tpm=provider.max_tpm,
         max_rpm=provider.max_rpm,
         updated_at=provider.updated_at,
@@ -119,7 +120,8 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         provider_id=resolved.provider_id,
         provider_name=provider_name,
         provider=resolved.provider,
-        api_key=resolved.api_key,
+        has_api_key=bool(resolved.api_key and resolved.api_key.strip()),
+        api_key=None,
         base_url=resolved.base_url,
         project_id=resolved.project_id,
         model=resolved.model,
@@ -246,7 +248,9 @@ def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: 
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    provider.api_key = payload.api_key
+    if payload.api_key is not None:
+        key_str = payload.api_key.strip()
+        provider.api_key = key_str if key_str else None
     provider.base_url = payload.base_url
     provider.project_id = payload.project_id
     provider.models_json = _json_dumps(payload.models)
@@ -569,7 +573,8 @@ def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfi
     return BurpRestApiConfigOut(
         enabled=cfg.enabled,
         api_url=cfg.api_url,
-        api_key=cfg.api_key,
+        has_api_key=bool(cfg.api_key and cfg.api_key.strip()),
+        api_key=None,
         scan_configuration_name=cfg.scan_configuration_name,
         scan_sqli=cfg.scan_sqli,
         scan_xss=cfg.scan_xss,
@@ -580,6 +585,13 @@ def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfi
         scan_ssti=cfg.scan_ssti,
         updated_at=cfg.updated_at,
     )
+
+
+def get_burp_rest_api_config_model(session: Session) -> BurpRestApiConfig:
+    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
+    if cfg is None:
+        return BurpRestApiConfig(id=_SINGLETON_ID)
+    return cfg
 
 
 def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
@@ -648,7 +660,9 @@ def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) 
 
     cfg.enabled = payload.enabled
     cfg.api_url = payload.api_url
-    cfg.api_key = payload.api_key
+    if payload.api_key is not None:
+        key_str = payload.api_key.strip()
+        cfg.api_key = key_str if key_str else None
     cfg.scan_configuration_name = payload.scan_configuration_name
     cfg.scan_sqli = payload.scan_sqli
     cfg.scan_xss = payload.scan_xss
@@ -781,12 +795,37 @@ def upsert_cloudflare_access_config(
 
 # ── LLM config export / import ────────────────────────────────────────────────
 
-def export_llm_config(session: Session) -> LLMConfigExport:
-    """Serialize all LLM providers and profiles to a portable dict."""
+def _is_direct_loopback(request: Request | None) -> bool:
+    if request is None or request.client is None:
+        return False
+    host = request.client.host
+    if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return False
+    proxy_headers = (
+        "cf-access-jwt-assertion",
+        "cf-connecting-ip",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-real-ip",
+    )
+    for h in proxy_headers:
+        if h in request.headers:
+            return False
+    return True
+
+
+def export_llm_config(session: Session, request: Request | None = None) -> LLMConfigExport:
+    """Serialize all LLM providers and profiles to a portable dict.
+
+    If accessed directly from local loopback (without proxy headers), API keys
+    are included in raw form for ease of export/import. If accessed remotely or
+    via a reverse proxy (e.g. Cloudflare Access), API keys are omitted.
+    """
     providers_db = session.exec(select(LLMProviderConfig).order_by(LLMProviderConfig.id)).all()
     profiles_db = session.exec(select(LLMConfig).order_by(LLMConfig.id)).all()
 
     provider_id_to_name: dict[int, str] = {p.id: p.name for p in providers_db if p.id is not None}
+    include_raw_keys = _is_direct_loopback(request)
 
     provider_items = [
         LLMExportProviderItem(
@@ -795,7 +834,8 @@ def export_llm_config(session: Session) -> LLMConfigExport:
             base_url=p.base_url,
             project_id=p.project_id,
             models=_provider_models(p),
-            api_key=p.api_key,
+            has_api_key=bool(p.api_key and p.api_key.strip()),
+            api_key=p.api_key if include_raw_keys else None,
             max_tpm=p.max_tpm,
             max_rpm=p.max_rpm,
         )
@@ -872,7 +912,9 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         provider.api_format = item.api_format
         provider.base_url = item.base_url
         provider.project_id = item.project_id
-        provider.api_key = item.api_key
+        if item.api_key is not None:
+            key_str = item.api_key.strip()
+            provider.api_key = key_str if key_str else None
         provider.models_json = _json_dumps(item.models)
         provider.max_tpm = item.max_tpm
         provider.max_rpm = item.max_rpm
