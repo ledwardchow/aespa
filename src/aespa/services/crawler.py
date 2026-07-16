@@ -2594,61 +2594,9 @@ def _combine_api_context(fallback_context: str, llm_context: str) -> str:
 
 
 def _api_categories(call: dict, credential_id: Optional[int]) -> dict:
-    method = str(call.get("method") or "GET").upper()
-    url = call.get("url") or ""
-    request_body = call.get("request_body") or ""
-    url_lower = url.lower()
-    body_lower = request_body.lower()
-    is_mutating = method in ("POST", "PUT", "PATCH", "DELETE")
-    has_id = _url_has_object_ref(url) or _body_has_object_ref(request_body)
-    is_auth_endpoint = any(
-        kw in url_lower
-        for kw in (
-            "/login",
-            "/logout",
-            "/auth",
-            "/token",
-            "/session",
-            "/password",
-            "/reset",
-            "/register",
-            "/signup",
-            "/oauth",
-        )
-    )
-    has_url_param = bool(
-        re.search(
-            r"[?&](?:url|uri|href|src|redirect|callback|proxy|fetch|target)=", url_lower
-        )
-    ) or bool(
-        re.search(
-            r'"(?:url|uri|href|src|redirect|callback|proxy|fetch|target)"\s*:',
-            body_lower,
-        )
-    )
+    from aespa.services.web_route_inventory import classify_http_exchange
 
-    owasp_applicable = {
-        "A01": has_id or credential_id is not None,  # Broken Access Control
-        "A02": is_auth_endpoint
-        or bool(
-            re.search(r"password|secret|token|key|credential", body_lower)
-        ),  # Cryptographic Failures
-        "A03": is_mutating or bool(request_body),  # Injection
-        "A04": is_mutating,  # Insecure Design
-        "A05": True,  # Security Misconfiguration (headers etc.)
-        "A06": False,  # Supply Chain — can't tell from request alone
-        "A07": is_auth_endpoint or credential_id is not None,  # Auth Failures
-        "A08": is_mutating,  # Software & Data Integrity
-        "A09": is_mutating,  # Logging & Monitoring
-        "A10": has_url_param,  # SSRF
-    }
-    return {
-        "req_auth": credential_id is not None,
-        "takes_input": method not in ("GET", "HEAD", "OPTIONS") or bool(request_body),
-        "has_object_ref": has_id,
-        "has_business_logic": None,
-        "owasp_applicable": owasp_applicable,
-    }
+    return classify_http_exchange(call, authenticated=credential_id is not None)
 
 
 def _body_has_object_ref(body: str) -> bool:
@@ -2670,25 +2618,9 @@ def _body_has_object_ref(body: str) -> bool:
 
 
 def _merge_api_categories(fallback: dict, llm_categories: dict) -> dict:
-    merged = dict(fallback)
-    for key in ("req_auth", "takes_input", "has_object_ref", "has_business_logic"):
-        if llm_categories.get(key) is not None:
-            merged[key] = llm_categories[key]
-    if fallback.get("takes_input"):
-        merged["takes_input"] = True
-    if fallback.get("has_object_ref"):
-        merged["has_object_ref"] = True
-    if fallback.get("req_auth"):
-        merged["req_auth"] = True
-    # Pass through OWASP applicability from LLM; OR-merge with heuristic fallback
-    llm_owasp = llm_categories.get("owasp_applicable") or {}
-    heuristic_owasp = fallback.get("owasp_applicable") or {}
-    if llm_owasp or heuristic_owasp:
-        merged["owasp_applicable"] = {
-            cat: llm_owasp.get(cat, False) or heuristic_owasp.get(cat, False)
-            for cat in set(list(llm_owasp) + list(heuristic_owasp))
-        }
-    return merged
+    from aespa.services.web_route_inventory import merge_route_categories
+
+    return merge_route_categories(fallback, llm_categories)
 
 
 async def _persist_recon_session(run_id: int, cred, page) -> None:

@@ -154,6 +154,9 @@ export function ApiTestRunDetail({
     }
   };
   const scanRunning = scanStatus?.running === true;
+  if (!run) {
+    return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
+  }
   return <>
     <PageHeader
       title={<>

@@ -73,6 +73,38 @@ _UNCOVERED_STATES = ("not_started", "in_progress")
 # routes retain separate obligations for the common dynamic injection classes.
 _A03_INPUT_TEST_CLASSES = ("sqli", "reflected_xss", "stored_xss")
 
+_A03_TEST_CLASS_LABELS = {
+    "sqli": "SQL Injection",
+    "reflected_xss": "Reflected XSS",
+    "stored_xss": "Stored XSS",
+}
+
+
+def _web_coverage_columns() -> list[dict[str, str | None]]:
+    """Return UI/export columns, expanding A03 into independently tracked tests."""
+    columns: list[dict[str, str | None]] = []
+    for category in OWASP_WEB_CATEGORIES:
+        if category == "A03":
+            columns.extend(
+                {
+                    "key": f"A03:{test_class}",
+                    "category": "A03",
+                    "test_class": test_class,
+                    "label": label,
+                }
+                for test_class, label in _A03_TEST_CLASS_LABELS.items()
+            )
+        else:
+            columns.append(
+                {
+                    "key": category,
+                    "category": category,
+                    "test_class": None,
+                    "label": OWASP_WEB_LABELS.get(category, category),
+                }
+            )
+    return columns
+
 _TEST_CLASS_ALIASES = {
     "sql_injection": "sqli",
     "xss": "xss",
@@ -260,6 +292,8 @@ def update_web_coverage_cell(
             if finding_id is not None and finding_id not in class_fids:
                 class_fids.append(finding_id)
             class_state["finding_ids"] = class_fids
+            if skip_reason is not None:
+                class_state["skip_reason"] = skip_reason
             classes[normalized_class] = class_state
             cell.test_classes_json = json.dumps(classes, sort_keys=True)
         if skip_reason is not None:
@@ -335,6 +369,7 @@ def _make_web_post_probe_fn(run_id: int):
         method: str,
         owasp_category: str,
         test_class: str | None = None,
+        response_status: int | None = None,
     ) -> None:
         cat = (owasp_category or "").strip().upper()
         if not cat:
@@ -352,6 +387,8 @@ def _make_web_post_probe_fn(run_id: int):
             )
             page_id = _match_page_for_url(url, pages)
             if page_id is None:
+                if response_status == 404:
+                    return  # a guessed missing path is not discovered attack surface
                 # Create a placeholder page so the workprogram can track this probe.
                 page = CrawledPage(
                     test_run_id=run_id,
@@ -507,6 +544,13 @@ def _match_page_for_url(url: str, pages: list[CrawledPage]) -> int | None:
     for p in pages:
         if p.url.split("?")[0].rstrip("/") == url_base:
             return p.id
+    # 3. Canonical route match — collapse concrete numeric/UUID object IDs so
+    # dynamic observations of /users/2 enrich the crawled /users/1 route.
+    normalized_base = _normalize_url(url_base)
+    for p in pages:
+        page_base = p.url.split("?")[0].rstrip("/")
+        if _normalize_url(page_base) == normalized_base:
+            return p.id
     return None
 
 
@@ -540,6 +584,50 @@ def _uncovered_web_cells(run_id: int) -> list[tuple[CrawledPage, str, str]]:
         if page is not None:
             out.append((page, c.owasp_category, c.status))
     return out
+
+
+def _uncovered_web_obligations(
+    run_id: int,
+) -> list[tuple[CrawledPage, str, str, str | None]]:
+    """Return non-terminal page/category/test-class obligations.
+
+    Input-bearing A03 cells expand into SQLi, reflected-XSS, and stored-XSS
+    obligations. The broad parent status must not hide an unfinished child.
+    """
+    with Session(get_engine(), expire_on_commit=False) as s:
+        cells = list(
+            s.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+            ).all()
+        )
+        page_ids = {cell.page_id for cell in cells}
+        pages = {
+            page.id: page
+            for page in (
+                s.exec(
+                    select(CrawledPage).where(CrawledPage.id.in_(page_ids))  # type: ignore[attr-defined]
+                ).all()
+                if page_ids
+                else []
+            )
+        }
+
+    obligations: list[tuple[CrawledPage, str, str, str | None]] = []
+    for cell in cells:
+        page = pages.get(cell.page_id)
+        if page is None:
+            continue
+        if cell.owasp_category == "A03" and page.takes_input:
+            classes = _load_test_classes(cell)
+            for test_class in _A03_INPUT_TEST_CLASSES:
+                status = str(
+                    (classes.get(test_class) or {}).get("status") or "not_started"
+                )
+                if status in _UNCOVERED_STATES:
+                    obligations.append((page, "A03", status, test_class))
+        elif cell.status in _UNCOVERED_STATES:
+            obligations.append((page, cell.owasp_category, cell.status, None))
+    return obligations
 
 
 def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
@@ -682,13 +770,14 @@ def _build_web_enforce_directive(run_id: int) -> str:
     and instructs the Test Lead to drive every cell to coverage, tagging each
     ``http_request`` with the ``owasp_category`` it exercises.
     """
-    cells = _uncovered_web_cells(run_id)
-    if not cells:
+    obligations = _uncovered_web_obligations(run_id)
+    if not obligations:
         return ""
     # Group by page
     grouped: dict[int, tuple[CrawledPage, list[str]]] = {}
-    for page, cat, _status in cells:
-        grouped.setdefault(page.id, (page, []))[1].append(cat)
+    for page, cat, _status, test_class in obligations:
+        label = f"{cat}/{_A03_TEST_CLASS_LABELS[test_class]}" if test_class else cat
+        grouped.setdefault(page.id, (page, []))[1].append(label)
 
     lines = [
         "=== ENFORCE COVERAGE MODE ===",
@@ -696,15 +785,17 @@ def _build_web_enforce_directive(run_id: int) -> str:
         "OWASP Top-10 (2025) category in the checklist below. For EVERY http_request "
         "you send, set the `owasp_category` field to the category you are testing "
         "(A01–A10) so coverage is tracked. Work through the checklist methodically; "
-        "do not call `done` until every page/category pair has been exercised, or "
+        "A03 is split into independent SQL injection, reflected XSS, and stored "
+        "XSS obligations. Set `test_class` as well as `owasp_category='A03'` for "
+        "those requests. Do not call `done` until every listed obligation has been "
+        "exercised, or "
         "you have documented why a category does not apply to a page.",
         "",
         "Coverage checklist (page → categories still to cover):",
     ]
     items = sorted(grouped.values(), key=lambda t: t[0].url)
     for page, cats in items[:60]:
-        ordered = [c for c in OWASP_WEB_CATEGORIES if c in set(cats)]
-        lines.append(f"  {page.url} → {', '.join(ordered)}")
+        lines.append(f"  {page.url} → {', '.join(cats)}")
     if len(items) > 60:
         lines.append(
             f"  … and {len(items) - 60} more pages (use context_tool page_list)."
@@ -723,11 +814,13 @@ async def _enforce_web_coverage_loop(
 ) -> dict:
     """Drive every still-uncovered web coverage cell to a terminal state.
 
-    ``prober(page, category, current_status)`` must return ``(status, reason)``
+    ``prober(page, category, current_status, test_class)`` must return
+    ``(status, reason)``
     where status is ``covered`` / ``finding`` / ``skipped``.
 
     Mirrors ``_enforce_coverage_loop`` in ``api_scanner.py``.
     """
+    import inspect
     import time as _time
 
     now_fn = now_fn or _time.monotonic
@@ -737,6 +830,10 @@ async def _enforce_web_coverage_loop(
             return False
 
     deadline = now_fn() + max(0.0, time_budget_s)
+    try:
+        prober_accepts_test_class = len(inspect.signature(prober).parameters) >= 4
+    except (TypeError, ValueError):
+        prober_accepts_test_class = True
     stats: dict[str, Any] = {
         "attempted": 0,
         "covered": 0,
@@ -746,8 +843,8 @@ async def _enforce_web_coverage_loop(
         "remaining": 0,
     }
 
-    cells = _uncovered_web_cells(run_id)
-    total = len(cells)
+    obligations = _uncovered_web_obligations(run_id)
+    total = len(obligations)
     events_svc.emit(
         run_id,
         {
@@ -759,13 +856,19 @@ async def _enforce_web_coverage_loop(
         },
     )
 
-    for idx, (page, category, current_status) in enumerate(cells):
+    for idx, (page, category, current_status, test_class) in enumerate(obligations):
         if stop_check() or stats["attempted"] >= max_attempts or now_fn() >= deadline:
             stats["budget_exhausted"] = True
             break
         stats["attempted"] += 1
         try:
-            status, reason = await prober(page, category, current_status)
+            if prober_accepts_test_class:
+                status, reason = await prober(
+                    page, category, current_status, test_class
+                )
+            else:
+                # Preserve compatibility with custom three-argument probers.
+                status, reason = await prober(page, category, current_status)
         except Exception as exc:
             log.warning(
                 "enforce prober error page=%s cat=%s: %s", page.id, category, exc
@@ -779,6 +882,7 @@ async def _enforce_web_coverage_loop(
             category,
             status,
             skip_reason=reason if status == "skipped" else None,
+            test_class=test_class,
         )
         stats[status] += 1
         if (idx + 1) % 5 == 0 or idx + 1 == total:
@@ -794,13 +898,14 @@ async def _enforce_web_coverage_loop(
             )
 
     # Close out anything not reached within budget.
-    for page, category, _status in _uncovered_web_cells(run_id):
+    for page, category, _status, test_class in _uncovered_web_obligations(run_id):
         update_web_coverage_cell(
             run_id,
             page.id,
             category,
             "skipped",
             skip_reason="coverage budget exhausted",
+            test_class=test_class,
         )
         stats["skipped"] += 1
 
@@ -834,10 +939,12 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
     """
     from aespa.services import llm as llm_svc
 
-    # page_id → {category: (status, reason)}
-    _cache: dict[int, dict[str, tuple[str, str]]] = {}
+    # page_id → {(category, test_class): (status, reason)}
+    _cache: dict[int, dict[tuple[str, str | None], tuple[str, str]]] = {}
 
-    async def _classify_page(page: CrawledPage) -> dict[str, tuple[str, str]]:
+    async def _classify_page(
+        page: CrawledPage,
+    ) -> dict[tuple[str, str | None], tuple[str, str]]:
         try:
             applicable_raw = json.loads(page.owasp_applicable_json or "{}")
         except Exception:
@@ -845,7 +952,25 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
         cats = [c for c in OWASP_WEB_CATEGORIES if applicable_raw.get(c)]
         if not cats:
             return {}
-        cat_lines = "\n".join(f"  - {c} ({OWASP_WEB_LABELS.get(c, c)})" for c in cats)
+        obligations = [
+            (cat, test_class)
+            for cat in cats
+            for test_class in (
+                _A03_INPUT_TEST_CLASSES
+                if cat == "A03" and page.takes_input
+                else (None,)
+            )
+        ]
+        obligation_keys = {
+            (cat, test_class): (
+                f"A03:{test_class}" if test_class is not None else cat
+            )
+            for cat, test_class in obligations
+        }
+        cat_lines = "\n".join(
+            f"  - {key} ({_A03_TEST_CLASS_LABELS[test_class] if test_class else OWASP_WEB_LABELS.get(cat, cat)})"
+            for (cat, test_class), key in obligation_keys.items()
+        )
         prompt = (
             "You are triaging OWASP Top-10 (2025) test coverage for a single web "
             "page that an automated scan did not explicitly exercise. For each "
@@ -855,12 +980,12 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
             f"Requires auth: {bool(page.req_auth)}\n"
             f"Takes user input: {bool(page.takes_input)}\n\n"
             f"Categories to triage:\n{cat_lines}\n\n"
-            "Reply with ONLY a JSON object mapping each category id to "
+            "Reply with ONLY a JSON object mapping each listed obligation id to "
             '{"applicable": true|false, "reason": "one short sentence"}. '
             "Mark applicable=false only when the category cannot meaningfully apply "
             "to this page. No prose, no markdown fences."
         )
-        decisions: dict[str, tuple[str, str]] = {}
+        decisions: dict[tuple[str, str | None], tuple[str, str]] = {}
         try:
             raw = await llm_svc.plain_completion(llm_cfg, prompt)
             cleaned = re.sub(
@@ -872,26 +997,35 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
         except Exception as exc:
             log.debug("enforce classify failed page=%s: %s", page.id, exc)
             parsed = {}
-        for cat in cats:
-            d = parsed.get(cat) if isinstance(parsed, dict) else None
+        for obligation, key in obligation_keys.items():
+            d = parsed.get(key) if isinstance(parsed, dict) else None
             reason = (d or {}).get("reason", "") if isinstance(d, dict) else ""
             if isinstance(d, dict) and d.get("applicable") is False:
-                decisions[cat] = (
+                decisions[obligation] = (
                     "skipped",
                     f"not applicable: {reason}".strip().rstrip(":"),
                 )
             else:
                 note = reason or "applicable but not reached by the scan"
-                decisions[cat] = ("skipped", f"not covered within scan budget — {note}")
+                decisions[obligation] = (
+                    "skipped",
+                    f"not covered within scan budget — {note}",
+                )
         return decisions
 
-    async def _prober(page: CrawledPage, category: str, current_status: str):
+    async def _prober(
+        page: CrawledPage,
+        category: str,
+        current_status: str,
+        test_class: str | None = None,
+    ):
         if current_status == "in_progress":
             return ("covered", None)
         if page.id not in _cache:
             _cache[page.id] = await _classify_page(page)
         return _cache[page.id].get(
-            category, ("skipped", "applicable but not reached by the scan")
+            (category, test_class),
+            ("skipped", "applicable but not reached by the scan"),
         )
 
     return _prober
@@ -918,8 +1052,10 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                 "run_id": run_id,
                 "coverage_mode": getattr(run, "coverage_mode", "track") or "track",
                 "categories": OWASP_WEB_CATEGORIES,
+                "columns": _web_coverage_columns(),
                 "pages": [],
                 "totals": {st: 0 for st in _STATUS_RANK},
+                "column_totals": {st: 0 for st in _STATUS_RANK},
                 "seeded": False,
             }
 
@@ -1035,6 +1171,8 @@ def get_web_coverage_matrix(run_id: int) -> dict:
     class_totals: dict[str, dict[str, int]] = defaultdict(
         lambda: {st: 0 for st in _STATUS_RANK}
     )
+    column_totals: dict[str, int] = {st: 0 for st in _STATUS_RANK}
+    coverage_columns = _web_coverage_columns()
     page_rows: list[dict] = []
 
     for pattern, g in sorted(groups.items()):
@@ -1046,6 +1184,33 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                 class_status = str(class_state.get("status") or "not_started")
                 class_totals[test_class][class_status] = (
                     class_totals[test_class].get(class_status, 0) + 1
+                )
+        # Expose A03 obligations as real matrix cells while retaining the parent
+        # A03 cell for API compatibility and detailed finding attribution.
+        a03_cell = g["cells"].get("A03")
+        if a03_cell:
+            for test_class in _A03_INPUT_TEST_CLASSES:
+                class_state = a03_cell.get("test_classes", {}).get(test_class)
+                if class_state is None:
+                    continue
+                class_fids = list(class_state.get("finding_ids") or [])
+                g["cells"][f"A03:{test_class}"] = {
+                    "status": str(class_state.get("status") or "not_started"),
+                    "skip_reason": class_state.get("skip_reason"),
+                    "finding_ids": class_fids,
+                    "findings": [
+                        finding
+                        for finding in a03_cell.get("findings", [])
+                        if finding.get("id") in class_fids
+                    ],
+                    "test_class": test_class,
+                }
+        for column in coverage_columns:
+            display_cell = g["cells"].get(str(column["key"]))
+            if display_cell is not None:
+                display_status = str(display_cell.get("status") or "not_started")
+                column_totals[display_status] = (
+                    column_totals.get(display_status, 0) + 1
                 )
         rep = g["pages"][0]
         page_rows.append(
@@ -1063,8 +1228,10 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         "run_id": run_id,
         "coverage_mode": coverage_mode,
         "categories": OWASP_WEB_CATEGORIES,
+        "columns": coverage_columns,
         "pages": page_rows,
         "totals": totals,
+        "column_totals": column_totals,
         "class_totals": dict(class_totals),
         "seeded": True,
     }

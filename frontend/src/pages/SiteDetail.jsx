@@ -624,6 +624,9 @@ export function TestRunDetail({
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canStartThinking = !thinkingStopRequested && canStartAnyScan && ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
+  if (!run) {
+    return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
+  }
   return <>
     <WebRunHeader
       run={run} siteName={siteName} profiles={runProfiles} headerStatus={headerStatus}

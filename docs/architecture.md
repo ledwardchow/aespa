@@ -552,6 +552,7 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
+- `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
 - `TestRun.coverage_mode` selects **Track** (observe only) or **Enforce**; in Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget.
 - `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
 

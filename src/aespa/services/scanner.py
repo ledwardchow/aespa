@@ -7576,6 +7576,7 @@ async def _do_agentic_thinking_loop(
                 # cookies first so a prior authenticated step can't leak into an
                 # anonymous/other-user navigation, then install exactly the selected
                 # session (default → restore the primary session).
+                cookie_list: list[dict] = []
                 with contextlib.suppress(Exception):
                     await browser_ctx.clear_cookies()
                 if selected_session is not None:
@@ -7674,6 +7675,33 @@ async def _do_agentic_thinking_loop(
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
             completion_policy.record_progress(f"browser-route:{final_url}")
+            if not is_api_run and resp_status:
+                try:
+                    from aespa.services.web_route_inventory import enrich_dynamic_route
+
+                    await enrich_dynamic_route(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        url=final_url,
+                        method="GET",
+                        request_body=(
+                            {"steps": steps_list}
+                            if any(
+                                str(browser_step.get("action") or "").lower()
+                                in {"fill", "select", "type"}
+                                for browser_step in steps_list
+                                if isinstance(browser_step, dict)
+                            )
+                            else None
+                        ),
+                        response_status=resp_status,
+                        response_headers=resp_headers,
+                        response_body=resp_body,
+                        authenticated=bool(cookie_list),
+                        browser_observation=True,
+                    )
+                except Exception as _route_exc:
+                    log.debug("Dynamic browser route enrichment failed: %s", _route_exc)
             # Evict expired/invalid named sessions from the vault on 401/403
             _br_session_evicted = False
             if (
@@ -8588,6 +8616,31 @@ async def _do_agentic_thinking_loop(
             )
         for _path in _js_paths:
             completion_policy.record_progress(f"route:{_path}")
+        if not is_api_run and hr_resp_status:
+            try:
+                from aespa.services.web_route_inventory import enrich_dynamic_route
+
+                await enrich_dynamic_route(
+                    run_id=run_id,
+                    llm_cfg=llm_cfg,
+                    url=hr_url,
+                    method=hr_method,
+                    request_headers=hr_headers,
+                    request_body=hr_req_body_str,
+                    response_status=hr_resp_status,
+                    response_headers=hr_resp_headers,
+                    response_body=hr_resp_body,
+                    authenticated=bool(
+                        hr_use_session
+                        or hr_sent_cookies
+                        or any(
+                            str(key).lower() in {"authorization", "cookie"}
+                            for key in hr_headers
+                        )
+                    ),
+                )
+            except Exception as _route_exc:
+                log.debug("Dynamic HTTP route enrichment failed: %s", _route_exc)
         # Notify the web/API coverage tracker with the declared OWASP category.
         if post_probe_fn is not None:
             if _hr_owasp:
@@ -8596,7 +8649,11 @@ async def _do_agentic_thinking_loop(
                         post_probe_fn(hr_url, hr_method, _hr_owasp)
                     else:
                         post_probe_fn(
-                            hr_url, hr_method, _hr_owasp, _hr_test_class or None
+                            hr_url,
+                            hr_method,
+                            _hr_owasp,
+                            _hr_test_class or None,
+                            hr_resp_status,
                         )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
