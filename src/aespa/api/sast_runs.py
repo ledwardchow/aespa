@@ -24,6 +24,7 @@ from aespa.models import (
 )
 from aespa.schemas import SastRunSummary, ScanLeadOut
 from aespa.services import events as events_svc
+from aespa.services import llm as llm_svc
 from aespa.services import run_cleanup
 
 _UTC = timezone.utc
@@ -178,6 +179,16 @@ def stream_events(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.get("/api/sast-runs/{run_id}/token-usage")
+def get_token_usage(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Return accumulated LLM token usage for this SAST run."""
+    _get_run_or_404(session, run_id)
+    return llm_svc.get_run_token_usage(run_id, run_kind="sast")
 
 
 # ── Agent log ─────────────────────────────────────────────────────────────────

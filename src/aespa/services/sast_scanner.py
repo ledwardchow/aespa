@@ -522,6 +522,7 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         llm_svc.set_run_context(
             sast_run_id,
             lambda evt: events_svc.emit(sast_run_id, evt),
+            run_kind="sast",
         )
 
         events_svc.emit(sast_run_id, {
