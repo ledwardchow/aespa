@@ -2126,7 +2126,9 @@ async def run_api_alice_turn_stream(
         if "configured_primary" not in session_vault:
             session_vault["configured_primary"] = entry
 
-    llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
+    llm_svc.set_run_context(
+        api_run_id, lambda evt: events_svc.emit(api_run_id, evt), run_kind="api"
+    )
 
     # Scope-check closure uses a minimal copy of collection data (no DB session).
 

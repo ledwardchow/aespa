@@ -1,5 +1,6 @@
 import React from "react";
 import { IconSend } from "../../components/Icons";
+import { TokenUsageBar } from "../../components/TokenUsageBar";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 import { renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, renderAliceBlocks } from "../../lib/aliceRender";
@@ -9,39 +10,8 @@ export function WebRunActivityTab(props) {
     <>
       <div className="activity-panel">
           {(() => {
-          
-          const fmtTok = n => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M" : n >= 1_000 ? (n / 1_000).toFixed(1) + "K" : String(n || 0);
-          const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
           return <>
-              <div className="activity-token-bar" onClick={hasTokens ? () => setTokenExpanded(p => !p) : undefined} style={{
-              cursor: hasTokens ? "pointer" : "default"
-            }}>
-                {hasTokens ? <>
-                  <span className="token-bar-label">Tokens</span>
-                  <span className="token-bar-in" title="Input tokens">↑{fmtTok(tokenUsage.total_input)} in</span>
-                  <span className="token-bar-sep">·</span>
-                  <span className="token-bar-out" title="Output tokens">↓{fmtTok(tokenUsage.total_output)} out</span>
-                  {tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0 ? <>
-                    <span className="token-bar-sep">·</span>
-                    {tokenUsage.total_cache_read > 0 ? <span className="token-bar-cache-read" title="Cache read tokens">⚡{fmtTok(tokenUsage.total_cache_read)} cached</span> : null}
-                    {tokenUsage.total_cache_write > 0 ? <span className="token-bar-cache-write" title="Cache write tokens">✎{fmtTok(tokenUsage.total_cache_write)} written</span> : null}
-                  </> : null}
-                  <span className="activity-expand-chevron" style={{
-                  marginLeft: 4
-                }}>{tokenExpanded ? "▲" : "▼"}</span>
-                </> : <span className="token-bar-empty">No token data yet</span>}
-              </div>
-              {tokenExpanded && hasTokens && <div className="token-breakdown">
-                  {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => <div key={model} className="token-breakdown-row">
-                      <span className="token-model-name">{model}</span>
-                      <span className="token-in">↑{fmtTok(v.input)}</span>
-                      <span className="token-out">↓{fmtTok(v.output)}</span>
-                      {v.cache_read > 0 || v.cache_write > 0 ? <>
-                        {v.cache_read > 0 ? <span className="token-cache-read" title="Cache read">⚡{fmtTok(v.cache_read)}</span> : null}
-                        {v.cache_write > 0 ? <span className="token-cache-write" title="Cache write">✎{fmtTok(v.cache_write)}</span> : null}
-                      </> : null}
-                    </div>)}
-                </div>}
+              <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
               <div className="activity-sub-tab-bar">
                 <button className={"activity-sub-tab-btn" + (activitySubTab === "agents" ? " active" : "")} onClick={() => setActivitySubTab("agents")}>Agents{agents.map(normalizeAgentForRun).some(a => a.status === "active") ? " ●" : ""}</button>
                 <button className={"activity-sub-tab-btn" + (activitySubTab === "specialists" ? " active" : "")} onClick={() => setActivitySubTab("specialists")}>Specialist{agents.filter(a => a.id.startsWith("specialist-")).some(a => a.status === "active") ? " ●" : ""}</button>

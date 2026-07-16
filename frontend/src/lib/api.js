@@ -68,10 +68,13 @@ export const api = {
   getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
   getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
   getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
-  createStandaloneSastRun: (file, name) => {
+  getSastTokenUsage:   (id)       => req(`/api/sast-runs/${id}/token-usage`),
+  getApiTokenUsage:    (id)       => req(`/api/api-test-runs/${id}/token-usage`),
+  createStandaloneSastRun: (file, name, llm_profile_id) => {
     const fd = new FormData();
     fd.append("file", file);
     if (name) fd.append("name", name);
+    if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
     return fetch(`/api/sast-runs`, { method:"POST", body:fd })
       .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
   },

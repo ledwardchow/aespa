@@ -23,6 +23,7 @@ export function useRoute() {
   if (hash === "#/apis")                                 return { name: "api-list" };
   if ((m = hash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/))) return { name: "api-run-detail", id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/api-runs\/(\d+)$/)))          return { name: "api-run-detail", id: +m[1] };
+  if (hash === "#/sast-runs/new")                              return { name: "sast-run-new" };
   if (hash === "#/sast-runs")                                  return { name: "sast-list" };
   if ((m = hash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/))) return { name: "sast-run-detail", id: +m[1], tab: m[2] };
   if ((m = hash.match(/^#\/sast-runs\/(\d+)$/)))            return { name: "sast-run-detail", id: +m[1] };
