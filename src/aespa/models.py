@@ -17,6 +17,7 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"  # existing single-page Playwright form fill
     totp = "totp"  # auto + TOTP 2FA code from stored seed
+    entra_id = "entra_id"  # Microsoft Entra ID multi-page browser flow
     guided = "guided"  # open headed browser, user logs in manually
 
 

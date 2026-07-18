@@ -459,9 +459,24 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
   fill (hardcoded field/submit selectors, plus `_reveal_login_form` to pop a
   modal login from a small list of trigger selectors). TOTP additionally fills a
   2FA code from the stored seed.
+- **`entra_id`** — `_authenticate_entra_id` follows Microsoft Entra's multi-page
+  browser flow. It handles account pickers, username/password pages, consent,
+  stay-signed-in prompts, Authenticator notification approval, and TOTP code
+  entry when a seed is configured. Number-matching prompts and terminal status
+  are emitted to the run UI; retryable Authenticator failures wait for an
+  operator retry request. Successful cookies/storage are persisted as an Entra
+  `ScannerSession` with MFA metadata.
 - **`guided`** — `_authenticate_guided` opens a headed browser so the user logs
   in by hand; cookies/storage are captured and injected into the headless crawl
   contexts.
+
+Entra and guided modes use the run-scoped interactive-auth coordinator. A
+credential's first successful interactive login is cached so concurrent crawl
+workers and later scan phases reuse the captured state instead of opening
+competing browser/MFA flows. The API exposes an Entra retry action, while
+`entra_authenticator_prompt` and `entra_authenticator_status` events keep the run
+view synchronized with number matching, success, timeout, and retry-required
+states.
 
 **LLM-driven adaptive fallback.** When the deterministic `auto`/`totp` attempt
 fails to clear the login form (`_page_requires_login` still true) and the run has
@@ -947,6 +962,7 @@ Events are emitted at key points during crawling and scanning:
 - `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata
 - Resumed agentic checkpoints are repaired when they end on an assistant turn: AESPA appends either an explicit continuation request or matching interrupted `tool_result` blocks before calling providers that prohibit assistant-message prefill
 - `credential_discovered` — emitted when the dynamic scan finds and persists a valid credential; prompts the user to re-crawl with the new account
+- `entra_authenticator_prompt` / `entra_authenticator_status` — number-matching and lifecycle updates for interactive Microsoft Entra authentication, including retry-required, success, and timeout states
 - Error events
 
 ### UI tabs

@@ -11,7 +11,7 @@ import sys
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 from sqlmodel import Session, select
 
@@ -50,11 +50,26 @@ _active_tasks: dict[int, asyncio.Task] = {}
 _guided_registry: dict[int, asyncio.Event] = {}
 # Ready registry: credential_id -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
 _guided_ready_registry: dict[int, asyncio.Event] = {}
+# Entra Authenticator retry registry: (run_id, credential_id) -> Event set by UI Retry.
+_entra_retry_registry: dict[tuple[int, int], asyncio.Event] = {}
 # Per-run lock: ensures guided logins happen one at a time (no simultaneous browser windows)
 _guided_locks: dict[int, asyncio.Lock] = {}
 # Captured guided-session cookies/headers keyed by (run_id, credential_id) so reconcile
 # can reuse them instead of opening a second browser window.
 _guided_session_cache: dict[tuple[int, int], dict] = {}
+
+
+def _credential_cache_key(run_id: int, credential) -> tuple[int, int] | None:
+    credential_id = getattr(credential, "id", None)
+    if not run_id or credential_id is None:
+        return None
+    return (run_id, credential_id)
+
+
+def _drop_cached_browser_session(run_id: int, credential) -> None:
+    key = _credential_cache_key(run_id, credential)
+    if key is not None:
+        _guided_session_cache.pop(key, None)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -89,7 +104,41 @@ def _page_function_label(value: object) -> str | None:
 
 
 def _login_url_for_credential(default_login_url: str, cred) -> str:
-    return (getattr(cred, "login_url", None) or default_login_url or "").strip()
+    credential_login_url = (getattr(cred, "login_url", None) or "").strip()
+    default_login_url = (default_login_url or "").strip()
+    auth_mode = (getattr(cred, "auth_mode", None) or "auto").strip().lower()
+    if (
+        auth_mode == "entra_id"
+        and credential_login_url
+        and default_login_url
+        and _is_entra_auth_url(credential_login_url)
+        and not _is_entra_auth_url(default_login_url)
+    ):
+        return default_login_url
+    return credential_login_url or default_login_url
+
+
+def _is_entra_auth_url(url: str) -> bool:
+    host = urlparse(url or "").hostname or ""
+    return host.lower() in {
+        "login.microsoftonline.com",
+        "login.microsoft.com",
+        "login.live.com",
+        "login.windows.net",
+        "sts.windows.net",
+        "autologon.microsoftazuread-sso.com",
+        "aadcdn.msftauth.net",
+        "aadcdn.msauth.net",
+        "logincdn.msauth.net",
+    }
+
+
+def _entra_target_host(login_url: str) -> str:
+    parsed = urlparse(login_url)
+    if not _is_entra_auth_url(login_url):
+        return parsed.hostname or ""
+    redirect_uri = (parse_qs(parsed.query).get("redirect_uri") or [""])[0]
+    return urlparse(redirect_uri).hostname or ""
 
 
 def _crawl_seed_urls(
@@ -3547,6 +3596,7 @@ async def _goto_with_auth_recovery(
                 f"Session dropped for {username or 'user'} — re-authenticating",
                 page_url=url,
             )
+            _drop_cached_browser_session(run_id, credential)
             await _authenticate(page, login_url, credential, run_id, llm_cfg=llm_cfg)
             continue
         log.warning(
@@ -3808,6 +3858,920 @@ async def _fill_totp_if_prompted(page, credential) -> None:
         pass
     await page.wait_for_timeout(1000)
     log.info("  _fill_totp: TOTP code filled and submitted for %s", credential.username)
+
+
+_BEARER_STORAGE_KEYS = [
+    "access_token",
+    "accessToken",
+    "token",
+    "jwt",
+    "id_token",
+    "idToken",
+    "auth_token",
+    "authToken",
+    "bearer_token",
+]
+
+
+async def _capture_browser_storage(page) -> tuple[dict[str, str], dict[str, str]]:
+    local_storage: dict[str, str] = {}
+    session_storage: dict[str, str] = {}
+    try:
+        local_storage = (
+            await page.evaluate("() => Object.fromEntries(Object.entries(localStorage))")
+            or {}
+        )
+    except Exception:
+        pass
+    try:
+        session_storage = (
+            await page.evaluate(
+                "() => Object.fromEntries(Object.entries(sessionStorage))"
+            )
+            or {}
+        )
+    except Exception:
+        pass
+    return local_storage, session_storage
+
+
+def _infer_bearer_header_from_storage(
+    local_storage: dict[str, str],
+    session_storage: dict[str, str],
+    captured_headers: dict[str, str],
+) -> None:
+    all_storage = {**session_storage, **local_storage}
+    for key in _BEARER_STORAGE_KEYS:
+        value = all_storage.get(key)
+        if value and not captured_headers.get("Authorization"):
+            captured_headers["Authorization"] = f"Bearer {value}"
+            return
+    if not captured_headers.get("Authorization"):
+        for value in all_storage.values():
+            if isinstance(value, str) and value.startswith("eyJ") and value.count(".") >= 2:
+                captured_headers["Authorization"] = f"Bearer {value}"
+                return
+
+
+def _cookie_dict(cookies: list[dict]) -> dict[str, str]:
+    return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
+
+
+async def _restore_browser_storage(
+    page, local_storage: dict[str, str], session_storage: dict[str, str]
+) -> None:
+    if local_storage:
+        await page.evaluate(
+            "(entries) => { for (const [k,v] of Object.entries(entries)) "
+            "localStorage.setItem(k, v); }",
+            local_storage,
+        )
+    if session_storage:
+        await page.evaluate(
+            "(entries) => { for (const [k,v] of Object.entries(entries)) "
+            "sessionStorage.setItem(k, v); }",
+            session_storage,
+        )
+
+
+async def _visible_locator(page, selector: str):
+    try:
+        root = page.locator(selector)
+        if not hasattr(root, "count"):
+            loc = root.first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc
+            return None
+        count = await root.count()
+        for idx in range(min(count, 10)):
+            loc = root.nth(idx) if hasattr(root, "nth") else root.first
+            if await loc.is_visible():
+                return loc
+    except Exception:
+        pass
+    return None
+
+
+async def _click_first_visible(page, selectors: list[str]) -> bool:
+    for selector in selectors:
+        loc = await _visible_locator(page, selector)
+        if loc is None:
+            continue
+        try:
+            await loc.click()
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def _fill_first_visible(page, selectors: list[str], value: str) -> bool:
+    for selector in selectors:
+        loc = await _visible_locator(page, selector)
+        if loc is None:
+            continue
+        try:
+            await loc.fill(value)
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def _press_enter(page) -> bool:
+    try:
+        keyboard = getattr(page, "keyboard", None)
+        if keyboard is None:
+            return False
+        await keyboard.press("Enter")
+        return True
+    except Exception:
+        return False
+
+
+async def _entra_page_text(page) -> str:
+    try:
+        return str(
+            await page.evaluate(
+                """() => {
+                    const body = (document.body && document.body.innerText) || "";
+                    const attrText = Array.from(
+                        document.querySelectorAll(
+                            "input,button,a,div,span,[aria-label],[title]"
+                        )
+                    ).slice(0, 300).flatMap((el) => [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute("aria-label"),
+                        el.getAttribute("title"),
+                        el.getAttribute("value"),
+                        el.value,
+                    ]).filter(Boolean).join("\\n");
+                    return `${body}\\n${attrText}`.slice(0, 12000);
+                }"""
+            )
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _entra_text_requires_guided(text: str) -> bool:
+    markers = [
+        "multi-factor authentication",
+        "more information required",
+        "help us protect your account",
+        "additional security verification",
+        "your organization requires",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _entra_text_requests_totp(text: str) -> bool:
+    markers = [
+        "enter code",
+        "verification code",
+        "enter the code",
+        "code from your authenticator app",
+        "code displayed in the authenticator app",
+        "use a verification code",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _entra_notification_number(text: str) -> str | None:
+    if "authenticator" not in text and "approve" not in text and "sign in request" not in text:
+        return None
+    has_number_matching_hint = any(
+        marker in text
+        for marker in (
+            "enter the number",
+            "number shown",
+            "number below",
+            "enter this number",
+            "type this number",
+            "match the number",
+            "approve sign in request",
+            "open your authenticator app",
+            "open the authenticator app",
+            "open microsoft authenticator",
+            "enter the code displayed",
+            "enter the code shown",
+            "enter number",
+            "shown in the app",
+            "displayed on your screen",
+            "displayed in your browser",
+        )
+    )
+    if not has_number_matching_hint:
+        return None
+    matches = re.findall(r"\b(\d{2,3})\b", text)
+    return matches[-1] if matches else None
+
+
+def _entra_text_offers_notification(text: str) -> bool:
+    markers = [
+        "approve a request",
+        "approve sign in request",
+        "microsoft authenticator app",
+        "send a notification",
+        "send me a push",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _entra_text_has_retryable_authenticator_failure(text: str) -> bool:
+    text = (text or "").lower()
+    failure_markers = [
+        "request denied",
+        "request was denied",
+        "sign in request denied",
+        "sign in request was denied",
+        "you denied the request",
+        "you entered the wrong number",
+        "wrong number",
+        "incorrect number",
+        "authentication failed",
+        "verification failed",
+        "we didn't hear from you",
+        "timed out",
+    ]
+    retry_markers = [
+        "try again",
+        "send another request",
+        "send a new request",
+        "request a new notification",
+    ]
+    return any(marker in text for marker in failure_markers) and any(
+        marker in text for marker in retry_markers
+    )
+
+
+def _entra_text_offers_sso_provider(text: str) -> bool:
+    markers = [
+        "azure ad",
+        "microsoft entra",
+        "microsoft 365",
+        "sign in with microsoft",
+        "continue with microsoft",
+        "single sign-on",
+    ]
+    return any(marker in text for marker in markers)
+
+
+async def _entra_page_has_sso_provider_control(page) -> bool:
+    return (
+        await _visible_locator(
+            page,
+            "button:has-text('Azure AD'), a:has-text('Azure AD'), "
+            "div[role='button']:has-text('Azure AD'), "
+            "button:has-text('Microsoft Entra'), a:has-text('Microsoft Entra'), "
+            "button:has-text('Microsoft'), a:has-text('Microsoft'), "
+            "div[role='button']:has-text('Microsoft'), "
+            "button:has-text('SSO'), a:has-text('SSO')",
+        )
+        is not None
+    )
+
+
+def _entra_page_kind(text: str, url: str) -> str:
+    if _entra_text_has_retryable_authenticator_failure(text):
+        return "authenticator_retry"
+    if _entra_notification_number(text):
+        return "authenticator_number"
+    if _entra_text_offers_notification(text):
+        return "authenticator_notification"
+    if _entra_text_requests_totp(text):
+        return "totp"
+    if _entra_text_offers_sso_provider(text):
+        return "sso_provider"
+    if "pick an account" in text or "use another account" in text:
+        return "account_picker"
+    if "password" in text:
+        return "password"
+    if "sign in" in text or "email" in text:
+        return "username"
+    if _is_entra_auth_url(url):
+        return "entra"
+    return "unknown"
+
+
+def _short_url_for_log(url: str) -> str:
+    parsed = urlparse(url or "")
+    path = parsed.path or "/"
+    if len(path) > 80:
+        path = f"{path[:77]}..."
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def _emit_entra_notification_prompt(
+    run_id: int, credential_id: int | None, username: str, number: str | None
+) -> None:
+    if number:
+        message = (
+            f"Attempting Entra login as {username} - open Authenticator and enter {number}"
+        )
+    else:
+        message = (
+            f"Attempting Entra login as {username} - open Authenticator and approve "
+            "the sign-in request"
+        )
+    try:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "entra_authenticator_prompt",
+                "credential_id": credential_id,
+                "username": username,
+                "number": number,
+                "message": message,
+            },
+        )
+    except Exception:
+        pass
+    _crawl_log(
+        run_id,
+        "auth",
+        "info",
+        message,
+        data={
+            "auth_provider": "entra_id",
+            "mfa_mode": "notification",
+            "number": number,
+        },
+    )
+
+
+def _emit_entra_authenticator_status(
+    run_id: int,
+    credential_id: int | None,
+    username: str,
+    status: str,
+    number: str | None = None,
+) -> None:
+    if status == "success":
+        message = f"Entra login confirmed for {username}."
+        log_status = "complete"
+    elif status == "retry_required":
+        message = (
+            f"Entra Authenticator approval failed for {username}. "
+            "Check Authenticator, then click Retry to request a new number."
+        )
+        log_status = "error"
+    else:
+        message = (
+            f"Timed out waiting for Entra Authenticator approval for {username}. "
+            "Retry the run, use a TOTP seed, or switch this credential to guided login."
+        )
+        log_status = "error"
+    try:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "entra_authenticator_status",
+                "credential_id": credential_id,
+                "username": username,
+                "number": number,
+                "status": status,
+                "message": message,
+            },
+        )
+    except Exception:
+        pass
+    _crawl_log(
+        run_id,
+        "auth",
+        log_status,
+        message,
+        data={
+            "auth_provider": "entra_id",
+            "mfa_mode": "notification",
+            "number": number,
+            "status": status,
+        },
+    )
+
+
+async def _entra_fill_totp_if_prompted(page, credential, run_id: int) -> bool:
+    seed = (getattr(credential, "totp_seed", None) or "").strip()
+    if not seed:
+        return False
+    try:
+        import pyotp
+
+        code = pyotp.TOTP(seed).now()
+    except Exception as exc:
+        log.warning("  _authenticate_entra_id: could not generate TOTP code: %s", exc)
+        return False
+
+    filled = await _fill_first_visible(
+        page,
+        [
+            "input[autocomplete='one-time-code']",
+            "input#idTxtBx_SAOTCC_OTC",
+            "input[name='otc']",
+            "input[name*='otp' i]",
+            "input[id*='otp' i]",
+            "input[name*='code' i]",
+            "input[id*='code' i]",
+            "input[type='tel']",
+            "input[type='text']",
+        ],
+        code,
+    )
+    if not filled:
+        return False
+    _crawl_log(
+        run_id,
+        "auth",
+        "info",
+        f"Entered Entra ID authenticator-app TOTP for {credential.username}",
+        data={"auth_provider": "entra_id", "mfa_mode": "totp"},
+    )
+    await _click_first_visible(
+        page,
+        [
+            "input#idSubmit_SAOTCC_Continue",
+            "input#idSIButton9",
+            "button[type='submit']",
+            "input[type='submit']",
+            "button:has-text('Verify')",
+            "button:has-text('Next')",
+            "button:has-text('Continue')",
+            "button:has-text('Sign in')",
+        ],
+    )
+    return True
+
+
+async def _wait_for_entra_authenticator_retry(
+    page,
+    run_id: int,
+    credential_id: int,
+    username: str,
+    number: str | None,
+) -> bool:
+    retry_event = asyncio.Event()
+    key = (run_id, credential_id)
+    _entra_retry_registry[key] = retry_event
+    _emit_entra_authenticator_status(
+        run_id,
+        credential_id,
+        username,
+        "retry_required",
+        number,
+    )
+    try:
+        await asyncio.wait_for(retry_event.wait(), timeout=300)
+    except TimeoutError:
+        return False
+    finally:
+        _entra_retry_registry.pop(key, None)
+
+    clicked = await _click_first_visible(
+        page,
+        [
+            "button:has-text('Try again')",
+            "a:has-text('Try again')",
+            "input[value='Try again']",
+            "button:has-text('Send another request')",
+            "a:has-text('Send another request')",
+            "button:has-text('Send a new request')",
+            "a:has-text('Send a new request')",
+            "button:has-text('Request a new notification')",
+            "a:has-text('Request a new notification')",
+            "input#idSubmit_SAOTCC_TryAgain",
+            "input#idSIButton9",
+        ],
+    )
+    if clicked:
+        _crawl_log(
+            run_id,
+            "auth",
+            "info",
+            f"Retrying Entra Authenticator approval for {username}",
+            data={"auth_provider": "entra_id", "mfa_mode": "notification"},
+        )
+    return clicked
+
+
+async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) -> None:
+    """Provider-aware Microsoft Entra ID username/password flow.
+
+    This handles the stable Microsoft hosted pages deterministically and leaves
+    MFA, device compliance, and conditional-access approval to guided mode.
+    """
+    username = getattr(credential, "username", "?")
+    target_host = _entra_target_host(login_url)
+    captured_headers: dict[str, str] = {}
+
+    async def _capture_auth_header(request) -> None:
+        try:
+            auth = request.headers.get("authorization")
+        except Exception:
+            auth = None
+        if auth and not captured_headers.get("Authorization"):
+            captured_headers["Authorization"] = auth
+
+    try:
+        page.context.on("request", _capture_auth_header)
+    except Exception:
+        pass
+
+    _crawl_log(run_id, "auth", "start", f"Authenticating with Entra ID as {username}...")
+    try:
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=20_000)
+    except Exception as exc:
+        log.warning("  _authenticate_entra_id: initial navigation failed: %s", exc)
+
+    completed = False
+    needs_guided = False
+    needs_guided_reason = "MFA or conditional access"
+    notified_numbers: set[str] = set()
+    notified_waiting_for_approval = False
+    authenticator_prompted = False
+    last_authenticator_number: str | None = None
+    username_submitted = False
+    password_submitted = False
+    last_no_action_signature = ""
+    retry_failure_grace_until = 0.0
+    authenticator_wait_until: float | None = None
+    for step in range(500):
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=6_000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(600)
+        except Exception:
+            pass
+
+        current_host = urlparse(page.url or "").hostname or ""
+        text = await _entra_page_text(page)
+        page_kind = _entra_page_kind(text, page.url)
+        has_sso_provider_control = False
+        if not _is_entra_auth_url(page.url) and _entra_text_offers_sso_provider(text):
+            has_sso_provider_control = await _entra_page_has_sso_provider_control(page)
+        if target_host and current_host == target_host and not _is_entra_auth_url(page.url):
+            if (
+                not has_sso_provider_control
+                and not await _page_requires_login(page, login_url)
+            ):
+                completed = True
+                break
+
+        acted = False
+        notification_number = _entra_notification_number(text)
+        if notification_number:
+            if notification_number not in notified_numbers:
+                notified_numbers.add(notification_number)
+                authenticator_prompted = True
+                authenticator_wait_until = asyncio.get_running_loop().time() + 300.0
+                last_authenticator_number = notification_number
+                _emit_entra_notification_prompt(
+                    run_id,
+                    getattr(credential, "id", None),
+                    username,
+                    notification_number,
+                )
+            acted = True
+        retryable_failure = _entra_text_has_retryable_authenticator_failure(text)
+        if retryable_failure and asyncio.get_running_loop().time() < retry_failure_grace_until:
+            acted = True
+        if not acted and retryable_failure:
+            retry_clicked = await _wait_for_entra_authenticator_retry(
+                page,
+                run_id,
+                getattr(credential, "id", 0),
+                username,
+                last_authenticator_number,
+            )
+            if not retry_clicked:
+                needs_guided = True
+                needs_guided_reason = "a retry after failed Authenticator approval"
+                break
+            acted = True
+            notified_waiting_for_approval = False
+            notified_numbers.clear()
+            last_authenticator_number = None
+            authenticator_wait_until = asyncio.get_running_loop().time() + 300.0
+            retry_failure_grace_until = asyncio.get_running_loop().time() + 15.0
+            last_no_action_signature = ""
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=4_000)
+            except Exception:
+                pass
+            try:
+                await page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+        if (
+            not acted
+            and not notified_waiting_for_approval
+            and _entra_text_offers_notification(text)
+        ):
+            acted = await _click_first_visible(
+                page,
+                [
+                    "div[role='button']:has-text('Approve a request')",
+                    "button:has-text('Approve a request')",
+                    "a:has-text('Approve a request')",
+                    "div[role='button']:has-text('Microsoft Authenticator')",
+                    "button:has-text('Microsoft Authenticator')",
+                    "a:has-text('Microsoft Authenticator')",
+                    "div[role='button']:has-text('Send a notification')",
+                    "button:has-text('Send a notification')",
+                ],
+            )
+            if acted:
+                if not notified_waiting_for_approval:
+                    notified_waiting_for_approval = True
+                    authenticator_prompted = True
+                    authenticator_wait_until = (
+                        asyncio.get_running_loop().time() + 300.0
+                    )
+                    _emit_entra_notification_prompt(
+                        run_id,
+                        getattr(credential, "id", None),
+                        username,
+                        None,
+                    )
+                _crawl_log(
+                    run_id,
+                    "auth",
+                    "info",
+                    f"Selected Entra ID Authenticator notification for {username}",
+                    data={"auth_provider": "entra_id", "mfa_mode": "notification"},
+                )
+        if not acted and _entra_text_requests_totp(text):
+            acted = await _entra_fill_totp_if_prompted(page, credential, run_id)
+            if not acted and not (getattr(credential, "totp_seed", None) or "").strip():
+                needs_guided = True
+                needs_guided_reason = "a TOTP seed or interactive authenticator approval"
+                break
+        if not acted and has_sso_provider_control:
+            acted = await _click_first_visible(
+                page,
+                [
+                    "button:has-text('Azure AD')",
+                    "a:has-text('Azure AD')",
+                    "div[role='button']:has-text('Azure AD')",
+                    "button:has-text('Microsoft Entra')",
+                    "a:has-text('Microsoft Entra')",
+                    "button:has-text('Microsoft')",
+                    "a:has-text('Microsoft')",
+                    "div[role='button']:has-text('Microsoft')",
+                    "button:has-text('SSO')",
+                    "a:has-text('SSO')",
+                ],
+            )
+            if acted:
+                _crawl_log(
+                    run_id,
+                    "auth",
+                    "info",
+                    f"Selected upstream Microsoft/Entra SSO provider for {username}",
+                    data={"auth_provider": "entra_id", "sso_provider": "microsoft"},
+                )
+        if not acted and (getattr(credential, "totp_seed", None) or "").strip():
+            acted = await _click_first_visible(
+                page,
+                [
+                    'a:has-text("I can\'t use my Microsoft Authenticator app right now")',
+                    'button:has-text("I can\'t use my Microsoft Authenticator app right now")',
+                    "a:has-text('Use a different verification option')",
+                    "button:has-text('Use a different verification option')",
+                    "div[role='button']:has-text('Use a verification code')",
+                    "div[role='button']:has-text('verification code')",
+                    "button:has-text('Use a verification code')",
+                ],
+            )
+        if not acted and _entra_text_requires_guided(text):
+            needs_guided = True
+            break
+        if not acted and ("pick an account" in text or "use another account" in text):
+            acted = await _click_first_visible(
+                page,
+                [
+                    f"div[role='button']:has-text('{username}')",
+                    f"[data-test-id]:has-text('{username}')",
+                    "div[role='button']:has-text('Use another account')",
+                    "div:has-text('Use another account')",
+                ],
+            )
+        if not acted and not username_submitted:
+            acted = await _fill_first_visible(
+                page,
+                [
+                    "input[type='email']",
+                    "input[name='loginfmt']",
+                    "input#i0116",
+                    "input[autocomplete='username']",
+                ],
+                credential.username,
+            )
+            if acted:
+                try:
+                    await page.wait_for_timeout(200)
+                except Exception:
+                    pass
+                submitted = await _click_first_visible(
+                    page,
+                    [
+                        "input#idSIButton9",
+                        "button[type='submit']",
+                        "input[type='submit']",
+                        "button:has-text('Next')",
+                    ],
+                )
+                if not submitted:
+                    submitted = await _press_enter(page)
+                username_submitted = True
+                _crawl_log(
+                    run_id,
+                    "auth",
+                    "info",
+                    f"Entered Entra ID username for {username}",
+                    data={
+                        "auth_provider": "entra_id",
+                        "step": step + 1,
+                        "submitted": submitted,
+                    },
+                )
+        if not acted and not password_submitted:
+            acted = await _fill_first_visible(
+                page,
+                [
+                    "input[type='password']",
+                    "input#i0118",
+                    "input[name='passwd']",
+                    "input[autocomplete='current-password']",
+                ],
+                credential.password,
+            )
+            if acted:
+                try:
+                    await page.wait_for_timeout(200)
+                except Exception:
+                    pass
+                submitted = await _click_first_visible(
+                    page,
+                    [
+                        "input#idSIButton9",
+                        "button[type='submit']",
+                        "input[type='submit']",
+                        "button:has-text('Sign in')",
+                    ],
+                )
+                if not submitted:
+                    submitted = await _press_enter(page)
+                password_submitted = True
+                _crawl_log(
+                    run_id,
+                    "auth",
+                    "info",
+                    f"Entered Entra ID password for {username}",
+                    data={
+                        "auth_provider": "entra_id",
+                        "step": step + 1,
+                        "submitted": submitted,
+                    },
+                )
+        if not acted:
+            acted = await _click_first_visible(
+                page,
+                [
+                    "input#idSIButton9",
+                    "button:has-text('Yes')",
+                    "input[value='Yes']",
+                    "button:has-text('Accept')",
+                    "input[value='Accept']",
+                    "button:has-text('Continue')",
+                    "input[type='submit']",
+                ],
+            )
+        if not acted:
+            signature = f"{current_host}|{page_kind}|{_short_url_for_log(page.url)}"
+            if signature != last_no_action_signature:
+                last_no_action_signature = signature
+                _crawl_log(
+                    run_id,
+                    "auth",
+                    "info",
+                    f"Waiting on Entra ID page for {username}: {page_kind}",
+                    data={
+                        "auth_provider": "entra_id",
+                        "step": step + 1,
+                        "host": current_host,
+                        "url": _short_url_for_log(page.url),
+                        "page_kind": page_kind,
+                    },
+                )
+            log.debug(
+                "  _authenticate_entra_id: no action on step %d url=%s",
+                step + 1,
+                page.url,
+            )
+        now = asyncio.get_running_loop().time()
+        if authenticator_wait_until is not None and now >= authenticator_wait_until:
+            break
+        if step >= 39 and authenticator_wait_until is None:
+            break
+
+    if needs_guided:
+        if authenticator_prompted:
+            _emit_entra_authenticator_status(
+                run_id,
+                getattr(credential, "id", None),
+                username,
+                "timeout",
+                last_authenticator_number,
+            )
+        _crawl_log(
+            run_id,
+            "auth",
+            "error",
+            f"Entra ID requires {needs_guided_reason} for {username}; use guided login.",
+        )
+        return
+
+    cookies = []
+    try:
+        cookies = await page.context.cookies()
+    except Exception:
+        pass
+    local_storage, session_storage = await _capture_browser_storage(page)
+    _infer_bearer_header_from_storage(local_storage, session_storage, captured_headers)
+
+    if completed:
+        _guided_session_cache[(run_id, credential.id)] = {
+            "cookies": _cookie_dict(cookies),
+            "headers": captured_headers,
+            "local_storage": local_storage,
+            "session_storage": session_storage,
+            "provider": "entra_id",
+            "landing_url": page.url,
+            "completed": True,
+        }
+        try:
+            from aespa.services import scanner_sessions as _ss
+
+            _ss.upsert_session(
+                run_id,
+                label=f"entra_{credential.id}",
+                kind="mixed" if captured_headers else "cookie",
+                account_label=credential.label,
+                username=credential.username,
+                credential_id=credential.id,
+                source="entra_id_login",
+                cookies=_guided_session_cache[(run_id, credential.id)]["cookies"],
+                extra_headers=captured_headers or None,
+                metadata={
+                    "auth_provider": "entra_id",
+                    "login_url": login_url,
+                    "landing_url": page.url,
+                    "completed": True,
+                },
+            )
+        except Exception as exc:
+            log.warning("  _authenticate_entra_id: could not persist session: %s", exc)
+    else:
+        _drop_cached_browser_session(run_id, credential)
+
+    if captured_headers:
+        try:
+            await page.context.set_extra_http_headers(captured_headers)
+        except Exception:
+            pass
+    try:
+        await _restore_browser_storage(page, local_storage, session_storage)
+    except Exception:
+        pass
+
+    if completed:
+        if authenticator_prompted:
+            _emit_entra_authenticator_status(
+                run_id,
+                getattr(credential, "id", None),
+                username,
+                "success",
+                last_authenticator_number,
+            )
+        _crawl_log(run_id, "auth", "complete", f"Logged in with Entra ID as {username}")
+    else:
+        if authenticator_prompted:
+            _emit_entra_authenticator_status(
+                run_id,
+                getattr(credential, "id", None),
+                username,
+                "timeout",
+                last_authenticator_number,
+            )
+        _crawl_log(
+            run_id,
+            "auth",
+            "error",
+            f"Could not confirm Entra ID login for {username}; session material was captured if present.",
+        )
 
 
 async def _authenticate_guided(page, login_url: str, credential, run_id: int) -> None:
@@ -4224,12 +5188,16 @@ async def _authenticate(
     except ValueError:
         mode = AuthMode.auto
 
-    # If this is a guided credential with a pre-captured session, inject directly
-    if mode == AuthMode.guided and run_id:
-        cached = _guided_session_cache.get((run_id, credential.id))
+    # If this credential has a pre-captured browser session, inject it directly.
+    if mode in (AuthMode.guided, AuthMode.entra_id) and run_id:
+        cache_key = _credential_cache_key(run_id, credential)
+        cached = _guided_session_cache.get(cache_key) if cache_key is not None else None
+        if mode == AuthMode.entra_id and cached and not cached.get("completed"):
+            _drop_cached_browser_session(run_id, credential)
+            cached = None
         if cached:
             log.info(
-                "  _authenticate: reusing cached guided session for %s (cred_id=%s)",
+                "  _authenticate: reusing cached browser session for %s (cred_id=%s)",
                 credential.username,
                 credential.id,
             )
@@ -4287,12 +5255,15 @@ async def _authenticate(
             return
 
     username = getattr(credential, "username", "?")
-    if mode in (AuthMode.auto, AuthMode.totp):
+    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.entra_id):
         _crawl_log(run_id, "auth", "start", f"Authenticating as {username}…")
 
     if mode == AuthMode.totp:
         await _authenticate_auto(page, login_url, credential)
         await _fill_totp_if_prompted(page, credential)
+    elif mode == AuthMode.entra_id:
+        await _authenticate_entra_id(page, login_url, credential, run_id)
+        return
     elif mode == AuthMode.guided:
         await _authenticate_guided(page, login_url, credential, run_id)
         return
