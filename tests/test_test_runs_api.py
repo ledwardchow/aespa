@@ -370,6 +370,7 @@ def test_get_scanner_sessions_redacts_auth_material():
                     test_run_id=run.id,
                     label="configured_primary",
                     kind="mixed",
+                    account_label="Primary administrator",
                     username="alice",
                     credential_id=3,
                     source="test",
@@ -386,6 +387,8 @@ def test_get_scanner_sessions_redacts_auth_material():
         assert summary.counts["total"] == 1
         item = summary.sessions[0]
         assert item.label == "configured_primary"
+        assert item.account_label == "Primary administrator"
+        assert item.username == "alice"
         assert item.cookie_names == ["sid"]
         assert item.header_names == ["Authorization"]
         assert item.session_metadata["login_url"] == "https://target.local/login"
@@ -451,6 +454,36 @@ def test_update_scanner_session_renames_and_deactivates():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_validate_scanner_sessions_route(client: TestClient, monkeypatch):
+    from aespa.services import scanner_sessions
+
+    site = _make_site(client, base_url="https://target.local")
+    run = _make_run(client, site["id"]).json()
+    captured = {}
+
+    async def validate(db, run_id, **kwargs):
+        captured.update(run_id=run_id, **kwargs)
+        return {
+            "checked": 2,
+            "valid": 1,
+            "evicted": 1,
+            "errors": 0,
+            "skipped": 0,
+            "results": [],
+        }
+
+    monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
+    response = client.post(
+        f"/api/test-runs/{run['id']}/scanner-sessions/validate"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evicted"] == 1
+    assert captured["run_id"] == run["id"]
+    assert captured["run_kind"] == "web"
+    assert captured["default_url"].rstrip("/") == "https://target.local"
 
 
 def test_get_run_not_found(client: TestClient):

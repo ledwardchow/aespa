@@ -1,5 +1,7 @@
+import asyncio
+
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from aespa.services import scanner, scanner_sessions
 
@@ -20,6 +22,7 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
             1,
             label="Configured Primary",
             kind="mixed",
+            account_label="Production admin",
             username="alice",
             credential_id=7,
             source="test",
@@ -44,8 +47,12 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
         assert list(vault) == ["configured_primary"]
         assert vault["configured_primary"]["kind"] == "bearer"
         assert vault["configured_primary"]["source"] == "updated"
+        assert vault["configured_primary"]["account_label"] == "Production admin"
         assert vault["configured_primary"]["username"] == "alice"
-        assert vault["configured_primary"]["extra_headers"]["Authorization"] == "Bearer replacement-token-value"
+        assert (
+            vault["configured_primary"]["extra_headers"]["Authorization"]
+            == "Bearer replacement-token-value"
+        )
 
     finally:
         SQLModel.metadata.drop_all(engine)
@@ -71,6 +78,40 @@ def test_anonymous_session_is_first_class(monkeypatch):
         assert vault["anonymous"]["cookies"] == {}
         assert vault["anonymous"]["extra_headers"] == {}
         assert vault["anonymous"]["source"] == "dynamic_scan"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_upsert_without_identity_preserves_originating_account(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+
+        scanner_sessions.upsert_session(
+            1,
+            label="admin_session",
+            kind="cookie",
+            username="admin@example.test",
+            credential_id=9,
+            cookies={"sid": "first"},
+        )
+        refreshed = scanner_sessions.upsert_session(
+            1,
+            label="admin_session",
+            kind="cookie",
+            cookies={"sid": "refreshed"},
+        )
+
+        assert refreshed.username == "admin@example.test"
+        assert refreshed.credential_id == 9
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -113,9 +154,116 @@ def test_disposable_account_payload_redacts_password(monkeypatch):
     monkeypatch.setattr(scanner.secrets, "token_hex", lambda n: "abc12345")
 
     account = scanner._disposable_account_fields({}, base_url="https://target.local")
-    redacted = scanner._redacted_account_body(account["body"], account["password_field"])
+    redacted = scanner._redacted_account_body(
+        account["body"], account["password_field"]
+    )
 
     assert account["username"] == "aespa_abc12345"
     assert account["email"] == "aespa_abc12345@example.invalid"
     assert account["password"] == "Aespa-abc12345-Test!23"
     assert redacted["password"] == "***"
+
+
+def test_validate_active_sessions_evicts_only_explicit_rejections(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+        valid = scanner_sessions.upsert_session(
+            12,
+            label="valid_token",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer valid"},
+        )
+        invalid = scanner_sessions.upsert_session(
+            12,
+            label="expired_cookie",
+            kind="cookie",
+            cookies={"sid": "expired"},
+        )
+        scanner_sessions.ensure_anonymous_session(12)
+        scanner_sessions.upsert_session(
+            12,
+            label="api_collision",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer api"},
+            run_kind="api",
+        )
+
+        calls = []
+
+        async def request(url, headers, cookies):
+            calls.append((url, headers, cookies))
+            return 401 if cookies.get("sid") == "expired" else 200
+
+        with Session(engine) as db:
+            result = asyncio.run(
+                scanner_sessions.validate_active_sessions(
+                    db,
+                    12,
+                    run_kind="web",
+                    default_url="https://target.local/account",
+                    request_fn=request,
+                )
+            )
+            db.expire_all()
+            assert db.get(_models.ScannerSession, valid.id).is_active is True
+            assert db.get(_models.ScannerSession, invalid.id).is_active is False
+
+        assert result.checked == 2
+        assert result.valid == 1
+        assert result.evicted == 1
+        assert result.errors == 0
+        assert result.skipped == 1
+        assert len(calls) == 2
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_validate_active_sessions_preserves_tokens_on_transport_error(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+        record = scanner_sessions.upsert_session(
+            8,
+            label="unreachable_target",
+            kind="bearer",
+            extra_headers={"Authorization": "Bearer keep-me"},
+        )
+
+        async def request(url, headers, cookies):
+            raise TimeoutError("target timed out")
+
+        with Session(engine) as db:
+            result = asyncio.run(
+                scanner_sessions.validate_active_sessions(
+                    db,
+                    8,
+                    run_kind="web",
+                    default_url="https://target.local",
+                    request_fn=request,
+                )
+            )
+            assert db.get(_models.ScannerSession, record.id).is_active is True
+
+        assert result.checked == 1
+        assert result.errors == 1
+        assert result.evicted == 0
+        assert result.results[0].error == "target timed out"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()

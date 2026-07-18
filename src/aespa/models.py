@@ -641,6 +641,7 @@ class ScannerSession(SQLModel, table=True):
     kind: str = Field(
         default="cookie", index=True
     )  # anonymous | cookie | bearer | mixed
+    account_label: Optional[str] = Field(default=None, index=True)
     username: Optional[str] = Field(default=None, index=True)
     credential_id: Optional[int] = Field(
         default=None, foreign_key="credential.id", index=True

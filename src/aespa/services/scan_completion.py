@@ -13,6 +13,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from aespa.services.execution_monitor import ExecutionMonitor
+
 
 def _fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8", errors="replace")).hexdigest()[
@@ -43,6 +45,8 @@ class ScanCompletionPolicy:
     coverage_challenge_active: bool = False
     coverage_challenge_generation: int = 0
     termination_reason: str = ""
+
+    execution_monitor: ExecutionMonitor = field(default_factory=ExecutionMonitor)
 
     @classmethod
     def from_state(cls, raw: dict[str, Any] | None) -> "ScanCompletionPolicy":
@@ -83,6 +87,10 @@ class ScanCompletionPolicy:
         # A checkpoint is taken after a complete tool turn, so this is the correct
         # baseline for deciding whether the next tool produces new progress.
         policy.observed_generation = policy.progress_generation
+        if "execution_monitor" in raw:
+            policy.execution_monitor = ExecutionMonitor.from_state(
+                raw.get("execution_monitor")
+            )
         return policy
 
     def to_state(self) -> dict[str, Any]:
@@ -100,6 +108,7 @@ class ScanCompletionPolicy:
             "coverage_challenge_active": self.coverage_challenge_active,
             "coverage_challenge_generation": self.coverage_challenge_generation,
             "termination_reason": self.termination_reason,
+            "execution_monitor": self.execution_monitor.to_state(),
         }
 
     def record_progress(self, key: str) -> bool:
@@ -199,15 +208,17 @@ class ScanCompletionPolicy:
             "count": int(previous.get("count") or 0) + 1 if same else 1,
         }
 
-    def observe_tool_result(self, result: str) -> str:
+    def observe_tool_result(self, result: str, *, executed: bool = True) -> str:
         """Update stagnation counters and append the one-time warning if needed."""
         if self.progress_generation > self.observed_generation:
             self.observed_generation = self.progress_generation
             self.nonprogress_tool_calls = 0
             self.stagnation_warning_emitted = False
+            self.execution_monitor.finish_step(progress_made=True, executed=executed)
             return result
 
         self.nonprogress_tool_calls += 1
+        self.execution_monitor.finish_step(progress_made=False, executed=executed)
         if (
             self.nonprogress_tool_calls >= self.stagnation_warning_calls
             and not self.stagnation_warning_emitted
@@ -225,6 +236,10 @@ class ScanCompletionPolicy:
 
     def check_termination(self) -> str | None:
         if self.termination_reason:
+            return self.termination_reason
+        monitor_reason = self.execution_monitor.check_termination()
+        if monitor_reason:
+            self.termination_reason = monitor_reason
             return self.termination_reason
         if self.nonprogress_tool_calls >= self.stagnation_stop_calls:
             self.termination_reason = (

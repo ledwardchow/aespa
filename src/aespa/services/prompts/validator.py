@@ -77,7 +77,6 @@ false-positive source.
 • Check whether the object ID appears in a public listing or URL. Sequential IDs on \
 public resources (blog posts, product catalogue) are not IDOR unless sensitive \
 user-specific data is returned.""",
-
     "A02": """\
 Disproof checklist for A02 (Cryptographic Failures):
 • Missing HTTPS: the target may sit behind a TLS-terminating reverse proxy. Verify \
@@ -88,7 +87,6 @@ proxies sometimes strip or downgrade security headers. Use compare_responses aga
 a proxy-direct and a direct path if both are reachable.
 • Weak password storage: confirm the allegedly plaintext secret appears in a live response \
 body, not only in a static export or debug log that is already access-controlled.""",
-
     "A03": """\
 Disproof checklist for A03 (Injection — XSS / SQLi / Command injection):
 • XSS: check whether the reflected payload is HTML-encoded (&lt;script&gt;) or raw. \
@@ -100,7 +98,6 @@ regardless of SQL execution. For time-based, compare actual response time agains
 baseline to rule out server slowness.
 • Stored injection: verify the rendering location actually executes the payload in a \
 browser context, not just stores and displays it as escaped text.""",
-
     "A04": """\
 Disproof checklist for A04 (Insecure Design / Business Logic):
 • Business logic flaws require precise preconditions. Reproduce the exact transaction \
@@ -112,7 +109,6 @@ combinations for operational reasons.
 • Race conditions require genuinely concurrent requests. Sequential probes cannot \
 reproduce them — if you suspect the scanner triggered one by accident, discard \
 the finding unless you can replicate it with actual concurrency.""",
-
     "A05": """\
 Disproof checklist for A05 (Security Misconfiguration):
 • Missing headers (X-Frame-Options, CSP, HSTS): re-request the endpoint directly to rule \
@@ -122,7 +118,6 @@ the same protection.
 not just an HTTP 200 with an empty body or a redirect to a login page.
 • Default credentials: confirm the login actually succeeded with a privileged response \
 (token, redirect to authenticated area), not just an HTTP 200 on the login endpoint.""",
-
     "A07": """\
 Disproof checklist for A07 (Identification and Authentication Failures):
 • Is the endpoint intentionally unauthenticated? Health checks (/health, /status, \
@@ -135,7 +130,6 @@ whether it is accepted by a protected endpoint.
 sensitive data without a session, not just a 200 OK with a generic page body.
 • Was the scanner's "unauthenticated" request genuinely cookie-free? Some HTTP clients \
 carry session cookies from a prior authenticated step automatically.""",
-
     "A10": """\
 Disproof checklist for A10 (Server-Side Request Forgery):
 • Does the application actually make an outbound request, or does it echo the URL in \

@@ -4,6 +4,7 @@ Covers the standalone SAST upload endpoint and the web-run lead-import flow
 (available SAST runs → import a copy → list imported leads). Also guards that
 the API-style SAST run shape (collection_id + document_id) still constructs.
 """
+
 from __future__ import annotations
 
 import io
@@ -73,16 +74,18 @@ def _make_completed_sast_run_with_leads(engine, n=2) -> int:
         s.commit()
         s.refresh(run)
         for i in range(n):
-            s.add(ScanLead(
-                producer_run_id=run.id,
-                producer_run_type="sast",
-                collection_id=None,
-                title=f"Lead {i}",
-                category="A03",
-                severity="high",
-                confidence=0.9,
-                status="open",
-            ))
+            s.add(
+                ScanLead(
+                    producer_run_id=run.id,
+                    producer_run_type="sast",
+                    collection_id=None,
+                    title=f"Lead {i}",
+                    category="A03",
+                    severity="high",
+                    confidence=0.9,
+                    status="open",
+                )
+            )
         s.commit()
         return run.id
 
@@ -209,6 +212,7 @@ def test_api_style_sast_run_still_constructs(env):
     """Regression: the API SAST shape (collection_id + document_id) is unaffected."""
     client, engine = env
     from aespa.services import sast_scanner
+
     run = sast_scanner.create_sast_run(
         collection_id=1,
         name="SAST for API run #1",

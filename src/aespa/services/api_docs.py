@@ -8,6 +8,7 @@ Dispatch is by ``ApiDocument.doc_type``:
   3d  freetext           — LLM extraction of endpoint list + auth notes
   3e  source_zip         — safe-unzip, framework-heuristic route scanning (+ optional LLM)
 """
+
 from __future__ import annotations
 
 import io
@@ -30,8 +31,8 @@ if TYPE_CHECKING:
 # ── Safety limits ─────────────────────────────────────────────────────────────
 
 _MAX_ZIP_ENTRIES = 5_000
-_MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024   # 100 MiB uncompressed
-_MAX_ZIP_SINGLE_BYTES = 10 * 1024 * 1024   # 10 MiB per entry
+_MAX_ZIP_TOTAL_BYTES = 100 * 1024 * 1024  # 100 MiB uncompressed
+_MAX_ZIP_SINGLE_BYTES = 10 * 1024 * 1024  # 10 MiB per entry
 _MAX_FREETEXT_LLM_CHARS = 40_000
 
 
@@ -41,20 +42,26 @@ class ParseError(Exception):
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def parse_document(session: Session, collection_id: int, document_id: int) -> None:
+
+async def parse_document(
+    session: Session, collection_id: int, document_id: int
+) -> None:
     """Parse a stored document into endpoints/credentials; update its status.
 
     Idempotent: existing endpoints from the same doc are replaced.
     """
     doc = session.get(ApiDocument, document_id)
     if doc is None or doc.collection_id != collection_id:
-        raise ParseError(f"Document {document_id} not found in collection {collection_id}")
+        raise ParseError(
+            f"Document {document_id} not found in collection {collection_id}"
+        )
 
     content = Path(doc.stored_path).read_bytes()
 
     # Re-sniff doc_type from content on every parse so that a misclassified
     # upload corrects itself on the first explicit reparse.
     from aespa.services.api_documents import _sniff_doc_type
+
     doc.doc_type = _sniff_doc_type(doc.filename, content)
 
     # Remove any existing endpoints from this doc so re-parse is clean.
@@ -90,6 +97,7 @@ async def parse_document(session: Session, collection_id: int, document_id: int)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _delete_endpoints_for_doc(session: Session, document_id: int) -> None:
     existing = list(
         session.exec(
@@ -115,7 +123,10 @@ def _upsert_endpoints(
         existing_keys.add((_norm_method(ep.method), _norm_path(ep.path)))
 
     for ep_data in endpoints:
-        key = (_norm_method(ep_data.get("method", "GET")), _norm_path(ep_data.get("path", "/")))
+        key = (
+            _norm_method(ep_data.get("method", "GET")),
+            _norm_path(ep_data.get("path", "/")),
+        )
         if key in existing_keys:
             continue
         existing_keys.add(key)
@@ -151,8 +162,8 @@ def _upsert_credentials(
 
     for cred_data in credentials:
         scheme = cred_data.get("scheme", "bearer")
-        name   = cred_data.get("name", "Authorization")
-        value  = cred_data.get("value", "")
+        name = cred_data.get("name", "Authorization")
+        value = cred_data.get("value", "")
         key = (scheme, name, value)
         if key in existing_keys:
             continue
@@ -175,9 +186,8 @@ def _update_collection_auth_summary(
 ) -> None:
     try:
         spec = _load_yaml_or_json(content)
-        schemes = (
-            spec.get("components", {}).get("securitySchemes", {})
-            or spec.get("securityDefinitions", {})
+        schemes = spec.get("components", {}).get("securitySchemes", {}) or spec.get(
+            "securityDefinitions", {}
         )
         if schemes:
             col = session.get(ApiCollection, collection_id)
@@ -380,11 +390,13 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
             for p in path_params + operation.get("parameters", []):
                 resolved = _resolve_schema_ref(spec, p) if isinstance(p, dict) else p
                 if isinstance(resolved, dict):
-                    params.append({
-                        "name": resolved.get("name", ""),
-                        "in": resolved.get("in", ""),
-                        "required": resolved.get("required", False),
-                    })
+                    params.append(
+                        {
+                            "name": resolved.get("name", ""),
+                            "in": resolved.get("in", ""),
+                            "required": resolved.get("required", False),
+                        }
+                    )
 
             # Request body (OpenAPI 3)
             req_body: dict = {}
@@ -415,19 +427,21 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
                     if sample:
                         break
 
-            endpoints.append({
-                "method": method.upper(),
-                "path": path,
-                "base_url": base_url,
-                "operation_id": operation.get("operationId"),
-                "summary": operation.get("summary"),
-                "parameters": params,
-                "request_body": req_body,
-                "security": security,
-                "auth_required": auth_required,
-                "tags": operation.get("tags", []),
-                "sample_request": sample,
-            })
+            endpoints.append(
+                {
+                    "method": method.upper(),
+                    "path": path,
+                    "base_url": base_url,
+                    "operation_id": operation.get("operationId"),
+                    "summary": operation.get("summary"),
+                    "parameters": params,
+                    "request_body": req_body,
+                    "security": security,
+                    "auth_required": auth_required,
+                    "tags": operation.get("tags", []),
+                    "sample_request": sample,
+                }
+            )
 
     if not endpoints:
         raise ParseError("No paths/operations found in OpenAPI spec")
@@ -435,6 +449,7 @@ def _parse_openapi(content: bytes, doc: ApiDocument) -> list[dict]:
 
 
 # ── 3b Postman collection ─────────────────────────────────────────────────────
+
 
 def _postman_method_url(item: dict) -> tuple[str, str, str | None]:
     req = item.get("request", {})
@@ -461,13 +476,23 @@ def _postman_method_url(item: dict) -> tuple[str, str, str | None]:
 
 
 def _postman_auth(item: dict) -> tuple[bool, list[dict]]:
-    auth = item.get("request", {}).get("auth") if isinstance(item.get("request"), dict) else None
+    auth = (
+        item.get("request", {}).get("auth")
+        if isinstance(item.get("request"), dict)
+        else None
+    )
     if not auth or not isinstance(auth, dict):
         return False, []
     auth_type = auth.get("type", "").lower()
     if auth_type == "noauth":
         return False, []
-    scheme = "bearer" if auth_type in ("bearer",) else "apikey" if auth_type == "apikey" else "other"
+    scheme = (
+        "bearer"
+        if auth_type in ("bearer",)
+        else "apikey"
+        if auth_type == "apikey"
+        else "other"
+    )
     return True, [{"security_type": auth_type, "scheme": scheme}]
 
 
@@ -486,9 +511,17 @@ def _postman_body_example(item: dict) -> dict:
         except Exception:
             return {}
     if mode == "urlencoded":
-        return {p["key"]: p.get("value", "") for p in (body.get("urlencoded") or []) if "key" in p}
+        return {
+            p["key"]: p.get("value", "")
+            for p in (body.get("urlencoded") or [])
+            if "key" in p
+        }
     if mode == "formdata":
-        return {p["key"]: p.get("value", "") for p in (body.get("formdata") or []) if "key" in p}
+        return {
+            p["key"]: p.get("value", "")
+            for p in (body.get("formdata") or [])
+            if "key" in p
+        }
     return {}
 
 
@@ -509,19 +542,21 @@ def _walk_postman_items(items: list, base_url: str | None = None) -> list[dict]:
             method, path, item_base_url = _postman_method_url(item)
             auth_required, security = _postman_auth(item)
             sample = _postman_body_example(item)
-            endpoints.append({
-                "method": method,
-                "path": path,
-                "base_url": item_base_url or base_url,
-                "operation_id": None,
-                "summary": item.get("name"),
-                "parameters": [],
-                "request_body": {},
-                "security": security,
-                "auth_required": auth_required,
-                "tags": [],
-                "sample_request": sample,
-            })
+            endpoints.append(
+                {
+                    "method": method,
+                    "path": path,
+                    "base_url": item_base_url or base_url,
+                    "operation_id": None,
+                    "summary": item.get("name"),
+                    "parameters": [],
+                    "request_body": {},
+                    "security": security,
+                    "auth_required": auth_required,
+                    "tags": [],
+                    "sample_request": sample,
+                }
+            )
         except Exception:
             continue
     return endpoints
@@ -540,7 +575,9 @@ def _parse_postman(content: bytes, doc: ApiDocument) -> tuple[list[dict], list[d
         for v in (data.get("variable") or [])
         if isinstance(v, dict)
     }
-    base_url = variables.get("baseUrl") or variables.get("base_url") or variables.get("host")
+    base_url = (
+        variables.get("baseUrl") or variables.get("base_url") or variables.get("host")
+    )
 
     # Auth at collection level
     credentials: list[dict] = []
@@ -550,17 +587,49 @@ def _parse_postman(content: bytes, doc: ApiDocument) -> tuple[list[dict], list[d
         if auth_type == "bearer":
             bearer_list = col_auth.get("bearer", [])
             token = next(
-                (x.get("value") for x in bearer_list if isinstance(x, dict) and x.get("key") == "token"),
+                (
+                    x.get("value")
+                    for x in bearer_list
+                    if isinstance(x, dict) and x.get("key") == "token"
+                ),
                 None,
             )
             if token:
-                credentials.append({"scheme": "bearer", "name": "Authorization", "value": f"Bearer {token}", "label": "postman-collection-auth"})
+                credentials.append(
+                    {
+                        "scheme": "bearer",
+                        "name": "Authorization",
+                        "value": f"Bearer {token}",
+                        "label": "postman-collection-auth",
+                    }
+                )
         elif auth_type == "apikey":
             items_list = col_auth.get("apikey", [])
-            key_name = next((x.get("value") for x in items_list if isinstance(x, dict) and x.get("key") == "key"), "X-API-Key")
-            key_val = next((x.get("value") for x in items_list if isinstance(x, dict) and x.get("key") == "value"), "")
+            key_name = next(
+                (
+                    x.get("value")
+                    for x in items_list
+                    if isinstance(x, dict) and x.get("key") == "key"
+                ),
+                "X-API-Key",
+            )
+            key_val = next(
+                (
+                    x.get("value")
+                    for x in items_list
+                    if isinstance(x, dict) and x.get("key") == "value"
+                ),
+                "",
+            )
             if key_val:
-                credentials.append({"scheme": "apikey", "name": key_name, "value": key_val, "label": "postman-collection-auth"})
+                credentials.append(
+                    {
+                        "scheme": "apikey",
+                        "name": key_name,
+                        "value": key_val,
+                        "label": "postman-collection-auth",
+                    }
+                )
 
     items = data.get("item") or []
     endpoints = _walk_postman_items(items, base_url)
@@ -571,6 +640,7 @@ def _parse_postman(content: bytes, doc: ApiDocument) -> tuple[list[dict], list[d
 
 
 # ── 3c + 3d  Free text / credentials — combined LLM extraction ───────────────
+
 
 async def _parse_freetext_llm(
     session: Session,
@@ -591,7 +661,9 @@ async def _parse_freetext_llm(
 
     llm_cfg = get_llm_config(session)
     if llm_cfg is None:
-        raise ParseError("No active LLM config — configure an LLM profile in Settings first")
+        raise ParseError(
+            "No active LLM config — configure an LLM profile in Settings first"
+        )
 
     text = content.decode("utf-8", errors="replace")[:_MAX_FREETEXT_LLM_CHARS]
 
@@ -696,18 +768,20 @@ JSON object (reply with ONLY the object, nothing else):"""
         data = json.loads(m.group(0))
     except json.JSONDecodeError as exc:
         snippet = m.group(0)[:300].replace("\n", " ")
-        raise ParseError(f"Could not parse LLM JSON: {exc}. Snippet: {snippet}") from exc
+        raise ParseError(
+            f"Could not parse LLM JSON: {exc}. Snippet: {snippet}"
+        ) from exc
 
     # ── Parse endpoints ──────────────────────────────────────────────────────
     _METHOD_ALIASES = ("method", "http_method", "verb", "type")
-    _PATH_ALIASES   = ("path", "endpoint", "url", "route", "uri")
+    _PATH_ALIASES = ("path", "endpoint", "url", "route", "uri")
 
     endpoints: list[dict] = []
-    for item in (data.get("endpoints") or []):
+    for item in data.get("endpoints") or []:
         if not isinstance(item, dict):
             continue
         method = next((item[k] for k in _METHOD_ALIASES if item.get(k)), None)
-        path   = next((item[k] for k in _PATH_ALIASES   if item.get(k)), None)
+        path = next((item[k] for k in _PATH_ALIASES if item.get(k)), None)
         if not method or not path:
             continue
         path = str(path)
@@ -716,25 +790,39 @@ JSON object (reply with ONLY the object, nothing else):"""
         if not path.startswith("/"):
             path = "/" + path
         # Pull request body / parameters / sample from the LLM item
-        request_body = item.get("request_body") or item.get("body") or item.get("requestBody") or {}
-        sample = item.get("sample_request") or item.get("example") or item.get("sample") or {}
+        request_body = (
+            item.get("request_body")
+            or item.get("body")
+            or item.get("requestBody")
+            or {}
+        )
+        sample = (
+            item.get("sample_request")
+            or item.get("example")
+            or item.get("sample")
+            or {}
+        )
         parameters = item.get("parameters") or item.get("params") or []
-        endpoints.append({
-            "method": str(method).upper(),
-            "path": path,
-            "summary": item.get("summary") or item.get("description"),
-            "auth_required": bool(item.get("auth_required", item.get("requires_auth", False))),
-            "tags": item.get("tags", []),
-            "parameters": parameters if isinstance(parameters, list) else [],
-            "request_body": request_body if isinstance(request_body, dict) else {},
-            "sample_request": sample if isinstance(sample, dict) else {},
-        })
+        endpoints.append(
+            {
+                "method": str(method).upper(),
+                "path": path,
+                "summary": item.get("summary") or item.get("description"),
+                "auth_required": bool(
+                    item.get("auth_required", item.get("requires_auth", False))
+                ),
+                "tags": item.get("tags", []),
+                "parameters": parameters if isinstance(parameters, list) else [],
+                "request_body": request_body if isinstance(request_body, dict) else {},
+                "sample_request": sample if isinstance(sample, dict) else {},
+            }
+        )
 
     # ── Parse credentials ────────────────────────────────────────────────────
     _VALID_SCHEMES = {"bearer", "apikey", "basic", "cookie", "header", "login"}
 
     credentials: list[dict] = []
-    for item in (data.get("credentials") or []):
+    for item in data.get("credentials") or []:
         if not isinstance(item, dict):
             continue
         value = item.get("value", "").strip()
@@ -761,18 +849,53 @@ JSON object (reply with ONLY the object, nothing else):"""
 # Framework routing patterns — (regex for the file path, regex for route lines, method, path group)
 _ROUTE_PATTERNS: list[tuple[str, str, str, int]] = [
     # FastAPI / Flask: @router.get("/path") / @app.route("/path", methods=["POST"])
-    (r"\.(py)$", r'@(?:\w+\.)?(?:get|post|put|patch|delete|head)\(["\']([^"\']+)["\']', "FROM_DECORATOR", 1),
-    (r"\.(py)$", r'@(?:\w+\.)?route\(["\']([^"\']+)["\'].*methods=\[["\'](.*?)["\']\]', "FROM_ROUTE", 1),
+    (
+        r"\.(py)$",
+        r'@(?:\w+\.)?(?:get|post|put|patch|delete|head)\(["\']([^"\']+)["\']',
+        "FROM_DECORATOR",
+        1,
+    ),
+    (
+        r"\.(py)$",
+        r'@(?:\w+\.)?route\(["\']([^"\']+)["\'].*methods=\[["\'](.*?)["\']\]',
+        "FROM_ROUTE",
+        1,
+    ),
     # Express.js: router.get('/path', ...) / app.post('/path', ...)
-    (r"\.(js|ts|mjs)$", r'(?:router|app)\.(get|post|put|patch|delete)\(["\`]([^"\'`]+)["\`]', "FROM_DECORATOR", 2),
+    (
+        r"\.(js|ts|mjs)$",
+        r'(?:router|app)\.(get|post|put|patch|delete)\(["\`]([^"\'`]+)["\`]',
+        "FROM_DECORATOR",
+        2,
+    ),
     # Rails: get '/path', ... / resources :users
-    (r"\.(rb)$", r'^\s*(get|post|put|patch|delete)\s+["\']([^"\']+)["\']', "FROM_DECORATOR", 2),
+    (
+        r"\.(rb)$",
+        r'^\s*(get|post|put|patch|delete)\s+["\']([^"\']+)["\']',
+        "FROM_DECORATOR",
+        2,
+    ),
     # Laravel: Route::get('/path', ...)
-    (r"\.(php)$", r'Route::(get|post|put|patch|delete)\(["\']([^"\']+)["\']', "FROM_DECORATOR", 2),
+    (
+        r"\.(php)$",
+        r'Route::(get|post|put|patch|delete)\(["\']([^"\']+)["\']',
+        "FROM_DECORATOR",
+        2,
+    ),
     # Spring: @GetMapping / @PostMapping / @RequestMapping
-    (r"\.(java|kt)$", r'@(?:Get|Post|Put|Patch|Delete|Request)Mapping\(["\']([^"\']+)["\']', "FROM_DECORATOR", 1),
+    (
+        r"\.(java|kt)$",
+        r'@(?:Get|Post|Put|Patch|Delete|Request)Mapping\(["\']([^"\']+)["\']',
+        "FROM_DECORATOR",
+        1,
+    ),
     # Go gin / echo: r.GET("/path", ...)
-    (r"\.go$", r'\.(GET|POST|PUT|PATCH|DELETE)\(["\`]([^"\'`]+)["\`]', "FROM_DECORATOR", 2),
+    (
+        r"\.go$",
+        r'\.(GET|POST|PUT|PATCH|DELETE)\(["\`]([^"\'`]+)["\`]',
+        "FROM_DECORATOR",
+        2,
+    ),
 ]
 
 
@@ -785,7 +908,9 @@ def _safe_unzip(zip_bytes: bytes) -> dict[str, bytes]:
 
     entries = zf.infolist()
     if len(entries) > _MAX_ZIP_ENTRIES:
-        raise ParseError(f"Zip has {len(entries)} entries, exceeds limit of {_MAX_ZIP_ENTRIES}")
+        raise ParseError(
+            f"Zip has {len(entries)} entries, exceeds limit of {_MAX_ZIP_ENTRIES}"
+        )
 
     total_bytes = 0
     files: dict[str, bytes] = {}
@@ -804,9 +929,30 @@ def _safe_unzip(zip_bytes: bytes) -> dict[str, bytes]:
             continue
         # Skip obviously non-code files (binaries, media, etc.)
         ext = Path(name).suffix.lower()
-        if ext in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".ttf", ".eot",
-                   ".svg", ".mp4", ".mp3", ".pdf", ".exe", ".dll", ".so", ".dylib",
-                   ".class", ".jar", ".war", ".ear", ".lock", ".sum"}:
+        if ext in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".ico",
+            ".woff",
+            ".ttf",
+            ".eot",
+            ".svg",
+            ".mp4",
+            ".mp3",
+            ".pdf",
+            ".exe",
+            ".dll",
+            ".so",
+            ".dylib",
+            ".class",
+            ".jar",
+            ".war",
+            ".ear",
+            ".lock",
+            ".sum",
+        }:
             continue
 
         if info.file_size > _MAX_ZIP_SINGLE_BYTES:
@@ -834,7 +980,17 @@ def _parse_source_zip(content: bytes, doc: ApiDocument) -> list[dict]:
     for file_path, file_bytes in files.items():
         # Only scan files with known extensions
         ext = Path(file_path).suffix.lower()
-        if ext not in {".py", ".js", ".ts", ".mjs", ".rb", ".php", ".java", ".kt", ".go"}:
+        if ext not in {
+            ".py",
+            ".js",
+            ".ts",
+            ".mjs",
+            ".rb",
+            ".php",
+            ".java",
+            ".kt",
+            ".go",
+        }:
             continue
 
         try:
@@ -849,9 +1005,15 @@ def _parse_source_zip(content: bytes, doc: ApiDocument) -> list[dict]:
                 if method_hint == "FROM_DECORATOR":
                     # The method may be the match group 0 prefix or the decorator name
                     method_part = m.group(0).split("(")[0].rsplit(".", 1)[-1].upper()
-                    method_parts = {"ROUTE": "GET", "MAPPING": "GET", "REQUESTMAPPING": "GET"}
+                    method_parts = {
+                        "ROUTE": "GET",
+                        "MAPPING": "GET",
+                        "REQUESTMAPPING": "GET",
+                    }
                     method = method_parts.get(method_part, method_part)
-                    if method.lower() not in _HTTP_METHODS and method not in ("FROM_DECORATOR",):
+                    if method.lower() not in _HTTP_METHODS and method not in (
+                        "FROM_DECORATOR",
+                    ):
                         # Try to infer from the decorator name
                         decorator = m.group(0).split("(")[0].upper()
                         for hm in _HTTP_METHODS:
@@ -874,11 +1036,13 @@ def _parse_source_zip(content: bytes, doc: ApiDocument) -> list[dict]:
                 if key in seen:
                     continue
                 seen.add(key)
-                endpoints.append({
-                    "method": method.upper(),
-                    "path": path,
-                    "summary": f"Discovered in {Path(file_path).name}",
-                })
+                endpoints.append(
+                    {
+                        "method": method.upper(),
+                        "path": path,
+                        "summary": f"Discovered in {Path(file_path).name}",
+                    }
+                )
 
     if not endpoints:
         raise ParseError("No route definitions found in source zip")
@@ -886,6 +1050,7 @@ def _parse_source_zip(content: bytes, doc: ApiDocument) -> list[dict]:
 
 
 # ── Count helpers (used by router) ───────────────────────────────────────────
+
 
 def count_endpoints(session: Session, collection_id: int) -> int:
     return len(

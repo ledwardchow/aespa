@@ -1,4 +1,5 @@
 """API routes for standalone SAST runs and explicit lead imports."""
+
 from __future__ import annotations
 
 import io
@@ -37,10 +38,13 @@ router = APIRouter(tags=["sast-runs"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _get_run_or_404(session: Session, run_id: int) -> SastRun:
     run = session.get(SastRun, run_id)
     if run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SAST run not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="SAST run not found"
+        )
     return run
 
 
@@ -49,6 +53,7 @@ def _to_summary(run: SastRun) -> SastRunSummary:
 
 
 # ── Standalone SAST run (upload archive + create, no collection) ──────────────
+
 
 @router.post(
     "/api/sast-runs",
@@ -88,8 +93,10 @@ async def create_standalone_sast_run(
     stored_path.write_bytes(content)
 
     from aespa.services import sast_scanner
+
     if llm_profile_id is not None:
         from aespa.models import LLMProfile
+
         if session.get(LLMProfile, llm_profile_id) is None:
             raise HTTPException(status_code=404, detail="Scan profile not found")
 
@@ -106,6 +113,7 @@ async def create_standalone_sast_run(
 
 # ── Global SAST runs list ──────────────────────────────────────────────────────
 
+
 @router.get("/api/sast-runs", response_model=list[SastRunSummary])
 def list_all_sast_runs(session: Session = Depends(get_session)) -> list[SastRunSummary]:
     runs = session.exec(
@@ -116,8 +124,11 @@ def list_all_sast_runs(session: Session = Depends(get_session)) -> list[SastRunS
 
 # ── Single SAST run ────────────────────────────────────────────────────────────
 
+
 @router.get("/api/sast-runs/{run_id}", response_model=SastRunSummary)
-def get_sast_run(run_id: int, session: Session = Depends(get_session)) -> SastRunSummary:
+def get_sast_run(
+    run_id: int, session: Session = Depends(get_session)
+) -> SastRunSummary:
     return _to_summary(_get_run_or_404(session, run_id))
 
 
@@ -130,6 +141,7 @@ def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> Non
 
 # ── Start / Stop / Status ──────────────────────────────────────────────────────
 
+
 @router.post("/api/sast-runs/{run_id}/scan/start")
 async def start_sast_scan(
     run_id: int,
@@ -137,6 +149,7 @@ async def start_sast_scan(
 ) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import sast_scanner
+
     await sast_scanner.start_sast_scan(run_id)
     return {"ok": True}
 
@@ -148,6 +161,7 @@ async def stop_sast_scan(
 ) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import sast_scanner
+
     stopped = await sast_scanner.stop_sast_scan(run_id)
     return {"ok": True, "stopped": stopped}
 
@@ -159,10 +173,12 @@ def sast_scan_status(
 ) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import sast_scanner
+
     return sast_scanner.get_sast_status(run_id)
 
 
 # ── SSE event stream ───────────────────────────────────────────────────────────
+
 
 @router.get("/api/sast-runs/{run_id}/events")
 def stream_events(
@@ -192,6 +208,7 @@ def get_token_usage(
 
 
 # ── Agent log ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/api/sast-runs/{run_id}/scan-log")
 def get_scan_log(
@@ -268,7 +285,9 @@ def export_agent_log(
     ]
     for r in rows:
         ts = r.created_at.strftime("%H:%M:%S") if r.created_at else ""
-        lines.append(f"### `{ts}` [{(r.status or '').upper()}] {r.role} (`{r.agent_id}`)")
+        lines.append(
+            f"### `{ts}` [{(r.status or '').upper()}] {r.role} (`{r.agent_id}`)"
+        )
         lines.append("")
         if r.current_task:
             lines.append(f"**Task:** {r.current_task}")
@@ -282,11 +301,14 @@ def export_agent_log(
     return HTTPResponse(
         content=md.encode("utf-8"),
         media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="agent-log-sast-{run_id}.md"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="agent-log-sast-{run_id}.md"'
+        },
     )
 
 
 # ── Leads ─────────────────────────────────────────────────────────────────────
+
 
 @router.get("/api/sast-runs/{run_id}/leads", response_model=list[ScanLeadOut])
 def get_sast_leads(
