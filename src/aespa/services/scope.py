@@ -2,6 +2,7 @@
 
 All checks do a fresh DB read — no caching — so changes take effect immediately.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,6 +24,7 @@ def _same_root_domain(a: str, b: str) -> bool:
     Uses the last-2-labels rule, extended to 3 labels when the second-to-last
     label is <= 3 chars (e.g. co.uk, com.au).
     """
+
     def _root(h: str) -> str:
         parts = h.lower().rstrip(".").split(".")
         if len(parts) >= 3 and len(parts[-2]) <= 3:
@@ -36,9 +38,11 @@ def _same_root_domain(a: str, b: str) -> bool:
 
 def _urls_match(a: str, b: str) -> bool:
     """Compare URLs ignoring trailing slashes and fragments."""
+
     def _norm(u: str) -> str:
         p = urlparse(u)
         return f"{p.scheme}://{p.netloc}{p.path.rstrip('/') or '/'}"
+
     return _norm(a) == _norm(b)
 
 
@@ -73,12 +77,17 @@ def register_scope_host_for_run(run_id: int, url: str) -> bool:
         site.scope_hosts = json.dumps(current)
         s.add(site)
         s.commit()
-        log.info("scope: auto-added host %s to site %d (run %d)", hostname, site.id, run_id)
+        log.info(
+            "scope: auto-added host %s to site %d (run %d)", hostname, site.id, run_id
+        )
 
-    events_svc.emit(run_id, {
-        "type": "scope_hosts_updated",
-        "scope_hosts": current,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scope_hosts_updated",
+            "scope_hosts": current,
+        },
+    )
     return True
 
 
@@ -97,7 +106,9 @@ def check_scope(url: str, site_id: int, run_id: int) -> str | None:
 
     with Session(get_engine()) as s:
         site = s.get(Site, site_id)
-        scope_hosts: list[str] = json.loads((site.scope_hosts if site else None) or "[]")
+        scope_hosts: list[str] = json.loads(
+            (site.scope_hosts if site else None) or "[]"
+        )
 
         # ── Host-level check ──────────────────────────────────────────────────
         if scope_hosts and hostname not in scope_hosts:

@@ -4,6 +4,7 @@ Raw bytes are written to disk under ``settings.data_dir``; only metadata is kept
 in the DB. Stored filenames are generated (uuid) so the user-supplied filename is
 never used to build a filesystem path (prevents path traversal).
 """
+
 from __future__ import annotations
 
 import uuid
@@ -62,7 +63,9 @@ def _sniff_doc_type(filename: str, content: bytes) -> str:
     except Exception:
         head = ""
 
-    if '"info"' in head and ('"_postman_id"' in head or "schema.getpostman.com" in head):
+    if '"info"' in head and (
+        '"_postman_id"' in head or "schema.getpostman.com" in head
+    ):
         return "postman"
     # openapi / swagger: match on content keywords first (extension is a hint, not a gate)
     if "openapi" in head:
@@ -147,11 +150,15 @@ def create_document(
     return doc
 
 
-def read_document_bytes(session: Session, collection_id: int, document_id: int) -> tuple[ApiDocument, bytes]:
+def read_document_bytes(
+    session: Session, collection_id: int, document_id: int
+) -> tuple[ApiDocument, bytes]:
     doc = get_document(session, collection_id, document_id)
     path = Path(doc.stored_path)
     if not path.is_file():
-        raise ApiDocumentNotFound(f"Stored file for document id={document_id} is missing")
+        raise ApiDocumentNotFound(
+            f"Stored file for document id={document_id} is missing"
+        )
     return doc, path.read_bytes()
 
 

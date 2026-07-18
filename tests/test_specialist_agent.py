@@ -14,8 +14,10 @@ from aespa.services.scanner import (
 # Helpers / stubs
 # ---------------------------------------------------------------------------
 
+
 class _SpecialistConfig:
     """Minimal stand-in for SpecialistAgentConfigOut."""
+
     def __init__(self, **kwargs):
         defaults = dict(
             enabled=True,
@@ -38,10 +40,10 @@ class _SpecialistConfig:
             setattr(self, k, v)
 
 
-
 # ---------------------------------------------------------------------------
 # _should_dispatch_specialist
 # ---------------------------------------------------------------------------
+
 
 def test_should_dispatch_returns_false_when_disabled():
     cfg = _SpecialistConfig(enabled=False)
@@ -92,6 +94,7 @@ def test_should_dispatch_returns_false_none_config():
 # _specialist_at_capacity
 # ---------------------------------------------------------------------------
 
+
 def test_at_capacity_false_when_none_running(tmp_path):
     run_id = 99991
     _specialist_running.pop(run_id, None)
@@ -123,6 +126,7 @@ def test_at_capacity_false_below_limit():
 # _next_specialist_agent_id
 # ---------------------------------------------------------------------------
 
+
 def test_next_specialist_agent_id_increments():
     run_id = 99994
     _specialist_seq.pop(run_id, None)
@@ -145,8 +149,10 @@ def test_next_specialist_agent_id_format():
 # SpecialistAgentConfig model defaults
 # ---------------------------------------------------------------------------
 
+
 def test_specialist_config_defaults():
     from aespa.models import SpecialistAgentConfig
+
     cfg = SpecialistAgentConfig()
     assert cfg.enabled is True
     assert cfg.max_concurrent == 5
@@ -164,6 +170,7 @@ def test_specialist_config_defaults():
 # ---------------------------------------------------------------------------
 # Settings API round-trip via TestClient
 # ---------------------------------------------------------------------------
+
 
 def test_specialist_config_api_get_returns_defaults(client):
     resp = client.get("/api/settings/specialist-agent-config")
@@ -221,8 +228,10 @@ def test_specialist_config_api_put_validates_min_priority(client):
 # SPECIALIST_AGENT_TOOLS list
 # ---------------------------------------------------------------------------
 
+
 def test_specialist_agent_tools_subset():
     from aespa.services.llm import SPECIALIST_AGENT_TOOLS, THINKING_AGENT_TOOLS
+
     specialist_names = {t["name"] for t in SPECIALIST_AGENT_TOOLS}
     # Must include core tools
     assert "http_request" in specialist_names
@@ -235,21 +244,26 @@ def test_specialist_agent_tools_subset():
     # All specialist tools must exist in THINKING_AGENT_TOOLS
     thinking_names = {t["name"] for t in THINKING_AGENT_TOOLS}
     for name in specialist_names:
-        assert name in thinking_names, f"specialist tool {name!r} not in THINKING_AGENT_TOOLS"
+        assert name in thinking_names, (
+            f"specialist tool {name!r} not in THINKING_AGENT_TOOLS"
+        )
 
 
 # ---------------------------------------------------------------------------
 # agent_dispatch in THINKING_AGENT_TOOLS
 # ---------------------------------------------------------------------------
 
+
 def test_agent_dispatch_in_thinking_tools():
     from aespa.services.llm import THINKING_AGENT_TOOLS
+
     names = {t["name"] for t in THINKING_AGENT_TOOLS}
     assert "agent_dispatch" in names
 
 
 def test_agent_dispatch_schema_has_required_properties():
     from aespa.services.llm import THINKING_AGENT_TOOLS
+
     tool = next(t for t in THINKING_AGENT_TOOLS if t["name"] == "agent_dispatch")
     props = tool["input_schema"].get("properties", {})
     required = tool["input_schema"].get("required", [])

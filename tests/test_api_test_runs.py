@@ -1,4 +1,5 @@
 """Tests for Slice 5: ApiTestRun CRUD and alias endpoints."""
+
 from __future__ import annotations
 
 import pytest
@@ -11,6 +12,7 @@ from aespa.main import create_app
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture()
 def client():
     engine = create_engine(
@@ -19,6 +21,7 @@ def client():
         poolclass=StaticPool,
     )
     from aespa import models as _models  # noqa: F401
+
     SQLModel.metadata.create_all(engine)
 
     def _override_session():
@@ -37,19 +40,25 @@ def client():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _make_collection(client: TestClient, name: str = "Test API") -> int:
-    r = client.post("/api/api-collections", json={"name": name, "base_url": "https://example.com"})
+    r = client.post(
+        "/api/api-collections", json={"name": name, "base_url": "https://example.com"}
+    )
     assert r.status_code == 201
     return r.json()["id"]
 
 
 def _make_run(client: TestClient, collection_id: int, name: str = "Run 1") -> dict:
-    r = client.post(f"/api/api-collections/{collection_id}/test-runs", json={"name": name})
+    r = client.post(
+        f"/api/api-collections/{collection_id}/test-runs", json={"name": name}
+    )
     assert r.status_code == 201
     return r.json()
 
 
 # ── List / Create ──────────────────────────────────────────────────────────────
+
 
 def test_list_runs_empty(client):
     cid = _make_collection(client)
@@ -86,6 +95,36 @@ def test_create_run_coverage_mode(client):
     assert r.json()["coverage_mode"] == "enforce"
 
 
+def test_validate_api_scanner_sessions_route(client, monkeypatch):
+    from aespa.services import scanner_sessions
+
+    cid = _make_collection(client)
+    run = _make_run(client, cid)
+    captured = {}
+
+    async def validate(db, run_id, **kwargs):
+        captured.update(run_id=run_id, **kwargs)
+        return {
+            "checked": 1,
+            "valid": 0,
+            "evicted": 1,
+            "errors": 0,
+            "skipped": 0,
+            "results": [],
+        }
+
+    monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
+    response = client.post(
+        f"/api/api-test-runs/{run['id']}/scanner-sessions/validate"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evicted"] == 1
+    assert captured["run_id"] == run["id"]
+    assert captured["run_kind"] == "api"
+    assert captured["default_url"] == "https://example.com"
+
+
 def test_list_runs_returns_newest_first(client):
     cid = _make_collection(client)
     _make_run(client, cid, "First")
@@ -103,6 +142,7 @@ def test_create_run_404_collection(client):
 
 
 # ── Get / Delete ───────────────────────────────────────────────────────────────
+
 
 def test_get_run(client):
     cid = _make_collection(client)
@@ -131,7 +171,9 @@ def test_delete_run_404(client):
     assert r.status_code == 404
 
 
-def _import_finding(client: TestClient, run_id: int, title: str = "Leaky finding") -> None:
+def _import_finding(
+    client: TestClient, run_id: int, title: str = "Leaky finding"
+) -> None:
     r = client.post(
         f"/api/api-test-runs/{run_id}/findings/import",
         json=[{"title": title, "severity": "high", "owasp_api_category": "API1"}],
@@ -215,6 +257,7 @@ def test_delete_collection_cascades_runs_and_findings(client):
 
 # ── Alice alias endpoints (session persistence) ────────────────────────────────
 
+
 def test_alice_sessions_get_empty(client):
     cid = _make_collection(client)
     run = _make_run(client, cid)
@@ -236,7 +279,13 @@ def test_alice_sessions_save_and_reload(client):
                 "id": "tab-default",
                 "title": "Session 1",
                 "messages": [
-                    {"id": "m1", "sender": "user", "type": "message", "text": "hello", "ts": "12:00"},
+                    {
+                        "id": "m1",
+                        "sender": "user",
+                        "type": "message",
+                        "text": "hello",
+                        "ts": "12:00",
+                    },
                     {
                         "id": "m2",
                         "sender": "alice",
@@ -246,7 +295,13 @@ def test_alice_sessions_save_and_reload(client):
                         "stepData": {
                             "1": {
                                 "llmMessages": [],
-                                "tools": [{"tool": "context_tool", "input": {"tool": "finding_list"}, "result": "{\"count\":0}"}],
+                                "tools": [
+                                    {
+                                        "tool": "context_tool",
+                                        "input": {"tool": "finding_list"},
+                                        "result": '{"count":0}',
+                                    }
+                                ],
                             }
                         },
                     },
@@ -263,7 +318,10 @@ def test_alice_sessions_save_and_reload(client):
     body = r2.json()
     assert len(body["chats"]) == 1
     assert body["chats"][0]["messages"][0]["text"] == "hello"
-    assert body["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["result"] == "{\"count\":0}"
+    assert (
+        body["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["result"]
+        == '{"count":0}'
+    )
 
 
 def test_alice_sessions_404(client):
@@ -280,6 +338,7 @@ def test_alice_status_endpoint(client):
 
 # ── Agent log alias ────────────────────────────────────────────────────────────
 
+
 def test_agent_log_empty(client):
     cid = _make_collection(client)
     run = _make_run(client, cid)
@@ -295,12 +354,14 @@ def test_agent_log_404(client):
 
 # ── Events alias (streaming) ───────────────────────────────────────────────────
 
+
 def test_events_endpoint_404(client):
     r = client.get("/api/api-test-runs/9999/events")
     assert r.status_code == 404
 
 
 # ── Regression: API and web findings must not cross the shared id space ─────────
+
 
 def test_api_and_web_findings_do_not_cross():
     """ApiTestRun.id and TestRun.id are independent autoincrement sequences, so
@@ -345,14 +406,26 @@ def test_api_and_web_findings_do_not_cross():
         # The collision that used to cause the leak.
         assert web_run_id == api_run_id == 1
 
-        s.add(models.ScanFinding(
-            test_run_id=web_run_id, owasp_category="A01", severity="high",
-            title="WEB FINDING", description="d", evidence="e",
-        ))
-        s.add(models.ScanFinding(
-            api_test_run_id=api_run_id, owasp_category="API1", severity="high",
-            title="API FINDING", description="d", evidence="e",
-        ))
+        s.add(
+            models.ScanFinding(
+                test_run_id=web_run_id,
+                owasp_category="A01",
+                severity="high",
+                title="WEB FINDING",
+                description="d",
+                evidence="e",
+            )
+        )
+        s.add(
+            models.ScanFinding(
+                api_test_run_id=api_run_id,
+                owasp_category="API1",
+                severity="high",
+                title="API FINDING",
+                description="d",
+                evidence="e",
+            )
+        )
         s.commit()
 
     def _override_session():
@@ -377,6 +450,7 @@ def test_api_and_web_findings_do_not_cross():
 
 
 # ── Regression: API log rows must not be mis-tagged when ids collide ─────────────
+
 
 def test_run_kind_is_resolved_by_scope_only():
     """Run ids collide across web / api / sast (independent counters), so the
@@ -464,14 +538,27 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
 
     try:
         with events_svc.run_kind_scope("api"):
-            events_svc.emit(api_run_id, {
-                "type": "agent_status", "agent_id": "scanner", "role": "Test Lead",
-                "status": "active", "current_task": "Step 1: GET /api/x", "outcome": None,
-            })
-            events_svc.emit(api_run_id, {
-                "type": "scanner_phase", "phase": "thinking_step",
-                "status": "deciding", "message": "reasoning", "data": {"step": 1},
-            })
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "scanner",
+                    "role": "Test Lead",
+                    "status": "active",
+                    "current_task": "Step 1: GET /api/x",
+                    "outcome": None,
+                },
+            )
+            events_svc.emit(
+                api_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "deciding",
+                    "message": "reasoning",
+                    "data": {"step": 1},
+                },
+            )
 
         with Session(engine) as s:
             agent_rows = s.exec(
@@ -501,6 +588,7 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
 
 
 # ── ALICE Collision isolation tests ──────────────────────────────────────────
+
 
 def test_alice_sessions_do_not_cross_colliding_ids():
     """Verify that ALICE sessions for web and API scans with colliding IDs do not overlap."""
@@ -550,26 +638,50 @@ def test_alice_sessions_do_not_cross_colliding_ids():
     with TestClient(app, raise_server_exceptions=True) as c:
         # PUT web scan Alice session
         web_payload = {
-            "chats": [{
-                "id": "tab-web",
-                "title": "WEB SESSION",
-                "messages": [{"id": "m1", "sender": "user", "type": "message", "text": "hello web", "ts": "12:00"}],
-            }],
+            "chats": [
+                {
+                    "id": "tab-web",
+                    "title": "WEB SESSION",
+                    "messages": [
+                        {
+                            "id": "m1",
+                            "sender": "user",
+                            "type": "message",
+                            "text": "hello web",
+                            "ts": "12:00",
+                        }
+                    ],
+                }
+            ],
             "active_tab_id": "tab-web",
         }
-        r_web_put = c.put(f"/api/test-runs/{web_run_id}/alice/sessions", json=web_payload)
+        r_web_put = c.put(
+            f"/api/test-runs/{web_run_id}/alice/sessions", json=web_payload
+        )
         assert r_web_put.status_code == 200
 
         # PUT API scan Alice session
         api_payload = {
-            "chats": [{
-                "id": "tab-api",
-                "title": "API SESSION",
-                "messages": [{"id": "m2", "sender": "user", "type": "message", "text": "hello api", "ts": "12:01"}],
-            }],
+            "chats": [
+                {
+                    "id": "tab-api",
+                    "title": "API SESSION",
+                    "messages": [
+                        {
+                            "id": "m2",
+                            "sender": "user",
+                            "type": "message",
+                            "text": "hello api",
+                            "ts": "12:01",
+                        }
+                    ],
+                }
+            ],
             "active_tab_id": "tab-api",
         }
-        r_api_put = c.put(f"/api/api-test-runs/{api_run_id}/alice/sessions", json=api_payload)
+        r_api_put = c.put(
+            f"/api/api-test-runs/{api_run_id}/alice/sessions", json=api_payload
+        )
         assert r_api_put.status_code == 200
 
         # GET web scan Alice session and verify it is not overwritten
@@ -620,28 +732,33 @@ def test_alice_tasks_do_not_cross_colliding_ids():
         pass
 
     import aespa.services.alice_tasks as at_mod
+
     orig_run = at_mod._run
     at_mod._run = _fake_run
 
     try:
-        web_task = asyncio.run(alice_tasks.start(
-            1,
-            tab_id="tab-web",
-            think_msg_id="th-web",
-            reply_msg_id="re-web",
-            message="hello web",
-            history=[],
-            run_type="site",
-        ))
-        api_task = asyncio.run(alice_tasks.start(
-            1,
-            tab_id="tab-api",
-            think_msg_id="th-api",
-            reply_msg_id="re-api",
-            message="hello api",
-            history=[],
-            run_type="api",
-        ))
+        web_task = asyncio.run(
+            alice_tasks.start(
+                1,
+                tab_id="tab-web",
+                think_msg_id="th-web",
+                reply_msg_id="re-web",
+                message="hello web",
+                history=[],
+                run_type="site",
+            )
+        )
+        api_task = asyncio.run(
+            alice_tasks.start(
+                1,
+                tab_id="tab-api",
+                think_msg_id="th-api",
+                reply_msg_id="re-api",
+                message="hello api",
+                history=[],
+                run_type="api",
+            )
+        )
 
         # Check they both exist in registry concurrently without overwriting each other
         assert alice_tasks.get(1, run_type="site") is web_task

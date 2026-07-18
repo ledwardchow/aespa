@@ -1,4 +1,5 @@
 """Tests for A.L.I.C.E. chat coordinator and scope routing service."""
+
 from __future__ import annotations
 
 import json
@@ -86,6 +87,7 @@ def test_data_fixture(db_session):
 @pytest.fixture(name="test_client")
 def test_client_fixture(db_engine):
     """FastAPI TestClient bound to the overridden test database session."""
+
     def _override_session():
         with Session(db_engine) as session:
             yield session
@@ -112,7 +114,9 @@ async def test_run_alice_turn_rejects_out_of_scope_directive(db_session, test_da
 
 
 @pytest.mark.anyio
-async def test_run_alice_turn_executes_loop_for_in_scope_directive(db_session, test_data):
+async def test_run_alice_turn_executes_loop_for_in_scope_directive(
+    db_session, test_data
+):
     """Verify that an in-scope instruction runs the agentic loop and returns a final reply."""
     run = test_data["run"]
     instruction = "Scan for XSS on http://target.local/api/comments"
@@ -163,7 +167,9 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
 
 
 @pytest.mark.anyio
-async def test_run_alice_turn_stream_routes_inline_think_tags_to_trace(db_session, test_data):
+async def test_run_alice_turn_stream_routes_inline_think_tags_to_trace(
+    db_session, test_data
+):
     """MiniMax-style <think> blocks should not leak into visible reply chunks."""
     run = test_data["run"]
     reply = "<think>private reasoning\nwith details</think>Visible answer only."
@@ -178,8 +184,12 @@ async def test_run_alice_turn_stream_routes_inline_think_tags_to_trace(db_sessio
             if line.startswith("data: "):
                 chunks.append(json.loads(line[6:].strip()))
 
-    thinking_text = "".join(c.get("delta", "") for c in chunks if c.get("type") == "thinking_chunk")
-    message_text = "".join(c.get("delta", "") for c in chunks if c.get("type") == "message_chunk")
+    thinking_text = "".join(
+        c.get("delta", "") for c in chunks if c.get("type") == "thinking_chunk"
+    )
+    message_text = "".join(
+        c.get("delta", "") for c in chunks if c.get("type") == "message_chunk"
+    )
     done = [c for c in chunks if c.get("type") == "done"][0]
 
     assert "private reasoning" in thinking_text
@@ -236,37 +246,57 @@ def test_alice_sessions_roundtrip_and_run_token(test_client, test_data):
 
     # Save a chat session, then reload it.
     payload = {
-        "chats": [{
-            "id": "tab-default",
-            "title": "Session 1",
-            "messages": [
-                {"id": "m1", "sender": "user", "type": "message", "text": "hi", "ts": "10:00"},
-                {
-                    "id": "m2",
-                    "sender": "alice",
-                    "type": "thinking",
-                    "text": "[Step 1] Calling LLM...",
-                    "ts": "10:01",
-                    "stepData": {
-                        "1": {
-                            "llmMessages": [{"role": "user", "content": "hi"}],
-                            "tools": [{"tool": "context_tool", "input": {"tool": "finding_list"}, "result": "{}"}],
-                        }
+        "chats": [
+            {
+                "id": "tab-default",
+                "title": "Session 1",
+                "messages": [
+                    {
+                        "id": "m1",
+                        "sender": "user",
+                        "type": "message",
+                        "text": "hi",
+                        "ts": "10:00",
                     },
-                },
-            ],
-        }],
+                    {
+                        "id": "m2",
+                        "sender": "alice",
+                        "type": "thinking",
+                        "text": "[Step 1] Calling LLM...",
+                        "ts": "10:01",
+                        "stepData": {
+                            "1": {
+                                "llmMessages": [{"role": "user", "content": "hi"}],
+                                "tools": [
+                                    {
+                                        "tool": "context_tool",
+                                        "input": {"tool": "finding_list"},
+                                        "result": "{}",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ],
+            }
+        ],
         "active_tab_id": "tab-default",
     }
     r_put = test_client.put(f"/api/test-runs/{run.id}/alice/sessions", json=payload)
     assert r_put.status_code == 200
 
     loaded = test_client.get(f"/api/test-runs/{run.id}/alice/sessions").json()
-    assert loaded["run_created_at"] == token   # token is stable across saves
+    assert loaded["run_created_at"] == token  # token is stable across saves
     assert len(loaded["chats"]) == 1
     assert loaded["chats"][0]["id"] == "tab-default"
-    assert [m["text"] for m in loaded["chats"][0]["messages"]] == ["hi", "[Step 1] Calling LLM..."]
-    assert loaded["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["tool"] == "context_tool"
+    assert [m["text"] for m in loaded["chats"][0]["messages"]] == [
+        "hi",
+        "[Step 1] Calling LLM...",
+    ]
+    assert (
+        loaded["chats"][0]["messages"][1]["stepData"]["1"]["tools"][0]["tool"]
+        == "context_tool"
+    )
     assert loaded["updated_at"] is not None
 
 
@@ -292,8 +322,14 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     # Mock _persist_dynamic_finding so it doesn't need full LLM
     mock_finding = MagicMock()
     mock_finding.id = 42
-    with patch("aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock) as mock_persist, \
-         patch("aespa.services.validator.validate_finding_inline", new_callable=AsyncMock) as mock_validate:
+    with (
+        patch(
+            "aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock
+        ) as mock_persist,
+        patch(
+            "aespa.services.validator.validate_finding_inline", new_callable=AsyncMock
+        ) as mock_validate,
+    ):
         mock_persist.return_value = mock_finding
         result = await _execute_alice_tool(
             run_id=run.id,
@@ -316,6 +352,7 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
 def _capturing_scanner_client(captured: dict):
     """Return a fake _make_scanner_client that records the cookies/headers it is
     built with and yields a client whose .request returns a canned response."""
+
     def _factory(*args, **kwargs):
         captured["cookies"] = kwargs.get("cookies")
         captured["headers"] = kwargs.get("headers")
@@ -339,14 +376,19 @@ def _capturing_scanner_client(captured: dict):
 
 
 @pytest.mark.anyio
-async def test_alice_http_request_forwards_owasp_category_to_post_probe(db_session, test_data):
+async def test_alice_http_request_forwards_owasp_category_to_post_probe(
+    db_session, test_data
+):
     """A probe declaring owasp_category invokes post_probe_fn(url, method, category)."""
     from aespa.services.alice import _execute_alice_tool
 
     run = test_data["run"]
     calls: list = []
     captured: dict = {}
-    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+    with patch(
+        "aespa.services.scanner._make_scanner_client",
+        _capturing_scanner_client(captured),
+    ):
         await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=test_data["llm_cfg"],
@@ -374,7 +416,10 @@ async def test_alice_http_request_no_post_probe_without_category(db_session, tes
     run = test_data["run"]
     calls: list = []
     captured: dict = {}
-    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+    with patch(
+        "aespa.services.scanner._make_scanner_client",
+        _capturing_scanner_client(captured),
+    ):
         await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=test_data["llm_cfg"],
@@ -407,7 +452,10 @@ async def test_alice_http_request_uses_stored_primary_session(db_session, test_d
     vault = session_svc.load_session_vault(run.id)
 
     captured: dict = {}
-    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+    with patch(
+        "aespa.services.scanner._make_scanner_client",
+        _capturing_scanner_client(captured),
+    ):
         await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=test_data["llm_cfg"],
@@ -424,19 +472,27 @@ async def test_alice_http_request_uses_stored_primary_session(db_session, test_d
 
 
 @pytest.mark.anyio
-async def test_alice_http_request_use_session_selects_and_anonymous_opts_out(db_session, test_data):
+async def test_alice_http_request_use_session_selects_and_anonymous_opts_out(
+    db_session, test_data
+):
     """use_session selects a specific stored session; "anonymous" sends no creds."""
     from aespa.services import scanner_sessions as session_svc
     from aespa.services.alice import _execute_alice_tool
 
     run = test_data["run"]
     session_svc.upsert_session(
-        run.id, label="configured_primary", kind="cookie",
-        cookies={"SESSION": "admin"}, extra_headers={},
+        run.id,
+        label="configured_primary",
+        kind="cookie",
+        cookies={"SESSION": "admin"},
+        extra_headers={},
     )
     session_svc.upsert_session(
-        run.id, label="alice_user_b", kind="cookie",
-        cookies={"SESSION": "userb"}, extra_headers={},
+        run.id,
+        label="alice_user_b",
+        kind="cookie",
+        cookies={"SESSION": "userb"},
+        extra_headers={},
     )
     session_svc.ensure_anonymous_session(run.id)
     vault = session_svc.load_session_vault(run.id)
@@ -446,16 +502,26 @@ async def test_alice_http_request_use_session_selects_and_anonymous_opts_out(db_
 
     async def _probe(tool_input):
         captured: dict = {}
-        with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+        with patch(
+            "aespa.services.scanner._make_scanner_client",
+            _capturing_scanner_client(captured),
+        ):
             await _execute_alice_tool(
-                run_id=run.id, llm_cfg=llm_cfg, base_url="http://target.local",
-                site_id=site_id, tool_name="http_request", tool_input=tool_input,
-                step=1, session_vault=vault,
+                run_id=run.id,
+                llm_cfg=llm_cfg,
+                base_url="http://target.local",
+                site_id=site_id,
+                tool_name="http_request",
+                tool_input=tool_input,
+                step=1,
+                session_vault=vault,
             )
         return captured
 
     # Explicit label selects the second identity.
-    selected = await _probe({"url": "http://target.local/u/2", "use_session": "alice_user_b"})
+    selected = await _probe(
+        {"url": "http://target.local/u/2", "use_session": "alice_user_b"}
+    )
     assert selected["cookies"] == {"SESSION": "userb"}
 
     # "anonymous" opts out of stored credentials entirely.
@@ -471,7 +537,10 @@ async def test_alice_http_request_anonymous_when_vault_empty(db_session, test_da
 
     run = test_data["run"]
     captured: dict = {}
-    with patch("aespa.services.scanner._make_scanner_client", _capturing_scanner_client(captured)):
+    with patch(
+        "aespa.services.scanner._make_scanner_client",
+        _capturing_scanner_client(captured),
+    ):
         await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=test_data["llm_cfg"],
@@ -505,10 +574,15 @@ async def test_alice_browser_captures_session_into_vault(db_session, test_data):
         return fake_page, fake_ctx
 
     async def fake_run_action(page, action, default_url, scanner_policy):  # noqa: ARG001
-        return {"body": "Final URL: http://target.local/admin\nLogged in.", "url": "http://target.local/admin"}
+        return {
+            "body": "Final URL: http://target.local/admin\nLogged in.",
+            "url": "http://target.local/admin",
+        }
 
-    with patch("aespa.services.alice._get_alice_browser", fake_get_browser), \
-         patch("aespa.services.scanner._run_thinking_browser_action", fake_run_action):
+    with (
+        patch("aespa.services.alice._get_alice_browser", fake_get_browser),
+        patch("aespa.services.scanner._run_thinking_browser_action", fake_run_action),
+    ):
         result = await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=test_data["llm_cfg"],

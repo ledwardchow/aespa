@@ -6,6 +6,7 @@ Alice, events, and agent-log endpoints already key on ``test_run_id`` in
 frontend can call the same alice/events/agent-log URLs against an ApiTestRun id
 without any changes to the underlying services.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,6 +23,8 @@ from aespa.models import (
     AgentLog,
     AliceChatMessage,
     AliceChatSession,
+    ApiCollection,
+    ApiEndpoint,
     ApiTestRun,
     ScanFinding,
     ScannerSession,
@@ -35,6 +38,7 @@ from aespa.schemas import (
     ScannerSessionOut,
     ScannerSessionSummary,
     ScannerSessionUpdate,
+    ScannerSessionValidationResult,
 )
 from aespa.services import alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
@@ -47,10 +51,13 @@ router = APIRouter(prefix="/api/api-test-runs", tags=["api-test-runs"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _get_run_or_404(session: Session, run_id: int) -> ApiTestRun:
     run = session.get(ApiTestRun, run_id)
     if run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API test run not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API test run not found"
+        )
     return run
 
 
@@ -59,6 +66,7 @@ def _to_summary(run: ApiTestRun) -> ApiTestRunSummary:
 
 
 # ── Single run ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/{run_id}", response_model=ApiTestRunSummary)
 def get_api_test_run(
@@ -75,6 +83,7 @@ def delete_api_test_run(run_id: int, session: Session = Depends(get_session)) ->
 
 
 # ── Alice helper: build sessions payload from DB ──────────────────────────────
+
 
 def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
     run_token = run.created_at.isoformat() if run.created_at else None
@@ -93,6 +102,7 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
             .where(AliceChatMessage.session_id == s.id)
             .order_by(AliceChatMessage.position, AliceChatMessage.id)
         ).all()
+
         def _safe_step_data(raw: str) -> dict:
             try:
                 parsed = json.loads(raw or "{}")
@@ -100,18 +110,27 @@ def _load_api_sessions(run_id: int, run: ApiTestRun, session: Session) -> dict:
             except Exception:
                 return {}
 
-        chats.append({
-            "id": s.session_key,
-            "title": s.title,
-            "messages": [
-                {"id": m.message_key, "sender": m.sender,
-                 "type": m.type, "text": m.text, "ts": m.ts,
-                 "stepData": _safe_step_data(m.step_data_json)}
-                for m in msg_rows
-            ],
-        })
+        chats.append(
+            {
+                "id": s.session_key,
+                "title": s.title,
+                "messages": [
+                    {
+                        "id": m.message_key,
+                        "sender": m.sender,
+                        "type": m.type,
+                        "text": m.text,
+                        "ts": m.ts,
+                        "stepData": _safe_step_data(m.step_data_json),
+                    }
+                    for m in msg_rows
+                ],
+            }
+        )
 
-    active = next((s for s in sess_rows if s.is_active), sess_rows[0] if sess_rows else None)
+    active = next(
+        (s for s in sess_rows if s.is_active), sess_rows[0] if sess_rows else None
+    )
     latest_updated = max((s.updated_at for s in sess_rows), default=None)
     return {
         "chats": chats,
@@ -134,13 +153,17 @@ class AliceRunRequest(BaseModel):
     reply_msg_id: str
 
 
-def _save_api_sessions(run_id: int, req: AliceSessionsRequest, session: Session) -> None:
+def _save_api_sessions(
+    run_id: int, req: AliceSessionsRequest, session: Session
+) -> None:
     from aespa.api.alice import _save_sessions
+
     # Delegate to the canonical implementation — same DB tables, same logic.
     _save_sessions(run_id, req, session, run_kind="api")  # type: ignore[arg-type]
 
 
 # ── Alice alias routes ─────────────────────────────────────────────────────────
+
 
 @router.get("/{run_id}/alice/sessions")
 def get_alice_sessions(run_id: int, session: Session = Depends(get_session)) -> dict:
@@ -207,18 +230,27 @@ def alice_status(run_id: int, session: Session = Depends(get_session)) -> dict:
 
 # ── Events alias ───────────────────────────────────────────────────────────────
 
+
 @router.get("/{run_id}/events")
-def stream_events(run_id: int, session: Session = Depends(get_session)) -> StreamingResponse:
+def stream_events(
+    run_id: int, session: Session = Depends(get_session)
+) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     from aespa.services import events as events_svc
+
     return StreamingResponse(
         events_svc.stream(run_id),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
 # ── Agent log alias ────────────────────────────────────────────────────────────
+
 
 @router.get("/{run_id}/agent-log")
 def get_agent_log(run_id: int, session: Session = Depends(get_session)) -> list:
@@ -257,7 +289,9 @@ def clear_api_agent_log(run_id: int, session: Session = Depends(get_session)) ->
 
 
 @router.get("/{run_id}/agent-log/export")
-def export_api_agent_log(run_id: int, session: Session = Depends(get_session)) -> HTTPResponse:
+def export_api_agent_log(
+    run_id: int, session: Session = Depends(get_session)
+) -> HTTPResponse:
     """Download the agent activity log for this API test run as a markdown file."""
     run = _get_run_or_404(session, run_id)
     rows = session.exec(
@@ -301,6 +335,7 @@ def export_api_agent_log(run_id: int, session: Session = Depends(get_session)) -
 
 # ── Scan start / stop ──────────────────────────────────────────────────────────
 
+
 class ScanStartIn(BaseModel):
     coverage_mode: str | None = None  # "track" | "enforce"; overrides the run setting
 
@@ -319,6 +354,7 @@ async def start_api_scan(
         session.add(run)
         session.commit()
     from aespa.services import api_scanner
+
     await api_scanner.start_api_scan(run_id)
     return {"ok": True, "coverage_mode": run.coverage_mode}
 
@@ -327,6 +363,7 @@ async def start_api_scan(
 async def stop_api_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import api_scanner
+
     stopped = await api_scanner.stop_api_scan(run_id)
     return {"ok": True, "stopped": stopped}
 
@@ -335,10 +372,12 @@ async def stop_api_scan(run_id: int, session: Session = Depends(get_session)) ->
 def api_scan_status(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import api_scanner
+
     return api_scanner.get_scan_status(run_id)
 
 
 # ── Findings alias ─────────────────────────────────────────────────────────────
+
 
 @router.get("/{run_id}/findings", response_model=list[ScanFindingOut])
 def get_api_findings(
@@ -365,7 +404,9 @@ def update_api_finding(
     _get_run_or_404(session, run_id)
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.api_test_run_id != run_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
     findings_svc.apply_finding_update(finding, payload)
     session.add(finding)
     session.commit()
@@ -413,14 +454,22 @@ def import_api_findings(
     if not payload:
         raise HTTPException(status_code=400, detail="No findings to import")
     allowed_severities = {"critical", "high", "medium", "low", "info"}
-    allowed_validation = {"unvalidated", "validating", "skipped", "confirmed", "unconfirmed", "false_positive"}
+    allowed_validation = {
+        "unvalidated",
+        "validating",
+        "skipped",
+        "confirmed",
+        "unconfirmed",
+        "false_positive",
+    }
     imported: list[ScanFinding] = []
     for item in payload:
         severity = item.severity.lower().strip()
         validation_status = item.validation_status.lower().strip()
         import_validation_status = (
             validation_status
-            if validation_status in allowed_validation and validation_status != "validating"
+            if validation_status in allowed_validation
+            and validation_status != "validating"
             else "unvalidated"
         )
         finding = ScanFinding(
@@ -462,6 +511,7 @@ def import_api_findings(
 
 # ── Traffic alias ──────────────────────────────────────────────────────────────
 
+
 @router.get("/{run_id}/traffic")
 def get_api_traffic(
     run_id: int,
@@ -470,6 +520,7 @@ def get_api_traffic(
 ) -> list[dict]:
     _get_run_or_404(session, run_id)
     from aespa.services import traffic as traffic_svc
+
     return traffic_svc.get_traffic(0, since_id, api_run_id=run_id)
 
 
@@ -480,15 +531,20 @@ def get_api_traffic_count(
 ) -> dict[str, int]:
     _get_run_or_404(session, run_id)
     from aespa.services import traffic as traffic_svc
+
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
 
 
 # ── Coverage matrix ────────────────────────────────────────────────────────────
 
+
 @router.get("/{run_id}/coverage")
-def get_api_coverage_matrix(run_id: int, session: Session = Depends(get_session)) -> dict:
+def get_api_coverage_matrix(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
     _get_run_or_404(session, run_id)
     from aespa.services import api_scanner
+
     return api_scanner.get_coverage_matrix(run_id)
 
 
@@ -569,7 +625,44 @@ def get_api_scanner_sessions(
     )
 
 
-@router.patch("/{run_id}/scanner-sessions/{session_id}", response_model=ScannerSessionOut)
+@router.post(
+    "/{run_id}/scanner-sessions/validate",
+    response_model=ScannerSessionValidationResult,
+)
+async def validate_api_scanner_sessions(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ScannerSessionValidationResult:
+    run = _get_run_or_404(session, run_id)
+    collection = session.get(ApiCollection, run.collection_id)
+    if collection is None:
+        raise HTTPException(status_code=404, detail="API collection not found")
+
+    endpoints = session.exec(
+        select(ApiEndpoint)
+        .where(ApiEndpoint.collection_id == run.collection_id)
+        .where(ApiEndpoint.in_scope != False)  # noqa: E712
+        .where(ApiEndpoint.auth_required == True)  # noqa: E712
+        .where(ApiEndpoint.method.in_(["GET", "HEAD"]))
+        .order_by(ApiEndpoint.id)
+    ).all()
+    endpoint = next((item for item in endpoints if "{" not in item.path), None)
+    default_url = collection.base_url.rstrip("/")
+    if endpoint is not None:
+        endpoint_base = (endpoint.base_url or default_url).rstrip("/")
+        default_url = f"{endpoint_base}/{endpoint.path.lstrip('/')}"
+
+    return await scanner_session_svc.validate_active_sessions(
+        session,
+        run_id,
+        run_kind="api",
+        default_url=default_url,
+    )
+
+
+@router.patch(
+    "/{run_id}/scanner-sessions/{session_id}", response_model=ScannerSessionOut
+)
 def update_api_scanner_session(
     run_id: int,
     session_id: int,
@@ -579,7 +672,9 @@ def update_api_scanner_session(
     _get_run_or_404(session, run_id)
     record = session.get(ScannerSession, session_id)
     if record is None or record.test_run_id != run_id or record.run_kind != "api":
-        raise HTTPException(status_code=404, detail=f"ScannerSession {session_id} not found")
+        raise HTTPException(
+            status_code=404, detail=f"ScannerSession {session_id} not found"
+        )
 
     if payload.label is not None:
         normalized = scanner_session_svc.stable_label(payload.label)
@@ -593,11 +688,14 @@ def update_api_scanner_session(
             .where(ScannerSession.id != session_id)
         ).first()
         if duplicate is not None:
-            raise HTTPException(status_code=409, detail=f"Session label '{normalized}' already exists")
+            raise HTTPException(
+                status_code=409, detail=f"Session label '{normalized}' already exists"
+            )
         record.label = normalized
     if payload.is_active is not None:
         record.is_active = payload.is_active
     from aespa.models import _utcnow
+
     record.updated_at = _utcnow()
     session.add(record)
     session.commit()
@@ -613,4 +711,5 @@ def get_api_token_usage(
     """Return accumulated LLM token usage for this API test run."""
     _get_run_or_404(session, run_id)
     from aespa.services import llm as llm_svc
+
     return llm_svc.get_run_token_usage(run_id, run_kind="api")
