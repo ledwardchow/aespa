@@ -16,6 +16,7 @@ def data_dir(tmp_path, monkeypatch):
 
 # ---- helpers ----------------------------------------------------------------
 
+
 def make_collection(client: TestClient, **kwargs):
     defaults = {
         "name": "Payments API",
@@ -25,6 +26,7 @@ def make_collection(client: TestClient, **kwargs):
 
 
 # ---- create -----------------------------------------------------------------
+
 
 def test_create_collection(client):
     r = make_collection(client)
@@ -65,6 +67,7 @@ def test_create_collection_requires_valid_url(client):
 
 # ---- list / get -------------------------------------------------------------
 
+
 def test_list_collections(client):
     make_collection(client, name="A")
     make_collection(client, name="B")
@@ -89,6 +92,7 @@ def test_get_missing_collection_404(client):
 
 
 # ---- update -----------------------------------------------------------------
+
 
 def test_update_collection(client):
     cid = make_collection(client).json()["id"]
@@ -129,6 +133,7 @@ def test_update_missing_collection_404(client):
 
 # ---- scope hosts ------------------------------------------------------------
 
+
 def test_update_scope_hosts(client):
     cid = make_collection(client).json()["id"]
     r = client.put(
@@ -142,6 +147,7 @@ def test_update_scope_hosts(client):
 
 
 # ---- delete -----------------------------------------------------------------
+
 
 def test_delete_collection(client):
     cid = make_collection(client).json()["id"]
@@ -173,7 +179,10 @@ def test_upload_and_list_documents(client, data_dir):
     r = client.post(
         f"/api/api-collections/{cid}/documents",
         files=[
-            ("files", ("spec.yaml", b"openapi: 3.0.0\npaths: {}\n", "application/yaml")),
+            (
+                "files",
+                ("spec.yaml", b"openapi: 3.0.0\npaths: {}\n", "application/yaml"),
+            ),
             ("files", ("notes.txt", b"GET /widgets returns widgets", "text/plain")),
         ],
     )
@@ -190,7 +199,9 @@ def test_upload_and_list_documents(client, data_dir):
     assert len(listed) == 2
 
     # document_count reflected in the collection summary
-    summary = next(c for c in client.get("/api/api-collections").json() if c["id"] == cid)
+    summary = next(
+        c for c in client.get("/api/api-collections").json() if c["id"] == cid
+    )
     assert summary["document_count"] == 2
 
 
@@ -247,7 +258,10 @@ def test_delete_document(client, data_dir):
         f"/api/api-collections/{cid}/documents",
         files=[("files", ("spec.yaml", b"openapi: 3.0.0", "application/yaml"))],
     ).json()[0]
-    assert client.delete(f"/api/api-collections/{cid}/documents/{doc['id']}").status_code == 204
+    assert (
+        client.delete(f"/api/api-collections/{cid}/documents/{doc['id']}").status_code
+        == 204
+    )
     assert client.get(f"/api/api-collections/{cid}/documents").json() == []
     # File removed from disk too.
     assert list((data_dir / "api_collections" / str(cid)).glob("*")) == []
@@ -269,6 +283,7 @@ def test_uploaded_file_stored_with_generated_name(client, data_dir):
 
 
 # ---- migration --------------------------------------------------------------
+
 
 def test_migrate_creates_api_collection_table_on_old_db():
     engine = create_engine(
@@ -311,11 +326,24 @@ def test_migrate_creates_api_collection_table_on_old_db():
                 for row in conn.execute(text("PRAGMA table_info(api_collection)"))
             }
             doc_columns = {
-                row[1]
-                for row in conn.execute(text("PRAGMA table_info(api_document)"))
+                row[1] for row in conn.execute(text("PRAGMA table_info(api_document)"))
             }
-        assert {"id", "name", "base_url", "description", "servers", "scope_hosts"} <= columns
-        assert {"id", "collection_id", "filename", "doc_type", "stored_path",
-                "size_bytes", "status"} <= doc_columns
+        assert {
+            "id",
+            "name",
+            "base_url",
+            "description",
+            "servers",
+            "scope_hosts",
+        } <= columns
+        assert {
+            "id",
+            "collection_id",
+            "filename",
+            "doc_type",
+            "stored_path",
+            "size_bytes",
+            "status",
+        } <= doc_columns
     finally:
         engine.dispose()

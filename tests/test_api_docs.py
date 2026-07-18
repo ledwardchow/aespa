@@ -1,4 +1,5 @@
 """Tests for Slice 3: document parsing → ApiEndpoint / ApiCredential rows."""
+
 from __future__ import annotations
 
 import io
@@ -15,6 +16,7 @@ from aespa.main import create_app
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture()
 def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
@@ -29,6 +31,7 @@ def client(data_dir):
         poolclass=StaticPool,
     )
     from aespa import models as _models  # noqa: F401
+
     SQLModel.metadata.create_all(engine)
 
     def _override_session():
@@ -54,7 +57,13 @@ def _make_collection(client: TestClient, name: str = "Test API") -> int:
     return r.json()["id"]
 
 
-def _upload(client: TestClient, cid: int, filename: str, content: bytes, content_type: str = "application/octet-stream") -> dict:
+def _upload(
+    client: TestClient,
+    cid: int,
+    filename: str,
+    content: bytes,
+    content_type: str = "application/octet-stream",
+) -> dict:
     r = client.post(
         f"/api/api-collections/{cid}/documents",
         files={"files": (filename, io.BytesIO(content), content_type)},
@@ -124,22 +133,24 @@ components:
       scheme: bearer
 """
 
-SWAGGER_JSON = json.dumps({
-    "swagger": "2.0",
-    "info": {"title": "Petstore", "version": "1.0"},
-    "host": "petstore.example.com",
-    "basePath": "/v2",
-    "schemes": ["https"],
-    "paths": {
-        "/pets": {
-            "get": {
-                "operationId": "listPets",
-                "summary": "List pets",
-                "responses": {"200": {"description": "ok"}},
+SWAGGER_JSON = json.dumps(
+    {
+        "swagger": "2.0",
+        "info": {"title": "Petstore", "version": "1.0"},
+        "host": "petstore.example.com",
+        "basePath": "/v2",
+        "schemes": ["https"],
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "summary": "List pets",
+                    "responses": {"200": {"description": "ok"}},
+                }
             }
-        }
-    },
-}).encode()
+        },
+    }
+).encode()
 
 # OpenAPI spec exercising recursive $ref resolution and allOf composition.
 OPENAPI_REFS_YAML = b"""
@@ -208,33 +219,49 @@ paths:
         "200": {description: ok}
 """
 
-POSTMAN_V21 = json.dumps({
-    "info": {"name": "Widgets API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-    "variable": [{"key": "baseUrl", "value": "https://widgets.example.com"}],
-    "auth": {
-        "type": "bearer",
-        "bearer": [{"key": "token", "value": "super-secret-tok", "type": "string"}],
-    },
-    "item": [
-        {
-            "name": "Get widget",
-            "request": {
-                "method": "GET",
-                "url": {"raw": "{{baseUrl}}/widgets/{{id}}", "host": ["{{baseUrl}}"], "path": ["widgets", "{{id}}"]},
-                "auth": {"type": "noauth"},
-            },
+POSTMAN_V21 = json.dumps(
+    {
+        "info": {
+            "name": "Widgets API",
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
         },
-        {
-            "name": "Create widget",
-            "request": {
-                "method": "POST",
-                "url": {"raw": "{{baseUrl}}/widgets", "host": ["{{baseUrl}}"], "path": ["widgets"]},
-                "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "tok", "type": "string"}]},
-                "body": {"mode": "raw", "raw": '{"name": "foo"}'},
-            },
+        "variable": [{"key": "baseUrl", "value": "https://widgets.example.com"}],
+        "auth": {
+            "type": "bearer",
+            "bearer": [{"key": "token", "value": "super-secret-tok", "type": "string"}],
         },
-    ],
-}).encode()
+        "item": [
+            {
+                "name": "Get widget",
+                "request": {
+                    "method": "GET",
+                    "url": {
+                        "raw": "{{baseUrl}}/widgets/{{id}}",
+                        "host": ["{{baseUrl}}"],
+                        "path": ["widgets", "{{id}}"],
+                    },
+                    "auth": {"type": "noauth"},
+                },
+            },
+            {
+                "name": "Create widget",
+                "request": {
+                    "method": "POST",
+                    "url": {
+                        "raw": "{{baseUrl}}/widgets",
+                        "host": ["{{baseUrl}}"],
+                        "path": ["widgets"],
+                    },
+                    "auth": {
+                        "type": "bearer",
+                        "bearer": [{"key": "token", "value": "tok", "type": "string"}],
+                    },
+                    "body": {"mode": "raw", "raw": '{"name": "foo"}'},
+                },
+            },
+        ],
+    }
+).encode()
 
 CREDENTIALS_FILE = b"""
 # Sample credentials
@@ -272,6 +299,7 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
 
 # ── 3a OpenAPI ───────────────────────────────────────────────────────────────
 
+
 def test_parse_openapi_yaml_extracts_endpoints(client, data_dir):
     cid = _make_collection(client)
     doc = _upload(client, cid, "openapi.yaml", OPENAPI_YAML, "application/yaml")
@@ -291,8 +319,10 @@ def test_parse_openapi_auth_required_flag(client, data_dir):
     cid = _make_collection(client)
     doc = _upload(client, cid, "openapi.yaml", OPENAPI_YAML, "application/yaml")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
-    eps = {e["path"] + ":" + e["method"]: e for e in
-           client.get(f"/api/api-collections/{cid}/endpoints").json()}
+    eps = {
+        e["path"] + ":" + e["method"]: e
+        for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
+    }
     # GET /users has security: [] → auth_required False
     assert eps["/users:GET"]["auth_required"] is False
     # POST /users has BearerAuth → auth_required True
@@ -303,9 +333,11 @@ def test_parse_openapi_sample_request(client, data_dir):
     cid = _make_collection(client)
     doc = _upload(client, cid, "openapi.yaml", OPENAPI_YAML, "application/yaml")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
-    eps = {e["method"]: e for e in
-           client.get(f"/api/api-collections/{cid}/endpoints").json()
-           if e["path"] == "/users"}
+    eps = {
+        e["method"]: e
+        for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
+        if e["path"] == "/users"
+    }
     sample = json.loads(eps["POST"]["sample_request_json"])
     assert sample.get("username") == "alice"
 
@@ -324,8 +356,11 @@ def test_parse_openapi_resolves_nested_refs(client, data_dir):
     doc = _upload(client, cid, "refs.yaml", OPENAPI_REFS_YAML, "application/yaml")
     r = client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     assert r.json()["status"] == "parsed"
-    ep = next(e for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
-              if e["path"] == "/accounts/{id}" and e["method"] == "POST")
+    ep = next(
+        e
+        for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
+        if e["path"] == "/accounts/{id}" and e["method"] == "POST"
+    )
 
     # Path-level $ref parameter resolved into a concrete {name,in,required}.
     params = json.loads(ep["parameters_json"])
@@ -379,9 +414,12 @@ def test_parse_openapi_with_external_refs_still_parses(client, data_dir):
 
 # ── 3b Postman ────────────────────────────────────────────────────────────────
 
+
 def test_parse_postman_extracts_endpoints(client, data_dir):
     cid = _make_collection(client)
-    doc = _upload(client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json")
+    doc = _upload(
+        client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json"
+    )
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     eps = client.get(f"/api/api-collections/{cid}/endpoints").json()
     paths = {e["path"] for e in eps}
@@ -391,7 +429,9 @@ def test_parse_postman_extracts_endpoints(client, data_dir):
 
 def test_parse_postman_extracts_collection_auth_credential(client, data_dir):
     cid = _make_collection(client)
-    doc = _upload(client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json")
+    doc = _upload(
+        client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json"
+    )
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     creds = client.get(f"/api/api-collections/{cid}/credentials").json()
     assert any(c["scheme"] == "bearer" for c in creds)
@@ -399,9 +439,13 @@ def test_parse_postman_extracts_collection_auth_credential(client, data_dir):
 
 def test_parse_postman_body_example(client, data_dir):
     cid = _make_collection(client)
-    doc = _upload(client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json")
+    doc = _upload(
+        client, cid, "widgets.postman_collection.json", POSTMAN_V21, "application/json"
+    )
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
-    eps = {e["path"]: e for e in client.get(f"/api/api-collections/{cid}/endpoints").json()}
+    eps = {
+        e["path"]: e for e in client.get(f"/api/api-collections/{cid}/endpoints").json()
+    }
     sample = json.loads(eps["/widgets"]["sample_request_json"])
     assert sample.get("name") == "foo"
 
@@ -411,18 +455,40 @@ def test_parse_postman_body_example(client, data_dir):
 _CREDS_LLM_RESULT = (
     [],  # endpoints
     [
-        {"scheme": "bearer", "name": "Authorization", "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.abc", "label": "bearer-token"},
-        {"scheme": "apikey", "name": "X-API-Key", "value": "my-api-key-12345", "label": "X-API-Key"},
-        {"scheme": "bearer", "name": "Authorization", "value": "Bearer curl-token-123", "label": "curl-header"},
-        {"scheme": "cookie", "name": "Cookie", "value": "session=abc123; csrf=xyz789", "label": "Cookie"},
+        {
+            "scheme": "bearer",
+            "name": "Authorization",
+            "value": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMSJ9.abc",
+            "label": "bearer-token",
+        },
+        {
+            "scheme": "apikey",
+            "name": "X-API-Key",
+            "value": "my-api-key-12345",
+            "label": "X-API-Key",
+        },
+        {
+            "scheme": "bearer",
+            "name": "Authorization",
+            "value": "Bearer curl-token-123",
+            "label": "curl-header",
+        },
+        {
+            "scheme": "cookie",
+            "name": "Cookie",
+            "value": "session=abc123; csrf=xyz789",
+            "label": "Cookie",
+        },
     ],
 )
 
 
 def test_parse_credentials_bearer(client, monkeypatch):
     import aespa.services.api_docs as api_docs_mod
+
     async def _mock_llm(session, content, doc):
         return _CREDS_LLM_RESULT
+
     monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
@@ -434,8 +500,10 @@ def test_parse_credentials_bearer(client, monkeypatch):
 
 def test_parse_credentials_apikey(client, monkeypatch):
     import aespa.services.api_docs as api_docs_mod
+
     async def _mock_llm(session, content, doc):
         return _CREDS_LLM_RESULT
+
     monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
@@ -447,21 +515,27 @@ def test_parse_credentials_apikey(client, monkeypatch):
 
 def test_parse_credentials_curl_header(client, monkeypatch):
     import aespa.services.api_docs as api_docs_mod
+
     async def _mock_llm(session, content, doc):
         return _CREDS_LLM_RESULT
+
     monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
     creds = client.get(f"/api/api-collections/{cid}/credentials").json()
-    curl_bearer = [c for c in creds if c.get("label") == "curl-header" and c["scheme"] == "bearer"]
+    curl_bearer = [
+        c for c in creds if c.get("label") == "curl-header" and c["scheme"] == "bearer"
+    ]
     assert len(curl_bearer) >= 1
 
 
 def test_parse_credentials_cookie(client, monkeypatch):
     import aespa.services.api_docs as api_docs_mod
+
     async def _mock_llm(session, content, doc):
         return _CREDS_LLM_RESULT
+
     monkeypatch.setattr(api_docs_mod, "_parse_freetext_llm", _mock_llm)
     cid = _make_collection(client)
     doc = _upload(client, cid, "creds.txt", CREDENTIALS_FILE, "text/plain")
@@ -472,6 +546,7 @@ def test_parse_credentials_cookie(client, monkeypatch):
 
 
 # ── 3e Source zip ─────────────────────────────────────────────────────────────
+
 
 def test_parse_source_zip_fastapi(client, data_dir):
     zip_bytes = _make_zip({"app/main.py": SOURCE_FASTAPI})
@@ -493,6 +568,7 @@ def test_parse_source_zip_rejects_path_traversal(client, data_dir):
         # Add traversal entry manually (ZipFile.writestr won't allow .., use lower-level)
     # Build a malicious zip with path traversal filename
     from zipfile import ZipFile, ZipInfo
+
     buf2 = io.BytesIO()
     with ZipFile(buf2, "w") as zf:
         info = ZipInfo("../../evil.py")
@@ -512,6 +588,7 @@ def test_parse_source_zip_rejects_path_traversal(client, data_dir):
 def test_parse_source_zip_rejects_bomb(client, data_dir):
     """A zip with too many entries should fail gracefully."""
     from aespa.services.api_docs import ParseError, _safe_unzip
+
     # Build a zip with 5001 tiny entries
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -523,6 +600,7 @@ def test_parse_source_zip_rejects_bomb(client, data_dir):
 
 # ── Document status → failed when content is invalid ─────────────────────────
 
+
 def test_parse_bad_openapi_sets_status_failed(client, data_dir):
     cid = _make_collection(client)
     doc = _upload(client, cid, "bad.yaml", b"this is not yaml: [", "application/yaml")
@@ -533,6 +611,7 @@ def test_parse_bad_openapi_sets_status_failed(client, data_dir):
 
 # ── Endpoint scope toggle ─────────────────────────────────────────────────────
 
+
 def test_patch_endpoint_scope(client, data_dir):
     cid = _make_collection(client)
     doc = _upload(client, cid, "openapi.yaml", OPENAPI_YAML, "application/yaml")
@@ -541,21 +620,28 @@ def test_patch_endpoint_scope(client, data_dir):
     assert len(eps) > 0
     ep = eps[0]
     assert ep["in_scope"] is True
-    r = client.patch(f"/api/api-collections/{cid}/endpoints/{ep['id']}/scope", json={"in_scope": False})
+    r = client.patch(
+        f"/api/api-collections/{cid}/endpoints/{ep['id']}/scope",
+        json={"in_scope": False},
+    )
     assert r.status_code == 200
     assert r.json()["in_scope"] is False
 
 
 # ── Credentials CRUD ─────────────────────────────────────────────────────────
 
+
 def test_create_and_list_credentials(client, data_dir):
     cid = _make_collection(client)
-    r = client.post(f"/api/api-collections/{cid}/credentials", json={
-        "scheme": "bearer",
-        "name": "Authorization",
-        "value": "Bearer my-test-token",
-        "label": "dev token",
-    })
+    r = client.post(
+        f"/api/api-collections/{cid}/credentials",
+        json={
+            "scheme": "bearer",
+            "name": "Authorization",
+            "value": "Bearer my-test-token",
+            "label": "dev token",
+        },
+    )
     assert r.status_code == 201
     cred = r.json()
     assert cred["scheme"] == "bearer"
@@ -569,9 +655,10 @@ def test_create_and_list_credentials(client, data_dir):
 
 def test_delete_credential(client, data_dir):
     cid = _make_collection(client)
-    r = client.post(f"/api/api-collections/{cid}/credentials", json={
-        "scheme": "apikey", "name": "X-API-Key", "value": "k", "label": "test"
-    })
+    r = client.post(
+        f"/api/api-collections/{cid}/credentials",
+        json={"scheme": "apikey", "name": "X-API-Key", "value": "k", "label": "test"},
+    )
     cid2 = r.json()["id"]
     r2 = client.delete(f"/api/api-collections/{cid}/credentials/{cid2}")
     assert r2.status_code == 204
@@ -579,6 +666,7 @@ def test_delete_credential(client, data_dir):
 
 
 # ── endpoint_count in collection summary ─────────────────────────────────────
+
 
 def test_collection_summary_endpoint_count(client, data_dir):
     cid = _make_collection(client)
@@ -590,6 +678,7 @@ def test_collection_summary_endpoint_count(client, data_dir):
 
 
 # ── Reparse idempotency ───────────────────────────────────────────────────────
+
 
 def test_reparse_replaces_endpoints(client, data_dir):
     """Parsing the same doc twice should not duplicate endpoints."""
@@ -603,6 +692,7 @@ def test_reparse_replaces_endpoints(client, data_dir):
 
 
 # ── Migration smoke test ──────────────────────────────────────────────────────
+
 
 def test_migrate_creates_api_endpoint_and_credential_tables():
     from sqlalchemy import inspect, text

@@ -1,14 +1,18 @@
+import { useState } from "react";
 import { useColResize } from "./_helpers";
 import { parseDate } from "../../lib/utilities";
 
 export function ScannerSessionsPanel({
   data,
   refresh,
-  onUpdate
+  onUpdate,
+  onValidate
 }) {
+  const [validating, setValidating] = useState(false);
   const [sessColW, startSessResize] = useColResize("colw:sessions", [150, 100, 180, null, 180, 170, 150]);
   const sessions = data?.sessions || [];
   const counts = data?.counts || {};
+  const hasValidatableSessions = sessions.some(session => session.is_active && session.kind !== "anonymous" && ((session.cookie_names || []).length || (session.header_names || []).length));
   const kinds = Object.entries(counts).filter(([kind]) => !["total", "active", "inactive"].includes(kind)).sort(([a], [b]) => a.localeCompare(b));
   const fmtAge = iso => {
     if (!iso) return "—";
@@ -42,6 +46,20 @@ export function ScannerSessionsPanel({
       alert(e.message);
     }
   };
+  const validateSessions = async () => {
+    if (!confirm("Validate every active scanner session and deactivate any rejected by the target?")) return;
+    setValidating(true);
+    try {
+      const result = await onValidate();
+      await refresh();
+      const summary = `Checked ${result.checked}; ${result.valid} valid; ${result.evicted} evicted; ${result.errors} errors; ${result.skipped} skipped.`;
+      alert(summary);
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setValidating(false);
+    }
+  };
   return <div className="intel-panel">
       <div className="intel-toolbar">
         <div className="intel-title">
@@ -49,6 +67,7 @@ export function ScannerSessionsPanel({
           <span className="subtle">{counts.total || 0} durable label{(counts.total || 0) === 1 ? "" : "s"}; auth material is redacted</span>
         </div>
         <div className="intel-filter">
+          <button className="btn secondary sm" disabled={validating || !hasValidatableSessions} onClick={validateSessions}>{validating ? "Validating…" : "Validate all"}</button>
           <button className="btn ghost sm" onClick={refresh}>Refresh</button>
         </div>
       </div>

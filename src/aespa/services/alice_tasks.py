@@ -8,6 +8,7 @@ Clients reconnect via GET /api/test-runs/{id}/alice/stream?cursor=N which
 replays buffered events from position N and then streams live events as they
 arrive.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +29,7 @@ class AliceTask:
     tab_id: str
     think_msg_id: str
     reply_msg_id: str
-    run_type: str = "site"           # "site" | "api"
+    run_type: str = "site"  # "site" | "api"
     # All SSE events produced so far (for replay on reconnect).
     events: list[dict] = field(default_factory=list)
     # Number of events dropped off the front of ``events`` by buffer trimming.
@@ -49,6 +50,7 @@ _registry: dict[tuple[str, int], AliceTask] = {}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def get(run_id: int, run_type: str = "site") -> Optional[AliceTask]:
     return _registry.get((run_type, run_id))
@@ -113,7 +115,9 @@ async def stop(run_id: int, run_type: str = "site") -> bool:
     return False
 
 
-async def stream_events(run_id: int, cursor: int = 0, run_type: str = "site") -> AsyncGenerator[str, None]:
+async def stream_events(
+    run_id: int, cursor: int = 0, run_type: str = "site"
+) -> AsyncGenerator[str, None]:
     """Yield SSE lines: buffered events from *cursor*, then live events."""
     task = _registry.get((run_type, run_id))
 
@@ -139,7 +143,7 @@ async def stream_events(run_id: int, cursor: int = 0, run_type: str = "site") ->
     try:
         while True:
             event = await q.get()
-            if event is None:           # sentinel — task finished
+            if event is None:  # sentinel — task finished
                 break
             yield f"data: {json.dumps(event)}\n\n"
             if event.get("type") == "done":
@@ -149,6 +153,7 @@ async def stream_events(run_id: int, cursor: int = 0, run_type: str = "site") ->
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────
+
 
 def _append(task: AliceTask, event: dict) -> None:
     """Add an event to the buffer and push to all connected clients."""
@@ -177,7 +182,7 @@ def _append(task: AliceTask, event: dict) -> None:
         }
 
     if len(task.events) >= BUFFER_LIMIT:
-        keep = task.events[-(BUFFER_LIMIT - 1):]
+        keep = task.events[-(BUFFER_LIMIT - 1) :]
         task.dropped += len(task.events) - len(keep)
         task.events = keep
     task.events.append(event)
@@ -209,30 +214,37 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
                         _append(task, json.loads(sse_line[6:].strip()))
                     except Exception:
                         pass
-            
+
             # Calibrate all findings for this run when Alice finishes
-            is_api = (task.run_type == "api")
+            is_api = task.run_type == "api"
             from aespa.services.scanner import calibrate_all_findings_for_run
+
             try:
                 calibrate_all_findings_for_run(task.run_id, is_api_run=is_api)
             except Exception as ce:
                 log.warning("calibrate_all_findings_for_run failed: %s", ce)
     except asyncio.CancelledError:
-        _append(task, {
-            "type": "done",
-            "thought": task.accumulated_thought,
-            "message": task.accumulated_message or "Stopped by user.",
-        })
+        _append(
+            task,
+            {
+                "type": "done",
+                "thought": task.accumulated_thought,
+                "message": task.accumulated_message or "Stopped by user.",
+            },
+        )
         raise
     except Exception as exc:
         log.exception("ALICE background task failed for run_id=%s", task.run_id)
-        _append(task, {
-            "type": "done",
-            "thought": task.accumulated_thought,
-            "message": f"Agent encountered an error: {exc}",
-        })
+        _append(
+            task,
+            {
+                "type": "done",
+                "thought": task.accumulated_thought,
+                "message": f"Agent encountered an error: {exc}",
+            },
+        )
     finally:
         task.done = True
         for q in list(task.waiters):
-            q.put_nowait(None)      # sentinel to close all client streams
+            q.put_nowait(None)  # sentinel to close all client streams
         task.waiters.clear()

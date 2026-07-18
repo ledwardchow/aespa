@@ -147,6 +147,22 @@ export function WebRunActivityTab(props) {
               post_review_turn: {
                 label: "Review",
                 cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok"
+              },
+              execution_monitor: {
+                label: "Execution Monitor",
+                cls: "phase-warning"
+              },
+              mentor_guidance: {
+                label: "Mentor Guidance",
+                cls: "phase-warning"
+              },
+              session_validator: {
+                label: "Session Validator",
+                cls: "phase-warning"
+              },
+              test_lead_completion_policy: {
+                label: "Test Lead Completion Gate",
+                cls: "phase-other"
               }
             };
             const _baseMeta = PHASE_META[entry.phase] || {
@@ -166,7 +182,8 @@ export function WebRunActivityTab(props) {
             const hasThinkingDetail = entry.phase === "thinking_step" && !!(entry.data?.observation || entry.data?.hypothesis || entry.data?.payload_purpose || entry.data?.payload_summary || entry.data?.tool_input || entry.data?.tool_output);
             const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
             const hasLlmDiagnostics = !!(entry.data?.native_stop_reason || entry.data?.provider_diagnostics?.length || entry.data?.termination_reason);
-            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail || hasLlmDiagnostics);
+            const hasInterventionDetail = entry.phase === "execution_monitor" || entry.phase === "mentor_guidance" || entry.phase === "session_validator" || entry.phase === "test_lead_completion_policy";
+            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail || hasLlmDiagnostics || hasInterventionDetail);
             const isExpanded = expandedLogIds.has(entry._id);
             return <div key={entry._id}>
                   <div className={"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")} onClick={hasPayload ? () => toggleLogId(entry._id) : undefined}>
@@ -200,6 +217,9 @@ export function WebRunActivityTab(props) {
                           explicit_done: entry.data?.explicit_done,
                           provider_diagnostics: entry.data?.provider_diagnostics
                         }, null, 2)}</pre></>}
+                      {hasInterventionDetail && <>
+                        <div className="activity-payload-label">{entry.data?.emitter || "Scan supervisor"} details</div>
+                        <pre>{JSON.stringify(entry.data, null, 2)}</pre></>}
                       {hasThinkingDetail && <>
                         {entry.data?.observation && <>
                           <div className="activity-payload-label">Observation</div>
