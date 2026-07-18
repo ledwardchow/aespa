@@ -5,6 +5,7 @@ state (LLM messages, action history, blocked-URL tracking, and loop counters)
 to the ``scan_checkpoint`` table after every LLM turn.  A crashed or stopped
 scan can be resumed by re-loading this state without loss of LLM context.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ def _utcnow() -> datetime:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def save_checkpoint(
     run_id: int,
@@ -52,7 +54,9 @@ def save_checkpoint(
                 existing.messages_json = json.dumps(messages, default=str)
                 existing.history_json = json.dumps(history, default=str)
                 existing.blocked_urls_json = json.dumps(list(blocked_urls), default=str)
-                existing.failed_url_counts_json = json.dumps(failed_url_counts, default=str)
+                existing.failed_url_counts_json = json.dumps(
+                    failed_url_counts, default=str
+                )
                 existing.step_count = step_count
                 existing.progressive_findings_count = progressive_findings_count
                 existing.consecutive_context_tools = consecutive_context_tools

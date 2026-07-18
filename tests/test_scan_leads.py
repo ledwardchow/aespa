@@ -1,4 +1,5 @@
 """Tests for ScanLead auto-promotion: confirming a lead must back it with a finding."""
+
 import json
 
 import pytest
@@ -48,7 +49,9 @@ def _make_lead(engine, **overrides) -> int:
         category=overrides.pop("category", "API1"),
         severity=overrides.pop("severity", "high"),
         title=overrides.pop("title", "IDOR on /orders/{id}"),
-        description=overrides.pop("description", "SAST hypothesis: object id not authorised."),
+        description=overrides.pop(
+            "description", "SAST hypothesis: object id not authorised."
+        ),
         location=overrides.pop("location", "api/orders.py:42"),
         evidence="order = db.get(id)  # no owner check",
         **overrides,
@@ -114,7 +117,9 @@ def test_confirm_links_existing_finding_no_duplicate(engine):
 
     assert updated.linked_finding_id == existing_id
     with Session(engine) as s:
-        count = len(s.exec(select(ScanFinding).where(ScanFinding.api_test_run_id == 99)).all())
+        count = len(
+            s.exec(select(ScanFinding).where(ScanFinding.api_test_run_id == 99)).all()
+        )
     assert count == 1
 
 
@@ -158,7 +163,10 @@ def _make_collection_with_endpoint(engine, path="/users/{id}") -> tuple[int, int
         s.commit()
         s.refresh(coll)
         ep = ApiEndpoint(
-            collection_id=coll.id, method="GET", path=path, in_scope=True,
+            collection_id=coll.id,
+            method="GET",
+            path=path,
+            in_scope=True,
         )
         s.add(ep)
         s.commit()
@@ -234,16 +242,19 @@ def test_confirm_without_run_id_does_not_promote(engine):
 
 # ── Copy-into-web-run model ─────────────────────────────────────────────────────
 
+
 def _make_sast_originals(engine, sast_run_id=10, n=2) -> list[int]:
     ids = []
     for i in range(n):
-        ids.append(_make_lead(
-            engine,
-            collection_id=None,
-            producer_run_id=sast_run_id,
-            title=f"Lead {i}",
-            category="A03",
-        ))
+        ids.append(
+            _make_lead(
+                engine,
+                collection_id=None,
+                producer_run_id=sast_run_id,
+                title=f"Lead {i}",
+                category="A03",
+            )
+        )
     return ids
 
 
@@ -307,6 +318,8 @@ def test_explicit_imports_are_fresh_and_independent_for_each_api_run(engine):
         original = s.get(ScanLead, original_id)
         assert original.status == "open"
         assert original.investigated_by_run_id is None
+
+
 def test_investigating_copy_leaves_original_open(engine):
     [orig_id] = _make_sast_originals(engine, sast_run_id=10, n=1)
     copy_leads_to_run(10, "web", 7)
@@ -327,7 +340,9 @@ def test_investigating_copy_leaves_original_open(engine):
 
 def test_web_confirm_promotes_to_test_run_id(engine):
     """A web-investigated lead must key its finding on test_run_id, not api_test_run_id."""
-    lead_id = _make_lead(engine, collection_id=None, category="A01", title="SQLi on /search")
+    lead_id = _make_lead(
+        engine, collection_id=None, category="A01", title="SQLi on /search"
+    )
 
     updated = update_lead(
         lead_id,

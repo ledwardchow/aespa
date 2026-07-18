@@ -17,6 +17,7 @@ Usage:
 
 Defaults OUTPUT_PATH to ./THIRD_PARTY_LICENSES.txt.
 """
+
 from __future__ import annotations
 
 import sys
@@ -53,7 +54,9 @@ def _license_texts(dist: metadata.Distribution) -> list[tuple[str, str]]:
     """Return (filename, text) for LICENSE/NOTICE/COPYING files in the dist-info."""
     out: list[tuple[str, str]] = []
     # Filenames the package explicitly declares as license files (METADATA 2.4).
-    declared = {p.split("/")[-1].lower() for p in (dist.metadata.get_all("License-File") or [])}
+    declared = {
+        p.split("/")[-1].lower() for p in (dist.metadata.get_all("License-File") or [])
+    }
     seen: set[str] = set()
     for f in dist.files or []:
         name = f.name.lower()
@@ -84,7 +87,9 @@ def _license_texts(dist: metadata.Distribution) -> list[tuple[str, str]]:
 
 
 def main() -> int:
-    out_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("THIRD_PARTY_LICENSES.txt")
+    out_path = (
+        Path(sys.argv[1]) if len(sys.argv) > 1 else Path("THIRD_PARTY_LICENSES.txt")
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     dists: dict[str, metadata.Distribution] = {}

@@ -1,4 +1,5 @@
 """Tests for the sslscan-like TLS probe service (no network — cert crafted locally)."""
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,7 @@ from cryptography.x509.oid import NameOID
 from aespa.services import tls_scan
 
 # ── _parse_target ─────────────────────────────────────────────────────────────
+
 
 def test_parse_target_bare_host_defaults_443():
     assert tls_scan._parse_target("example.com", None) == ("example.com", 443)
@@ -32,6 +34,7 @@ def test_parse_target_explicit_port_wins_over_default():
 
 # ── _hostname_matches ─────────────────────────────────────────────────────────
 
+
 def test_hostname_exact_match():
     assert tls_scan._hostname_matches("api.example.com", ["api.example.com"]) is True
 
@@ -49,6 +52,7 @@ def test_hostname_mismatch():
 
 
 # ── _describe_cert ────────────────────────────────────────────────────────────
+
 
 def _make_cert(*, host, key_bits=2048, hash_algo=None, days_valid=365, san=None):
     hash_algo = hash_algo or hashes.SHA256()
@@ -107,6 +111,7 @@ def test_describe_cert_flags_hostname_mismatch():
 
 
 # ── scan_tls (probe mocked) ───────────────────────────────────────────────────
+
 
 def test_scan_tls_runs_probe_with_resolved_target(monkeypatch):
     captured = {}
@@ -203,9 +208,7 @@ def test_run_module_skips_non_https():
 
 def test_posture_finding_api_mode_keys_api_column():
     r = _result(issues=["Certificate expired."], certificate={"expired": True})
-    f = scanner._tls_posture_finding(
-        7, "https://h.example.com/", r, is_api_run=True
-    )
+    f = scanner._tls_posture_finding(7, "https://h.example.com/", r, is_api_run=True)
     assert f.api_test_run_id == 7
     assert f.test_run_id is None
 

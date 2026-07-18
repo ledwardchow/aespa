@@ -459,7 +459,9 @@ def _build_coverage(
         route["coverage"] = {
             "total": len(obligations),
             "statuses": dict(statuses),
-            "categories": sorted({category for category, _status, _class in obligations}),
+            "categories": sorted(
+                {category for category, _status, _class in obligations}
+            ),
             "remaining_categories": sorted(
                 category
                 for category, status in category_statuses.items()

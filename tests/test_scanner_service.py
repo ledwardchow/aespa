@@ -7,7 +7,42 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from aespa.models import ScanFinding
 from aespa.services import burp_rest, scanner
 
+
+def test_select_browser_auth_token_accepts_namespaced_token_key():
+    token, key = scanner._select_browser_auth_token(
+        {
+            "bankofed_user": '{"email":"amelia@example.com"}',
+            "bankofed_token": "opaque-access-token",
+        }
+    )
+
+    assert token == "opaque-access-token"
+    assert key == "bankofed_token"
+
+
+def test_select_browser_auth_token_accepts_jwt_under_arbitrary_key():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"
+
+    assert scanner._select_browser_auth_token({"app_session": jwt}) == (
+        jwt,
+        "app_session",
+    )
+
+
+def test_select_browser_auth_token_rejects_non_bearer_tokens():
+    assert scanner._select_browser_auth_token(
+        {"csrf_token": "csrf", "refresh_token": "refresh"}
+    ) == (None, None)
+
+
+def test_authorization_header_is_case_insensitive():
+    assert (
+        scanner._authorization_header({"authorization": "Bearer persisted"})
+        == "Bearer persisted"
+    )
+
 # ── scope-checked redirect following ──────────────────────────────────────────
+
 
 class _FakeResp:
     def __init__(self, url, status_code, headers=None):
@@ -30,34 +65,50 @@ class _FakeClient:
 
 def test_reporting_handoff_replaces_test_lead_decision_status(monkeypatch):
     emitted = []
-    monkeypatch.setattr(scanner.events_svc, "emit", lambda run_id, event: emitted.append((run_id, event)))
+    monkeypatch.setattr(
+        scanner.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
 
     scanner._emit_reporting_handoff(42, probe_count=12, batch_count=3)
 
-    assert emitted == [(42, {
-        "type": "agent_status",
-        "agent_id": "scanner",
-        "role": "Test Lead",
-        "status": "active",
-        "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
-        "outcome": "Reporting is analysing 12 probe result(s) across 3 LLM turn(s).",
-        "_persist": True,
-    })]
+    assert emitted == [
+        (
+            42,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "active",
+                "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
+                "outcome": "Reporting is analysing 12 probe result(s) across 3 LLM turn(s).",
+                "_persist": True,
+            },
+        )
+    ]
 
 
 def test_scan_complete_is_emitted_as_the_terminal_phase(monkeypatch):
     emitted = []
-    monkeypatch.setattr(scanner.events_svc, "emit", lambda run_id, event: emitted.append((run_id, event)))
+    monkeypatch.setattr(
+        scanner.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
 
     scanner._emit_scan_complete(42, finding_count=3)
 
-    assert emitted[-1] == (42, {
-        "type": "scanner_phase",
-        "phase": "scan_complete",
-        "status": "complete",
-        "message": "Scan complete",
-        "data": {"finding_count": 3},
-    })
+    assert emitted[-1] == (
+        42,
+        {
+            "type": "scanner_phase",
+            "phase": "scan_complete",
+            "status": "complete",
+            "message": "Scan complete",
+            "data": {"finding_count": 3},
+        },
+    )
 
 
 def test_reporting_findings_use_managed_validator_queue(monkeypatch):
@@ -67,6 +118,7 @@ def test_reporting_findings_use_managed_validator_queue(monkeypatch):
         queued.append((run_id, finding_ids, kwargs))
 
     from aespa.services import validator
+
     monkeypatch.setattr(validator, "start_validation", fake_start_validation)
 
     asyncio.run(scanner._queue_reporting_validation(42, [7, 8]))
@@ -77,32 +129,44 @@ def test_reporting_findings_use_managed_validator_queue(monkeypatch):
 
 def test_request_scope_checked_follows_in_scope_redirect(monkeypatch):
     monkeypatch.setattr(scanner, "check_scope", lambda url, site_id, run_id: None)
-    client = _FakeClient({
-        "https://t.local/a": _FakeResp("https://t.local/a", 302, {"location": "/b"}),
-        "https://t.local/b": _FakeResp("https://t.local/b", 200, {}),
-    })
+    client = _FakeClient(
+        {
+            "https://t.local/a": _FakeResp(
+                "https://t.local/a", 302, {"location": "/b"}
+            ),
+            "https://t.local/b": _FakeResp("https://t.local/b", 200, {}),
+        }
+    )
     resp, blocked = asyncio.run(
-        scanner._request_scope_checked(client, "GET", "https://t.local/a", site_id=1, run_id=1)
+        scanner._request_scope_checked(
+            client, "GET", "https://t.local/a", site_id=1, run_id=1
+        )
     )
     assert blocked is None
     assert resp.status_code == 200
     assert [c[:2] for c in client.calls] == [
-        ("GET", "https://t.local/a"), ("GET", "https://t.local/b"),
+        ("GET", "https://t.local/a"),
+        ("GET", "https://t.local/b"),
     ]
 
 
 def test_request_scope_checked_blocks_out_of_scope_redirect(monkeypatch):
     monkeypatch.setattr(
-        scanner, "check_scope",
+        scanner,
+        "check_scope",
         lambda url, site_id, run_id: None if "t.local" in url else "Host out of scope",
     )
-    client = _FakeClient({
-        "https://t.local/a": _FakeResp(
-            "https://t.local/a", 302, {"location": "http://169.254.169.254/meta"}
-        ),
-    })
+    client = _FakeClient(
+        {
+            "https://t.local/a": _FakeResp(
+                "https://t.local/a", 302, {"location": "http://169.254.169.254/meta"}
+            ),
+        }
+    )
     resp, blocked = asyncio.run(
-        scanner._request_scope_checked(client, "GET", "https://t.local/a", site_id=1, run_id=1)
+        scanner._request_scope_checked(
+            client, "GET", "https://t.local/a", site_id=1, run_id=1
+        )
     )
     assert blocked is not None
     assert blocked[0] == "http://169.254.169.254/meta"
@@ -114,10 +178,14 @@ def test_request_scope_checked_blocks_out_of_scope_redirect(monkeypatch):
 
 def test_request_scope_checked_303_downgrades_post_to_get_and_drops_body(monkeypatch):
     monkeypatch.setattr(scanner, "check_scope", lambda url, site_id, run_id: None)
-    client = _FakeClient({
-        "https://t.local/a": _FakeResp("https://t.local/a", 303, {"location": "/done"}),
-        "https://t.local/done": _FakeResp("https://t.local/done", 200, {}),
-    })
+    client = _FakeClient(
+        {
+            "https://t.local/a": _FakeResp(
+                "https://t.local/a", 303, {"location": "/done"}
+            ),
+            "https://t.local/done": _FakeResp("https://t.local/done", 200, {}),
+        }
+    )
     resp, blocked = asyncio.run(
         scanner._request_scope_checked(
             client, "POST", "https://t.local/a", site_id=1, run_id=1, json={"x": 1}
@@ -165,14 +233,18 @@ def test_persist_discovered_credential_refuses_out_of_scope_login(monkeypatch):
 
         # Off-host login → refused, nothing written.
         created = scanner._maybe_persist_discovered_credential(
-            run_id, username="attacker", password="pw",
+            run_id,
+            username="attacker",
+            password="pw",
             login_url="https://evil-other.com/login",
         )
         assert created is False
 
         # In-scope login → saved.
         created = scanner._maybe_persist_discovered_credential(
-            run_id, username="realuser", password="pw",
+            run_id,
+            username="realuser",
+            password="pw",
             login_url="https://bankofed.local/login",
         )
         assert created is True
@@ -270,19 +342,38 @@ def test_load_findings_snapshot_returns_existing_findings(monkeypatch):
 
 def _finding_list(args, snapshot):
     return scanner._run_thinking_context_tool(
-        "finding_list", args,
-        pages_snapshot=[], findings_snapshot=snapshot, history=[], run_id=1,
+        "finding_list",
+        args,
+        pages_snapshot=[],
+        findings_snapshot=snapshot,
+        history=[],
+        run_id=1,
     )
 
 
 def test_finding_list_category_filter():
     snapshot = [
-        {"title": "SQL injection in /search", "severity": "high", "owasp": "A03",
-         "affected_url": "https://t/search", "description": "blind sql"},
-        {"title": "Reflected XSS in name param", "severity": "medium", "owasp": "A03",
-         "affected_url": "https://t/profile", "description": "cross-site scripting"},
-        {"title": "SSRF via webhook url", "severity": "high", "owasp": "A10",
-         "affected_url": "https://t/webhook", "description": "server-side request forgery"},
+        {
+            "title": "SQL injection in /search",
+            "severity": "high",
+            "owasp": "A03",
+            "affected_url": "https://t/search",
+            "description": "blind sql",
+        },
+        {
+            "title": "Reflected XSS in name param",
+            "severity": "medium",
+            "owasp": "A03",
+            "affected_url": "https://t/profile",
+            "description": "cross-site scripting",
+        },
+        {
+            "title": "SSRF via webhook url",
+            "severity": "high",
+            "owasp": "A10",
+            "affected_url": "https://t/webhook",
+            "description": "server-side request forgery",
+        },
     ]
 
     # Vuln-class slug matches only its class, not other A03 findings.
@@ -411,8 +502,12 @@ def test_dynamic_finding_can_be_saved_without_page_assignment():
 
 
 def test_finding_from_llm_preserves_large_request_response_evidence():
-    long_request = "POST /api/search HTTP/1.1\nContent-Type: application/json\n\n" + ("A" * 9000)
-    long_response = "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + ("B" * 12000)
+    long_request = "POST /api/search HTTP/1.1\nContent-Type: application/json\n\n" + (
+        "A" * 9000
+    )
+    long_response = "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + (
+        "B" * 12000
+    )
 
     finding = scanner._finding_from_llm(
         run_id=1,
@@ -463,7 +558,11 @@ def test_finding_from_llm_emits_structured_evidence_items():
     item_types = {item["type"] for item in finding.evidence_items}
     assert {"summary", "status", "http_request", "http_response"} <= item_types
     assert "secret-token" not in finding.evidence_json
-    assert any(item["value"] == "200" for item in finding.evidence_items if item["type"] == "status")
+    assert any(
+        item["value"] == "200"
+        for item in finding.evidence_items
+        if item["type"] == "status"
+    )
 
 
 def test_http_evidence_items_include_timing_diff_outcome_and_screenshot():
@@ -480,9 +579,19 @@ def test_http_evidence_items_include_timing_diff_outcome_and_screenshot():
         action_log=["goto /admin", "snapshot"],
         screenshot_b64="abc123",
     )
-    item_types = {item["type"] for item in scanner._evidence_items_from_json(evidence_json)}
+    item_types = {
+        item["type"] for item in scanner._evidence_items_from_json(evidence_json)
+    }
 
-    assert {"status_delta", "timing", "timing_delta", "body_diff", "action_outcome", "action_log", "screenshot"} <= item_types
+    assert {
+        "status_delta",
+        "timing",
+        "timing_delta",
+        "body_diff",
+        "action_outcome",
+        "action_log",
+        "screenshot",
+    } <= item_types
 
 
 def test_finding_from_llm_preserves_prebuilt_probe_evidence_items():
@@ -569,7 +678,9 @@ def test_cvss_score_calculator():
 def test_calibrate_finding_rating():
     # 1. CORS should calibrate to 3.1 (Low)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "CORS arbitrary Origin reflection", 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N"
+        "CORS arbitrary Origin reflection",
+        6.5,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
     )
     assert score == 3.1
     assert severity == "low"
@@ -579,7 +690,9 @@ def test_calibrate_finding_rating():
 
     # 2. Server headers (including CSP) should calibrate to 3.7 (Low) or 0.0 (Info)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Content-Security-Policy missing", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        "Content-Security-Policy missing",
+        5.3,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
     )
     assert score == 3.7
     assert severity == "low"
@@ -588,7 +701,9 @@ def test_calibrate_finding_rating():
 
     # 3. Username enumeration should calibrate to 3.7 (Low)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Username Enumeration on login page", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        "Username Enumeration on login page",
+        5.3,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
     )
     assert score == 3.7
     assert severity == "low"
@@ -596,7 +711,9 @@ def test_calibrate_finding_rating():
 
     # 4. Session logout invalidation should calibrate to 3.6 (Low)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Session not invalidated on logout", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+        "Session not invalidated on logout",
+        7.5,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
     )
     assert score == 3.6
     assert severity == "low"
@@ -607,7 +724,9 @@ def test_calibrate_finding_rating():
 
     # 5. Stack trace should calibrate to 3.7 (Low)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Verbose stack trace disclosure", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        "Verbose stack trace disclosure",
+        5.3,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
     )
     assert score == 3.7
     assert severity == "low"
@@ -623,14 +742,18 @@ def test_calibrate_finding_rating():
 
     # Sensitive data exposed (with secrets) should NOT calibrate
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Sensitive data exposed: private key leaked", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
+        "Sensitive data exposed: private key leaked",
+        7.5,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
     )
     assert score == 7.5
     assert severity == "high"
 
     # 7. Rate Limiting (normal) should calibrate to 3.7 (Low)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Missing login rate limiting", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"
+        "Missing login rate limiting",
+        5.3,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
     )
     assert score == 3.7
     assert severity == "low"
@@ -638,7 +761,9 @@ def test_calibrate_finding_rating():
 
     # Rate Limiting (TOTP/MFA) should calibrate to 5.3 (Medium)
     score, severity, vector = scanner._calibrate_finding_rating(
-        "Rate limiting bypass on TOTP validation", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+        "Rate limiting bypass on TOTP validation",
+        7.5,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
     )
     assert score == 5.3
     assert severity == "medium"
@@ -649,7 +774,9 @@ def test_calibrate_finding_rating():
 
     # 8. Unaffected findings (SQL Injection) should remain unchanged
     score, severity, vector = scanner._calibrate_finding_rating(
-        "SQL injection error disclosure", 7.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N"
+        "SQL injection error disclosure",
+        7.1,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
     )
     assert score == 7.1
     assert severity == "high"
@@ -663,6 +790,7 @@ def test_calibrate_all_findings_for_run():
     )
     try:
         from aespa import models as _models  # noqa: F401
+
         SQLModel.metadata.create_all(engine)
 
         with Session(engine) as session:
@@ -691,6 +819,7 @@ def test_calibrate_all_findings_for_run():
 
         # Monkeypatch get_engine to use our memory db
         from unittest import mock
+
         with mock.patch("aespa.services.scanner.get_engine", return_value=engine):
             scanner.calibrate_all_findings_for_run(1)
 

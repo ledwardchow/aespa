@@ -14,6 +14,7 @@ Workflow
 
 Reference: https://portswigger.net/burp/documentation/desktop/getting-started/rest-api
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,9 +34,9 @@ _SUCCESS_STATUSES = {"succeeded"}
 
 # Polling schedule: [(up_to_elapsed_s, interval_s), ...]
 _POLL_SCHEDULE = [
-    (60,  5),    # first minute: every 5 s
-    (180, 15),   # minutes 1-3: every 15 s
-    (600, 30),   # minutes 3-10: every 30 s
+    (60, 5),  # first minute: every 5 s
+    (180, 15),  # minutes 1-3: every 15 s
+    (600, 30),  # minutes 3-10: every 30 s
 ]
 _DEFAULT_TIMEOUT_S = 600.0  # 10 minutes
 
@@ -134,7 +135,9 @@ def _normalise_issue(event: dict) -> dict | None:
     path = str(issue.get("path") or "/")
     affected_url = f"{origin}{path}" if origin else path
     description = str(issue.get("issue_background") or issue.get("description") or "")
-    remediation = str(issue.get("remediation_background") or issue.get("remediation") or "")
+    remediation = str(
+        issue.get("remediation_background") or issue.get("remediation") or ""
+    )
 
     # Extract request/response evidence if available
     request_evidence = ""
@@ -259,19 +262,26 @@ async def wait_for_scan(
         except BurpRestApiError:
             raise
         except Exception as exc:
-            raise BurpRestApiError(f"Error polling Burp scan task {task_id}: {exc}") from exc
+            raise BurpRestApiError(
+                f"Error polling Burp scan task {task_id}: {exc}"
+            ) from exc
 
         status = str(data.get("status") or "").lower()
-        log.debug("burp_rest: task_id=%s status=%s elapsed=%.0fs", task_id, status, elapsed)
+        log.debug(
+            "burp_rest: task_id=%s status=%s elapsed=%.0fs", task_id, status, elapsed
+        )
 
         if status in _TERMINAL_STATUSES:
             issues = [
-                n for e in (data.get("issue_events") or [])
+                n
+                for e in (data.get("issue_events") or [])
                 if (n := _normalise_issue(e)) is not None
             ]
             log.info(
                 "burp_rest: task_id=%s finished status=%s issues=%d",
-                task_id, status, len(issues),
+                task_id,
+                status,
+                len(issues),
             )
             return issues
 
@@ -288,11 +298,16 @@ async def test_connection(config: BurpRestApiConfig) -> tuple[bool, str]:
     """
     endpoint = f"{config.api_url}/v0.1/scan/0"
     try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0, verify=False, trust_env=False
+        ) as client:
             resp = await client.get(endpoint, headers=_headers(config))
         if resp.status_code in {200, 400, 404}:
             return True, f"Connected to Burp REST API at {config.api_url}"
-        return False, f"Burp REST API at {config.api_url} returned HTTP {resp.status_code}: {resp.text[:200]}"
+        return (
+            False,
+            f"Burp REST API at {config.api_url} returned HTTP {resp.status_code}: {resp.text[:200]}",
+        )
     except httpx.ConnectError:
         return False, (
             f"Cannot connect to Burp REST API at {config.api_url}. "
@@ -302,4 +317,7 @@ async def test_connection(config: BurpRestApiConfig) -> tuple[bool, str]:
     except httpx.TimeoutException:
         return False, f"Connection to Burp REST API at {config.api_url} timed out."
     except Exception as exc:
-        return False, f"Unexpected error testing Burp REST API at {config.api_url}: {exc}"
+        return (
+            False,
+            f"Unexpected error testing Burp REST API at {config.api_url}: {exc}",
+        )
