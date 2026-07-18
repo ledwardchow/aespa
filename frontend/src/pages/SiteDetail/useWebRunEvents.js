@@ -4,7 +4,7 @@ import { isDynamicScanActive } from "./_helpers";
 import { useEventStream } from "../../hooks/useEventStream";
 
 export function useWebRunEvents(options) {
-  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors } = options;
+  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts } = options;
 
   // SSE: receive incremental graph + status updates — no graph polling needed.
   useEventStream(`/api/test-runs/${runId}/events`, {
@@ -226,6 +226,34 @@ export function useWebRunEvents(options) {
         setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
       } else if (evt.type === "guided_login_confirmed") {
         setGuidedLoginPending(prev => prev.filter(p => p.credential_id !== evt.credential_id));
+      } else if (evt.type === "entra_authenticator_prompt") {
+        setEntraPrompts(prev => {
+          const id = `${evt.credential_id || evt.username || "entra"}:${evt.number || ""}`;
+          const prompt = {
+            id,
+            credential_id: evt.credential_id,
+            username: evt.username,
+            number: evt.number,
+            status: "pending",
+            message: evt.message
+          };
+          const next = [prompt, ...prev.filter(p => p.id !== id && p.credential_id !== evt.credential_id)];
+          return next.slice(0, 3);
+        });
+      } else if (evt.type === "entra_authenticator_status") {
+        setEntraPrompts(prev => {
+          const id = `${evt.credential_id || evt.username || "entra"}:${evt.status || "status"}`;
+          const prompt = {
+            id,
+            credential_id: evt.credential_id,
+            username: evt.username,
+            number: evt.number,
+            status: evt.status || "info",
+            message: evt.message
+          };
+          const next = [prompt, ...prev.filter(p => p.id !== id && p.credential_id !== evt.credential_id)];
+          return next.slice(0, 3);
+        });
       }
     }
   });
