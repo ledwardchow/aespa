@@ -4,6 +4,26 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## [PR #242] July 18 Update - Entra ID login, loop supervision, full coverage obligations
+
+**Branch:** `develop -> main`
+
+### Microsoft Entra ID authentication
+
+- **Dedicated Entra ID auth mode** (`services/crawler.py`, site configuration UI): credentials can use a Microsoft-aware multi-page login flow that handles account selection, username/password entry, consent, stay-signed-in prompts, Authenticator notification approval, and optional TOTP codes.
+- **Interactive MFA status and retry** (`api/scan.py`, run events/UI): Authenticator number-matching prompts, success/time-out states, and retry actions are surfaced in the run view. Entra and guided logins are coordinated so one interactive login can be captured and reused by the crawl, dynamic scan, and A.L.I.C.E.
+- **Persisted Entra sessions**: successful browser authentication is saved to the run's session vault with provider and MFA metadata, making it available to later scan phases without repeating the login unnecessarily.
+
+### Agent loop supervision
+
+- **Execution Monitor and Mentor** (`services/execution_monitor.py`, `services/mentor.py`): successive identical tool calls are now intercepted ("Execution Monitor") and sent back to the LLM for a change in strategy ("Mentor"), to unblock loops.
+
+### Coverage, SAST, telemetry, and settings
+
+- **Quick and Full coverage modes** (`services/web_workprogram.py`, web/API run UI): renamed Track and Enforce modes to Quick and Full. Full mode now additionally enforces testing for RXSS, PXSS and SQLi as part of A03 (previously only enforced against the whole category as one item)
+- **Standalone SAST creation and token telemetry** (`SastRuns.jsx`, `TokenUsageBar.jsx`): SAST runs now also have a token counter displayed.
+- **API key privacy** (`services/settings.py`, settings UI): API keys can no longer be copied out of settings fields. Exporting LLM settings still works if you're accessing the app via localhost (LLM settings are exported without keys if reverse proxied)
+
 ## [PR #237] July 15 Update — evidence-driven scanning, bounded completion, unified coverage UI
 
 **Branch:** `develop → main`
@@ -87,8 +107,8 @@ All pull requests merged to `main`, in reverse chronological order.
 No behavior change intended; this is structural cleanup of the Vite/React SPA.
 
 - **Shared components** (`frontend/src/components/`): `PageHeader` (+ `Crumb`/`Sep`) replaces the topbar/breadcrumb markup copy-pasted across ~9 pages; `EmptyState` standardises the icon+message+action empty card; `StatusBadge` centralises status→colour mapping. `StatusBadge` also **fixes drifted badge colours** — some pages used `success`/`warning` variants that had no CSS rule and rendered colourless.
-- **`ApiCollections.jsx` (1315 lines) split** into an `ApiCollections/` module: `ApiCollectionsList`, `ApiCollectionForm`, `ApiCollectionDetail`, `ApiFilesManager`, `ApiTestRunDetail`, `ApiTestRunForm`, with a barrel `index.js` as the router's import surface.
-- **`SiteDetail.jsx` slimmed (743 → ~120 lines):** extracted `TestRunForm`, plus `useActivity` and `useFindings` hooks that each own one tab's state (event log/agent roster/token usage; findings list/validation/dedup) instead of threading ~40 loose props through `TestRunDetail`.
+- `**ApiCollections.jsx` (1315 lines) split** into an `ApiCollections/` module: `ApiCollectionsList`, `ApiCollectionForm`, `ApiCollectionDetail`, `ApiFilesManager`, `ApiTestRunDetail`, `ApiTestRunForm`, with a barrel `index.js` as the router's import surface.
+- `**SiteDetail.jsx` slimmed (743 → ~120 lines):** extracted `TestRunForm`, plus `useActivity` and `useFindings` hooks that each own one tab's state (event log/agent roster/token usage; findings list/validation/dedup) instead of threading ~40 loose props through `TestRunDetail`.
 - **A.L.I.C.E. session split** (`frontend/src/lib/`): `aliceSession.jsx` → `aliceRender.jsx` (render helpers) + `aliceSession.js` (the module-level singleton stream store that keeps the reader loop alive across component unmounts).
 
 ## [PR #220] July 7 Update — upstream proxy fixes, macOS clipboard, packaging
@@ -111,7 +131,7 @@ No behavior change intended; this is structural cleanup of the Vite/React SPA.
 
 ## [PR #216] July 3–5 Update — Vite/React frontend rewrite, TLS scanner
 
-**Branch:** `vite` 
+**Branch:** `vite`
 
 ### Frontend rewrite: vanilla JS → Vite + React
 
@@ -119,7 +139,6 @@ No behavior change intended; this is structural cleanup of the Vite/React SPA.
 - **SPA serving + dev proxy** (`main.py`, `frontend/vite.config.js`): backend serves the built `index.html`/assets; Vite dev config proxies API/WS to the FastAPI server.
 - **d3 sitemap fix** (`69dbb19`): sitemap tab renders under React again; assorted tab components de-duplicated.
 - **Alice chat wiring fixes** (`487c41b`, `4b560d6`): `lib/aliceSession.jsx` reconnect/replay fixed; SAST-leads tab (`WebRunSastLeadsTab`) and `SastRuns` page reworked.
-
 
 ### TLS/SSL scanner (`services/tls_scan.py`, `d810ee8`, `1dd6482`)
 
@@ -130,7 +149,7 @@ No behavior change intended; this is structural cleanup of the Vite/React SPA.
 
 ### Test Lead prompt: eager lead resolution (uncommitted)
 
-- **`update_lead` now called immediately** - SAST leads were marked with investigation status at the end of a scan, now they are marked during a scan (via prompt, so may not be 100% reliable...)
+- `**update_lead` now called immediately** - SAST leads were marked with investigation status at the end of a scan, now they are marked during a scan (via prompt, so may not be 100% reliable...)
 
 ### Licensing / packaging
 

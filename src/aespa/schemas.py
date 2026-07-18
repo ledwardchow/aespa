@@ -936,6 +936,8 @@ class CredentialSummary(BaseModel):
     id: int
     username: str
     label: str | None
+    auth_mode: str = "auto"
+    has_totp_seed: bool = False
 
 
 class TestRunSummary(BaseModel):
