@@ -4,3 +4,12 @@
 - **True Componentization, Not Just Slicing**: When breaking down massive components, do NOT simply extract the JSX and pass a giant "props bag" from the parent. You must move the associated state, handlers, and `useEffect` logic into the child component or into specialized custom hooks (e.g. `useFindings`, `useAliceChat`). The parent component should only retain genuinely shared state (e.g., routing IDs, live event streams).
 - **Vite 8 Build Config**: Vite 8 uses `oxc` for transformations. Do not add `esbuild` configuration blocks (like `keepNames`) to `vite.config.js` as they will be ignored and cause warnings. Use `rollupOptions.output.keepNames` for name preservation.
 - **NPM Context**: The `package.json` lives in the `frontend/` directory. Ensure all `npm` commands and launch configurations are executed with this directory as the working context (e.g., `cd frontend && npm run dev` or using `--prefix frontend`).
+
+## Playwright UI Automation & Route Invariants
+- **Hash Route Patterns**:
+  - Web site detail: `/#/sites/{site_id}`
+  - Web run detail: `/#/runs/{run_id}`
+  - API collection detail: `/#/apis/{collection_id}` (not `/#/apis/collections/...`)
+  - API run detail: `/#/api-runs/{run_id}` (not `/#/apis/runs/...`)
+- **Tab Selection**: When automating UI navigation or taking screenshots, navigate to the main entity route first, then explicitly click tab buttons (`button.tab-btn:has-text("...")`) to ensure React state and tab components mount correctly.
+- **ALICE Panel Interactions**: Clicking `.agent-row--alice-chat` lands on child elements with `e.stopPropagation()`. Target `.agent-row:has-text("A.L.I.C.E") .agent-role-name` directly to collapse or expand the section.

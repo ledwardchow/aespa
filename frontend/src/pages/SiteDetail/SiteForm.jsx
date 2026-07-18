@@ -173,9 +173,10 @@ export function SiteForm({
                   })}>
                       <option value="auto">auto — single-page form fill</option>
                       <option value="totp">totp — form fill + TOTP 2FA</option>
+                      <option value="entra_id">entra id — Microsoft multi-page login</option>
                       <option value="guided">guided — interactive browser login</option>
                     </select></div>
-                  {(c.auth_mode || "auto") === "totp" && <div className="field"><label>TOTP Seed <span className="field-optional">(base32 secret from authenticator app)</span></label>
+                  {["totp", "entra_id"].includes(c.auth_mode || "auto") && <div className="field"><label>TOTP Seed <span className="field-optional">{(c.auth_mode || "auto") === "entra_id" ? "(optional, for Entra \"other app\" code mode)" : "(base32 secret from authenticator app)"}</span></label>
                       <input type="text" value={c.totp_seed || ""} placeholder="JBSWY3DPEHPK3PXP…" onChange={e => updC(i, {
                     totp_seed: e.target.value
                   })} /></div>}
@@ -188,6 +189,16 @@ export function SiteForm({
                     color: "var(--text-2)"
                   }}>
                       🖥️ A browser window will open when a crawl or dynamic scan starts. Complete the login (including any SSO / MFA / push notifications), then click <strong>I'm Done</strong> in the run detail view. ALICE reuses the session captured by whichever phase runs first.
+                    </div></div>}
+                  {(c.auth_mode || "auto") === "entra_id" && <div className="field"><div style={{
+                    background: "var(--surface-2,#2a2a2a)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    color: "var(--text-2)"
+                  }}>
+                      Uses a Microsoft Entra ID-aware browser flow for username, password, consent, account picker, stay-signed-in, Authenticator number matching, and TOTP code pages. MFA policies that require manual interaction may still need guided mode.
                     </div></div>}
                   <div className="credential-remove-cell"><button type="button" className="btn ghost sm" onClick={() => rmC(i)}>Remove</button></div>
                 </div>;

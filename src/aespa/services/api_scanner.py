@@ -471,7 +471,7 @@ async def _enforce_coverage_loop(
             "phase": "start",
             "remaining": total,
             "total": total,
-            "message": f"Enforce mode: {total} coverage cell(s) to resolve.",
+            "message": f"Full mode: {total} coverage cell(s) to resolve.",
         },
     )
 
@@ -530,7 +530,7 @@ async def _enforce_coverage_loop(
             "skipped": stats["skipped"],
             "budget_exhausted": stats["budget_exhausted"],
             "message": (
-                f"Enforce complete: {stats['covered']} covered, "
+                f"Full coverage complete: {stats['covered']} covered, "
                 f"{stats['finding']} finding, {stats['skipped']} skipped."
             ),
         },
@@ -837,6 +837,7 @@ def seed_sessions_from_credentials(api_run_id: int) -> int:
             api_run_id,
             label=label,
             kind=kind,
+            account_label=cred.label,
             username=cred.label or f"cred_{cred.id}",
             credential_id=cred.id,
             source="api_scanner",
@@ -924,9 +925,7 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
         return {
             "tool": tool_name,
             "error": "unknown or unavailable context tool for API scans",
-            "available_tools": sorted(
-                _API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS
-            ),
+            "available_tools": sorted(_API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS),
         }
 
     return _fn
@@ -1197,7 +1196,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
-    llm_svc.set_run_context(api_run_id, lambda evt: events_svc.emit(api_run_id, evt))
+    llm_svc.set_run_context(
+        api_run_id, lambda evt: events_svc.emit(api_run_id, evt), run_kind="api"
+    )
 
     log.info(
         "=== API thinking scan start: api_run_id=%s base_url=%s ===",
@@ -1267,6 +1268,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # without this, API findings never flip their work-program cells. Mirrors
     # web's _do_thinking_scan. ponytail: popped in the finally below.
     from aespa.services.scanner import _finding_hooks
+
     _finding_hooks[api_run_id] = post_finding_fn
 
     events_svc.emit(
@@ -1362,7 +1364,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
                 "agent_id": "scanner",
                 "role": "Test Lead",
                 "status": "active",
-                "current_task": "Enforcing coverage — resolving remaining cells…",
+                "current_task": "Completing full coverage — resolving remaining cells…",
                 "outcome": None,
                 "_persist": True,
             },

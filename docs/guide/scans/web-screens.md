@@ -9,12 +9,16 @@ You can use the **Import site** button on the top right to re-import these on a 
 ## Creating a site configuration
 ![create site screen](images/createsite.png)
 Enter details as necessary. 
-The **Default login page URL** will be used by default for each credential added. If your app has multiple login pages, you can override this for a specific set of credentails by entering the url in the **Login URL (optional override)** field. 
+The **Default login page URL** will be used by default for each credential added. If your app has multiple login pages, you can override this for a specific set of credentials by entering the URL in the **Login URL (optional override)** field.
 
-The **Auth Mode** field allows you to select one of three modes:
+The **Auth Mode** field allows you to select one of four modes:
+
 - **auto** - this will fill in the username/password on a standard form on the website.
 - **totp** - this will fill in the username/password field, and use the entered TOTP seed to fill a TOTP field as well.
-- **guided** - For complex login forms/passkeys/multi-page/multipath logins i.e. Entra. This mode only works if you are running AESPA on a machine with a GUI shell (i.e. not running on a headless server). AESPA will pop a message on the top of the screen when the scanner wants to log in; click on the button to pop open a Chromium browser at the login form, and complete the login; go back to AESPA and click the Done button to close the browser. AESPA will then capture your authentication tokens and continue.
+- **entra id** - uses a Microsoft-aware multi-page flow for account selection, username/password entry, consent, stay-signed-in prompts, Authenticator number matching, and TOTP code pages. When Authenticator approval is required, keep the run page open: AESPA displays the number to enter, reports success or timeout, and offers a retry after a failed approval. The TOTP seed is optional and is used when the tenant permits an authenticator-code flow.
+- **guided** - opens an interactive Chromium window for passkeys, unusual SSO providers, or any login that needs manual input. This mode only works when AESPA runs on a machine with a GUI shell. Complete the login in the browser, then return to the run page and click **I'm Done**. AESPA captures the authenticated session and continues.
+
+Entra ID and guided authentication are interactive login modes. Keep the run page open while a crawl or pentest is starting so AESPA can show approval, retry, browser, and confirmation prompts. Once captured, the session is reused by subsequent scan phases and A.L.I.C.E.
 
 ## Site configuration
 ![run selector screen](images/runselector.png)

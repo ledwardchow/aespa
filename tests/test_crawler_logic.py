@@ -4,8 +4,12 @@ from aespa.services import crawler
 
 
 def test_page_function_label_removes_credential_possessive():
-    assert crawler._page_function_label("Zoe's Accounts Overview") == "Accounts Overview"
-    assert crawler._page_function_label("Admin User Management") == "Admin User Management"
+    assert (
+        crawler._page_function_label("Zoe's Accounts Overview") == "Accounts Overview"
+    )
+    assert (
+        crawler._page_function_label("Admin User Management") == "Admin User Management"
+    )
 
 
 class _FakeLocator:
@@ -23,6 +27,29 @@ class _FakeLocator:
 class _FakeLocatorRoot:
     def __init__(self, locator):
         self.first = locator
+
+
+class _IndexedLocatorRoot:
+    def __init__(self, locators):
+        self._locators = locators
+        self.first = locators[0]
+
+    async def count(self):
+        return len(self._locators)
+
+    def nth(self, index):
+        return self._locators[index]
+
+
+def test_visible_locator_skips_hidden_first_match():
+    hidden = _FakeLocator(count=1, visible=False)
+    visible = _FakeLocator(count=1, visible=True)
+
+    class _Page:
+        def locator(self, selector):  # noqa: ARG002
+            return _IndexedLocatorRoot([hidden, visible])
+
+    assert asyncio.run(crawler._visible_locator(_Page(), "input")) is visible
 
 
 class _FakePage:
@@ -1007,3 +1034,755 @@ def test_authenticate_skips_smart_fallback_without_llm_cfg(monkeypatch):
     )
 
     assert called["smart"] is False
+
+
+def test_authenticate_routes_entra_id_mode(monkeypatch):
+    called = {"entra": False, "auto": False}
+
+    class _Cred(_SmartCred):
+        id = 42
+        auth_mode = "entra_id"
+
+    async def _flag_entra(*args, **kwargs):  # noqa: ARG001
+        called["entra"] = True
+
+    async def _flag_auto(*args, **kwargs):  # noqa: ARG001
+        called["auto"] = True
+
+    monkeypatch.setattr(crawler, "_authenticate_entra_id", _flag_entra)
+    monkeypatch.setattr(crawler, "_authenticate_auto", _flag_auto)
+
+    asyncio.run(
+        crawler._authenticate(
+            _SmartLoginPage(), "https://target.local/login", _Cred(), run_id=1
+        )
+    )
+
+    assert called == {"entra": True, "auto": False}
+
+
+def test_authenticate_does_not_reuse_unconfirmed_entra_session(monkeypatch):
+    called = {"entra": False}
+
+    class _Cred(_SmartCred):
+        id = 42
+        auth_mode = "entra_id"
+
+    async def _flag_entra(*args, **kwargs):  # noqa: ARG001
+        called["entra"] = True
+
+    crawler._guided_session_cache[(12, 42)] = {
+        "cookies": {"AppSession": "stale"},
+        "provider": "entra_id",
+        "completed": False,
+    }
+    monkeypatch.setattr(crawler, "_authenticate_entra_id", _flag_entra)
+
+    asyncio.run(
+        crawler._authenticate(
+            _SmartLoginPage(), "https://target.local/login", _Cred(), run_id=12
+        )
+    )
+
+    assert called["entra"] is True
+    assert (12, 42) not in crawler._guided_session_cache
+
+
+def test_login_url_for_entra_credential_prefers_site_login_before_provider():
+    class _Cred:
+        auth_mode = "entra_id"
+        login_url = "https://login.microsoftonline.com/"
+
+    assert (
+        crawler._login_url_for_credential("https://target.local/login", _Cred())
+        == "https://target.local/login"
+    )
+
+
+def test_login_url_for_entra_credential_keeps_provider_without_site_login():
+    class _Cred:
+        auth_mode = "entra_id"
+        login_url = "https://login.microsoftonline.com/"
+
+    assert (
+        crawler._login_url_for_credential("", _Cred())
+        == "https://login.microsoftonline.com/"
+    )
+
+
+class _EntraContext:
+    def __init__(self):
+        self.handlers = {}
+
+    def on(self, name, handler):
+        self.handlers[name] = handler
+
+    async def cookies(self):
+        return [{"name": "AppSession", "value": "abc123"}]
+
+    async def set_extra_http_headers(self, headers):  # noqa: ARG002
+        return None
+
+
+class _EntraLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+        self.first = self
+
+    async def count(self):
+        return 1 if self.page.is_selector_visible(self.selector) else 0
+
+    async def is_visible(self):
+        return self.page.is_selector_visible(self.selector)
+
+    async def fill(self, value):
+        self.page.fills.append((self.selector, value))
+        if "email" in self.selector or "loginfmt" in self.selector:
+            self.page.email_filled = True
+        if "password" in self.selector or "passwd" in self.selector:
+            self.page.password_filled = True
+
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.state == "email" and self.page.email_filled:
+            self.page.state = "password"
+        elif self.page.state == "password" and self.page.password_filled:
+            self.page.state = "stay_signed_in"
+        elif self.page.state == "stay_signed_in":
+            self.page.state = "done"
+            self.page.url = "https://target.local/dashboard"
+
+
+class _EntraPage:
+    def __init__(self):
+        self.context = _EntraContext()
+        self.url = "about:blank"
+        self.state = "email"
+        self.email_filled = False
+        self.password_filled = False
+        self.fills = []
+        self.clicks = []
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+
+    async def wait_for_load_state(self, *args, **kwargs):  # noqa: ARG002
+        return None
+
+    async def wait_for_timeout(self, *args, **kwargs):  # noqa: ARG002
+        return None
+
+    def locator(self, selector):
+        return _EntraLocator(self, selector)
+
+    def is_selector_visible(self, selector):
+        if self.state == "email":
+            return "email" in selector or "loginfmt" in selector or "idSIButton9" in selector
+        if self.state == "password":
+            return "password" in selector or "passwd" in selector or "idSIButton9" in selector
+        if self.state == "stay_signed_in":
+            return "idSIButton9" in selector or "Yes" in selector
+        return False
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            return {
+                "email": "Sign in Enter your email",
+                "password": "Enter password",
+                "stay_signed_in": "Stay signed in?",
+                "done": "Dashboard Account overview",
+            }[self.state]
+        return "Dashboard Account overview"
+
+
+class _EntraCred:
+    id = 9
+    username = "alice@example.com"
+    password = "s3cr3t"
+    label = "alice"
+    auth_mode = "entra_id"
+
+
+def test_authenticate_entra_id_completes_and_persists_session(monkeypatch):
+    captured = {}
+
+    def _fake_upsert(run_id, **kwargs):
+        captured["run_id"] = run_id
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+
+    page = _EntraPage()
+    asyncio.run(
+        crawler._authenticate_entra_id(
+            page, "https://target.local/login", _EntraCred(), run_id=77
+        )
+    )
+
+    assert page.url == "https://target.local/dashboard"
+    assert ("input[type='email']", "alice@example.com") in page.fills
+    assert ("input[type='password']", "s3cr3t") in page.fills
+    assert captured["run_id"] == 77
+    assert captured["label"] == "entra_9"
+    assert captured["source"] == "entra_id_login"
+    assert captured["cookies"] == {"AppSession": "abc123"}
+    assert captured["extra_headers"]["Authorization"] == "Bearer eyJ.access.token"
+    assert captured["metadata"]["auth_provider"] == "entra_id"
+    assert captured["metadata"]["completed"] is True
+
+
+class _EntraTotpPage(_EntraPage):
+    def is_selector_visible(self, selector):
+        if self.state == "totp":
+            return (
+                "one-time-code" in selector
+                or "SAOTCC" in selector
+                or "otc" in selector
+                or "code" in selector
+                or "idSIButton9" in selector
+            )
+        return super().is_selector_visible(selector)
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            return {
+                "email": "Sign in Enter your email",
+                "password": "Enter password",
+                "totp": "Enter code from your authenticator app",
+                "done": "Dashboard Account overview",
+            }[self.state]
+        return "Dashboard Account overview"
+
+
+class _EntraTotpLocator(_EntraLocator):
+    async def fill(self, value):
+        await super().fill(value)
+        if self.page.state == "totp":
+            self.page.totp_filled = True
+
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.state == "email" and self.page.email_filled:
+            self.page.state = "password"
+        elif self.page.state == "password" and self.page.password_filled:
+            self.page.state = "totp"
+        elif self.page.state == "totp" and getattr(self.page, "totp_filled", False):
+            self.page.state = "done"
+            self.page.url = "https://target.local/dashboard"
+
+
+class _EntraTotpPageWithLocator(_EntraTotpPage):
+    def __init__(self):
+        super().__init__()
+        self.totp_filled = False
+
+    def locator(self, selector):
+        return _EntraTotpLocator(self, selector)
+
+
+class _EntraCredWithTotp(_EntraCred):
+    totp_seed = "JBSWY3DPEHPK3PXP"
+
+
+def test_authenticate_entra_id_uses_totp_seed_for_other_app_code(monkeypatch):
+    captured = {}
+
+    def _fake_upsert(run_id, **kwargs):
+        captured["run_id"] = run_id
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+
+    page = _EntraTotpPageWithLocator()
+    asyncio.run(
+        crawler._authenticate_entra_id(
+            page, "https://target.local/login", _EntraCredWithTotp(), run_id=78
+        )
+    )
+
+    totp_fills = [
+        value
+        for selector, value in page.fills
+        if "one-time-code" in selector or "SAOTCC" in selector
+    ]
+    assert page.url == "https://target.local/dashboard"
+    assert len(totp_fills) == 1
+    assert totp_fills[0].isdigit()
+    assert len(totp_fills[0]) == 6
+    assert captured["metadata"]["completed"] is True
+
+
+def test_entra_notification_prompt_event_contains_number(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+
+    crawler._emit_entra_notification_prompt(12, 34, "alice@example.com", "42")
+
+    assert captured == [
+        (
+            12,
+            {
+                "type": "entra_authenticator_prompt",
+                "credential_id": 34,
+                "username": "alice@example.com",
+                "number": "42",
+                "message": "Attempting Entra login as alice@example.com - open Authenticator and enter 42",
+            },
+        )
+    ]
+
+
+def test_entra_notification_prompt_event_allows_pending_approval(monkeypatch):
+    captured = []
+    logs = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+
+    crawler._emit_entra_notification_prompt(12, 34, "alice@example.com", None)
+
+    assert captured == [
+        (
+            12,
+            {
+                "type": "entra_authenticator_prompt",
+                "credential_id": 34,
+                "username": "alice@example.com",
+                "number": None,
+                "message": "Attempting Entra login as alice@example.com - open Authenticator and approve the sign-in request",
+            },
+        )
+    ]
+    assert logs
+
+
+def test_entra_authenticator_status_event_reports_success_and_timeout(monkeypatch):
+    captured = []
+    logs = []
+    monkeypatch.setattr(
+        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+
+    crawler._emit_entra_authenticator_status(
+        12, 34, "alice@example.com", "success", "42"
+    )
+    crawler._emit_entra_authenticator_status(
+        12, 34, "alice@example.com", "timeout", "42"
+    )
+
+    assert captured[0] == (
+        12,
+        {
+            "type": "entra_authenticator_status",
+            "credential_id": 34,
+            "username": "alice@example.com",
+            "number": "42",
+            "status": "success",
+            "message": "Entra login confirmed for alice@example.com.",
+        },
+    )
+    assert captured[1][1]["status"] == "timeout"
+    assert "Timed out waiting for Entra Authenticator approval" in captured[1][1]["message"]
+    assert [entry[2] for entry in logs] == ["complete", "error"]
+
+
+def test_entra_notification_number_detects_number_matching_prompt():
+    text = "approve sign in request open authenticator and enter the number 42"
+    assert crawler._entra_notification_number(text) == "42"
+
+
+def test_entra_notification_number_detects_displayed_number_prompt():
+    text = "open microsoft authenticator enter the code displayed in your browser 42"
+    assert crawler._entra_notification_number(text) == "42"
+
+
+def test_entra_sso_provider_detection_ignores_bare_sso_app_text():
+    text = "dashboard settings authenticated user sso configuration audit logs"
+    assert crawler._entra_text_offers_sso_provider(text) is False
+
+
+def test_entra_sso_provider_detection_keeps_azure_ad_choice():
+    text = "choose a login method azure ad one-time pin"
+    assert crawler._entra_text_offers_sso_provider(text) is True
+
+
+def test_entra_detects_retryable_authenticator_failure():
+    text = "Your sign in request was denied. Select Try again to send another request."
+    assert crawler._entra_text_has_retryable_authenticator_failure(text) is True
+    assert crawler._entra_page_kind(text, "https://login.microsoftonline.com/common/SAS") == "authenticator_retry"
+
+
+class _EntraNotificationPage(_EntraPage):
+    def __init__(self):
+        super().__init__()
+        self.number_was_shown = False
+
+    async def wait_for_timeout(self, *args, **kwargs):  # noqa: ARG002
+        if self.state == "number_prompt" and self.number_was_shown:
+            self.state = "done"
+            self.url = "https://target.local/dashboard"
+        return None
+
+    def is_selector_visible(self, selector):
+        if self.state == "notification_choice":
+            return "Approve a request" in selector or "Microsoft Authenticator" in selector
+        if self.state == "number_prompt":
+            return False
+        return super().is_selector_visible(selector)
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            value = {
+                "email": "Sign in Enter your email",
+                "password": "Enter password",
+                "notification_choice": "Approve a request on my Microsoft Authenticator app",
+                "number_prompt": "Open your Authenticator app and enter the number shown below 42 to sign in",
+                "done": "Dashboard Account overview",
+            }[self.state]
+            if self.state == "number_prompt":
+                self.number_was_shown = True
+            return value
+        return "Dashboard Account overview"
+
+
+class _EntraNotificationLocator(_EntraLocator):
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.state == "email" and self.page.email_filled:
+            self.page.state = "password"
+        elif self.page.state == "password" and self.page.password_filled:
+            self.page.state = "notification_choice"
+        elif self.page.state == "notification_choice":
+            self.page.state = "number_prompt"
+
+
+class _EntraNotificationPageWithLocator(_EntraNotificationPage):
+    def locator(self, selector):
+        return _EntraNotificationLocator(self, selector)
+
+
+class _EntraRetryPage(_EntraPage):
+    def __init__(self):
+        super().__init__()
+        self.state = "retry"
+
+    def is_selector_visible(self, selector):
+        if self.state == "retry":
+            return "Try again" in selector
+        return False
+
+
+def test_entra_authenticator_retry_waits_for_ui_and_clicks_retry(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(crawler.events_svc, "emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+    page = _EntraRetryPage()
+
+    async def _run():
+        task = asyncio.create_task(
+            crawler._wait_for_entra_authenticator_retry(
+                page, 81, 9, "alice@example.com", "89"
+            )
+        )
+        await asyncio.sleep(0)
+        crawler._entra_retry_registry[(81, 9)].set()
+        return await task
+
+    assert asyncio.run(_run()) is True
+    assert any("Try again" in selector for selector in page.clicks)
+    assert emitted[0][1]["type"] == "entra_authenticator_status"
+    assert emitted[0][1]["status"] == "retry_required"
+
+
+class _EntraRetryThenNumberPage(_EntraPage):
+    def __init__(self):
+        super().__init__()
+        self.state = "retry"
+        self.retry_clicked = False
+        self.body_reads_after_retry = 0
+        self.number_was_shown = False
+
+    def is_selector_visible(self, selector):
+        if self.state == "retry":
+            return "Try again" in selector
+        return False
+
+    async def wait_for_timeout(self, *args, **kwargs):  # noqa: ARG002
+        if self.number_was_shown:
+            self.state = "done"
+            self.url = "https://target.local/dashboard"
+        return None
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            if self.state == "done":
+                return "Dashboard Account overview"
+            if self.retry_clicked:
+                self.body_reads_after_retry += 1
+                if self.body_reads_after_retry > 3:
+                    self.number_was_shown = True
+                    return "Open Authenticator and enter the number shown below 55"
+            return "Your sign in request was denied. Try again to send another request."
+        return "Dashboard Account overview"
+
+
+class _EntraRetryThenNumberLocator(_EntraLocator):
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.state == "retry":
+            self.page.retry_clicked = True
+            return
+        await super().click()
+
+
+class _EntraRetryThenNumberPageWithLocator(_EntraRetryThenNumberPage):
+    def locator(self, selector):
+        return _EntraRetryThenNumberLocator(self, selector)
+
+
+def test_authenticate_entra_retry_does_not_immediately_reprompt_failure(monkeypatch):
+    emitted = []
+    logs = []
+    monkeypatch.setattr(
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(
+        "aespa.services.scanner_sessions.upsert_session",
+        lambda *args, **kwargs: None,
+    )
+
+    page = _EntraRetryThenNumberPageWithLocator()
+
+    async def _run():
+        task = asyncio.create_task(
+            crawler._authenticate_entra_id(
+                page, "https://target.local/login", _EntraCred(), run_id=82
+            )
+        )
+        await asyncio.sleep(0)
+        crawler._entra_retry_registry[(82, 9)].set()
+        await task
+
+    asyncio.run(_run())
+
+    retry_required = [
+        event
+        for _run_id, event in emitted
+        if event["type"] == "entra_authenticator_status"
+        and event["status"] == "retry_required"
+    ]
+    assert len(retry_required) == 1
+    assert any(
+        event["type"] == "entra_authenticator_prompt" and event["number"] == "55"
+        for _run_id, event in emitted
+    )
+    assert page.url == "https://target.local/dashboard"
+
+
+class _EntraCloudflarePage(_EntraPage):
+    def __init__(self):
+        super().__init__()
+        self.state = "sso_choice"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = "https://target.local/cdn-cgi/access/login"
+
+    def is_selector_visible(self, selector):
+        if self.state == "sso_choice":
+            return "Azure AD" in selector
+        return super().is_selector_visible(selector)
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            return {
+                "sso_choice": "Access protected application Azure AD One-time PIN",
+                "email": "Sign in Enter your email",
+                "password": "Enter password",
+                "stay_signed_in": "Stay signed in?",
+                "done": "Dashboard Account overview",
+            }[self.state]
+        return "Dashboard Account overview"
+
+
+class _EntraCloudflareLocator(_EntraLocator):
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.state == "sso_choice":
+            self.page.state = "email"
+            self.page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            return
+        await super().click()
+
+
+class _EntraCloudflarePageWithLocator(_EntraCloudflarePage):
+    def locator(self, selector):
+        return _EntraCloudflareLocator(self, selector)
+
+
+def test_authenticate_entra_id_clicks_upstream_sso_provider(monkeypatch):
+    logs = []
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(crawler.events_svc, "emit", lambda *args, **kwargs: None)
+
+    captured = {}
+
+    def _fake_upsert(run_id, **kwargs):
+        captured["run_id"] = run_id
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
+    )
+
+    page = _EntraCloudflarePageWithLocator()
+    asyncio.run(
+        crawler._authenticate_entra_id(
+            page, "https://target.local/cdn-cgi/access/login", _EntraCred(), run_id=80
+        )
+    )
+
+    assert any("Azure AD" in selector for selector in page.clicks)
+    assert page.url == "https://target.local/dashboard"
+    assert any("Selected upstream Microsoft/Entra SSO provider" in args[3] for args in logs)
+    assert captured["metadata"]["completed"] is True
+
+
+class _EntraPostLoginSsoTextPage(_EntraPage):
+    def __init__(self):
+        super().__init__()
+        self.state = "done"
+        self.url = "https://target.local/dashboard"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = "https://target.local/dashboard"
+
+    async def evaluate(self, script, *args):  # noqa: ARG002
+        if "localStorage" in script:
+            return {"access_token": "eyJ.access.token"}
+        if "sessionStorage" in script:
+            return {}
+        if "document.body" in script:
+            return "Dashboard Settings Azure AD single sign-on audit logs"
+        return "Dashboard Settings Azure AD single sign-on audit logs"
+
+    def is_selector_visible(self, selector):
+        return False
+
+
+def test_authenticate_entra_id_accepts_target_app_with_sso_text(monkeypatch):
+    emitted = []
+    captured = {}
+    monkeypatch.setattr(
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+
+    def _fake_upsert(run_id, **kwargs):
+        captured["run_id"] = run_id
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
+    )
+
+    page = _EntraPostLoginSsoTextPage()
+    asyncio.run(
+        crawler._authenticate_entra_id(
+            page, "https://target.local/login", _EntraCred(), run_id=83
+        )
+    )
+
+    assert captured["metadata"]["completed"] is True
+    assert captured["metadata"]["landing_url"] == "https://target.local/dashboard"
+    assert not any(
+        event["type"] == "entra_authenticator_status" and event["status"] == "timeout"
+        for _run_id, event in emitted
+    )
+
+
+def test_authenticate_entra_id_selects_notification_and_emits_number(monkeypatch):
+    emitted = []
+
+    monkeypatch.setattr(
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+
+    page = _EntraNotificationPageWithLocator()
+    asyncio.run(
+        crawler._authenticate_entra_id(
+            page, "https://target.local/login", _EntraCred(), run_id=79
+        )
+    )
+
+    assert any("Approve a request" in selector for selector in page.clicks)
+    assert (
+        79,
+        {
+            "type": "entra_authenticator_prompt",
+            "credential_id": 9,
+            "username": "alice@example.com",
+            "number": None,
+            "message": "Attempting Entra login as alice@example.com - open Authenticator and approve the sign-in request",
+        },
+    ) in emitted
+    assert (
+        79,
+        {
+            "type": "entra_authenticator_prompt",
+            "credential_id": 9,
+            "username": "alice@example.com",
+            "number": "42",
+            "message": "Attempting Entra login as alice@example.com - open Authenticator and enter 42",
+        },
+    ) in emitted
+    assert (
+        79,
+        {
+            "type": "entra_authenticator_status",
+            "credential_id": 9,
+            "username": "alice@example.com",
+            "number": "42",
+            "status": "success",
+            "message": "Entra login confirmed for alice@example.com.",
+        },
+    ) in emitted

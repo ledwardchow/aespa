@@ -23,7 +23,7 @@ class CredentialIn(BaseModel):
     login_url: HttpUrl | None = None
     # Advanced auth
     auth_mode: str = "auto"
-    totp_seed: str | None = None          # base32 TOTP secret; stored write-only
+    totp_seed: str | None = None  # base32 TOTP secret; stored write-only
 
 
 class CredentialOut(BaseModel):
@@ -65,9 +65,15 @@ class SiteCreate(SiteBase):
             raise ValueError("credentials are only allowed when requires_auth is true")
         if self.requires_auth:
             if self.login_url is None and not self.credentials:
-                raise ValueError("login_url is required when no credential login_url is provided")
-            if self.login_url is None and any(c.login_url is None for c in self.credentials):
-                raise ValueError("each credential must include login_url when site login_url is omitted")
+                raise ValueError(
+                    "login_url is required when no credential login_url is provided"
+                )
+            if self.login_url is None and any(
+                c.login_url is None for c in self.credentials
+            ):
+                raise ValueError(
+                    "each credential must include login_url when site login_url is omitted"
+                )
         return self
 
 
@@ -107,6 +113,7 @@ class SiteDetail(BaseModel):
 
 
 # ── API Collection schemas ────────────────────────────────────────────────
+
 
 class ApiCollectionBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -221,13 +228,14 @@ class ApiCredentialCreate(BaseModel):
 
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
+
 class ApiTestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    name: str | None = None        # auto-generated if omitted
+    name: str | None = None  # auto-generated if omitted
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
-    coverage_mode: str = "track"   # track|enforce
+    coverage_mode: str = "track"  # track|enforce
 
 
 class ApiTestRunSummary(BaseModel):
@@ -249,6 +257,7 @@ class ApiTestRunSummary(BaseModel):
 
 # ── Slice 7 — Coverage matrix schemas ────────────────────────────────────────
 
+
 class ApiEndpointTestOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -264,26 +273,29 @@ class ApiEndpointTestOut(BaseModel):
 
 class ApiCoverageEndpointRow(BaseModel):
     """One endpoint row in the coverage matrix."""
+
     endpoint_id: int
     method: str
     path: str
     auth_required: bool
     prereq_can_test: bool
     prereq_can_test_auth: bool
-    prereq_notes: str          # JSON list of gap strings
-    cells: dict[str, dict]     # owasp_api_category → {status, finding_ids}
+    prereq_notes: str  # JSON list of gap strings
+    cells: dict[str, dict]  # owasp_api_category → {status, finding_ids}
 
 
 class ApiCoverageMatrixOut(BaseModel):
     """Full coverage matrix for one ApiTestRun."""
+
     run_id: int
     coverage_mode: str
-    categories: list[str]      # ordered API1..API10
+    categories: list[str]  # ordered API1..API10
     endpoints: list[ApiCoverageEndpointRow]
-    totals: dict[str, int]     # status → count across all cells
+    totals: dict[str, int]  # status → count across all cells
 
 
 # ── SAST schemas ──────────────────────────────────────────────────────────────
+
 
 class SastRunSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -489,11 +501,11 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
-    api_key: str | None
+    has_api_key: bool = False
+    api_key: str | None = None
     max_tpm: int | None = None
     max_rpm: int | None = None
     updated_at: datetime
-
 
 
 class LLMConfigIn(BaseModel):
@@ -524,7 +536,8 @@ class LLMConfigOut(BaseModel):
     provider_id: int | None = None
     provider_name: str | None = None
     provider: str
-    api_key: str | None
+    has_api_key: bool = False
+    api_key: str | None = None
     base_url: str | None
     project_id: str | None = None
     model: str
@@ -581,11 +594,15 @@ class ScannerPolicyBase(BaseModel):
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
     min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
-    response_body_read_limit_bytes: int = Field(default=512 * 1024, ge=1024, le=10 * 1024 * 1024)
-    allowed_schemes: list[SchemeLiteral] = Field(default_factory=lambda: ["http", "https"], min_length=1)
-    methods_by_mode: dict[str, list[str]] = Field(default_factory=lambda: {
-        k: list(v) for k, v in DEFAULT_METHODS_BY_MODE.items()
-    })
+    response_body_read_limit_bytes: int = Field(
+        default=512 * 1024, ge=1024, le=10 * 1024 * 1024
+    )
+    allowed_schemes: list[SchemeLiteral] = Field(
+        default_factory=lambda: ["http", "https"], min_length=1
+    )
+    methods_by_mode: dict[str, list[str]] = Field(
+        default_factory=lambda: {k: list(v) for k, v in DEFAULT_METHODS_BY_MODE.items()}
+    )
     blocked_headers: list[str] = Field(default_factory=lambda: ["host", "cookie"])
     follow_redirects: bool = True
     allow_subdomains: bool = True
@@ -630,8 +647,13 @@ class ScannerPolicyBase(BaseModel):
 
     @model_validator(mode="after")
     def _check_current_mode_methods(self) -> "ScannerPolicyBase":
-        if self.scan_mode not in self.methods_by_mode or not self.methods_by_mode[self.scan_mode]:
-            raise ValueError("methods_by_mode must include methods for the selected scan_mode")
+        if (
+            self.scan_mode not in self.methods_by_mode
+            or not self.methods_by_mode[self.scan_mode]
+        ):
+            raise ValueError(
+                "methods_by_mode must include methods for the selected scan_mode"
+            )
         return self
 
 
@@ -714,10 +736,13 @@ class BurpRestApiConfigIn(BurpRestApiConfigBase):
 
 
 class BurpRestApiConfigOut(BurpRestApiConfigBase):
+    has_api_key: bool = False
+    api_key: str | None = None
     updated_at: datetime
 
 
 # ── Specialist agent config schemas ──────────────────────────────────────────
+
 
 class SpecialistAgentConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -750,12 +775,15 @@ class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
 
 # ── Adversarial Validator config schemas ──────────────────────────────────────
 
+
 class ValidatorConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     enabled: bool = True
     max_steps: int = Field(default=20, ge=1, le=50)
-    min_severity: str = Field(default="low", pattern=r"^(critical|high|medium|low|info)$")
+    min_severity: str = Field(
+        default="low", pattern=r"^(critical|high|medium|low|info)$"
+    )
     end_scan_max_concurrent: int = Field(default=4, ge=1, le=8)
     auto_validate_inline: bool = True
     require_concrete_disproof: bool = True
@@ -770,6 +798,7 @@ class ValidatorConfigOut(ValidatorConfigBase):
 
 
 # ── Global HTTP header config schemas ─────────────────────────────────────────
+
 
 class GlobalHttpHeaderConfigBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -807,6 +836,7 @@ class GlobalHttpHeaderConfigOut(GlobalHttpHeaderConfigBase):
 
 # ── Reporting debug config schemas ───────────────────────────────────────────
 
+
 class ReportingDebugConfigBase(BaseModel):
     capture_enabled: bool = False
     panel_enabled: bool = False
@@ -823,6 +853,7 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
 
 # ── Cloudflare Access config schemas ─────────────────────────────────────────
 
+
 class CloudflareAccessConfigBase(BaseModel):
     # Empty/blank string is treated as "no audience" → audience check skipped.
     audience: str | None = None
@@ -838,16 +869,17 @@ class CloudflareAccessConfigOut(CloudflareAccessConfigBase):
 
 # ── LLM config export / import schemas ───────────────────────────────────────
 
+
 class LLMExportProviderItem(BaseModel):
     name: str
     api_format: str
     base_url: str | None = None
     project_id: str | None = None
     models: list[str]
+    has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
     max_rpm: int | None = None
-
 
 
 class LLMExportProfileItem(BaseModel):
@@ -877,6 +909,7 @@ class LLMImportResult(BaseModel):
 
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
+
 class TestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -903,6 +936,8 @@ class CredentialSummary(BaseModel):
     id: int
     username: str
     label: str | None
+    auth_mode: str = "auto"
+    has_totp_seed: bool = False
 
 
 class TestRunSummary(BaseModel):
@@ -939,6 +974,7 @@ class TestRunSummary(BaseModel):
     @classmethod
     def _coerce_per_user_progress(cls, v):
         import json as _json
+
         if v is None or v == "":
             return {}
         if isinstance(v, str):
@@ -953,7 +989,7 @@ class ActiveJobSummary(BaseModel):
     run_name: str
     job_type: str
     status: str
-    run_type: str = "web"              # "web" | "api"
+    run_type: str = "web"  # "web" | "api"
     collection_id: Optional[int] = None
     collection_name: Optional[str] = None
     pages_done: int | None = None
@@ -1046,6 +1082,7 @@ class TargetIntelItemOut(BaseModel):
     @classmethod
     def _coerce_metadata(cls, v):
         import json as _json
+
         if v is None or v == "":
             return {}
         if isinstance(v, str):
@@ -1068,6 +1105,7 @@ class ScannerSessionOut(BaseModel):
     test_run_id: int
     label: str
     kind: str
+    account_label: str | None
     username: str | None
     credential_id: int | None
     source: str
@@ -1088,6 +1126,23 @@ class ScannerSessionSummary(BaseModel):
 class ScannerSessionUpdate(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=80)
     is_active: bool | None = None
+
+
+class ScannerSessionValidationItem(BaseModel):
+    session_id: int
+    label: str
+    outcome: str  # valid | evicted | error
+    status_code: int | None = None
+    error: str | None = None
+
+
+class ScannerSessionValidationResult(BaseModel):
+    checked: int = 0
+    valid: int = 0
+    evicted: int = 0
+    errors: int = 0
+    skipped: int = 0
+    results: list[ScannerSessionValidationItem] = Field(default_factory=list)
 
 
 class TrafficEntryOut(BaseModel):
@@ -1198,7 +1253,7 @@ class ValidationStatusOut(BaseModel):
     skipped: int = 0
     validating: int
     unvalidated: int
-    status: str   # idle | running | stopped | complete
+    status: str  # idle | running | stopped | complete
 
 
 class PageCredentialViewOut(BaseModel):
@@ -1220,7 +1275,7 @@ class ScanStatusOut(BaseModel):
     total_pages: int
     pages_done: int
     findings_count: int
-    status: str   # idle | running | complete | stopped | failed
+    status: str  # idle | running | complete | stopped | failed
 
 
 class ScanCheckpointStatusOut(BaseModel):

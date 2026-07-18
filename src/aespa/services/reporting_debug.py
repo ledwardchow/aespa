@@ -106,7 +106,9 @@ def _init(conn: sqlite3.Connection) -> None:
             ON prompt_version (key, name);
         """
     )
-    _ensure_column(conn, "reporting_capture", "kind", "TEXT NOT NULL DEFAULT 'analyse_probe_batch'")
+    _ensure_column(
+        conn, "reporting_capture", "kind", "TEXT NOT NULL DEFAULT 'analyse_probe_batch'"
+    )
     _ensure_column(conn, "reporting_capture", "source", "TEXT")
     _ensure_column(conn, "reporting_capture", "base_url", "TEXT")
     _ensure_column(conn, "reporting_capture", "finding_json", "TEXT")
@@ -407,7 +409,9 @@ def capture_writeup(
         return int(cur.lastrowid)
 
 
-def _capture_from_row(row: sqlite3.Row, *, include_payload: bool = False) -> dict[str, Any]:
+def _capture_from_row(
+    row: sqlite3.Row, *, include_payload: bool = False
+) -> dict[str, Any]:
     item = {
         "id": row["id"],
         "kind": row["kind"],
@@ -469,7 +473,9 @@ def _prompt_key_for_capture(capture: dict[str, Any]) -> str:
     )
 
 
-def create_replay(capture_id: int, prompt_version_id: int | None = None) -> dict[str, Any]:
+def create_replay(
+    capture_id: int, prompt_version_id: int | None = None
+) -> dict[str, Any]:
     capture = get_capture(capture_id)
     if capture is None:
         raise KeyError(capture_id)
