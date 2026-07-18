@@ -38,6 +38,42 @@ def test_create_run_default_name(client: TestClient):
     assert data["pages_discovered"] == 0
 
 
+def test_run_summary_exposes_safe_auth_mode_metadata(client: TestClient):
+    site = _make_site(
+        client,
+        requires_auth=True,
+        login_url="https://target.local/login",
+        credentials=[
+            {
+                "username": "push@example.com",
+                "password": "secret",
+                "auth_mode": "entra_id",
+            },
+            {
+                "username": "code@example.com",
+                "password": "secret",
+                "auth_mode": "entra_id",
+                "totp_seed": "JBSWY3DPEHPK3PXP",
+            },
+            {
+                "username": "manual@example.com",
+                "password": "secret",
+                "auth_mode": "guided",
+            },
+        ],
+    )
+    run = _make_run(client, site["id"]).json()
+    detail = client.get(f"/api/test-runs/{run['id']}").json()
+
+    credentials = {credential["username"]: credential for credential in detail["credentials"]}
+    assert credentials["push@example.com"]["auth_mode"] == "entra_id"
+    assert credentials["push@example.com"]["has_totp_seed"] is False
+    assert credentials["code@example.com"]["auth_mode"] == "entra_id"
+    assert credentials["code@example.com"]["has_totp_seed"] is True
+    assert credentials["manual@example.com"]["auth_mode"] == "guided"
+    assert "totp_seed" not in credentials["code@example.com"]
+
+
 def test_create_run_defaults_to_500_pages(client: TestClient):
     site = _make_site(client)
     response = client.post(f"/api/sites/{site['id']}/test-runs", json={})

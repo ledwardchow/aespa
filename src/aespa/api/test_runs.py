@@ -76,7 +76,14 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
 
     site = session.get(Site, run.site_id)
     creds = [
-        CredentialSummary.model_validate(c) for c in (site.credentials if site else [])
+        CredentialSummary(
+            id=c.id,
+            username=c.username,
+            label=c.label,
+            auth_mode=c.auth_mode or "auto",
+            has_totp_seed=bool((c.totp_seed or "").strip()),
+        )
+        for c in (site.credentials if site else [])
     ]
     s = TestRunSummary.model_validate(run)
     s.credentials = creds

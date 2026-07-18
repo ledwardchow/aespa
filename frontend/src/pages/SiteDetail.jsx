@@ -1,5 +1,5 @@
 import { ScopeHostsPanel } from "./Settings/ScopeHostsPanel";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
 import { useAliceChat } from "./SiteDetail/useAliceChat";
@@ -305,6 +305,7 @@ export function TestRunDetail({
   // Guided login: list of {credential_id, username} waiting for "I'm Done" confirmation
   const [guidedLoginPending, setGuidedLoginPending] = useState([]);
   const [guidedLoginErrors, setGuidedLoginErrors] = useState([]);
+  const [entraPrompts, setEntraPrompts] = useState([]);
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => {
@@ -459,7 +460,7 @@ export function TestRunDetail({
     runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent,
     setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData,
     setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts,
-    setGuidedLoginPending, setGuidedLoginErrors
+    setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts
   });
 
   // Poll run metadata (including per_user_progress current URLs) while crawling
@@ -624,6 +625,26 @@ export function TestRunDetail({
   const canStartAnyScan = run?.status !== "running" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canStartThinking = !thinkingStopRequested && canStartAnyScan && ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint = checkpointStatus?.exists === true && canStartAnyScan && !isDynamicScanActive(effectiveThinkingStatus);
+  const interactiveLogins = useMemo(() => (run?.credentials || []).flatMap(credential => {
+    const authMode = credential.auth_mode || "auto";
+    if (authMode === "guided") {
+      return [{
+        credential_id: credential.id,
+        username: credential.username,
+        label: credential.label,
+        mode: "Guided"
+      }];
+    }
+    if (authMode === "entra_id" && !credential.has_totp_seed) {
+      return [{
+        credential_id: credential.id,
+        username: credential.username,
+        label: credential.label,
+        mode: "Entra ID"
+      }];
+    }
+    return [];
+  }), [run?.credentials]);
   if (!run) {
     return <div className="content scroll-content">{error ? <div className="alert error">{error}</div> : <div className="subtle">Loading…</div>}</div>;
   }
@@ -655,7 +676,28 @@ export function TestRunDetail({
         runId={runId}
         pending={guidedLoginPending}
         errors={guidedLoginErrors}
+        entraPrompts={entraPrompts}
+        interactiveLogins={interactiveLogins}
         onDismissError={credentialId => setGuidedLoginErrors(previous => previous.filter(item => item.credential_id !== credentialId))}
+        onDismissEntraPrompt={id => setEntraPrompts(previous => previous.filter(item => item.id !== id))}
+        onRetryEntraPrompt={async prompt => {
+          try {
+            const response = await fetch(`/api/test-runs/${runId}/entra-authenticator/${prompt.credential_id}/retry`, {
+              method: "POST"
+            });
+            if (!response.ok) {
+              const body = await response.json().catch(() => null);
+              throw new Error(body?.detail || `Retry failed: ${response.status}`);
+            }
+            setEntraPrompts(previous => previous.map(item => item.id === prompt.id ? {
+              ...item,
+              status: "pending",
+              message: `Retrying Entra login as ${prompt.username} - waiting for a new Authenticator number`
+            } : item));
+          } catch (err) {
+            setError(err.message || "Could not retry Entra Authenticator approval");
+          }
+        }}
         onConfirmed={credentialId => setGuidedLoginPending(previous => previous.filter(item => item.credential_id !== credentialId))}
       />
 
