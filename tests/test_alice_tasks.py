@@ -1,4 +1,5 @@
 """Tests for ALICE background-task event buffering and reconnect replay."""
+
 import asyncio
 import json
 
@@ -7,7 +8,10 @@ from aespa.services import alice_tasks as at
 
 def _task(run_id=1, run_type="site"):
     return at.AliceTask(
-        run_id=run_id, tab_id="t", think_msg_id="th", reply_msg_id="re",
+        run_id=run_id,
+        tab_id="t",
+        think_msg_id="th",
+        reply_msg_id="re",
         run_type=run_type,
     )
 
@@ -43,7 +47,8 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
 
         async def _drain():
             return [
-                line async for line in at.stream_events(42, cursor=cursor, run_type="site")
+                line
+                async for line in at.stream_events(42, cursor=cursor, run_type="site")
             ]
 
         got = [json.loads(line[6:]) for line in asyncio.run(_drain())]

@@ -1,4 +1,5 @@
 """Service layer for application settings (LLM config, etc.)."""
+
 from __future__ import annotations
 
 import json
@@ -65,6 +66,7 @@ AGENT_ROLES: tuple[str, ...] = (
     "api_scanner",
     "sast",
     "alice",
+    "mentor",
 )
 
 
@@ -91,7 +93,6 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         max_rpm=provider.max_rpm,
         updated_at=provider.updated_at,
     )
-
 
 
 def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
@@ -147,10 +148,13 @@ def get_active_scan_profile(session: Session) -> LLMProfile | None:
 def _model_for_profile_role(
     session: Session, prof: LLMProfile, role: str | None
 ) -> LLMConfig | None:
-    """Resolve a profile's Model for *role*, falling back to its default model."""
+    """Resolve a role model, with Mentor inheriting Test Lead before default."""
     model_id: int | None = None
+    role_models = _json_loads(prof.role_models_json, {})
     if role is not None:
-        raw = _json_loads(prof.role_models_json, {}).get(role)
+        raw = role_models.get(role)
+        if raw is None and role == "mentor":
+            raw = role_models.get("test_lead")
         if raw is not None:
             try:
                 model_id = int(raw)
@@ -211,11 +215,15 @@ def upsert_llm_config(session: Session, payload: LLMConfigIn) -> LLMConfig:
 
 
 def list_llm_profiles(session: Session) -> list[LLMConfig]:
-    return list(session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).all())
+    return list(
+        session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).all()
+    )
 
 
 def list_llm_providers(session: Session) -> list[LLMProviderConfigOut]:
-    providers = session.exec(select(LLMProviderConfig).order_by(LLMProviderConfig.updated_at.desc())).all()
+    providers = session.exec(
+        select(LLMProviderConfig).order_by(LLMProviderConfig.updated_at.desc())
+    ).all()
     return [_provider_out(provider) for provider in providers]
 
 
@@ -226,25 +234,39 @@ def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
     return provider
 
 
-def create_llm_provider(session: Session, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+def create_llm_provider(
+    session: Session, payload: LLMProviderConfigIn
+) -> LLMProviderConfigOut:
     provider = LLMProviderConfig()
     return _apply_llm_provider(session, provider, payload)
 
 
-def update_llm_provider(session: Session, provider_id: int, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+def update_llm_provider(
+    session: Session, provider_id: int, payload: LLMProviderConfigIn
+) -> LLMProviderConfigOut:
     provider = get_llm_provider(session, provider_id)
     return _apply_llm_provider(session, provider, payload)
 
 
 def delete_llm_provider(session: Session, provider_id: int) -> None:
     provider = get_llm_provider(session, provider_id)
-    if session.exec(select(LLMConfig).where(LLMConfig.provider_id == provider_id)).first() is not None:
-        raise HTTPException(status_code=409, detail="Cannot delete an LLM provider that is used by a profile")
+    if (
+        session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider_id)
+        ).first()
+        is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete an LLM provider that is used by a profile",
+        )
     session.delete(provider)
     session.commit()
 
 
-def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn) -> LLMProviderConfigOut:
+def _apply_llm_provider(
+    session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn
+) -> LLMProviderConfigOut:
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
     provider.name = payload.name
     provider.api_format = payload.api_format
@@ -263,7 +285,6 @@ def _apply_llm_provider(session: Session, provider: LLMProviderConfig, payload: 
     return _provider_out(provider)
 
 
-
 def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
     cfg = session.get(LLMConfig, profile_id)
     if cfg is None:
@@ -273,10 +294,14 @@ def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
 
 def create_llm_profile(session: Session, payload: LLMConfigIn) -> LLMConfig:
     cfg = LLMConfig()
-    return _apply_llm_config(session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0))
+    return _apply_llm_config(
+        session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0)
+    )
 
 
-def update_llm_profile(session: Session, profile_id: int, payload: LLMConfigIn) -> LLMConfig:
+def update_llm_profile(
+    session: Session, profile_id: int, payload: LLMConfigIn
+) -> LLMConfig:
     cfg = get_llm_profile(session, profile_id)
     return _apply_llm_config(session, cfg, payload, activate=cfg.is_active)
 
@@ -297,12 +322,15 @@ def delete_llm_profile(session: Session, profile_id: int) -> None:
     session.delete(cfg)
     session.commit()
     if was_active:
-        replacement = session.exec(select(LLMConfig).order_by(LLMConfig.updated_at.desc())).first()
+        replacement = session.exec(
+            select(LLMConfig).order_by(LLMConfig.updated_at.desc())
+        ).first()
         if replacement is not None:
             activate_llm_profile(session, replacement.id)
 
 
 # ── Scan profiles (per-agent-role model assignment) ───────────────────────────
+
 
 def list_scan_profiles(session: Session) -> list[LLMProfile]:
     return list(
@@ -324,7 +352,9 @@ def create_scan_profile(session: Session, payload: LLMProfileIn) -> LLMProfile:
     )
 
 
-def update_scan_profile(session: Session, profile_id: int, payload: LLMProfileIn) -> LLMProfile:
+def update_scan_profile(
+    session: Session, profile_id: int, payload: LLMProfileIn
+) -> LLMProfile:
     prof = get_scan_profile(session, profile_id)
     return _apply_scan_profile(session, prof, payload, activate=prof.is_active)
 
@@ -358,7 +388,8 @@ def _apply_scan_profile(
     _ensure_unique_scan_profile_name(session, payload.name, prof.id)
     if session.get(LLMConfig, payload.default_model_id) is None:
         raise HTTPException(
-            status_code=422, detail="default_model_id does not reference an existing Model"
+            status_code=422,
+            detail="default_model_id does not reference an existing Model",
         )
     role_models: dict[str, int] = {}
     for role, model_id in (payload.role_models or {}).items():
@@ -427,25 +458,29 @@ def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
     )
 
 
-def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool) -> LLMConfig:
+def _apply_llm_config(
+    session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool
+) -> LLMConfig:
     _ensure_unique_llm_profile_name(session, payload.name, cfg.id)
     provider = get_llm_provider(session, payload.provider_id)
     if payload.model not in _provider_models(provider):
-        raise HTTPException(status_code=422, detail="Model is not configured for the selected provider")
+        raise HTTPException(
+            status_code=422, detail="Model is not configured for the selected provider"
+        )
 
-    cfg.name        = payload.name
-    cfg.is_active   = bool(activate)
+    cfg.name = payload.name
+    cfg.is_active = bool(activate)
 
     cfg.provider_id = payload.provider_id
-    cfg.provider    = provider.api_format
-    cfg.api_key     = provider.api_key
-    cfg.base_url    = provider.base_url
-    cfg.model       = payload.model
-    cfg.max_tokens  = payload.max_tokens
+    cfg.provider = provider.api_format
+    cfg.api_key = provider.api_key
+    cfg.base_url = provider.base_url
+    cfg.model = payload.model
+    cfg.max_tokens = payload.max_tokens
     cfg.temperature = payload.temperature
-    cfg.use_vision  = payload.use_vision
+    cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
-    cfg.updated_at  = _utcnow()
+    cfg.updated_at = _utcnow()
 
     if cfg.is_active:
         for profile in session.exec(select(LLMConfig)).all():
@@ -459,18 +494,27 @@ def _apply_llm_config(session: Session, cfg: LLMConfig, payload: LLMConfigIn, ac
     return cfg
 
 
-def _ensure_unique_llm_profile_name(session: Session, name: str, current_id: int | None) -> None:
+def _ensure_unique_llm_profile_name(
+    session: Session, name: str, current_id: int | None
+) -> None:
     normalized = name.strip().casefold()
     for profile in session.exec(select(LLMConfig)).all():
         if profile.id != current_id and profile.name.strip().casefold() == normalized:
-            raise HTTPException(status_code=409, detail="An LLM settings profile with that name already exists")
+            raise HTTPException(
+                status_code=409,
+                detail="An LLM settings profile with that name already exists",
+            )
 
 
-def _ensure_unique_llm_provider_name(session: Session, name: str, current_id: int | None) -> None:
+def _ensure_unique_llm_provider_name(
+    session: Session, name: str, current_id: int | None
+) -> None:
     normalized = name.strip().casefold()
     for provider in session.exec(select(LLMProviderConfig)).all():
         if provider.id != current_id and provider.name.strip().casefold() == normalized:
-            raise HTTPException(status_code=409, detail="An LLM provider with that name already exists")
+            raise HTTPException(
+                status_code=409, detail="An LLM provider with that name already exists"
+            )
 
 
 def _json_loads(value: str | None, fallback):
@@ -512,7 +556,9 @@ def get_scanner_policy(session: Session) -> ScannerPolicyOut:
     return _policy_from_model(cfg)
 
 
-def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> ScannerPolicyOut:
+def upsert_scanner_policy(
+    session: Session, payload: ScannerPolicyIn
+) -> ScannerPolicyOut:
     cfg = session.get(ScannerPolicy, _SINGLETON_ID)
     if cfg is None:
         cfg = ScannerPolicy(id=_SINGLETON_ID)
@@ -540,13 +586,19 @@ def upsert_scanner_policy(session: Session, payload: ScannerPolicyIn) -> Scanner
 
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:
     policy = get_scanner_policy(session)
-    return RunScannerPolicyOut(**policy.model_dump(exclude={"updated_at"}), source="global_default", updated_at=policy.updated_at)
+    return RunScannerPolicyOut(
+        **policy.model_dump(exclude={"updated_at"}),
+        source="global_default",
+        updated_at=policy.updated_at,
+    )
 
 
 def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
     cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
     if cfg is None:
-        return UpstreamProxyConfigOut(**UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow())
+        return UpstreamProxyConfigOut(
+            **UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return UpstreamProxyConfigOut(
         proxy_url=cfg.proxy_url,
         proxy_scanner=cfg.proxy_scanner,
@@ -555,7 +607,9 @@ def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
     )
 
 
-def upsert_upstream_proxy_config(session: Session, payload: UpstreamProxyConfigIn) -> UpstreamProxyConfigOut:
+def upsert_upstream_proxy_config(
+    session: Session, payload: UpstreamProxyConfigIn
+) -> UpstreamProxyConfigOut:
     cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
@@ -597,14 +651,18 @@ def get_burp_rest_api_config_model(session: Session) -> BurpRestApiConfig:
 def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
     cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
     if cfg is None:
-        return BurpRestApiConfigOut(**BurpRestApiConfigIn().model_dump(), updated_at=_utcnow())
+        return BurpRestApiConfigOut(
+            **BurpRestApiConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return _burp_rest_api_config_from_model(cfg)
 
 
 def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
     cfg = session.get(SpecialistAgentConfig, _SINGLETON_ID)
     if cfg is None:
-        return SpecialistAgentConfigOut(**SpecialistAgentConfigIn().model_dump(), updated_at=_utcnow())
+        return SpecialistAgentConfigOut(
+            **SpecialistAgentConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return SpecialistAgentConfigOut(
         enabled=cfg.enabled,
         max_concurrent=cfg.max_concurrent,
@@ -653,7 +711,9 @@ def upsert_specialist_agent_config(
     return get_specialist_agent_config(session)
 
 
-def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) -> BurpRestApiConfigOut:
+def upsert_burp_rest_api_config(
+    session: Session, payload: BurpRestApiConfigIn
+) -> BurpRestApiConfigOut:
     cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = BurpRestApiConfig(id=_SINGLETON_ID)
@@ -682,7 +742,9 @@ def upsert_burp_rest_api_config(session: Session, payload: BurpRestApiConfigIn) 
 def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
     cfg = session.get(AdversarialValidatorConfig, _SINGLETON_ID)
     if cfg is None:
-        return ValidatorConfigOut(**ValidatorConfigIn().model_dump(), updated_at=_utcnow())
+        return ValidatorConfigOut(
+            **ValidatorConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return ValidatorConfigOut(
         enabled=cfg.enabled,
         max_steps=cfg.max_steps,
@@ -716,7 +778,9 @@ def upsert_adversarial_validator_config(
 def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut:
     cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
     if cfg is None:
-        return GlobalHttpHeaderConfigOut(**GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow())
+        return GlobalHttpHeaderConfigOut(
+            **GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow()
+        )
     return GlobalHttpHeaderConfigOut(
         header_name=cfg.header_name,
         header_value=cfg.header_value,
@@ -795,6 +859,7 @@ def upsert_cloudflare_access_config(
 
 # ── LLM config export / import ────────────────────────────────────────────────
 
+
 def _is_direct_loopback(request: Request | None) -> bool:
     if request is None or request.client is None:
         return False
@@ -814,17 +879,23 @@ def _is_direct_loopback(request: Request | None) -> bool:
     return True
 
 
-def export_llm_config(session: Session, request: Request | None = None) -> LLMConfigExport:
+def export_llm_config(
+    session: Session, request: Request | None = None
+) -> LLMConfigExport:
     """Serialize all LLM providers and profiles to a portable dict.
 
     If accessed directly from local loopback (without proxy headers), API keys
     are included in raw form for ease of export/import. If accessed remotely or
     via a reverse proxy (e.g. Cloudflare Access), API keys are omitted.
     """
-    providers_db = session.exec(select(LLMProviderConfig).order_by(LLMProviderConfig.id)).all()
+    providers_db = session.exec(
+        select(LLMProviderConfig).order_by(LLMProviderConfig.id)
+    ).all()
     profiles_db = session.exec(select(LLMConfig).order_by(LLMConfig.id)).all()
 
-    provider_id_to_name: dict[int, str] = {p.id: p.name for p in providers_db if p.id is not None}
+    provider_id_to_name: dict[int, str] = {
+        p.id: p.name for p in providers_db if p.id is not None
+    }
     include_raw_keys = _is_direct_loopback(request)
 
     provider_items = [
@@ -845,7 +916,9 @@ def export_llm_config(session: Session, request: Request | None = None) -> LLMCo
     profile_items = [
         LLMExportProfileItem(
             name=c.name,
-            provider_name=provider_id_to_name.get(c.provider_id, "") if c.provider_id is not None else "",
+            provider_name=provider_id_to_name.get(c.provider_id, "")
+            if c.provider_id is not None
+            else "",
             model=c.model,
             max_tokens=c.max_tokens,
             temperature=c.temperature,
@@ -895,12 +968,17 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
 
     # ── 1. Upsert providers ───────────────────────────────────────────────────
     provider_name_to_id: dict[str, int] = {}
-    existing_providers = {p.name.strip().casefold(): p for p in session.exec(select(LLMProviderConfig)).all()}
+    existing_providers = {
+        p.name.strip().casefold(): p
+        for p in session.exec(select(LLMProviderConfig)).all()
+    }
 
     for item in payload.providers:
         key = item.name.strip().casefold()
         if not item.models:
-            raise HTTPException(status_code=422, detail=f"Provider '{item.name}' has no models listed")
+            raise HTTPException(
+                status_code=422, detail=f"Provider '{item.name}' has no models listed"
+            )
         provider = existing_providers.get(key)
         if provider is None:
             provider = LLMProviderConfig()
@@ -926,14 +1004,15 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
 
     session.flush()
 
-
     # refresh the map with any newly-created providers
     for p in session.exec(select(LLMProviderConfig)).all():
         if p.id is not None:
             provider_name_to_id.setdefault(p.name.strip().casefold(), p.id)
 
     # ── 2. Upsert profiles ────────────────────────────────────────────────────
-    existing_profiles = {c.name.strip().casefold(): c for c in session.exec(select(LLMConfig)).all()}
+    existing_profiles = {
+        c.name.strip().casefold(): c for c in session.exec(select(LLMConfig)).all()
+    }
 
     imported_active_name: str | None = None
     for item in payload.profiles:
@@ -946,7 +1025,10 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             )
         provider = session.get(LLMProviderConfig, provider_id)
         if provider is None:
-            raise HTTPException(status_code=422, detail=f"Provider '{item.provider_name}' not found after import")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Provider '{item.provider_name}' not found after import",
+            )
         if item.model not in _provider_models(provider):
             raise HTTPException(
                 status_code=422,

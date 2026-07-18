@@ -12,6 +12,7 @@ import asyncio
 import os
 import sqlite3
 import sys
+
 from playwright.async_api import async_playwright
 
 
@@ -61,7 +62,14 @@ def get_top_runs(db_path: str):
     return web_run_id, site_id, api_run_id, collection_id
 
 
-async def capture_screenshots(base_url: str, out_dir: str, web_run_id: int, site_id: int, api_run_id: int, collection_id: int):
+async def capture_screenshots(
+    base_url: str,
+    out_dir: str,
+    web_run_id: int,
+    site_id: int,
+    api_run_id: int,
+    collection_id: int,
+):
     os.makedirs(out_dir, exist_ok=True)
     base_url = base_url.rstrip("/")
 
@@ -69,7 +77,9 @@ async def capture_screenshots(base_url: str, out_dir: str, web_run_id: int, site
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={"width": 1440, "height": 900})
 
-        print(f"Capturing screenshots into {out_dir} (Web Run: #{web_run_id}, API Run: #{api_run_id})...")
+        print(
+            f"Capturing screenshots into {out_dir} (Web Run: #{web_run_id}, API Run: #{api_run_id})..."
+        )
 
         # 1. Sites list
         print(" -> sites.png")
@@ -201,14 +211,24 @@ async def capture_screenshots(base_url: str, out_dir: str, web_run_id: int, site
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Capture AESPA documentation screenshots.")
-    parser.add_argument("--url", default="http://127.0.0.1:8000", help="Base URL of AESPA web server")
-    parser.add_argument("--out-dir", default="docs/images", help="Target output directory for images")
+    parser = argparse.ArgumentParser(
+        description="Capture AESPA documentation screenshots."
+    )
+    parser.add_argument(
+        "--url", default="http://127.0.0.1:8000", help="Base URL of AESPA web server"
+    )
+    parser.add_argument(
+        "--out-dir", default="docs/images", help="Target output directory for images"
+    )
     parser.add_argument("--db-path", default="aespa.db", help="Path to SQLite database")
     args = parser.parse_args()
 
     web_run_id, site_id, api_run_id, collection_id = get_top_runs(args.db_path)
-    asyncio.run(capture_screenshots(args.url, args.out_dir, web_run_id, site_id, api_run_id, collection_id))
+    asyncio.run(
+        capture_screenshots(
+            args.url, args.out_dir, web_run_id, site_id, api_run_id, collection_id
+        )
+    )
 
 
 if __name__ == "__main__":

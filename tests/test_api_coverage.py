@@ -21,6 +21,7 @@ Tests:
   18. _make_post_probe_fn marks only the declared OWASP category in_progress (per-category granularity)
   19. _make_post_probe_fn is a no-op when the URL matches no endpoint
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -67,6 +68,7 @@ def _fake_create_task(coro, **kwargs):
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(name="db_engine")
 def db_engine_fixture():
     engine = create_engine(
@@ -75,6 +77,7 @@ def db_engine_fixture():
         poolclass=StaticPool,
     )
     from aespa.db import _engine as original_engine
+
     SQLModel.metadata.create_all(engine)
     _migrate(engine)  # ensure api_endpoint_test table is created
     set_engine(engine)
@@ -157,6 +160,7 @@ def api_run_fixture(db_session, collection):
 
 # ── HTTP client fixture ────────────────────────────────────────────────────────
 
+
 @pytest.fixture(name="client")
 def client_fixture(db_engine):
     from fastapi.testclient import TestClient
@@ -175,14 +179,20 @@ def client_fixture(db_engine):
 
 
 def _make_collection_and_run(client) -> tuple[dict, dict]:
-    coll = client.post("/api/api-collections", json={"name": "CovHTTP", "base_url": "http://target.api"}).json()
+    coll = client.post(
+        "/api/api-collections",
+        json={"name": "CovHTTP", "base_url": "http://target.api"},
+    ).json()
     run = client.post(f"/api/api-collections/{coll['id']}/test-runs", json={}).json()
     return coll, run
 
 
 # ── 1. seed_coverage_matrix creates rows ──────────────────────────────────────
 
-def test_seed_creates_cells(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+
+def test_seed_creates_cells(
+    db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run
+):
     count = seed_coverage_matrix(api_run.id)
     assert count > 0
     cells = db_session.exec(
@@ -198,6 +208,7 @@ def test_seed_creates_cells(db_engine, db_session, collection, endpoint_simple, 
 
 # ── 2. seed_coverage_matrix is idempotent ─────────────────────────────────────
 
+
 def test_seed_idempotent(db_engine, db_session, collection, endpoint_simple, api_run):
     first = seed_coverage_matrix(api_run.id)
     second = seed_coverage_matrix(api_run.id)
@@ -210,7 +221,10 @@ def test_seed_idempotent(db_engine, db_session, collection, endpoint_simple, api
 
 # ── 3. update_coverage_cell creates new cell ──────────────────────────────────
 
-def test_update_cell_creates(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_update_cell_creates(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "in_progress")
     cell = db_session.exec(
         select(ApiEndpointTest)
@@ -224,7 +238,10 @@ def test_update_cell_creates(db_engine, db_session, collection, endpoint_simple,
 
 # ── 4. update_coverage_cell updates status ────────────────────────────────────
 
-def test_update_cell_updates_status(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_update_cell_updates_status(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
     update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "covered")
     db_session.expire_all()
@@ -237,9 +254,13 @@ def test_update_cell_updates_status(db_engine, db_session, collection, endpoint_
     assert cell.status == "covered"
 
 
-def test_update_cell_no_downgrade(db_engine, db_session, collection, endpoint_simple, api_run):
+def test_update_cell_no_downgrade(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     """A higher-ranked status must not be overwritten by a lower-ranked one."""
-    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "finding", finding_id=1)
+    update_coverage_cell(
+        api_run.id, endpoint_simple.id, "API2", "finding", finding_id=1
+    )
     # Attempt to downgrade back to in_progress — should be silently ignored.
     update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "in_progress")
     db_session.expire_all()
@@ -254,8 +275,13 @@ def test_update_cell_no_downgrade(db_engine, db_session, collection, endpoint_si
 
 # ── 5. update_coverage_cell appends finding_id ────────────────────────────────
 
-def test_update_cell_appends_finding(db_engine, db_session, collection, endpoint_simple, api_run):
-    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "finding", finding_id=42)
+
+def test_update_cell_appends_finding(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
+    update_coverage_cell(
+        api_run.id, endpoint_simple.id, "API2", "finding", finding_id=42
+    )
     db_session.expire_all()
     cell = db_session.exec(
         select(ApiEndpointTest)
@@ -267,7 +293,9 @@ def test_update_cell_appends_finding(db_engine, db_session, collection, endpoint
     assert 42 in json.loads(cell.finding_ids_json)
 
     # Second call with a different finding_id appends it
-    update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "finding", finding_id=99)
+    update_coverage_cell(
+        api_run.id, endpoint_simple.id, "API2", "finding", finding_id=99
+    )
     db_session.expire_all()
     cell2 = db_session.exec(
         select(ApiEndpointTest)
@@ -281,7 +309,10 @@ def test_update_cell_appends_finding(db_engine, db_session, collection, endpoint
 
 # ── 6. mark_all_cells_covered leaves finding/skipped alone ────────────────────
 
-def test_mark_all_cells_covered(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+
+def test_mark_all_cells_covered(
+    db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run
+):
     seed_coverage_matrix(api_run.id)
     cells = db_session.exec(
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run.id)
@@ -307,14 +338,16 @@ def test_mark_all_cells_covered(db_engine, db_session, collection, endpoint_simp
     ).all()
     for c in updated:
         if c.id == finding_id:
-            assert c.status == "finding"       # not downgraded
+            assert c.status == "finding"  # not downgraded
         elif c.id == skipped_id:
-            assert c.status == "skipped"       # not downgraded
+            assert c.status == "skipped"  # not downgraded
         else:
-            assert c.status == "covered"       # in_progress → covered
+            assert c.status == "covered"  # in_progress → covered
 
 
-def test_mark_cells_covered_leaves_not_started(db_engine, db_session, collection, endpoint_simple, api_run):
+def test_mark_cells_covered_leaves_not_started(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     """not_started cells (never hit by the scanner) must NOT become covered."""
     seed_coverage_matrix(api_run.id)
     mark_all_cells_covered(api_run.id)
@@ -328,6 +361,7 @@ def test_mark_cells_covered_leaves_not_started(db_engine, db_session, collection
 
 
 # ── 7. GET /coverage returns matrix shape ─────────────────────────────────────
+
 
 def test_get_coverage_route(client, db_engine, db_session):
     coll, run = _make_collection_and_run(client)
@@ -357,6 +391,7 @@ def test_get_coverage_route(client, db_engine, db_session):
 
 # ── 8. GET /coverage with no endpoints ────────────────────────────────────────
 
+
 def test_get_coverage_no_endpoints(client):
     coll, run = _make_collection_and_run(client)
     r = client.get(f"/api/api-test-runs/{run['id']}/coverage")
@@ -367,8 +402,11 @@ def test_get_coverage_no_endpoints(client):
 
 # ── 9. _applicable_categories — API2 always present ──────────────────────────
 
+
 def test_applicable_categories_api2_always(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/ping", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/ping", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
@@ -378,8 +416,11 @@ def test_applicable_categories_api2_always(db_engine, db_session, collection):
 
 # ── 10. _applicable_categories — API1 for path params ─────────────────────────
 
+
 def test_applicable_categories_api1_path_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
@@ -388,7 +429,9 @@ def test_applicable_categories_api1_path_param(db_engine, db_session, collection
 
 
 def test_applicable_categories_no_api1_without_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/users", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
@@ -398,8 +441,11 @@ def test_applicable_categories_no_api1_without_param(db_engine, db_session, coll
 
 # ── 11. _applicable_categories — API3 for PUT/PATCH ──────────────────────────
 
+
 def test_applicable_categories_api3_patch(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="PATCH", path="/users/{id}", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="PATCH", path="/users/{id}", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
@@ -408,7 +454,9 @@ def test_applicable_categories_api3_patch(db_engine, db_session, collection):
 
 
 def test_applicable_categories_no_api3_get(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
@@ -418,52 +466,77 @@ def test_applicable_categories_no_api3_get(db_engine, db_session, collection):
 
 # ── 12. _match_endpoint_for_url — exact path ──────────────────────────────────
 
+
 def test_match_endpoint_exact(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/health", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/health", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
-    matched = _match_endpoint_for_url("http://api.local/health", [ep], "http://api.local")
+    matched = _match_endpoint_for_url(
+        "http://api.local/health", [ep], "http://api.local"
+    )
     assert matched is not None
     assert matched.id == ep.id
 
 
 # ── 13. _match_endpoint_for_url — parameterized path ─────────────────────────
 
+
 def test_match_endpoint_path_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/users/{id}", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
-    matched = _match_endpoint_for_url("http://api.local/users/42", [ep], "http://api.local")
+    matched = _match_endpoint_for_url(
+        "http://api.local/users/42", [ep], "http://api.local"
+    )
     assert matched is not None
     assert matched.id == ep.id
 
 
 def test_match_endpoint_nested_param(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="PATCH", path="/users/{uid}/posts/{pid}", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id,
+        method="PATCH",
+        path="/users/{uid}/posts/{pid}",
+        in_scope=True,
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
-    matched = _match_endpoint_for_url("http://api.local/users/10/posts/200", [ep], "http://api.local")
+    matched = _match_endpoint_for_url(
+        "http://api.local/users/10/posts/200", [ep], "http://api.local"
+    )
     assert matched is not None
     assert matched.id == ep.id
 
 
 # ── 14. _match_endpoint_for_url — no match ────────────────────────────────────
 
+
 def test_match_endpoint_no_match(db_engine, db_session, collection):
-    ep = ApiEndpoint(collection_id=collection.id, method="GET", path="/health", in_scope=True)
+    ep = ApiEndpoint(
+        collection_id=collection.id, method="GET", path="/health", in_scope=True
+    )
     db_session.add(ep)
     db_session.commit()
     db_session.refresh(ep)
-    matched = _match_endpoint_for_url("http://api.local/foobar/baz", [ep], "http://api.local")
+    matched = _match_endpoint_for_url(
+        "http://api.local/foobar/baz", [ep], "http://api.local"
+    )
     assert matched is None
 
 
 # ── 15. get_coverage_matrix totals ────────────────────────────────────────────
 
-def test_get_coverage_matrix_totals(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_get_coverage_matrix_totals(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
     mat = get_coverage_matrix(api_run.id)
     totals = mat["totals"]
@@ -474,7 +547,10 @@ def test_get_coverage_matrix_totals(db_engine, db_session, collection, endpoint_
 
 # ── 16. post_finding_fn updates coverage cell ─────────────────────────────────
 
-def test_post_finding_fn_updates_cell(db_engine, db_session, collection, endpoint_with_param, api_run):
+
+def test_post_finding_fn_updates_cell(
+    db_engine, db_session, collection, endpoint_with_param, api_run
+):
     seed_coverage_matrix(api_run.id)
 
     from aespa.services.api_scanner import _make_post_finding_fn
@@ -512,6 +588,7 @@ def test_post_finding_fn_updates_cell(db_engine, db_session, collection, endpoin
 
 # ── 17. start-scan seeds matrix ───────────────────────────────────────────────
 
+
 def test_start_scan_seeds_matrix(client, db_engine, db_session):
     coll, run = _make_collection_and_run(client)
     ep = ApiEndpoint(
@@ -524,7 +601,9 @@ def test_start_scan_seeds_matrix(client, db_engine, db_session):
     db_session.commit()
 
     with (
-        patch("aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock),
+        patch(
+            "aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock
+        ),
         patch("asyncio.create_task", side_effect=_fake_create_task),
     ):
         r = client.post(f"/api/api-test-runs/{run['id']}/scan/start")
@@ -538,7 +617,10 @@ def test_start_scan_seeds_matrix(client, db_engine, db_session):
 
 # ── 18. _make_post_probe_fn — marks only the declared category in_progress ────
 
-def test_post_probe_fn_marks_single_category(db_engine, db_session, collection, endpoint_with_param, api_run):
+
+def test_post_probe_fn_marks_single_category(
+    db_engine, db_session, collection, endpoint_with_param, api_run
+):
     """Calling the post_probe_fn with owasp_category=API1 should flip the API1
     cell to in_progress while leaving other categories untouched."""
     from aespa.services.api_scanner import _make_post_probe_fn
@@ -551,6 +633,7 @@ def test_post_probe_fn_marks_single_category(db_engine, db_session, collection, 
 
     # Populate the endpoint cache so _make_post_probe_fn can match the URL.
     from aespa.services.api_scanner import _endpoint_cache
+
     _endpoint_cache[api_run.id] = (collection.id, [endpoint_with_param])
 
     fn = _make_post_probe_fn(api_run.id)
@@ -583,7 +666,9 @@ def test_post_probe_fn_marks_single_category(db_engine, db_session, collection, 
     _endpoint_cache.pop(api_run.id, None)
 
 
-def test_post_probe_fn_no_match_is_noop(db_engine, db_session, collection, endpoint_with_param, api_run):
+def test_post_probe_fn_no_match_is_noop(
+    db_engine, db_session, collection, endpoint_with_param, api_run
+):
     """When the URL doesn't match any endpoint, the probe fn should silently do nothing."""
     from aespa.services.api_scanner import _endpoint_cache, _make_post_probe_fn
 
@@ -605,6 +690,7 @@ def test_post_probe_fn_no_match_is_noop(db_engine, db_session, collection, endpo
 
 # ── Slice 8: Enforce coverage mode ────────────────────────────────────────────
 
+
 def _all_cells(db_session, api_run_id):
     return db_session.exec(
         select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == api_run_id)
@@ -613,7 +699,10 @@ def _all_cells(db_session, api_run_id):
 
 # ── _uncovered_cells returns only non-terminal cells ──────────────────────────
 
-def test_uncovered_cells_excludes_terminal(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_uncovered_cells_excludes_terminal(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
     # Flip one cell to covered (terminal) — it should drop out of the uncovered list.
     update_coverage_cell(api_run.id, endpoint_simple.id, "API2", "covered")
@@ -626,13 +715,18 @@ def test_uncovered_cells_excludes_terminal(db_engine, db_session, collection, en
 
 # ── enforce loop drives every cell to a terminal state ────────────────────────
 
-def test_enforce_loop_covers_all_cells(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+
+def test_enforce_loop_covers_all_cells(
+    db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run
+):
     seed_coverage_matrix(api_run.id)
 
     async def prober(ep, cat, status):
         return ("covered", None)
 
-    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999))
+    stats = asyncio.run(
+        _enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999)
+    )
 
     db_session.expire_all()
     cells = _all_cells(db_session, api_run.id)
@@ -644,24 +738,34 @@ def test_enforce_loop_covers_all_cells(db_engine, db_session, collection, endpoi
 
 # ── enforce loop records skip reasons ─────────────────────────────────────────
 
-def test_enforce_loop_records_skip_reasons(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_enforce_loop_records_skip_reasons(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
 
     async def prober(ep, cat, status):
         return ("skipped", f"not applicable: {cat}")
 
-    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999))
+    stats = asyncio.run(
+        _enforce_coverage_loop(api_run.id, prober, max_attempts=999, time_budget_s=999)
+    )
 
     db_session.expire_all()
     cells = _all_cells(db_session, api_run.id)
     assert all(c.status == "skipped" for c in cells)
-    assert all(c.skip_reason and c.skip_reason.startswith("not applicable") for c in cells)
+    assert all(
+        c.skip_reason and c.skip_reason.startswith("not applicable") for c in cells
+    )
     assert stats["skipped"] == len(cells)
 
 
 # ── enforce loop respects the attempt budget ──────────────────────────────────
 
-def test_enforce_loop_respects_budget(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+
+def test_enforce_loop_respects_budget(
+    db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run
+):
     seed_coverage_matrix(api_run.id)
     total = len(_all_cells(db_session, api_run.id))
     assert total > 2  # need headroom so the budget actually bites
@@ -669,7 +773,9 @@ def test_enforce_loop_respects_budget(db_engine, db_session, collection, endpoin
     async def prober(ep, cat, status):
         return ("covered", None)
 
-    stats = asyncio.run(_enforce_coverage_loop(api_run.id, prober, max_attempts=2, time_budget_s=999))
+    stats = asyncio.run(
+        _enforce_coverage_loop(api_run.id, prober, max_attempts=2, time_budget_s=999)
+    )
 
     assert stats["attempted"] == 2
     assert stats["covered"] == 2
@@ -689,7 +795,10 @@ def test_enforce_loop_respects_budget(db_engine, db_session, collection, endpoin
 
 # ── enforce loop halts on stop_check ──────────────────────────────────────────
 
-def test_enforce_loop_stop_check_halts(db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run):
+
+def test_enforce_loop_stop_check_halts(
+    db_engine, db_session, collection, endpoint_simple, endpoint_with_param, api_run
+):
     seed_coverage_matrix(api_run.id)
     calls = {"n": 0}
 
@@ -700,8 +809,10 @@ def test_enforce_loop_stop_check_halts(db_engine, db_session, collection, endpoi
     # Stop after the first attempt completes.
     stats = asyncio.run(
         _enforce_coverage_loop(
-            api_run.id, prober,
-            max_attempts=999, time_budget_s=999,
+            api_run.id,
+            prober,
+            max_attempts=999,
+            time_budget_s=999,
             stop_check=lambda: calls["n"] >= 1,
         )
     )
@@ -713,7 +824,10 @@ def test_enforce_loop_stop_check_halts(db_engine, db_session, collection, endpoi
 
 # ── default prober: in_progress cells are promoted to covered (no LLM) ─────────
 
-def test_enforce_prober_promotes_in_progress(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_enforce_prober_promotes_in_progress(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     prober = _make_enforce_prober(api_run.id, llm_cfg=None, base_url="")
     status, reason = asyncio.run(prober(endpoint_simple, "API2", "in_progress"))
     assert status == "covered"
@@ -722,10 +836,15 @@ def test_enforce_prober_promotes_in_progress(db_engine, db_session, collection, 
 
 # ── default prober: not_started cells classified N/A via the LLM ──────────────
 
-def test_enforce_prober_classifies_not_applicable(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_enforce_prober_classifies_not_applicable(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     import aespa.services.llm as llm_mod
 
-    fake = AsyncMock(return_value='{"API2": {"applicable": false, "reason": "no auth required"}}')
+    fake = AsyncMock(
+        return_value='{"API2": {"applicable": false, "reason": "no auth required"}}'
+    )
     with patch.object(llm_mod, "plain_completion", new=fake):
         prober = _make_enforce_prober(api_run.id, llm_cfg=object(), base_url="")
         status, reason = asyncio.run(prober(endpoint_simple, "API2", "not_started"))
@@ -737,7 +856,10 @@ def test_enforce_prober_classifies_not_applicable(db_engine, db_session, collect
 
 # ── enforce directive lists endpoints + categories ───────────────────────────
 
-def test_build_enforce_directive_lists_checklist(db_engine, db_session, collection, endpoint_simple, api_run):
+
+def test_build_enforce_directive_lists_checklist(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
     text = _build_enforce_directive(api_run.id)
     assert "ENFORCE COVERAGE MODE" in text
@@ -745,7 +867,9 @@ def test_build_enforce_directive_lists_checklist(db_engine, db_session, collecti
     assert "API2" in text
 
 
-def test_build_enforce_directive_empty_when_nothing_uncovered(db_engine, db_session, collection, endpoint_simple, api_run):
+def test_build_enforce_directive_empty_when_nothing_uncovered(
+    db_engine, db_session, collection, endpoint_simple, api_run
+):
     seed_coverage_matrix(api_run.id)
     # Cover every cell so there is nothing left to enforce.
     for ep, cat, _status in _uncovered_cells(api_run.id):
@@ -755,13 +879,19 @@ def test_build_enforce_directive_empty_when_nothing_uncovered(db_engine, db_sess
 
 # ── scan-start accepts a coverage_mode override ───────────────────────────────
 
+
 def test_scan_start_overrides_coverage_mode(client, db_engine, db_session):
     coll, run = _make_collection_and_run(client)  # defaults to track
     with (
-        patch("aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock),
+        patch(
+            "aespa.services.api_scanner._do_api_thinking_scan", new_callable=AsyncMock
+        ),
         patch("asyncio.create_task", side_effect=_fake_create_task),
     ):
-        r = client.post(f"/api/api-test-runs/{run['id']}/scan/start", json={"coverage_mode": "enforce"})
+        r = client.post(
+            f"/api/api-test-runs/{run['id']}/scan/start",
+            json={"coverage_mode": "enforce"},
+        )
     assert r.status_code == 200
     assert r.json()["coverage_mode"] == "enforce"
 

@@ -1,4 +1,5 @@
 """Prompts and tool schemas for the SAST agentic scan."""
+
 from __future__ import annotations
 
 SAST_SYSTEM_PROMPT = """\
@@ -224,7 +225,12 @@ SAST_TOOLS: list[dict] = [
                 },
             },
             "required": [
-                "title", "category", "severity", "location", "description", "evidence",
+                "title",
+                "category",
+                "severity",
+                "location",
+                "description",
+                "evidence",
             ],
         },
     },

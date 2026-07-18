@@ -37,7 +37,9 @@ def get_prompt(key: str = reporting_debug_svc.PROMPT_KEY_ANALYSE) -> dict:
     try:
         return reporting_debug_svc.get_prompt(key)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting prompt not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting prompt not found"
+        ) from None
 
 
 @router.get("/prompts")
@@ -53,7 +55,9 @@ def save_prompt(
     try:
         return reporting_debug_svc.save_prompt(payload.prompt_text, key)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting prompt not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting prompt not found"
+        ) from None
 
 
 @router.post("/prompt/reset")
@@ -61,7 +65,9 @@ def reset_prompt(key: str = reporting_debug_svc.PROMPT_KEY_ANALYSE) -> dict:
     try:
         return reporting_debug_svc.reset_prompt(key)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting prompt not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting prompt not found"
+        ) from None
 
 
 @router.get("/prompt-versions")
@@ -69,7 +75,9 @@ def list_prompt_versions(key: str = reporting_debug_svc.PROMPT_KEY_ANALYSE) -> d
     try:
         return {"versions": reporting_debug_svc.list_prompt_versions(key)}
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting prompt not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting prompt not found"
+        ) from None
 
 
 @router.post("/prompt-versions")
@@ -81,12 +89,16 @@ def create_prompt_version(payload: ReportingPromptVersionCreateIn) -> dict:
             prompt_text=payload.prompt_text,
         )
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting prompt not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting prompt not found"
+        ) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except Exception as exc:
         if "UNIQUE" in str(exc).upper():
-            raise HTTPException(status_code=409, detail="Prompt version name already exists") from None
+            raise HTTPException(
+                status_code=409, detail="Prompt version name already exists"
+            ) from None
         raise
 
 
@@ -102,14 +114,18 @@ def update_prompt_version(
             prompt_text=payload.prompt_text,
         )
     except KeyError:
-        raise HTTPException(status_code=404, detail="Prompt version not found") from None
+        raise HTTPException(
+            status_code=404, detail="Prompt version not found"
+        ) from None
     except PermissionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except Exception as exc:
         if "UNIQUE" in str(exc).upper():
-            raise HTTPException(status_code=409, detail="Prompt version name already exists") from None
+            raise HTTPException(
+                status_code=409, detail="Prompt version name already exists"
+            ) from None
         raise
 
 
@@ -118,7 +134,9 @@ def delete_prompt_version(version_id: int) -> dict:
     try:
         reporting_debug_svc.delete_prompt_version(version_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Prompt version not found") from None
+        raise HTTPException(
+            status_code=404, detail="Prompt version not found"
+        ) from None
     except PermissionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"ok": True}
@@ -155,7 +173,9 @@ async def replay_capture(
             prompt_version_id=payload.prompt_version_id if payload else None,
         )
     except KeyError:
-        raise HTTPException(status_code=404, detail="Reporting capture or prompt version not found") from None
+        raise HTTPException(
+            status_code=404, detail="Reporting capture or prompt version not found"
+        ) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
 

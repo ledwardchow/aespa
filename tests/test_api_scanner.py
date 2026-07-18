@@ -12,6 +12,7 @@ Tests:
   9. report_finding sets finding_source = "alice_api"
   10. ScanFinding schema includes api_test_run_id + owasp_api_category fields
 """
+
 from __future__ import annotations
 
 import json
@@ -34,6 +35,7 @@ from aespa.models import (
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(name="db_engine")
 def db_engine_fixture():
     engine = create_engine(
@@ -42,6 +44,7 @@ def db_engine_fixture():
         poolclass=StaticPool,
     )
     from aespa.db import _engine as original_engine
+
     SQLModel.metadata.create_all(engine)
     set_engine(engine)
     yield engine
@@ -95,6 +98,7 @@ def bearer_cred_fixture(db_session, collection):
 
 # ── HTTP client fixture ────────────────────────────────────────────────────────
 
+
 @pytest.fixture(name="client")
 def client_fixture(db_engine):
     from fastapi.testclient import TestClient
@@ -114,8 +118,12 @@ def client_fixture(db_engine):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _make_collection(client):
-    r = client.post("/api/api-collections", json={"name": "ScanAPI", "base_url": "http://target.api"})
+    r = client.post(
+        "/api/api-collections",
+        json={"name": "ScanAPI", "base_url": "http://target.api"},
+    )
     assert r.status_code == 201
     return r.json()
 
@@ -143,7 +151,7 @@ def test_api_runs_import_sast_leads_explicitly_and_independently(client, db_engi
         s.add(
             ScanLead(
                 producer_run_type="sast",
-                    producer_run_id=sast_run_id,
+                producer_run_id=sast_run_id,
                 title="Reusable SAST lead",
                 description="Must be dynamically reassessed.",
                 confidence=0.9,
@@ -154,9 +162,7 @@ def test_api_runs_import_sast_leads_explicitly_and_independently(client, db_engi
 
     first = _make_run(client, coll["id"])
     assert get_leads_for_run("api", first["id"]) == []
-    available = client.get(
-        f"/api/api-test-runs/{first['id']}/sast-runs/available"
-    )
+    available = client.get(f"/api/api-test-runs/{first['id']}/sast-runs/available")
     assert available.status_code == 200
     assert [run["id"] for run in available.json()] == [sast_run_id]
     imported = client.post(
@@ -195,24 +201,28 @@ def test_api_runs_import_sast_leads_explicitly_and_independently(client, db_engi
         for lead in listed.json()
     )
 
-    assert client.delete(
-        f"/api/api-test-runs/{second['id']}/leads/{second_lead.id}"
-    ).status_code == 204
+    assert (
+        client.delete(
+            f"/api/api-test-runs/{second['id']}/leads/{second_lead.id}"
+        ).status_code
+        == 204
+    )
     assert client.get(f"/api/api-test-runs/{second['id']}/leads").json() == []
     assert client.post(
         f"/api/api-test-runs/{second['id']}/import-leads",
         json={"sast_run_id": sast_run_id},
     ).json() == {"imported": 1}
-    assert client.delete(
-        f"/api/api-test-runs/{second['id']}/leads"
-    ).status_code == 204
+    assert client.delete(f"/api/api-test-runs/{second['id']}/leads").status_code == 204
     assert client.get(f"/api/api-test-runs/{second['id']}/leads").json() == []
     assert len(client.get(f"/api/sast-runs/{sast_run_id}/leads").json()) == 1
 
 
 # ── Tests: seed_sessions_from_credentials ─────────────────────────────────────
 
-def test_seed_sessions_creates_anonymous_and_configured(db_engine, collection, api_run, bearer_cred):
+
+def test_seed_sessions_creates_anonymous_and_configured(
+    db_engine, collection, api_run, bearer_cred
+):
     """seed_sessions_from_credentials should create anonymous + bearer sessions."""
     from aespa.services.api_scanner import seed_sessions_from_credentials
     from aespa.services.scanner_sessions import list_run_sessions
@@ -227,7 +237,9 @@ def test_seed_sessions_creates_anonymous_and_configured(db_engine, collection, a
     assert any("admin_token" in lbl or "bearer" in lbl for lbl in labels)
 
 
-def test_seed_sessions_bearer_sets_extra_header(db_engine, collection, api_run, bearer_cred):
+def test_seed_sessions_bearer_sets_extra_header(
+    db_engine, collection, api_run, bearer_cred
+):
     """Bearer credentials should populate extra_headers_json with Authorization."""
     from aespa.services.api_scanner import seed_sessions_from_credentials
     from aespa.services.scanner_sessions import list_run_sessions
@@ -235,7 +247,9 @@ def test_seed_sessions_bearer_sets_extra_header(db_engine, collection, api_run, 
     seed_sessions_from_credentials(api_run.id)
     sessions = list_run_sessions(api_run.id, run_kind="api")
 
-    bearer_session = next((s for s in sessions if "admin_token" in s.label or s.kind == "bearer"), None)
+    bearer_session = next(
+        (s for s in sessions if "admin_token" in s.label or s.kind == "bearer"), None
+    )
     assert bearer_session is not None
 
     extra = json.loads(bearer_session.extra_headers_json or "{}")
@@ -383,6 +397,7 @@ def test_api_specialist_prompt_does_not_advertise_web_inventory(attack_class):
 
 # ── Tests: report_finding via context tool ────────────────────────────────────
 
+
 def test_report_finding_persists_scan_finding(db_engine, collection, api_run):
     """report_finding should write a ScanFinding with api_test_run_id set."""
     from aespa.services.alice import _run_api_context_tool
@@ -435,7 +450,9 @@ def test_report_finding_sets_finding_source(db_engine, collection, api_run):
     from aespa.services.alice import _run_api_context_tool
 
     result = _run_api_context_tool(
-        collection.id, api_run.id, "report_finding",
+        collection.id,
+        api_run.id,
+        "report_finding",
         {"title": "Auth bypass", "severity": "critical"},
     )
 
@@ -445,6 +462,7 @@ def test_report_finding_sets_finding_source(db_engine, collection, api_run):
 
 
 # ── Tests: API findings route ──────────────────────────────────────────────────
+
 
 def test_get_api_findings_returns_findings_for_run(client, db_engine):
     """GET /api/api-test-runs/{id}/findings should return findings with api_test_run_id."""
@@ -507,6 +525,7 @@ def test_get_api_findings_404_for_unknown_run(client):
 
 # ── Tests: API traffic route ───────────────────────────────────────────────────
 
+
 def test_get_api_traffic_returns_entries(client, db_engine):
     """GET /api/api-test-runs/{id}/traffic should return traffic for the run."""
     coll = _make_collection(client)
@@ -540,11 +559,17 @@ def test_get_api_traffic_count(client, db_engine):
 
     with Session(db_engine) as s:
         for i in range(3):
-            s.add(TrafficEntry(
-                test_run_id=0, api_test_run_id=run_id, source="httpx",
-                method="POST", url=f"http://target.api/ep{i}",
-                request_headers="{}", status=201,
-            ))
+            s.add(
+                TrafficEntry(
+                    test_run_id=0,
+                    api_test_run_id=run_id,
+                    source="httpx",
+                    method="POST",
+                    url=f"http://target.api/ep{i}",
+                    request_headers="{}",
+                    status=201,
+                )
+            )
         s.commit()
 
     r = client.get(f"/api/api-test-runs/{run_id}/traffic/count")
@@ -553,6 +578,7 @@ def test_get_api_traffic_count(client, db_engine):
 
 
 # ── Tests: scan start/stop/status routes ──────────────────────────────────────
+
 
 def test_scan_start_creates_task(client):
     """POST /scan/start should create an asyncio task and return ok=True."""
@@ -578,6 +604,7 @@ def test_scan_start_creates_task(client):
     assert r.json()["ok"] is True
 
     from aespa.services import api_scanner
+
     api_scanner._scan_tasks.pop(run_id, None)
 
 
@@ -613,9 +640,11 @@ def test_scan_start_404_for_unknown_run(client):
 
 # ── Tests: ScanFinding schema ──────────────────────────────────────────────────
 
+
 def test_scan_finding_schema_includes_api_fields():
     """ScanFindingOut schema should include api_test_run_id and owasp_api_category."""
     from aespa.schemas import ScanFindingOut
+
     fields = ScanFindingOut.model_fields
     assert "api_test_run_id" in fields
     assert "owasp_api_category" in fields
@@ -624,6 +653,7 @@ def test_scan_finding_schema_includes_api_fields():
 def test_scan_finding_model_has_api_columns(db_engine):
     """ScanFinding model should have api_test_run_id column after migration."""
     from aespa.db import _migrate
+
     _migrate(db_engine)
 
     with Session(db_engine) as s:
@@ -647,7 +677,10 @@ def test_scan_finding_model_has_api_columns(db_engine):
 
 # ── Tests: discovered-credential persistence (regression) ─────────────────────
 
-def test_discovered_credential_saved_to_collection_not_site(db_engine, collection, api_run):
+
+def test_discovered_credential_saved_to_collection_not_site(
+    db_engine, collection, api_run
+):
     """A credential discovered during an API scan must be saved as an ApiCredential
     on the collection — never as a site Credential.
 
@@ -665,17 +698,25 @@ def test_discovered_credential_saved_to_collection_not_site(db_engine, collectio
         s.add(site)
         s.commit()
         s.refresh(site)
-        tr = TestRun(id=api_run.id, site_id=site.id, name="unrelated run", status="completed")
+        tr = TestRun(
+            id=api_run.id, site_id=site.id, name="unrelated run", status="completed"
+        )
         s.add(tr)
         s.commit()
 
     persist = _make_persist_credential_fn(collection.id, api_run.id)
-    persist(username="alice@example.com", password="hunter2", login_url="/api/auth/login")
+    persist(
+        username="alice@example.com", password="hunter2", login_url="/api/auth/login"
+    )
 
     with Session(db_engine) as s:
-        api_creds = list(s.exec(
-            select(ApiCredential).where(ApiCredential.collection_id == collection.id)
-        ).all())
+        api_creds = list(
+            s.exec(
+                select(ApiCredential).where(
+                    ApiCredential.collection_id == collection.id
+                )
+            ).all()
+        )
         site_creds = list(s.exec(select(Credential)).all())
 
     assert len(site_creds) == 0, "discovered cred must not be written to a site"
@@ -697,7 +738,11 @@ def test_discovered_credential_dedup(db_engine, collection, api_run):
     persist(username="bob", password="pw", login_url=None)
 
     with Session(db_engine) as s:
-        api_creds = list(s.exec(
-            select(ApiCredential).where(ApiCredential.collection_id == collection.id)
-        ).all())
+        api_creds = list(
+            s.exec(
+                select(ApiCredential).where(
+                    ApiCredential.collection_id == collection.id
+                )
+            ).all()
+        )
     assert len(api_creds) == 1
