@@ -3,6 +3,7 @@
 Captures HTTP request/response pairs from both httpx and Playwright,
 persists them to the DB, and exposes a polling endpoint for the frontend.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +17,7 @@ from sqlmodel import Session, func, select
 
 from aespa.db import get_engine
 
-BODY_LIMIT = 8192                                 # 8 KB per body stored
+BODY_LIMIT = 8192  # 8 KB per body stored
 SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
 
 
@@ -45,6 +46,7 @@ def _write(
     api_run_id: Optional[int] = None,
 ) -> None:
     from aespa.models import TrafficEntry
+
     with Session(get_engine()) as s:
         entry = TrafficEntry(
             test_run_id=run_id,
@@ -67,8 +69,10 @@ def _write(
 
 # ── Query ─────────────────────────────────────────────────────────────────────
 
+
 def clear_traffic(run_id: int) -> None:
     from aespa.models import TrafficEntry
+
     with Session(get_engine()) as s:
         entries = s.exec(
             select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
@@ -78,10 +82,18 @@ def clear_traffic(run_id: int) -> None:
         s.commit()
 
 
-def get_traffic(run_id: int, since_id: int = 0, *, api_run_id: Optional[int] = None) -> list[dict]:
+def get_traffic(
+    run_id: int, since_id: int = 0, *, api_run_id: Optional[int] = None
+) -> list[dict]:
     from aespa.models import TrafficEntry
+
     with Session(get_engine()) as s:
-        q = select(TrafficEntry).where(TrafficEntry.id > since_id).order_by(TrafficEntry.id).limit(500)
+        q = (
+            select(TrafficEntry)
+            .where(TrafficEntry.id > since_id)
+            .order_by(TrafficEntry.id)
+            .limit(500)
+        )
         if api_run_id is not None:
             q = q.where(TrafficEntry.api_test_run_id == api_run_id)
         else:
@@ -108,6 +120,7 @@ def get_traffic(run_id: int, since_id: int = 0, *, api_run_id: Optional[int] = N
 
 def count_traffic(run_id: int, *, api_run_id: Optional[int] = None) -> int:
     from aespa.models import TrafficEntry
+
     with Session(get_engine()) as s:
         q = select(func.count(TrafficEntry.id))
         if api_run_id is not None:
@@ -128,8 +141,16 @@ _api_traffic_hooks: dict[int, object] = {}  # api_run_id → callable
 
 # ── Custom client for automatic logging ───────────────────────────────────────
 
+
 class LoggingAsyncClient(httpx.AsyncClient):
-    def __init__(self, *args, run_id: Optional[int] = None, username: Optional[str] = None, api_run_id: Optional[int] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        run_id: Optional[int] = None,
+        username: Optional[str] = None,
+        api_run_id: Optional[int] = None,
+        **kwargs,
+    ):
         self.run_id = run_id
         self.api_run_id = api_run_id
         self.username = username
@@ -141,7 +162,9 @@ class LoggingAsyncClient(httpx.AsyncClient):
             return await super().send(request, *args, **kwargs)
 
         # For API runs there is no real TestRun row; use sentinel 0.
-        effective_run_id = self.run_id if self.run_id is not None else _API_SENTINEL_RUN_ID
+        effective_run_id = (
+            self.run_id if self.run_id is not None else _API_SENTINEL_RUN_ID
+        )
 
         t0 = time.monotonic()
         try:
@@ -213,6 +236,7 @@ class LoggingAsyncClient(httpx.AsyncClient):
 
 # ── httpx event hooks (Legacy fallback) ───────────────────────────────────────
 
+
 def make_httpx_hooks(
     run_id: Optional[int],
     username: Optional[str] = None,
@@ -232,7 +256,9 @@ def make_httpx_hooks(
 
     async def on_response(response) -> None:
         start = _pending.pop(id(response.request), None)
-        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+        duration_ms = (
+            int((time.monotonic() - start) * 1000) if start is not None else None
+        )
 
         # Ensure body bytes are fully read before accessing .text / .content.
         await response.aread()
@@ -269,6 +295,7 @@ def make_httpx_hooks(
 
 
 # ── Playwright BrowserContext handler ─────────────────────────────────────────
+
 
 def setup_playwright_logging(
     ctx,
@@ -320,7 +347,9 @@ def setup_playwright_logging(
         rid = id(response.request)
         start = _pending.pop(rid, None)
         req_data = _req_data.pop(rid, {})
-        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+        duration_ms = (
+            int((time.monotonic() - start) * 1000) if start is not None else None
+        )
 
         # Read request headers here — the full set (cookies, Authorization, etc.)
         # is only available after the request has been sent.
@@ -351,7 +380,9 @@ def setup_playwright_logging(
             body_bytes = await response.body()
             ct = response.headers.get("content-type", "")
             if any(t in ct for t in ("text", "json", "xml", "html", "javascript")):
-                resp_body: Optional[str] = body_bytes.decode(errors="replace")[:BODY_LIMIT]
+                resp_body: Optional[str] = body_bytes.decode(errors="replace")[
+                    :BODY_LIMIT
+                ]
             else:
                 resp_body = f"[binary, {len(body_bytes)} bytes]"
         except Exception:
@@ -388,7 +419,9 @@ def setup_playwright_logging(
         rid = id(request)
         start = _pending.pop(rid, None)
         req_data = _req_data.pop(rid, {})
-        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+        duration_ms = (
+            int((time.monotonic() - start) * 1000) if start is not None else None
+        )
 
         try:
             req_headers = await request.all_headers()

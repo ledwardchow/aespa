@@ -38,6 +38,42 @@ def test_create_run_default_name(client: TestClient):
     assert data["pages_discovered"] == 0
 
 
+def test_run_summary_exposes_safe_auth_mode_metadata(client: TestClient):
+    site = _make_site(
+        client,
+        requires_auth=True,
+        login_url="https://target.local/login",
+        credentials=[
+            {
+                "username": "push@example.com",
+                "password": "secret",
+                "auth_mode": "entra_id",
+            },
+            {
+                "username": "code@example.com",
+                "password": "secret",
+                "auth_mode": "entra_id",
+                "totp_seed": "JBSWY3DPEHPK3PXP",
+            },
+            {
+                "username": "manual@example.com",
+                "password": "secret",
+                "auth_mode": "guided",
+            },
+        ],
+    )
+    run = _make_run(client, site["id"]).json()
+    detail = client.get(f"/api/test-runs/{run['id']}").json()
+
+    credentials = {credential["username"]: credential for credential in detail["credentials"]}
+    assert credentials["push@example.com"]["auth_mode"] == "entra_id"
+    assert credentials["push@example.com"]["has_totp_seed"] is False
+    assert credentials["code@example.com"]["auth_mode"] == "entra_id"
+    assert credentials["code@example.com"]["has_totp_seed"] is True
+    assert credentials["manual@example.com"]["auth_mode"] == "guided"
+    assert "totp_seed" not in credentials["code@example.com"]
+
+
 def test_create_run_defaults_to_500_pages(client: TestClient):
     site = _make_site(client)
     response = client.post(f"/api/sites/{site['id']}/test-runs", json={})
@@ -370,6 +406,7 @@ def test_get_scanner_sessions_redacts_auth_material():
                     test_run_id=run.id,
                     label="configured_primary",
                     kind="mixed",
+                    account_label="Primary administrator",
                     username="alice",
                     credential_id=3,
                     source="test",
@@ -386,6 +423,8 @@ def test_get_scanner_sessions_redacts_auth_material():
         assert summary.counts["total"] == 1
         item = summary.sessions[0]
         assert item.label == "configured_primary"
+        assert item.account_label == "Primary administrator"
+        assert item.username == "alice"
         assert item.cookie_names == ["sid"]
         assert item.header_names == ["Authorization"]
         assert item.session_metadata["login_url"] == "https://target.local/login"
@@ -451,6 +490,36 @@ def test_update_scanner_session_renames_and_deactivates():
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_validate_scanner_sessions_route(client: TestClient, monkeypatch):
+    from aespa.services import scanner_sessions
+
+    site = _make_site(client, base_url="https://target.local")
+    run = _make_run(client, site["id"]).json()
+    captured = {}
+
+    async def validate(db, run_id, **kwargs):
+        captured.update(run_id=run_id, **kwargs)
+        return {
+            "checked": 2,
+            "valid": 1,
+            "evicted": 1,
+            "errors": 0,
+            "skipped": 0,
+            "results": [],
+        }
+
+    monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
+    response = client.post(
+        f"/api/test-runs/{run['id']}/scanner-sessions/validate"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evicted"] == 1
+    assert captured["run_id"] == run["id"]
+    assert captured["run_kind"] == "web"
+    assert captured["default_url"].rstrip("/") == "https://target.local"
 
 
 def test_get_run_not_found(client: TestClient):

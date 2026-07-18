@@ -1,23 +1,33 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import AgentLog, CrawledPage, ScanFinding, Site
+from aespa.models import (
+    AgentLog,
+    CrawledPage,
+    Credential,
+    PageCredentialView,
+    ScanFinding,
+    Site,
+)
 from aespa.models import TestRun as RunModel
 from aespa.services import llm, scanner, validator
 from aespa.services.validator import _body_contains_page_evidence, _looks_like_spa_shell
 
 
 def test_validate_finding_result_without_probe_results_is_false_positive():
-    result = asyncio.run(llm.validate_finding_result(
-        config=None,
-        title="Possible issue",
-        description="A finding that could not be reproduced.",
-        evidence="REQUEST... RESPONSE...",
-        probe_results=[],
-    ))
+    result = asyncio.run(
+        llm.validate_finding_result(
+            config=None,
+            title="Possible issue",
+            description="A finding that could not be reproduced.",
+            evidence="REQUEST... RESPONSE...",
+            probe_results=[],
+        )
+    )
 
     assert result["verdict"] == "false_positive"
     assert "No validation probes" in result["reasoning"]
@@ -35,11 +45,13 @@ def test_access_control_validation_without_credentials_is_unconfirmed():
         evidence="",
     )
 
-    result = asyncio.run(validator._deterministic_validate_finding(
-        finding,
-        cred_sessions={},
-        scanner_policy=None,
-    ))
+    result = asyncio.run(
+        validator._deterministic_validate_finding(
+            finding,
+            cred_sessions={},
+            scanner_policy=None,
+        )
+    )
 
     assert result is not None
     verdict, reason, poc_spec = result
@@ -66,10 +78,17 @@ def test_severity_threshold_skip_is_not_an_unconfirmed_verdict(monkeypatch):
     monkeypatch.setattr(validator, "_persist_verdict", fake_persist)
     monkeypatch.setattr(validator.events_svc, "emit", lambda *_args, **_kwargs: None)
 
-    asyncio.run(validator._validate_one(
-        1, finding, None, {}, None, None,
-        validator_cfg=SimpleNamespace(min_severity="low", enabled=True),
-    ))
+    asyncio.run(
+        validator._validate_one(
+            1,
+            finding,
+            None,
+            {},
+            None,
+            None,
+            validator_cfg=SimpleNamespace(min_severity="low", enabled=True),
+        )
+    )
 
     assert persisted[0][0][2] == "skipped"
     assert persisted[0][0][3].startswith("Not validated:")
@@ -115,28 +134,32 @@ def test_resume_interrupted_validations_requeues_only_orphaned_work(monkeypatch)
     try:
         monkeypatch.setattr(validator, "get_engine", lambda: engine)
         with Session(engine) as session:
-            session.add(ScanFinding(
-                test_run_id=42,
-                page_id=None,
-                owasp_category="A01",
-                severity="high",
-                title="Interrupted validation",
-                description="A validation task was interrupted.",
-                validation_status="unvalidated",
-                validation_note=(
-                    "Validation was interrupted before a verdict (process restart); "
-                    "reset for re-validation."
-                ),
-            ))
-            session.add(ScanFinding(
-                test_run_id=42,
-                page_id=None,
-                owasp_category="A01",
-                severity="high",
-                title="Ordinary unvalidated finding",
-                description="This finding was not interrupted.",
-                validation_status="unvalidated",
-            ))
+            session.add(
+                ScanFinding(
+                    test_run_id=42,
+                    page_id=None,
+                    owasp_category="A01",
+                    severity="high",
+                    title="Interrupted validation",
+                    description="A validation task was interrupted.",
+                    validation_status="unvalidated",
+                    validation_note=(
+                        "Validation was interrupted before a verdict (process restart); "
+                        "reset for re-validation."
+                    ),
+                )
+            )
+            session.add(
+                ScanFinding(
+                    test_run_id=42,
+                    page_id=None,
+                    owasp_category="A01",
+                    severity="high",
+                    title="Ordinary unvalidated finding",
+                    description="This finding was not interrupted.",
+                    validation_status="unvalidated",
+                )
+            )
             session.commit()
 
         resumed = []
@@ -163,21 +186,39 @@ def test_validator_merges_active_primary_with_stored_role_sessions(monkeypatch):
         "cookies": {"sid": "admin"},
         "extra_headers": {},
     }
-    monkeypatch.setattr(validator.scanner_svc, "get_active_sessions", lambda _: {1: primary})
+    monkeypatch.setattr(
+        validator.scanner_svc, "get_active_sessions", lambda _: {1: primary}
+    )
 
     from aespa.services import scanner_sessions
-    monkeypatch.setattr(scanner_sessions, "load_session_vault", lambda _: {
-        "recon_2": {
-            "label": "recon_2", "kind": "cookie", "username": "viewer",
-            "credential_id": 2, "cookies": {"sid": "viewer"}, "extra_headers": {},
-        },
-    })
 
-    sessions = asyncio.run(validator._get_or_create_sessions(
-        1, "https://target.local", None,
-        [SimpleNamespace(id=1, username="admin"), SimpleNamespace(id=2, username="viewer")],
-        requires_auth=True,
-    ))
+    monkeypatch.setattr(
+        scanner_sessions,
+        "load_session_vault",
+        lambda _: {
+            "recon_2": {
+                "label": "recon_2",
+                "kind": "cookie",
+                "username": "viewer",
+                "credential_id": 2,
+                "cookies": {"sid": "viewer"},
+                "extra_headers": {},
+            },
+        },
+    )
+
+    sessions = asyncio.run(
+        validator._get_or_create_sessions(
+            1,
+            "https://target.local",
+            None,
+            [
+                SimpleNamespace(id=1, username="admin"),
+                SimpleNamespace(id=2, username="viewer"),
+            ],
+            requires_auth=True,
+        )
+    )
 
     assert sessions[1]["username"] == "admin"
     assert sessions[2]["username"] == "viewer"
@@ -187,6 +228,7 @@ def test_validator_bootstraps_configured_users_when_auth_flag_is_stale(monkeypat
     credential = SimpleNamespace(id=7, username="viewer", label="Viewer")
     monkeypatch.setattr(validator.scanner_svc, "get_active_sessions", lambda _: None)
     from aespa.services import scanner_sessions
+
     monkeypatch.setattr(scanner_sessions, "load_session_vault", lambda _: {})
 
     async def export_session(*_args):
@@ -194,9 +236,15 @@ def test_validator_bootstraps_configured_users_when_auth_flag_is_stale(monkeypat
 
     monkeypatch.setattr(validator.scanner_svc, "_export_cred_session", export_session)
 
-    sessions = asyncio.run(validator._get_or_create_sessions(
-        1, "https://target.local", None, [credential], requires_auth=False,
-    ))
+    sessions = asyncio.run(
+        validator._get_or_create_sessions(
+            1,
+            "https://target.local",
+            None,
+            [credential],
+            requires_auth=False,
+        )
+    )
 
     assert sessions[7]["cookies"] == {"sid": "viewer"}
 
@@ -214,7 +262,9 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
     try:
         monkeypatch.setattr(validator, "get_engine", lambda: engine)
         emitted = []
-        monkeypatch.setattr(validator.events_svc, "emit", lambda run_id, event: emitted.append(event))
+        monkeypatch.setattr(
+            validator.events_svc, "emit", lambda run_id, event: emitted.append(event)
+        )
 
         with Session(engine) as session:
             finding = ScanFinding(
@@ -232,35 +282,51 @@ def test_persist_verdict_appends_structured_validation_evidence(monkeypatch):
             session.refresh(finding)
             finding_id = finding.id
 
-        asyncio.run(validator._persist_verdict(
-            1,
-            finding_id,
-            "confirmed",
-            "Replay returned protected content.",
-            validation_results=[{
-                "desc": "Replay protected resource",
-                "url": "https://target.local/admin",
-                "status": 200,
-                "as_user": "alice",
-                "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
-                "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
-                "duration_ms": 35,
-                "timing_delta_ms": 900,
-                "body_diff": {"added_terms": ["admin", "panel"]},
-                "action_outcome": "Replay returned protected content.",
-            }],
-            source="test_validation",
-        ))
+        asyncio.run(
+            validator._persist_verdict(
+                1,
+                finding_id,
+                "confirmed",
+                "Replay returned protected content.",
+                validation_results=[
+                    {
+                        "desc": "Replay protected resource",
+                        "url": "https://target.local/admin",
+                        "status": 200,
+                        "as_user": "alice",
+                        "request_evidence": "GET /admin HTTP/1.1\nAuthorization: Bearer secret-token",
+                        "response_evidence": "HTTP/1.1 200 OK\n\nadmin panel",
+                        "duration_ms": 35,
+                        "timing_delta_ms": 900,
+                        "body_diff": {"added_terms": ["admin", "panel"]},
+                        "action_outcome": "Replay returned protected content.",
+                    }
+                ],
+                source="test_validation",
+            )
+        )
 
         with Session(engine) as session:
             saved = session.get(ScanFinding, finding_id)
 
         item_types = {item["type"] for item in saved.evidence_items}
-        assert {"validation_verdict", "validation_reasoning", "validation_probe", "validation_request", "validation_response", "timing", "timing_delta", "body_diff", "action_outcome"} <= item_types
+        assert {
+            "validation_verdict",
+            "validation_reasoning",
+            "validation_probe",
+            "validation_request",
+            "validation_response",
+            "timing",
+            "timing_delta",
+            "body_diff",
+            "action_outcome",
+        } <= item_types
         assert saved.validation_status == "confirmed"
         assert saved.validation_note == "Replay returned protected content."
         assert "secret-token" not in saved.evidence_json
-        update_event = next(e for e in emitted if e.get("type") == "finding_validation_update")
+        update_event = next(
+            e for e in emitted if e.get("type") == "finding_validation_update"
+        )
         assert update_event["evidence_items"]
     finally:
         SQLModel.metadata.drop_all(engine)
@@ -272,10 +338,13 @@ class _ScannerCredWithLogin:
 
 
 def test_scanner_login_url_for_credential_prefers_override():
-    assert scanner._login_url_for_credential(
-        "https://target.local/login",
-        _ScannerCredWithLogin(),
-    ) == "https://target.local/customer/login"
+    assert (
+        scanner._login_url_for_credential(
+            "https://target.local/login",
+            _ScannerCredWithLogin(),
+        )
+        == "https://target.local/customer/login"
+    )
 
 
 def test_dynamic_scan_creates_page_for_findings_without_crawl():
@@ -513,7 +582,7 @@ def test_dynamic_finding_write_persists_immediately(monkeypatch):
                 "affected_url": page.url,
                 "evidence": "password_hash was present in the JSON response.",
                 "request_evidence": "POST /api/login",
-                "response_evidence": "Status: 200\n{\"password_hash\":\"...\"}",
+                "response_evidence": 'Status: 200\n{"password_hash":"..."}',
             }
             result_by_url = {
                 page.url: {
@@ -523,24 +592,28 @@ def test_dynamic_finding_write_persists_immediately(monkeypatch):
                 }
             }
 
-            saved = asyncio.run(scanner._persist_dynamic_finding(
-                run_id=run.id,
-                llm_cfg=object(),
-                raw=raw,
-                base_url="https://target.local",
-                pages_snapshot=[{"id": page.id, "url": page.url}],
-                first_page_id=page.id,
-                result_by_url=result_by_url,
-            ))
-            duplicate = asyncio.run(scanner._persist_dynamic_finding(
-                run_id=run.id,
-                llm_cfg=object(),
-                raw=raw,
-                base_url="https://target.local",
-                pages_snapshot=[{"id": page.id, "url": page.url}],
-                first_page_id=page.id,
-                result_by_url=result_by_url,
-            ))
+            saved = asyncio.run(
+                scanner._persist_dynamic_finding(
+                    run_id=run.id,
+                    llm_cfg=object(),
+                    raw=raw,
+                    base_url="https://target.local",
+                    pages_snapshot=[{"id": page.id, "url": page.url}],
+                    first_page_id=page.id,
+                    result_by_url=result_by_url,
+                )
+            )
+            duplicate = asyncio.run(
+                scanner._persist_dynamic_finding(
+                    run_id=run.id,
+                    llm_cfg=object(),
+                    raw=raw,
+                    base_url="https://target.local",
+                    pages_snapshot=[{"id": page.id, "url": page.url}],
+                    first_page_id=page.id,
+                    result_by_url=result_by_url,
+                )
+            )
 
             findings = session.exec(select(ScanFinding)).all()
 
@@ -557,16 +630,18 @@ def test_dynamic_finding_write_persists_immediately(monkeypatch):
 
 
 def test_followup_log_message_names_signal_and_hypothesis():
-    probes = [{
-        "type": "http",
-        "method": "POST",
-        "url": "https://target.local/api/transfers",
-        "body": {"amount": 100, "toAccount": "10000001"},
-        "interesting_result": "2FA check returned requires_2fa=true",
-        "hypothesis": "transfer endpoint may not enforce 2FA server-side",
-        "payload_purpose": "omit the 2FA token from the transfer request",
-        "desc": "Follow-up: submit transfer without 2FA token.",
-    }]
+    probes = [
+        {
+            "type": "http",
+            "method": "POST",
+            "url": "https://target.local/api/transfers",
+            "body": {"amount": 100, "toAccount": "10000001"},
+            "interesting_result": "2FA check returned requires_2fa=true",
+            "hypothesis": "transfer endpoint may not enforce 2FA server-side",
+            "payload_purpose": "omit the 2FA token from the transfer request",
+            "desc": "Follow-up: submit transfer without 2FA token.",
+        }
+    ]
 
     message = scanner._followup_log_message(probes)
 
@@ -594,10 +669,12 @@ def test_thinking_jwt_helper_signs_hs256_token():
 
 
 def test_credential_check_redacts_passwords():
-    redacted = scanner._redact_candidate({
-        "username": "admin",
-        "password": "admin123",
-    })
+    redacted = scanner._redact_candidate(
+        {
+            "username": "admin",
+            "password": "admin123",
+        }
+    )
 
     assert redacted == {"username": "admin", "password": "***"}
 
@@ -619,17 +696,23 @@ def test_spa_shell_is_not_treated_as_protected_content():
     """
 
     assert _looks_like_spa_shell(body, "text/html; charset=utf-8") is True
-    assert _body_contains_page_evidence(body, "Admin Dashboard", "Secret invoice data") is False
+    assert (
+        _body_contains_page_evidence(body, "Admin Dashboard", "Secret invoice data")
+        is False
+    )
 
 
 def test_page_evidence_detection_matches_authorized_content():
     body = "<html><body><h1>Admin Dashboard</h1><p>Quarterly revenue export is ready.</p></body></html>"
 
-    assert _body_contains_page_evidence(
-        body,
-        "Admin Dashboard",
-        "Quarterly revenue export is ready.",
-    ) is True
+    assert (
+        _body_contains_page_evidence(
+            body,
+            "Admin Dashboard",
+            "Quarterly revenue export is ready.",
+        )
+        is True
+    )
 
 
 def test_bac_evidence_requires_original_user_content():
@@ -646,11 +729,14 @@ def test_bac_evidence_requires_original_user_content():
     </body></html>
     """
 
-    assert scanner._body_contains_original_page_evidence(
-        alternate_body,
-        "Account overview",
-        original_text,
-    ) is False
+    assert (
+        scanner._body_contains_original_page_evidence(
+            alternate_body,
+            "Account overview",
+            original_text,
+        )
+        is False
+    )
 
 
 def test_bac_evidence_matches_original_user_content():
@@ -666,11 +752,14 @@ def test_bac_evidence_matches_original_user_content():
     </body></html>
     """
 
-    assert scanner._body_contains_original_page_evidence(
-        leaked_body,
-        "Account overview",
-        original_text,
-    ) is True
+    assert (
+        scanner._body_contains_original_page_evidence(
+            leaked_body,
+            "Account overview",
+            original_text,
+        )
+        is True
+    )
 
 
 def test_thinking_context_tools_filter_routes_and_history():
@@ -698,16 +787,18 @@ def test_thinking_context_tools_filter_routes_and_history():
             "has_business_logic": False,
         },
     ]
-    history = [{
-        "step": 1,
-        "method": "GET",
-        "url": "https://target.local/api/search?q=test",
-        "note": "Baseline search",
-        "request_body": None,
-        "response_status": 200,
-        "response_headers": {"content-type": "application/json"},
-        "response_body": '{"results":[]}',
-    }]
+    history = [
+        {
+            "step": 1,
+            "method": "GET",
+            "url": "https://target.local/api/search?q=test",
+            "note": "Baseline search",
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"content-type": "application/json"},
+            "response_body": '{"results":[]}',
+        }
+    ]
 
     site_map = scanner._run_thinking_context_tool(
         "site_map",
@@ -799,7 +890,10 @@ def test_context_tool_checkpoint_allows_reasoned_extension():
     assert "checkpoint reached" in checkpoint["error"]
     assert checkpoint["checkpoint"]["checkpoint_interval"] == 3
     assert "context_budget_reason" in checkpoint["checkpoint"]["next_options"][2]
-    assert scanner._context_budget_reason({"context_budget_reason": "Need exact IDs."}) == "Need exact IDs."
+    assert (
+        scanner._context_budget_reason({"context_budget_reason": "Need exact IDs."})
+        == "Need exact IDs."
+    )
     assert scanner._context_budget_reason({"note": "no budget reason"}) == ""
 
 
@@ -812,7 +906,11 @@ def test_request_stop_cancels_running_validation(monkeypatch):
 
     task = FakeTask()
     reset_calls = []
-    monkeypatch.setattr(validator, "_reset_validating_findings", lambda run_id, note: reset_calls.append((run_id, note)))
+    monkeypatch.setattr(
+        validator,
+        "_reset_validating_findings",
+        lambda run_id, note: reset_calls.append((run_id, note)),
+    )
     validator._validation_tasks[123] = task
     validator._stop_requested.discard(123)
 
@@ -828,7 +926,11 @@ def test_request_stop_cancels_running_validation(monkeypatch):
 
 def test_request_stop_noops_when_validation_not_running(monkeypatch):
     reset_calls = []
-    monkeypatch.setattr(validator, "_reset_validating_findings", lambda run_id, note: reset_calls.append((run_id, note)))
+    monkeypatch.setattr(
+        validator,
+        "_reset_validating_findings",
+        lambda run_id, note: reset_calls.append((run_id, note)),
+    )
     validator._validation_tasks.pop(456, None)
     validator._stop_requested.discard(456)
 
@@ -852,9 +954,12 @@ def test_static_assets_are_not_protected_endpoints():
 
 def test_static_asset_check_still_flags_real_endpoints():
     assert scanner._is_static_asset_url("https://target.local/admin/users") is False
-    assert scanner._target_requires_auth_or_sensitive(
-        {"url": "https://target.local/admin/users"}
-    ) is True
+    assert (
+        scanner._target_requires_auth_or_sensitive(
+            {"url": "https://target.local/admin/users"}
+        )
+        is True
+    )
 
 
 def test_deterministic_result_analysis_detects_sql_error():
@@ -862,15 +967,17 @@ def test_deterministic_result_analysis_detects_sql_error():
         run_id=1,
         page_id=2,
         page_url="https://target.local/search?q=test",
-        results=[{
-            "desc": "SQLi in param 'q': ' OR '1'='1",
-            "url": "https://target.local/search?q=%27",
-            "status": 500,
-            "headers": {"content-type": "text/html"},
-            "body": "SQL syntax error near unexpected quote",
-            "request_evidence": "GET /search?q='",
-            "response_evidence": "HTTP/1.1 500\nSQL syntax error",
-        }],
+        results=[
+            {
+                "desc": "SQLi in param 'q': ' OR '1'='1",
+                "url": "https://target.local/search?q=%27",
+                "status": 500,
+                "headers": {"content-type": "text/html"},
+                "body": "SQL syntax error near unexpected quote",
+                "request_evidence": "GET /search?q='",
+                "response_evidence": "HTTP/1.1 500\nSQL syntax error",
+            }
+        ],
     )
 
     assert len(findings) == 1
@@ -885,15 +992,17 @@ def test_deterministic_result_analysis_detects_reflected_xss():
         run_id=1,
         page_id=2,
         page_url="https://target.local/search?q=test",
-        results=[{
-            "desc": f"XSS in param 'q': {payload}",
-            "url": "https://target.local/search?q=x",
-            "status": 200,
-            "headers": {"content-type": "text/html"},
-            "body": f"<html>Results for {payload}</html>",
-            "request_evidence": "GET /search?q=payload",
-            "response_evidence": f"HTTP/1.1 200\n{payload}",
-        }],
+        results=[
+            {
+                "desc": f"XSS in param 'q': {payload}",
+                "url": "https://target.local/search?q=x",
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "body": f"<html>Results for {payload}</html>",
+                "request_evidence": "GET /search?q=payload",
+                "response_evidence": f"HTTP/1.1 200\n{payload}",
+            }
+        ],
     )
 
     assert len(findings) == 1
@@ -942,15 +1051,17 @@ def test_dynamic_deterministic_analysis_persists_findings(monkeypatch):
             base_url="https://target.local",
             pages_snapshot=[{"id": page_id, "url": "https://target.local/search"}],
             first_page_id=page_id,
-            results=[{
-                "desc": "SQLi in param 'q': ' OR '1'='1",
-                "url": "https://target.local/search?q=%27",
-                "status": 500,
-                "headers": {"content-type": "text/html"},
-                "body": "SQL syntax error near unexpected quote",
-                "request_evidence": "GET /search?q='",
-                "response_evidence": "HTTP/1.1 500\nSQL syntax error",
-            }],
+            results=[
+                {
+                    "desc": "SQLi in param 'q': ' OR '1'='1",
+                    "url": "https://target.local/search?q=%27",
+                    "status": 500,
+                    "headers": {"content-type": "text/html"},
+                    "body": "SQL syntax error near unexpected quote",
+                    "request_evidence": "GET /search?q='",
+                    "response_evidence": "HTTP/1.1 500\nSQL syntax error",
+                }
+            ],
         )
 
         with Session(engine) as session:
@@ -999,6 +1110,222 @@ def test_deterministic_sessions_from_vault_merges_non_anonymous_sessions(monkeyp
     assert sessions[synthetic[0]]["username"] == "bob"
 
 
+def test_auth_matrix_targets_repairs_stale_imported_access_ids(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+    try:
+        with Session(engine) as session:
+            site = Site(name="target", base_url="https://target.local")
+            session.add(site)
+            session.flush()
+            admin = Credential(site_id=site.id, username="admin", password="admin-pass")
+            session.add(admin)
+            session.flush()
+            run = RunModel(site_id=site.id, name="run")
+            session.add(run)
+            session.flush()
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/admin",
+                accessible_by="[999]",
+            )
+            session.add(page)
+            session.flush()
+            session.add(
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=run.id,
+                    credential_id=admin.id,
+                    username="admin",
+                )
+            )
+            session.commit()
+            run_id = run.id
+            admin_id = admin.id
+
+        targets = scanner._auth_matrix_targets(run_id, "https://target.local")
+
+        assert targets[0]["accessible_by"] == [admin_id]
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_auth_matrix_role_probe_skips_unbound_tokens(monkeypatch):
+    target = {
+        "url": "https://target.local/api/admin/customers",
+        "method": "GET",
+        "accessible_by": [2],
+        "page_id": 1,
+        "req_auth": True,
+        "has_object_ref": False,
+        "has_business_logic": True,
+    }
+    calls = []
+
+    async def fake_fetch(_run_id, url, *, session=None, **_kwargs):
+        calls.append(session and session["username"])
+        if session is None:
+            return {
+                "url": url,
+                "status": 403,
+                "headers": {"content-type": "application/json"},
+                "body": "forbidden",
+                "request_evidence": "GET /api/admin/customers",
+                "response_evidence": "HTTP/1.1 403",
+                "sent_authenticated": False,
+            }
+        return {
+            "url": url,
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": '{"customers":[{"id":1}]}',
+            "request_evidence": "GET /api/admin/customers\nAuthorization: present",
+            "response_evidence": "HTTP/1.1 200",
+            "sent_authenticated": True,
+        }
+
+    async def no_sleep(_policy):
+        return None
+
+    monkeypatch.setattr(scanner, "_auth_matrix_targets", lambda *_args: [target])
+    monkeypatch.setattr(scanner, "_fetch_matrix_url", fake_fetch)
+    monkeypatch.setattr(scanner, "sleep_between_probes", no_sleep)
+
+    findings = asyncio.run(
+        scanner._run_auth_matrix_module(
+            run_id=1,
+            base_url="https://target.local",
+            cred_sessions={
+                -1: {"username": "admin_token_without_identity"},
+                1: {"username": "known_low_privilege_user"},
+                2: {"username": "known_admin"},
+            },
+        )
+    )
+
+    assert calls == [None, "known_low_privilege_user"]
+    assert len(findings) == 1
+    assert findings[0].title == "Unauthorized role access to admin endpoint"
+
+
+def test_idor_matrix_skips_unbound_tokens(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+    calls = []
+    try:
+        with Session(engine) as session:
+            site = Site(name="idor-target", base_url="https://target.local")
+            session.add(site)
+            session.flush()
+            user = Credential(site_id=site.id, username="user", password="pass")
+            admin = Credential(site_id=site.id, username="admin", password="pass")
+            session.add(user)
+            session.add(admin)
+            session.flush()
+            run = RunModel(site_id=site.id, name="run")
+            session.add(run)
+            session.flush()
+            page = CrawledPage(
+                test_run_id=run.id,
+                url="https://target.local/customers/123",
+                title="Protected customer record",
+                page_text="Unique protected customer statement reference ABC-12345",
+                accessible_by=json.dumps([admin.id]),
+            )
+            session.add(page)
+            session.commit()
+            run_id = run.id
+            user_id = user.id
+            admin_id = admin.id
+
+        async def fake_fetch(_run_id, url, *, session=None, **_kwargs):
+            calls.append(session["username"])
+            return {
+                "url": url,
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "body": "Unique protected customer statement reference ABC-12345",
+                "request_evidence": "GET /customers/123",
+                "response_evidence": "HTTP/1.1 200",
+                "sent_authenticated": True,
+            }
+
+        async def no_sleep(_policy):
+            return None
+
+        monkeypatch.setattr(scanner, "_fetch_matrix_url", fake_fetch)
+        monkeypatch.setattr(scanner, "sleep_between_probes", no_sleep)
+
+        findings = asyncio.run(
+            scanner._run_idor_matrix_module(
+                run_id=run_id,
+                cred_sessions={
+                    -1: {"username": "unbound_admin_token"},
+                    user_id: {"username": "known_user"},
+                    admin_id: {"username": "known_admin"},
+                },
+            )
+        )
+
+        assert calls == ["known_user"]
+        assert len(findings) == 1
+        assert findings[0].title == "Insecure direct object reference"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_auth_matrix_does_not_call_authenticated_request_anonymous(monkeypatch):
+    target = {
+        "url": "https://target.local/account",
+        "method": "GET",
+        "accessible_by": [],
+        "page_id": 1,
+        "req_auth": True,
+        "has_object_ref": False,
+        "has_business_logic": False,
+    }
+
+    async def fake_fetch(_run_id, url, **_kwargs):
+        return {
+            "url": url,
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": '{"account":{"id":1}}',
+            "request_evidence": "GET /account\nAuthorization: present",
+            "response_evidence": "HTTP/1.1 200",
+            "sent_authenticated": True,
+        }
+
+    async def no_sleep(_policy):
+        return None
+
+    monkeypatch.setattr(scanner, "_auth_matrix_targets", lambda *_args: [target])
+    monkeypatch.setattr(scanner, "_fetch_matrix_url", fake_fetch)
+    monkeypatch.setattr(scanner, "sleep_between_probes", no_sleep)
+
+    findings = asyncio.run(
+        scanner._run_auth_matrix_module(
+            run_id=1,
+            base_url="https://target.local",
+            cred_sessions={},
+        )
+    )
+
+    assert findings == []
+
+
 def test_thinking_action_log_message_describes_investigation_and_payload():
     action = {
         "note": "Found something interesting.",
@@ -1007,7 +1334,7 @@ def test_thinking_action_log_message_describes_investigation_and_payload():
         "payload_purpose": (
             "inject an event-handler payload to test script execution context"
         ),
-        "body": {"q": "\" autofocus onfocus=alert(1) x=\""},
+        "body": {"q": '" autofocus onfocus=alert(1) x="'},
     }
 
     message = scanner._thinking_action_log_message(

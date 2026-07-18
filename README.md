@@ -20,7 +20,7 @@ You will need to provide:
 
 - For web app testing - URL and (optionally) credentials
 - For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
-- (Optionally) ZIP of the source code for the API. It will perform a "SAST-lite" agentic examination of the code to identify leads to investigate during the DAST API testing
+- (Optionally) ZIP of the source code for the web app/API. You can run SAST as a standalone operation or load the SAST findings into a web or API scan, which will validate the finding with dynamic testing
 - An API key for an OpenAI or an Anthropic-format LLM provider
 
 ## Performance
@@ -173,9 +173,6 @@ Site setup:
 Site Map:  
 ![Screenshot](docs/images/sitemap.png)
 
-Intelligence Log (populated by crawler and scanners):  
-![Screenshot](docs/images/intelligence.png)
-
 A.L.I.C.E chat:  
 ![Screenshot](docs/images/alice.png)
 
@@ -209,6 +206,9 @@ API Scan Findings
 ## Recommended models
 
 - Claude Sonnet 4.6 - Output token cap 70000. Doesn't seem to trigger refusals even without CVP.
-- Minimax M3 - Output token cap 70000, turn off force tool call
-- GLM 5.2 - Output token cap 70000, turn off force tool call
-- GPT 5.4/5.5 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
+- Sonnet 5 works about as well as 4.6 and doesn't trigger refusals.
+- GPT 5.4/5.5/5.6 work well too, but you need an account with Trusted Access or the scanner will terminate early/frequent refusals.
+- Opus 4.8 also triggers refusals if not on CVP, but usually not immediately (it'll complete a "quick" mode scan most of the time)
+- Minimax M3
+- GLM 5.2 
+

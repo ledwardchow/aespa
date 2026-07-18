@@ -38,8 +38,8 @@ def test_limiter_reconcile_only_credits_what_was_reserved():
     limiter = llm.AsyncTokenBucketLimiter(tpm=1000)
 
     async def _run():
-        await limiter.acquire(10_000)          # clamps to 1000, drains bucket to ~0
-        await limiter.reconcile(10_000, 100)   # used 100 of 1000 reserved → credit ~900
+        await limiter.acquire(10_000)  # clamps to 1000, drains bucket to ~0
+        await limiter.reconcile(10_000, 100)  # used 100 of 1000 reserved → credit ~900
         return limiter.available_tokens
 
     avail = asyncio.run(_run())
@@ -93,17 +93,20 @@ def test_agentic_loop_recovers_from_text_only_turn(monkeypatch):
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
-    summary = asyncio.run(llm.thinking_agentic_loop(
-        config,
-        system_message="system",
-        initial_user_message="start",
-        tool_executor=fake_tool_executor,
-    ))
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+        )
+    )
 
     assert summary == "Complete."
     assert executed == [("context_tool", {"tool": "site_map", "args": {"limit": 5}}, 1)]
     correction_messages = [
-        msg for msg in calls[1]
+        msg
+        for msg in calls[1]
         if msg["role"] == "user"
         and isinstance(msg["content"], list)
         and msg["content"][0].get("type") == "text"
@@ -167,24 +170,28 @@ def test_agentic_loop_can_reject_premature_done(monkeypatch):
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
-    summary = asyncio.run(llm.thinking_agentic_loop(
-        config,
-        system_message="system",
-        initial_user_message="start",
-        tool_executor=fake_tool_executor,
-        done_check=done_check,
-    ))
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            done_check=done_check,
+        )
+    )
 
     assert summary == "Really complete."
-    assert executed == [(
-        "http_request",
-        {
-            "method": "GET",
-            "url": "https://target.local/api/profile",
-            "use_session": "customer_1",
-        },
-        2,
-    )]
+    assert executed == [
+        (
+            "http_request",
+            {
+                "method": "GET",
+                "url": "https://target.local/api/profile",
+                "use_session": "customer_1",
+            },
+            2,
+        )
+    ]
 
 
 def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
@@ -214,19 +221,19 @@ def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
         checkpoints.append(messages.copy())
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
-    summary = asyncio.run(llm.thinking_agentic_loop(
-        config,
-        system_message="system",
-        initial_user_message="start",
-        tool_executor=lambda *args: None,
-        on_checkpoint=checkpoint,
-    ))
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=lambda *args: None,
+            on_checkpoint=checkpoint,
+        )
+    )
 
     assert summary == "complete"
     assistant_messages = [
-        message
-        for message in checkpoints[-1]
-        if message["role"] == "assistant"
+        message for message in checkpoints[-1] if message["role"] == "assistant"
     ]
     assert all(message["content"] for message in assistant_messages)
     assert assistant_messages[0]["content"][0]["text"] == (
@@ -268,8 +275,7 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
     warnings = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response"
-        and event.get("status") == "warning"
+        if event.get("phase") == "llm_response" and event.get("status") == "warning"
     ]
     assert len(warnings) == 3
     assert warnings[0]["data"]["native_stop_reason"] == "guardrail_intervened"
@@ -332,14 +338,14 @@ def test_agentic_loop_repairs_trailing_assistant_checkpoint_on_resume(monkeypatc
 
     assert summary == "resumed"
     assert captured_messages[-1]["role"] == "user"
-    assert "previous model turn ended" in captured_messages[-1]["content"][0][
-        "text"
-    ].lower()
+    assert (
+        "previous model turn ended"
+        in captured_messages[-1]["content"][0]["text"].lower()
+    )
     repair_events = [
         event
         for event in emitted
-        if event.get("phase") == "llm_protocol"
-        and event.get("status") == "warning"
+        if event.get("phase") == "llm_protocol" and event.get("status") == "warning"
     ]
     assert repair_events[0]["data"]["repair_kind"] == "trailing_assistant_turn"
 
@@ -433,6 +439,62 @@ def test_agentic_loop_applies_result_hook_and_bounded_termination(monkeypatch):
     assert executed == 1
 
 
+def test_agentic_loop_accounts_for_blocked_steps_and_augments_tool_schema(monkeypatch):
+    config = LLMConfig(
+        provider="openai", api_key="test-key", model="gpt-test", max_tokens=2048
+    )
+    rejected = 0
+    executed = 0
+
+    async def fake_call_with_tools(*args, **kwargs):
+        properties = kwargs["tools"][0]["input_schema"]["properties"]
+        assert "strategy_pivot_justification" in properties
+        block = {
+            "type": "tool_use",
+            "id": f"call-{rejected}",
+            "name": "http_request",
+            "input": {"method": "GET", "url": "http://target.local/a"},
+            "text": None,
+        }
+        return [block], "tool_use", [block]
+
+    async def executor(*_args):
+        nonlocal executed
+        executed += 1
+        return "unexpected"
+
+    async def before(*_args):
+        return "block", "blocked", None
+
+    def after_rejection(_name, _input, result, _step):
+        nonlocal rejected
+        rejected += 1
+        return result
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=executor,
+            tools=[
+                {
+                    "name": "http_request",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            before_tool_execution=before,
+            after_tool_rejection=after_rejection,
+            termination_check=lambda: "bounded rejection" if rejected >= 2 else None,
+        )
+    )
+
+    assert summary == "bounded rejection"
+    assert rejected == 2
+    assert executed == 0
+
+
 def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",
@@ -452,16 +514,19 @@ def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
     with pytest.raises(llm.LLMRefusalError, match="cybersecurity risk"):
-        asyncio.run(llm.thinking_agentic_loop(
-            config,
-            system_message="system",
-            initial_user_message="start",
-            tool_executor=lambda *args: None,
-            emit_fn=emitted.append,
-        ))
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+                emit_fn=emitted.append,
+            )
+        )
 
     refusal_events = [
-        event for event in emitted
+        event
+        for event in emitted
         if event.get("phase") == "llm_response" and event.get("status") == "error"
     ]
     assert len(refusal_events) == 1
@@ -482,12 +547,14 @@ def test_agentic_loop_propagates_explicit_provider_refusal(monkeypatch):
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
     with pytest.raises(llm.LLMRefusalError, match="request declined"):
-        asyncio.run(llm.thinking_agentic_loop(
-            config,
-            system_message="system",
-            initial_user_message="start",
-            tool_executor=lambda *args: None,
-        ))
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+            )
+        )
 
 
 def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeypatch):
@@ -505,16 +572,19 @@ def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeyp
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
     with pytest.raises(RuntimeError, match="content is empty"):
-        asyncio.run(llm.thinking_agentic_loop(
-            config,
-            system_message="system",
-            initial_user_message="start",
-            tool_executor=lambda *args: None,
-            emit_fn=emitted.append,
-        ))
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+                emit_fn=emitted.append,
+            )
+        )
 
     error_events = [
-        event for event in emitted
+        event
+        for event in emitted
         if event.get("phase") == "llm_response" and event.get("status") == "error"
     ]
     assert len(error_events) == 1
@@ -548,7 +618,10 @@ def test_openrouter_call_uses_openrouter_base_url(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert {"api_key": "sk-or-v1-test", "base_url": llm.OPENROUTER_BASE_URL}.items() <= captured["client"].items()
+    assert {
+        "api_key": "sk-or-v1-test",
+        "base_url": llm.OPENROUTER_BASE_URL,
+    }.items() <= captured["client"].items()
     assert captured["completion"] == {
         "model": "openrouter/owl-alpha",
         "max_tokens": 2048,
@@ -585,7 +658,10 @@ def test_azure_foundry_openai_call_uses_openai_v1_base_url(monkeypatch):
     result = asyncio.run(llm._call(config, "hello", None))
 
     assert result == "ok"
-    assert {"api_key": "foundry-key", "base_url": "https://myresource.services.ai.azure.com/openai/v1"}.items() <= captured["client"].items()
+    assert {
+        "api_key": "foundry-key",
+        "base_url": "https://myresource.services.ai.azure.com/openai/v1",
+    }.items() <= captured["client"].items()
     assert captured["completion"] == {
         "model": "gpt-4o",
         "max_tokens": 2048,
@@ -665,7 +741,10 @@ def test_azure_foundry_anthropic_call_uses_messages_api(monkeypatch):
 
     assert result == "ok"
     assert {"timeout": 120}.items() <= captured["client"].items()
-    assert captured["url"] == "https://myresource.services.ai.azure.com/anthropic/v1/messages"
+    assert (
+        captured["url"]
+        == "https://myresource.services.ai.azure.com/anthropic/v1/messages"
+    )
     assert captured["post"]["headers"]["x-api-key"] == "foundry-key"
     assert "api-key" not in captured["post"]["headers"]
     assert captured["post"]["headers"]["anthropic-version"] == "2023-06-01"
@@ -762,7 +841,10 @@ The final answer was:
 
     extracted = llm._extract_message_text(message)
 
-    assert llm._extract_json(extracted, expect=list)[0]["title"] == "Reflected XSS in Query Parameter"
+    assert (
+        llm._extract_json(extracted, expect=list)[0]["title"]
+        == "Reflected XSS in Query Parameter"
+    )
 
 
 def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch):
@@ -785,14 +867,16 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Application pages:\n  https://target.local/search [takes-input]",
-        history=[],
-        max_steps=80,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Application pages:\n  https://target.local/search [takes-input]",
+            history=[],
+            max_steps=80,
+            current_step=1,
+        )
+    )
 
     assert action["observation"] == "search accepts a q parameter"
     assert "observation" in captured["prompt"]
@@ -803,7 +887,10 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert "endpoint inventory" in captured["prompt"]
     assert "admin/admin123" in captured["prompt"]
     assert "Business-logic gate bypass" in captured["prompt"]
-    assert "actual action endpoint directly without the required field" in captured["prompt"]
+    assert (
+        "actual action endpoint directly without the required field"
+        in captured["prompt"]
+    )
     assert "individual detail endpoints" in captured["prompt"]
     assert "SQL error disclosure" in captured["prompt"]
     assert "/api/health" in captured["prompt"]
@@ -816,7 +903,10 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert '"action": "credential_check"' in captured["prompt"]
     assert "Maximum 20 candidates" in captured["prompt"]
     assert "use_session" in captured["prompt"]
-    assert "Supported ops: goto, fill, type, click, press, wait, snapshot" in captured["prompt"]
+    assert (
+        "Supported ops: goto, fill, type, click, press, wait, snapshot"
+        in captured["prompt"]
+    )
 
 
 def test_thinking_next_action_history_includes_response_headers(monkeypatch):
@@ -839,39 +929,47 @@ def test_thinking_next_action_history_includes_response_headers(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Application pages:\n  https://target.local/",
-        history=[{
-            "step": 1,
-            "method": "GET",
-            "url": "https://target.local/",
-            "note": "Initial fingerprinting",
-            "request_body": None,
-            "response_status": 200,
-            "response_headers": {
-                "content-type": "text/html",
-                "x-frame-options": "DENY",
-            },
-            "response_body": "<a href=\"/admin/\">Admin</a>",
-        }],
-        sessions=[{
-            "label": "found_admin_1",
-            "kind": "bearer",
-            "username": "admin",
-            "source": "credential_check",
-        }],
-        max_steps=120,
-        current_step=2,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Application pages:\n  https://target.local/",
+            history=[
+                {
+                    "step": 1,
+                    "method": "GET",
+                    "url": "https://target.local/",
+                    "note": "Initial fingerprinting",
+                    "request_body": None,
+                    "response_status": 200,
+                    "response_headers": {
+                        "content-type": "text/html",
+                        "x-frame-options": "DENY",
+                    },
+                    "response_body": '<a href="/admin/">Admin</a>',
+                }
+            ],
+            sessions=[
+                {
+                    "label": "found_admin_1",
+                    "kind": "bearer",
+                    "username": "admin",
+                    "source": "credential_check",
+                }
+            ],
+            max_steps=120,
+            current_step=2,
+        )
+    )
 
     assert action["url"] == "https://target.local/admin/"
     assert "Response headers:" in captured["prompt"]
     assert "x-frame-options" in captured["prompt"]
     assert "content-type" in captured["prompt"]
     assert "found_admin_1" in captured["prompt"]
-    assert "found_admin_1" in captured["prompt"]  # session label present in sessions section
+    assert (
+        "found_admin_1" in captured["prompt"]
+    )  # session label present in sessions section
 
 
 def test_thinking_next_action_compacts_large_history(monkeypatch):
@@ -906,14 +1004,16 @@ def test_thinking_next_action_compacts_large_history(monkeypatch):
     ]
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Target: https://target.local",
-        history=history,
-        max_steps=120,
-        current_step=21,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Target: https://target.local",
+            history=history,
+            max_steps=120,
+            current_step=21,
+        )
+    )
 
     assert action["action"] == "tool"
     assert len(captured["prompt"]) < 35_000
@@ -943,14 +1043,16 @@ def test_thinking_next_action_accepts_browser_action(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Application pages:\n  https://target.local/banking/#/login [takes-input]",
-        history=[],
-        max_steps=120,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Application pages:\n  https://target.local/banking/#/login [takes-input]",
+            history=[],
+            max_steps=120,
+            current_step=1,
+        )
+    )
 
     assert action["action"] == "browser"
     assert action["steps"][0]["op"] == "goto"
@@ -974,14 +1076,16 @@ def test_thinking_next_action_accepts_jwt_action(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="API endpoints:\n  https://target.local/api/health",
-        history=[],
-        max_steps=120,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="API endpoints:\n  https://target.local/api/health",
+            history=[],
+            max_steps=120,
+            current_step=1,
+        )
+    )
 
     assert action["action"] == "jwt"
     assert action["claims"]["sub"] == 1
@@ -1011,14 +1115,16 @@ def test_thinking_next_action_accepts_credential_check_action(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Application pages:\n  https://target.local/admin/",
-        history=[],
-        max_steps=120,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Application pages:\n  https://target.local/admin/",
+            history=[],
+            max_steps=120,
+            current_step=1,
+        )
+    )
 
     assert action["action"] == "credential_check"
     assert len(action["candidates"]) == 2
@@ -1043,14 +1149,16 @@ def test_thinking_next_action_accepts_context_tool_action(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Crawl summary: 20 pages. Use context tools for details.",
-        history=[],
-        max_steps=120,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Crawl summary: 20 pages. Use context tools for details.",
+            history=[],
+            max_steps=120,
+            current_step=1,
+        )
+    )
 
     assert action["action"] == "tool"
     assert action["tool"] == "site_map"
@@ -1083,14 +1191,16 @@ Looking at the history, I need to search prior responses.
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Crawl summary: compact.",
-        history=[],
-        max_steps=120,
-        current_step=1,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Crawl summary: compact.",
+            history=[],
+            max_steps=120,
+            current_step=1,
+        )
+    )
 
     assert action["action"] == "tool"
     assert action["tool"] == "history_search"
@@ -1124,14 +1234,16 @@ def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    action = asyncio.run(llm.thinking_next_action(
-        config,
-        target_url="https://target.local",
-        crawl_context="Crawl summary: compact.",
-        history=[],
-        max_steps=120,
-        current_step=3,
-    ))
+    action = asyncio.run(
+        llm.thinking_next_action(
+            config,
+            target_url="https://target.local",
+            crawl_context="Crawl summary: compact.",
+            history=[],
+            max_steps=120,
+            current_step=3,
+        )
+    )
 
     assert action["action"] == "finding_write"
     assert action["title"] == "Verbose debug configuration disclosure"
@@ -1139,11 +1251,11 @@ def test_thinking_next_action_accepts_finding_write_action(monkeypatch):
 
 
 def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch):
-        captured: dict[str, str] = {}
+    captured: dict[str, str] = {}
 
-        async def fake_call(config, prompt, screenshot_b64):
-                captured["prompt"] = prompt
-                return """[
+    async def fake_call(config, prompt, screenshot_b64):
+        captured["prompt"] = prompt
+        return """[
                     {
                         "type": "http",
                         "method": "POST",
@@ -1159,30 +1271,36 @@ def test_followup_prompt_requires_interesting_result_and_hypothesis(monkeypatch)
                     }
                 ]"""
 
-        monkeypatch.setattr(llm, "_call", fake_call)
+    monkeypatch.setattr(llm, "_call", fake_call)
 
-        config = LLMConfig(provider="openai_compatible", model="local")
-        probes = asyncio.run(llm.plan_followup_probes(
-                config,
-                "https://target.local/transfer",
-                "Transfer page",
-                [{
-                        "desc": "2FA check",
-                        "url": "https://target.local/api/transfer/check",
-                        "status": 200,
-                        "body": '{"requires_2fa":true}',
-                        "response_evidence": "Status: 200\nrequires_2fa=true",
-                }],
-        ))
+    config = LLMConfig(provider="openai_compatible", model="local")
+    probes = asyncio.run(
+        llm.plan_followup_probes(
+            config,
+            "https://target.local/transfer",
+            "Transfer page",
+            [
+                {
+                    "desc": "2FA check",
+                    "url": "https://target.local/api/transfer/check",
+                    "status": 200,
+                    "body": '{"requires_2fa":true}',
+                    "response_evidence": "Status: 200\nrequires_2fa=true",
+                }
+            ],
+        )
+    )
 
-        assert probes[0]["interesting_result"].startswith("2FA check")
-        assert "interesting_result" in captured["prompt"]
-        assert "hypothesis" in captured["prompt"]
-        assert "payload_purpose" in captured["prompt"]
-        assert "looked interesting" in captured["prompt"]
+    assert probes[0]["interesting_result"].startswith("2FA check")
+    assert "interesting_result" in captured["prompt"]
+    assert "hypothesis" in captured["prompt"]
+    assert "payload_purpose" in captured["prompt"]
+    assert "looked interesting" in captured["prompt"]
 
 
-def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(monkeypatch):
+def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(
+    monkeypatch,
+):
     captured: dict[str, object] = {}
 
     class FakeCompletions:
@@ -1219,14 +1337,18 @@ def test_openai_reasoning_models_use_completion_tokens_and_default_temperature(m
 def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
     recorded_usages = []
 
-    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
-        recorded_usages.append({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-        })
+    def fake_record_usage(
+        model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0
+    ):
+        recorded_usages.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
+        )
 
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
@@ -1236,9 +1358,11 @@ def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
             usage = SimpleNamespace(
                 prompt_tokens=1500,
                 completion_tokens=200,
-                prompt_tokens_details=SimpleNamespace(cached_tokens=800)
+                prompt_tokens_details=SimpleNamespace(cached_tokens=800),
             )
-            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)], usage=usage
+            )
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1270,14 +1394,18 @@ def test_openai_caching_tokens_extraction_and_recording(monkeypatch):
 def test_openai_caching_tokens_extraction_missing_details(monkeypatch):
     recorded_usages = []
 
-    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
-        recorded_usages.append({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-        })
+    def fake_record_usage(
+        model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0
+    ):
+        recorded_usages.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
+        )
 
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
@@ -1285,11 +1413,11 @@ def test_openai_caching_tokens_extraction_missing_details(monkeypatch):
         async def create(self, **kwargs):
             message = SimpleNamespace(content="ok")
             usage = SimpleNamespace(
-                prompt_tokens=1500,
-                completion_tokens=200,
-                prompt_tokens_details=None
+                prompt_tokens=1500, completion_tokens=200, prompt_tokens_details=None
             )
-            return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)], usage=usage
+            )
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1475,7 +1603,9 @@ def test_bedrock_call_uses_aws_sdk_when_api_key_blank(monkeypatch):
     }
 
 
-def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(monkeypatch):
+def test_bedrock_call_uses_boto3_default_endpoint_when_api_key_and_base_url_blank(
+    monkeypatch,
+):
     captured: dict[str, object] = {}
 
     class FakeBedrockClient:
@@ -1597,7 +1727,9 @@ def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
         max_tokens=64,
     )
     asyncio.run(llm._call(cfg_region, "hi", None))
-    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-west-2.api.aws/v1"
+    assert (
+        captured["client"]["base_url"] == "https://bedrock-mantle.us-west-2.api.aws/v1"
+    )
 
     # An explicit base_url overrides region resolution (and gains the /v1 suffix).
     cfg_explicit = LLMConfig(
@@ -1608,7 +1740,9 @@ def test_bedrock_mantle_honours_explicit_base_url_and_region_env(monkeypatch):
         max_tokens=64,
     )
     asyncio.run(llm._call(cfg_explicit, "hi", None))
-    assert captured["client"]["base_url"] == "https://bedrock-mantle.eu-west-1.api.aws/v1"
+    assert (
+        captured["client"]["base_url"] == "https://bedrock-mantle.eu-west-1.api.aws/v1"
+    )
 
 
 def test_bedrock_mantle_frontier_model_uses_openai_v1_path(monkeypatch):
@@ -1620,18 +1754,29 @@ def test_bedrock_mantle_frontier_model_uses_openai_v1_path(monkeypatch):
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
     frontier = LLMConfig(
-        provider="bedrock_mantle", api_key="k", base_url=None,
-        model="openai.gpt-5.5", max_tokens=64,
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-5.5",
+        max_tokens=64,
     )
     asyncio.run(llm._call(frontier, "hi", None))
-    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+    assert (
+        captured["client"]["base_url"]
+        == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+    )
 
     oss = LLMConfig(
-        provider="bedrock_mantle", api_key="k", base_url=None,
-        model="openai.gpt-oss-120b", max_tokens=64,
+        provider="bedrock_mantle",
+        api_key="k",
+        base_url=None,
+        model="openai.gpt-oss-120b",
+        max_tokens=64,
     )
     asyncio.run(llm._call(oss, "hi", None))
-    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/v1"
+    assert (
+        captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/v1"
+    )
 
 
 def test_bedrock_mantle_rewrites_explicit_base_url_path_per_model(monkeypatch):
@@ -1641,12 +1786,17 @@ def test_bedrock_mantle_rewrites_explicit_base_url_path_per_model(monkeypatch):
 
     # User typed the /v1 host, but selected a frontier model → rewritten to /openai/v1.
     cfg = LLMConfig(
-        provider="bedrock_mantle", api_key="k",
+        provider="bedrock_mantle",
+        api_key="k",
         base_url="https://bedrock-mantle.us-east-2.api.aws/v1",
-        model="openai.gpt-5.4", max_tokens=64,
+        model="openai.gpt-5.4",
+        max_tokens=64,
     )
     asyncio.run(llm._call(cfg, "hi", None))
-    assert captured["client"]["base_url"] == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+    assert (
+        captured["client"]["base_url"]
+        == "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+    )
 
 
 def test_bedrock_mantle_skips_temperature_for_reasoning_models(monkeypatch):
@@ -1748,7 +1898,12 @@ def test_mantle_tools_translation_to_responses():
         {"name": "t", "description": "d", "input_schema": {"type": "object"}},
     ]
     assert llm._ant_tools_to_responses(tools) == [
-        {"type": "function", "name": "t", "description": "d", "parameters": {"type": "object"}},
+        {
+            "type": "function",
+            "name": "t",
+            "description": "d",
+            "parameters": {"type": "object"},
+        },
     ]
 
 
@@ -1840,16 +1995,8 @@ async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
             captured["converse_stream"] = kwargs
             return {
                 "stream": [
-                    {
-                        "contentBlockDelta": {
-                            "delta": {"text": "streaming "}
-                        }
-                    },
-                    {
-                        "contentBlockDelta": {
-                            "delta": {"text": "response"}
-                        }
-                    }
+                    {"contentBlockDelta": {"delta": {"text": "streaming "}}},
+                    {"contentBlockDelta": {"delta": {"text": "response"}}},
                 ]
             }
 
@@ -1877,7 +2024,9 @@ async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
     )
 
     chunks = []
-    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+    async for chunk in llm.stream_chat_completion(
+        config, "system prompt", [{"role": "user", "content": "hello"}]
+    ):
         chunks.append(chunk)
 
     assert "".join(chunks) == "streaming response"
@@ -1887,8 +2036,12 @@ async def test_bedrock_stream_uses_aws_sdk_when_api_key_blank(monkeypatch):
         "region_name": "ap-southeast-2",
         "endpoint_url": None,
     }.items() <= captured["client"].items()
-    assert captured["converse_stream"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
-    assert captured["converse_stream"]["messages"] == [{"role": "user", "content": [{"text": "hello"}]}]
+    assert (
+        captured["converse_stream"]["modelId"] == "global.anthropic.claude-sonnet-4-6"
+    )
+    assert captured["converse_stream"]["messages"] == [
+        {"role": "user", "content": [{"text": "hello"}]}
+    ]
     assert captured["converse_stream"]["system"] == [{"text": "system prompt"}]
 
 
@@ -1918,11 +2071,14 @@ async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
             captured["method"] = method
             captured["url"] = url
             captured["request"] = kwargs
+
             class StreamContext:
                 async def __aenter__(self):
                     return FakeResponse()
+
                 async def __aexit__(self, exc_type, exc, tb):
                     return None
+
             return StreamContext()
 
     monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
@@ -1937,7 +2093,9 @@ async def test_bedrock_stream_uses_converse_api_key(monkeypatch):
     )
 
     chunks = []
-    async for chunk in llm.stream_chat_completion(config, "system prompt", [{"role": "user", "content": "hello"}]):
+    async for chunk in llm.stream_chat_completion(
+        config, "system prompt", [{"role": "user", "content": "hello"}]
+    ):
         chunks.append(chunk)
 
     assert "".join(chunks) == "streaming response"
@@ -1985,21 +2143,32 @@ def test_analyse_probes_requires_structured_cvss_finding(monkeypatch):
     monkeypatch.setattr(llm, "_call", fake_call)
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
-        "desc": "XSS probe",
-        "url": "https://target.local/search?q=<script>alert(1)</script>",
-        "status": 200,
-        "headers": {"content-type": "text/html"},
-        "body": "<script>alert(1)</script>",
-        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
-        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
-    }]))
+    findings = asyncio.run(
+        llm.analyse_probes(
+            config,
+            "https://target.local/search",
+            [
+                {
+                    "desc": "XSS probe",
+                    "url": "https://target.local/search?q=<script>alert(1)</script>",
+                    "status": 200,
+                    "headers": {"content-type": "text/html"},
+                    "body": "<script>alert(1)</script>",
+                    "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+                    "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+                }
+            ],
+        )
+    )
 
     assert findings[0]["impact"].startswith("An attacker")
     assert findings[0]["cvss_score"] == 6.1
     assert "description" in captured["prompt"]
     assert "CVSS v3.1" in captured["prompt"]
-    assert "Rate generic server or framework version disclosure as info" in captured["prompt"]
+    assert (
+        "Rate generic server or framework version disclosure as info"
+        in captured["prompt"]
+    )
     assert "Rate verbose stack traces" in captured["prompt"]
     assert "Rate CORS arbitrary Origin reflection" in captured["prompt"]
     assert "GET /search" in captured["prompt"]
@@ -2037,15 +2206,23 @@ def test_analyse_probes_writes_reporting_replay_capture(monkeypatch):
     )
 
     config = LLMConfig(provider="openai_compatible", model="local")
-    findings = asyncio.run(llm.analyse_probes(config, "https://target.local/search", [{
-        "desc": "XSS probe",
-        "url": "https://target.local/search?q=<script>alert(1)</script>",
-        "status": 200,
-        "headers": {"content-type": "text/html"},
-        "body": "<script>alert(1)</script>",
-        "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
-        "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
-    }]))
+    findings = asyncio.run(
+        llm.analyse_probes(
+            config,
+            "https://target.local/search",
+            [
+                {
+                    "desc": "XSS probe",
+                    "url": "https://target.local/search?q=<script>alert(1)</script>",
+                    "status": 200,
+                    "headers": {"content-type": "text/html"},
+                    "body": "<script>alert(1)</script>",
+                    "request_evidence": "GET /search?q=<script>alert(1)</script> HTTP/1.1",
+                    "response_evidence": "HTTP/1.1 200\n\n<script>alert(1)</script>",
+                }
+            ],
+        )
+    )
 
     assert captured["url"] == "https://target.local/search"
     assert captured["result_texts"]
@@ -2088,7 +2265,10 @@ def test_replay_reporting_capture_rebuilds_current_prompt(monkeypatch):
     result = asyncio.run(llm.replay_reporting_capture(config, capture))
 
     assert prompts[0] != "old saved prompt"
-    assert "You are a web application penetration tester reviewing probe results" in prompts[0]
+    assert (
+        "You are a web application penetration tester reviewing probe results"
+        in prompts[0]
+    )
     assert "HTTP/1.1 500" in prompts[0]
     assert result["source_capture_id"] == "cap-1"
     assert result["findings"][0]["title"] == "Verbose error response"
@@ -2211,14 +2391,18 @@ def test_analyse_probes_chunks_large_result_sets(monkeypatch):
 def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
     recorded_usages = []
 
-    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
-        recorded_usages.append({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-        })
+    def fake_record_usage(
+        model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0
+    ):
+        recorded_usages.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
+        )
 
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
@@ -2235,7 +2419,7 @@ def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
                     "outputTokens": 100,
                     "cacheReadInputTokens": 400,
                     "cacheWriteInputTokens": 200,
-                }
+                },
             }
 
     class FakeSession:
@@ -2273,14 +2457,18 @@ def test_bedrock_caching_tokens_extraction_boto3_sdk(monkeypatch):
 def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
     recorded_usages = []
 
-    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
-        recorded_usages.append({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-        })
+    def fake_record_usage(
+        model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0
+    ):
+        recorded_usages.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
+        )
 
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
@@ -2300,7 +2488,7 @@ def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
                     "outputTokens": 150,
                     "cacheReadInputTokens": 500,
                     "cacheWriteInputTokens": 300,
-                }
+                },
             }
 
     class FakeAsyncClient:
@@ -2343,14 +2531,18 @@ def test_bedrock_caching_tokens_extraction_api_key(monkeypatch):
 def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
     recorded_usages = []
 
-    def fake_record_usage(model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0):
-        recorded_usages.append({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-        })
+    def fake_record_usage(
+        model, input_tokens, output_tokens, cache_read_tokens=0, cache_write_tokens=0
+    ):
+        recorded_usages.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }
+        )
 
     monkeypatch.setattr(llm, "_record_usage", fake_record_usage)
 
@@ -2367,7 +2559,7 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
                     "outputTokens": 250,
                     "cacheReadInputTokens": 800,
                     "cacheWriteInputTokens": 400,
-                }
+                },
             }
 
     class FakeSession:
@@ -2389,12 +2581,14 @@ def test_bedrock_caching_tokens_extraction_call_with_tools(monkeypatch):
         temperature=0.0,
     )
 
-    blocks, stop_reason, raw_content_ant = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="system",
-        messages=[{"role": "user", "content": "hello"}],
-        tools=[],
-    ))
+    blocks, stop_reason, raw_content_ant = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
 
     assert blocks[0]["text"] == "ok"
     assert len(recorded_usages) == 1
@@ -2491,12 +2685,14 @@ def test_call_with_tools_preempts_tool_choice_for_reasoning_models(monkeypatch):
         temperature=0.0,
     )
 
-    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="system message",
-        messages=[{"role": "user", "content": "hello"}],
-        tools=[],
-    ))
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system message",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
 
     assert blocks[0]["text"] == "ok"
     assert "tool_choice" not in captured["completion"]
@@ -2532,12 +2728,14 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
         temperature=0.0,
     )
 
-    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="system message",
-        messages=[{"role": "user", "content": "hello"}],
-        tools=[],
-    ))
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system message",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        )
+    )
 
     assert blocks[0]["text"] == "ok"
     assert captured["call_1"]["tool_choice"] == "required"
@@ -2590,7 +2788,11 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
             system_message="sys",
             messages=[{"role": "user", "content": "hello"}],
             tools=[
-                {"name": "http_request", "description": "d", "input_schema": {"type": "object"}},
+                {
+                    "name": "http_request",
+                    "description": "d",
+                    "input_schema": {"type": "object"},
+                },
             ],
         )
     )
@@ -2618,9 +2820,22 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
         async def create(self, **kwargs):
             captured["create_kwargs"] = kwargs
             return SimpleNamespace(
-                content=[SimpleNamespace(type="text", text="response text", id=None, name=None, input=None)],
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text="response text",
+                        id=None,
+                        name=None,
+                        input=None,
+                    )
+                ],
                 stop_reason="end_turn",
-                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=8, cache_creation_input_tokens=2)
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=5,
+                    cache_read_input_tokens=8,
+                    cache_creation_input_tokens=2,
+                ),
             )
 
     class FakeAsyncAnthropic:
@@ -2642,14 +2857,22 @@ def test_anthropic_caching_in_call_with_tools(monkeypatch):
         {"role": "assistant", "content": "hi there"},
         {"role": "user", "content": "how are you?"},
     ]
-    tools = [{"name": "get_weather", "description": "Get the weather", "input_schema": {"type": "object"}}]
+    tools = [
+        {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "input_schema": {"type": "object"},
+        }
+    ]
 
-    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="you are a helpful assistant",
-        messages=messages,
-        tools=tools,
-    ))
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="you are a helpful assistant",
+            messages=messages,
+            tools=tools,
+        )
+    )
 
     assert blocks[0]["text"] == "response text"
     create_kwargs = captured["create_kwargs"]
@@ -2688,7 +2911,7 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
                     "outputTokens": 250,
                     "cacheReadInputTokens": 800,
                     "cacheWriteInputTokens": 400,
-                }
+                },
             }
 
     class FakeSession:
@@ -2716,12 +2939,14 @@ def test_bedrock_caching_multiple_messages_in_call_with_tools(monkeypatch):
         {"role": "user", "content": "how are you?"},
     ]
 
-    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="system prompt",
-        messages=messages,
-        tools=[],
-    ))
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system prompt",
+            messages=messages,
+            tools=[],
+        )
+    )
 
     converse_kwargs = captured["converse_kwargs"]
     converse_messages = converse_kwargs["messages"]
@@ -2803,12 +3028,14 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
         {"role": "user", "content": "continue"},
     ]
 
-    blocks, stop_reason, raw_content = asyncio.run(llm._call_with_tools(
-        config,
-        system_message="system",
-        messages=messages,
-        tools=[],
-    ))
+    blocks, stop_reason, raw_content = asyncio.run(
+        llm._call_with_tools(
+            config,
+            system_message="system",
+            messages=messages,
+            tools=[],
+        )
+    )
 
     converse_messages = captured["converse_kwargs"]["messages"]
     assert all(message["content"] for message in converse_messages)
@@ -2825,3 +3052,46 @@ def test_bedrock_sanitizes_empty_history_and_preserves_reasoning(monkeypatch):
         "type": "bedrock_reasoning",
         "reasoning_content": reasoning,
     }
+
+
+def test_token_usage_tracking_for_sast_and_api():
+    # Verify set_run_context and get_run_token_usage isolate by run_kind
+    run_id = 888888
+    llm.set_run_context(run_id, emit_fn=None, run_kind="sast")
+    llm._record_usage("gpt-4", input_tokens=100, output_tokens=50)
+    llm.clear_run_context()
+
+    llm.set_run_context(run_id, emit_fn=None, run_kind="web")
+    llm._record_usage("gpt-4", input_tokens=200, output_tokens=80)
+    llm.clear_run_context()
+
+    sast_usage = llm.get_run_token_usage(run_id, run_kind="sast")
+    web_usage = llm.get_run_token_usage(run_id, run_kind="web")
+
+    assert sast_usage["total_input"] == 100
+    assert sast_usage["total_output"] == 50
+
+    assert web_usage["total_input"] == 200
+    assert web_usage["total_output"] == 80
+
+
+def test_google_usage_treats_none_counters_as_zero(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        llm, "_record_usage", lambda *args, **kwargs: recorded.append((args, kwargs))
+    )
+
+    llm._record_google_usage(
+        "gemini-test",
+        SimpleNamespace(
+            prompt_token_count=120,
+            candidates_token_count=None,
+            cached_content_token_count=None,
+        ),
+    )
+    llm._record_google_usage("gemini-test", None)
+
+    assert recorded == [
+        (("gemini-test", 120, 0), {"cache_read_tokens": 0}),
+        (("gemini-test", 0, 0), {"cache_read_tokens": 0}),
+    ]

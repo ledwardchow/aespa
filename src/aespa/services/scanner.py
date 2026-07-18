@@ -30,6 +30,7 @@ from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
     Credential,
+    PageCredentialView,
     ScanFinding,
     Site,
     TargetIntelItem,
@@ -43,6 +44,7 @@ from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import traffic as traffic_svc
+from aespa.services.execution_monitor import InterventionState
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
 )
@@ -58,7 +60,7 @@ from aespa.services.prompts.test_lead import (
 from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
-    get_burp_rest_api_config,
+    get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
     get_reporting_debug_config,
@@ -259,11 +261,7 @@ CONTEXT_TOOL_CHECKPOINT_ERROR = (
     "context_budget_reason to justify another targeted context scan round"
 )
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ── Browser traffic capture constants ────────────────────────────────────────
 _BROWSER_SKIP_RESOURCE_TYPES: frozenset[str] = frozenset(
@@ -923,6 +921,81 @@ def _session_kind(cookies: dict | None, extra_headers: dict | None) -> str:
     return "anonymous"
 
 
+_AUTH_STORAGE_KEY_PRIORITY = (
+    "access_token",
+    "accessToken",
+    "auth_token",
+    "authToken",
+    "bearer_token",
+    "id_token",
+    "idToken",
+    "token",
+    "jwt",
+)
+_NON_BEARER_TOKEN_KEY_RE = re.compile(
+    r"(?:csrf|xsrf|refresh|verification|captcha)[._-]*token", re.IGNORECASE
+)
+_AUTH_TOKEN_KEY_RE = re.compile(
+    r"(?:^|[._-])(?:(?:access|auth|bearer|id)[._-]*)?(?:token|jwt)(?:$|[._-])",
+    re.IGNORECASE,
+)
+
+
+def _select_browser_auth_token(
+    storage: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Return a bearer-like browser-storage value and its key.
+
+    SPAs frequently namespace their keys (for example ``bankofed_token``), so
+    exact generic names are insufficient. Prefer known access-token keys, then
+    accept namespaced auth/token keys, and finally JWT-shaped values stored
+    under an arbitrary key. CSRF and refresh tokens are deliberately excluded
+    because sending either as a bearer credential is incorrect.
+    """
+    values = {
+        str(key): value
+        for key, value in (storage or {}).items()
+        if isinstance(value, str) and value.strip()
+    }
+    casefolded = {key.casefold(): key for key in values}
+    for preferred in _AUTH_STORAGE_KEY_PRIORITY:
+        key = casefolded.get(preferred.casefold())
+        if key and not _NON_BEARER_TOKEN_KEY_RE.search(key):
+            return values[key], key
+
+    for key, value in values.items():
+        if _NON_BEARER_TOKEN_KEY_RE.search(key):
+            continue
+        if _AUTH_TOKEN_KEY_RE.search(key):
+            return value, key
+
+    for key, value in values.items():
+        if value.startswith("eyJ") and value.count(".") >= 2:
+            return value, key
+    return None, None
+
+
+async def _read_browser_auth_token(page) -> tuple[str | None, str | None]:
+    """Inspect all local/session storage entries without persisting their values."""
+    try:
+        storage = await page.evaluate(
+            """() => ({
+              ...Object.fromEntries(Object.entries(sessionStorage)),
+              ...Object.fromEntries(Object.entries(localStorage)),
+            })"""
+        )
+    except Exception:
+        storage = {}
+    return _select_browser_auth_token(storage if isinstance(storage, dict) else {})
+
+
+def _authorization_header(headers: dict | None) -> str | None:
+    for key, value in (headers or {}).items():
+        if str(key).casefold() == "authorization" and str(value).strip():
+            return str(value)
+    return None
+
+
 def _maybe_persist_discovered_credential(
     run_id: int,
     username: str,
@@ -947,8 +1020,7 @@ def _maybe_persist_discovered_credential(
             scope_err = check_scope(login_url, run.site_id, run_id)
             if scope_err:
                 log.warning(
-                    "Refusing to persist discovered credential for run %s: "
-                    "login_url %r is out of scope (%s)",
+                    "Refusing to persist discovered credential for run %s: login_url %r is out of scope (%s)",
                     run_id,
                     login_url,
                     scope_err,
@@ -1006,6 +1078,7 @@ def _record_session(
             session_data.get("cookies"),
             session_data.get("extra_headers"),
         ),
+        account_label=session_data.get("account_label"),
         username=session_data.get("username"),
         credential_id=credential_id or session_data.get("credential_id"),
         source=source,
@@ -3370,7 +3443,7 @@ async def _run_burp_active_scan_for_target(
 ) -> None:
     """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
     with Session(get_engine()) as s:
-        burp_cfg = get_burp_rest_api_config(s)
+        burp_cfg = get_burp_rest_api_config_model(s)
 
     if not burp_cfg.enabled:
         return
@@ -3592,8 +3665,7 @@ async def _run_burp_active_scan_for_target(
             "phase": "burp_active_scan",
             "status": "complete",
             "message": (
-                f"Burp active scan task {task_id} complete — "
-                f"{len(issues)} issue(s) found, {saved_count} saved."
+                f"Burp active scan task {task_id} complete — {len(issues)} issue(s) found, {saved_count} saved."
             ),
             "data": {
                 "finding_id": finding_id,
@@ -3757,8 +3829,7 @@ def _specialist_system_prompt_for_run(attack_class: str, *, is_api_run: bool) ->
     prompt = prompt.replace(
         "Check context_tool target_inventory for pre-identified xss_sink items first — "
         "these are direct leads with known injection points and rendering pages.",
-        "Review the dispatched endpoint schema and probe evidence for likely XSS "
-        "injection points before testing.",
+        "Review the dispatched endpoint schema and probe evidence for likely XSS injection points before testing.",
     ).replace(
         "Use context_tool to check target_inventory for pre-identified upload endpoints.",
         "Use the dispatched API endpoint schema to identify upload fields.",
@@ -3985,9 +4056,7 @@ async def _run_specialist_agent(
                     "phase": "specialist_step",
                     "status": "complete",
                     "message": (
-                        f"[{agent_id}] Step {step}: "
-                        f"{'recorded finding' if saved else 'skipped duplicate'} "
-                        f"{_fw_title}"
+                        f"[{agent_id}] Step {step}: {'recorded finding' if saved else 'skipped duplicate'} {_fw_title}"
                     ),
                     "data": {
                         **step_event_data,
@@ -4000,10 +4069,7 @@ async def _run_specialist_agent(
                     f'Finding recorded: "{tool_input.get("title")}" '
                     f"(severity: {tool_input.get('severity')}, ID: {saved.id})"
                 )
-            return (
-                f'Duplicate skipped: "{tool_input.get("title")}" already exists. '
-                "Move to a different test vector."
-            )
+            return f'Duplicate skipped: "{tool_input.get("title")}" already exists. Move to a different test vector.'
 
         if tool_name == "http_request":
             _url = str(tool_input.get("url") or target_url)
@@ -4748,8 +4814,7 @@ def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> 
             "status": "active",
             "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
             "outcome": (
-                f"Reporting is analysing {probe_count} probe result(s) "
-                f"across {batch_count} LLM turn(s)."
+                f"Reporting is analysing {probe_count} probe result(s) across {batch_count} LLM turn(s)."
             ),
             "_persist": True,
         },
@@ -5072,10 +5137,7 @@ async def _run_post_scan_llm_review(
             )
 
     accepted = len(candidates) - len(low_confidence_ids)
-    review_complete_msg = (
-        f"Pre-screen complete: {accepted} accepted, "
-        f"{len(low_confidence_ids)} flagged as low confidence."
-    )
+    review_complete_msg = f"Pre-screen complete: {accepted} accepted, {len(low_confidence_ids)} flagged as low confidence."
     events_svc.emit(
         run_id,
         {
@@ -5317,6 +5379,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         _build_web_enforce_directive,
         _make_web_post_finding_fn,
         _make_web_post_probe_fn,
+        reopen_unjustified_web_skips,
         seed_web_workprogram,
     )
 
@@ -5326,6 +5389,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         log.warning("seed_web_workprogram failed (non-fatal): %s", _wp_exc)
     if coverage_mode == "enforce":
         try:
+            reopen_unjustified_web_skips(run_id)
             _enforce_directive = _build_web_enforce_directive(run_id)
             if _enforce_directive:
                 crawl_context = f"{crawl_context}\n\n{_enforce_directive}"
@@ -5397,13 +5461,17 @@ async def _do_thinking_scan(run_id: int) -> None:
         except Exception:
             pass
 
+        _primary_vault_session = None
         if requires_auth and creds:
             # Check if the crawl phase already captured a guided session for this credential.
             # If so, inject it directly rather than opening another browser window.
             _primary_vault_session = session_vault.get(
                 f"guided_{creds[0].id}"
             ) or session_vault.get("configured_primary")
-            if _primary_vault_session and _primary_vault_session.get("cookies"):
+            if _primary_vault_session and (
+                _primary_vault_session.get("cookies")
+                or _authorization_header(_primary_vault_session.get("extra_headers"))
+            ):
                 log.info(
                     "Dynamic scan: reusing vault session '%s' for %s (skipping auth bootstrap)",
                     _primary_vault_session.get("label", "?"),
@@ -5440,30 +5508,24 @@ async def _do_thinking_scan(run_id: int) -> None:
         # Primary browser-session cookies, used to restore default browser steps
         # after an isolated anonymous/other-user step in the JSON fallback loop.
         _primary_browser_cookies = list(raw_cookies)
-        for key in [
-            "access_token",
-            "token",
-            "jwt",
-            "auth_token",
-            "id_token",
-            "authToken",
-            "accessToken",
-        ]:
-            try:
-                val = await pw_page.evaluate(
-                    f"() => localStorage.getItem('{key}') || sessionStorage.getItem('{key}')"
-                )
-                if val:
-                    auth_token = val
-                    break
-            except Exception:
-                pass
+        auth_token, auth_storage_key = await _read_browser_auth_token(pw_page)
 
-        extra_headers: dict[str, str] = {}
+        extra_headers: dict[str, str] = dict(
+            (_primary_vault_session or {}).get("extra_headers") or {}
+        )
         if auth_token:
             extra_headers["Authorization"] = f"Bearer {auth_token}"
+            log.info(
+                "Dynamic scan auth bootstrap: captured bearer token from browser storage key %r",
+                auth_storage_key,
+            )
 
-        if requires_auth and creds and not cookie_jar and not auth_token:
+        if (
+            requires_auth
+            and creds
+            and not cookie_jar
+            and not _authorization_header(extra_headers)
+        ):
             _cred_username = creds[0].username
             _warn_msg = (
                 f"Configured credentials for '{_cred_username}' did not produce a session "
@@ -5487,10 +5549,15 @@ async def _do_thinking_scan(run_id: int) -> None:
                 f"and do not spend steps retrying this credential.\n\n{crawl_context}"
             )
 
-        if requires_auth and creds and (cookie_jar or extra_headers):
+        if (
+            requires_auth
+            and creds
+            and (cookie_jar or _authorization_header(extra_headers))
+        ):
             configured_primary = {
                 "label": "configured_primary",
                 "kind": _session_kind(cookie_jar, extra_headers),
+                "account_label": creds[0].label,
                 "username": creds[0].username,
                 "credential_id": creds[0].id,
                 "source": "configured credential auth bootstrap",
@@ -5504,7 +5571,10 @@ async def _do_thinking_scan(run_id: int) -> None:
                 session_data=configured_primary,
                 source="dynamic_scan_auth_bootstrap",
                 credential_id=creds[0].id,
-                metadata={"login_url": _login_url_for_credential(login_url, creds[0])},
+                metadata={
+                    "login_url": _login_url_for_credential(login_url, creds[0]),
+                    "storage_key": auth_storage_key,
+                },
             )
 
         # ── Detect client-controlled authorization cookies ─────────────────────
@@ -5988,9 +6058,10 @@ async def _do_thinking_scan(run_id: int) -> None:
                         session_vault[label] = {
                             "label": label,
                             "kind": "bearer",
-                            "username": f"sub:{claims.get('sub')}"
-                            if claims.get("sub") is not None
-                            else None,
+                            "account_label": label,
+                            "username": claims.get("preferred_username")
+                            or claims.get("email")
+                            or claims.get("name"),
                             "source": "jwt action",
                             "extra_headers": {"Authorization": f"Bearer {token}"},
                             "cookies": {},
@@ -6241,14 +6312,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "password_field": password_field,
                         "candidates": [_redact_candidate(c) for c in candidates],
                     }
-                    request_evidence = (
-                        f"CREDENTIAL CHECK {url}\n"
-                        f"Candidates:\n{json.dumps(req_body['candidates'], indent=2)[:2000]}"
-                    )
-                    response_evidence = (
-                        f"Successes: {len(successes)} of {len(attempts)}\n"
-                        f"{json.dumps(attempts, indent=2)[:3000]}"
-                    )
+                    request_evidence = f"CREDENTIAL CHECK {url}\nCandidates:\n{json.dumps(req_body['candidates'], indent=2)[:2000]}"
+                    response_evidence = f"Successes: {len(successes)} of {len(attempts)}\n{json.dumps(attempts, indent=2)[:3000]}"
                     result = {
                         "desc": note,
                         "url": url,
@@ -6377,6 +6442,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             session_vault[created_label] = {
                                 "label": created_label,
                                 "kind": _session_kind(response_cookies, extra_headers),
+                                "account_label": store_as,
                                 "username": account["username"],
                                 "source": "register_account",
                                 "extra_headers": extra_headers,
@@ -6957,7 +7023,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     "agent_id": "scanner",
                     "role": "Test Lead",
                     "status": "active",
-                    "current_task": "Enforcing web coverage — resolving remaining cells…",
+                    "current_task": "Completing full web coverage — resolving remaining cells…",
                     "outcome": None,
                     "_persist": True,
                 },
@@ -6969,7 +7035,12 @@ async def _do_thinking_scan(run_id: int) -> None:
                 stop_check=lambda: run_id in _thinking_stop_requested,
             )
         except Exception as _enf_exc:
-            log.warning("enforce_web_coverage_loop failed (non-fatal): %s", _enf_exc)
+            log.exception("enforce_web_coverage_loop failed: %s", _enf_exc)
+            llm_svc.clear_run_context()
+            raise RuntimeError(
+                f"Full mode could not complete web coverage: {_enf_exc}"
+            ) from _enf_exc
+        stopped = run_id in _thinking_stop_requested
     else:
         try:
             mark_in_progress_to_covered(run_id)
@@ -7098,8 +7169,7 @@ async def _do_agentic_thinking_loop(
                 "phase": "session_reauth",
                 "status": "start",
                 "message": (
-                    f"Session expired — re-authenticating with "
-                    f"{creds[0].username} (attempt {_reauth_count[0]})…"
+                    f"Session expired — re-authenticating with {creds[0].username} (attempt {_reauth_count[0]})…"
                 ),
             },
         )
@@ -7164,8 +7234,7 @@ async def _do_agentic_thinking_loop(
         _consecutive_ctx_tools[0] = resume_from.get("consecutive_context_tools") or 0
         resume_messages = resume_from.get("messages") or None
         log.info(
-            "Resuming agentic loop for run_id=%s from step %s (%d history entries, "
-            "%d messages in LLM context)",
+            "Resuming agentic loop for run_id=%s from step %s (%d history entries, %d messages in LLM context)",
             run_id,
             resume_from.get("step_count", "?"),
             len(history),
@@ -7192,33 +7261,72 @@ async def _do_agentic_thinking_loop(
         completion_policy.session_attempted(label, status)
         if label and was_unattempted:
             invalid = status in (0, 401, 403)
-            _emit_completion_log(
-                f"Session {label} {'invalid and evicted' if invalid else 'exercised'}: "
-                f"status {status}.",
-                status="warning" if invalid else "complete",
-            )
+            if invalid:
+                _emit_session_validator_log(
+                    f"Session {label} invalid and evicted: status {status}."
+                )
+            else:
+                _emit_completion_log(f"Session {label} exercised: status {status}.")
+
+    def _emit_session_validator_log(message: str) -> None:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "session_validator",
+                "status": "warning",
+                "message": f"Session Validator — {message}",
+                "data": {"emitter": "Session Validator"},
+                "_persist": True,
+            },
+        )
 
     def _emit_completion_log(message: str, *, status: str = "complete") -> None:
         events_svc.emit(
             run_id,
             {
                 "type": "scanner_phase",
-                "phase": "completion_policy",
+                "phase": "test_lead_completion_policy",
                 "status": status,
-                "message": message,
+                "message": f"Test Lead Completion Gate — {message}",
+                "data": {"emitter": "Test Lead Completion Policy"},
                 "_persist": True,
             },
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
-        coverage_reader = None
-        if not is_api_run and coverage_mode == "track":
+        allowed, feedback, log_message = completion_policy.check_done()
+        if allowed and not is_api_run and coverage_mode == "enforce":
             from aespa.services.web_workprogram import get_web_coverage_gaps
 
-            def coverage_reader() -> dict[str, Any]:
-                return get_web_coverage_gaps(run_id, limit=8)
-
-        allowed, feedback, log_message = completion_policy.check_done(coverage_reader)
+            gaps = get_web_coverage_gaps(run_id, limit=50)
+            # A probe moves an obligation to in_progress; finalisation promotes
+            # it to covered. Only never-tested obligations block `done` here.
+            never_tested = [
+                action
+                for action in gaps.get("next_actions") or []
+                if action.get("status") == "not_started"
+            ]
+            if never_tested:
+                lines = [
+                    f"- {action.get('method', 'GET')} {action.get('url')} "
+                    f"category={action.get('owasp_category')}"
+                    + (
+                        f" test_class={action.get('test_class')}"
+                        if action.get("test_class")
+                        else ""
+                    )
+                    for action in never_tested[:8]
+                ]
+                allowed = False
+                feedback = (
+                    "Full mode still has never-tested applicable obligations. "
+                    "Actively test each with http_request or browser and set its "
+                    "owasp_category/test_class. Use skip_coverage only when a test is "
+                    "genuinely not applicable or concretely blocked; time or budget is "
+                    "not a valid skip reason. Remaining examples:\n" + "\n".join(lines)
+                )
+                log_message = f"Completion blocked by {len(never_tested)} sampled never-tested Full-mode obligations."
         _emit_completion_log(
             f"Step {step}: {log_message}",
             status="complete" if allowed else "warning",
@@ -7244,8 +7352,8 @@ async def _do_agentic_thinking_loop(
             for label, sd in session_vault.items()
         ]
         sessions_text = (
-            "Reusable authenticated sessions — use these labels instead of "
-            "re-authenticating:\n" + "\n".join(s_lines)
+            "Reusable authenticated sessions — use these labels instead of re-authenticating:\n"
+            + "\n".join(s_lines)
         )
 
     guidance_text = (
@@ -7338,8 +7446,7 @@ async def _do_agentic_thinking_loop(
                     "phase": "thinking_step",
                     "status": "complete",
                     "message": (
-                        f"Step {step}: context tool {inner_tool} returned "
-                        f"{len(result_text):,} chars"
+                        f"Step {step}: context tool {inner_tool} returned {len(result_text):,} chars"
                     ),
                     "data": {
                         "step": step,
@@ -7359,6 +7466,33 @@ async def _do_agentic_thinking_loop(
 
         # Non-context tools reset the consecutive counter
         _consecutive_ctx_tools[0] = 0
+
+        # ── skip_coverage ─────────────────────────────────────────────────────
+        if tool_name == "skip_coverage":
+            if is_api_run or coverage_mode != "enforce":
+                return "skip_coverage is available only for web Full mode."
+            try:
+                from aespa.services.web_workprogram import (
+                    skip_web_coverage_obligation,
+                )
+
+                detail = skip_web_coverage_obligation(
+                    run_id,
+                    url=str(tool_input.get("url") or ""),
+                    owasp_category=str(tool_input.get("owasp_category") or ""),
+                    test_class=str(tool_input.get("test_class") or "") or None,
+                    disposition=str(tool_input.get("disposition") or ""),
+                    reason=str(tool_input.get("reason") or ""),
+                    evidence=str(tool_input.get("evidence") or ""),
+                )
+            except Exception as exc:
+                return f"skip_coverage rejected: {exc}"
+            completion_policy.record_progress(
+                "coverage-skip:"
+                f"{tool_input.get('url')}:{tool_input.get('owasp_category')}:"
+                f"{tool_input.get('test_class') or 'unspecified'}"
+            )
+            return f"Coverage obligation skipped with justification: {detail}"
 
         # ── update_lead ───────────────────────────────────────────────────────
         if tool_name == "update_lead":
@@ -7535,6 +7669,8 @@ async def _do_agentic_thinking_loop(
         # ── browser ───────────────────────────────────────────────────────────
         if tool_name == "browser":
             br_url = (tool_input.get("url") or base_url).strip()
+            br_owasp = str(tool_input.get("owasp_category") or "").strip().upper()
+            br_test_class = str(tool_input.get("test_class") or "").strip()
             _scope_err = _active_scope_check(br_url)
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
@@ -7576,6 +7712,7 @@ async def _do_agentic_thinking_loop(
                 # cookies first so a prior authenticated step can't leak into an
                 # anonymous/other-user navigation, then install exactly the selected
                 # session (default → restore the primary session).
+                cookie_list: list[dict] = []
                 with contextlib.suppress(Exception):
                     await browser_ctx.clear_cookies()
                 if selected_session is not None:
@@ -7619,8 +7756,7 @@ async def _do_agentic_thinking_loop(
             _br_final_scope_err = _active_scope_check(final_url)
             if _br_final_scope_err:
                 log.info(
-                    "Agentic scan: browser navigation to %s redirected out of scope "
-                    "to %s — refusing to surface page",
+                    "Agentic scan: browser navigation to %s redirected out of scope to %s — refusing to surface page",
                     br_url,
                     final_url,
                 )
@@ -7669,11 +7805,57 @@ async def _do_agentic_thinking_loop(
                     "response_status": resp_status,
                     "response_headers": resp_headers,
                     "response_body": resp_body,
+                    "owasp_category": br_owasp or None,
+                    "test_class": br_test_class or None,
                 }
             )
             all_results.append(br_result_dict)
             _mark_session_used(use_session_label, resp_status)
             completion_policy.record_progress(f"browser-route:{final_url}")
+            if br_owasp:
+                from aespa.services.web_workprogram import _normalize_url
+
+                completion_policy.record_progress(
+                    f"coverage:{_normalize_url(final_url)}:{br_owasp}:{br_test_class or 'unspecified'}"
+                )
+                if post_probe_fn is not None and not is_api_run:
+                    try:
+                        post_probe_fn(
+                            final_url,
+                            "BROWSER",
+                            br_owasp,
+                            br_test_class or None,
+                            resp_status,
+                        )
+                    except Exception as exc:
+                        log.debug("browser post_probe_fn error: %s", exc)
+            if not is_api_run and resp_status:
+                try:
+                    from aespa.services.web_route_inventory import enrich_dynamic_route
+
+                    await enrich_dynamic_route(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        url=final_url,
+                        method="GET",
+                        request_body=(
+                            {"steps": steps_list}
+                            if any(
+                                str(browser_step.get("action") or "").lower()
+                                in {"fill", "select", "type"}
+                                for browser_step in steps_list
+                                if isinstance(browser_step, dict)
+                            )
+                            else None
+                        ),
+                        response_status=resp_status,
+                        response_headers=resp_headers,
+                        response_body=resp_body,
+                        authenticated=bool(cookie_list),
+                        browser_observation=True,
+                    )
+                except Exception as _route_exc:
+                    log.debug("Dynamic browser route enrichment failed: %s", _route_exc)
             # Evict expired/invalid named sessions from the vault on 401/403
             _br_session_evicted = False
             if (
@@ -7800,11 +7982,10 @@ async def _do_agentic_thinking_loop(
                 session_vault[jwt_label] = {
                     "label": jwt_label,
                     "kind": "bearer",
-                    "username": (
-                        f"sub:{jwt_claims.get('sub')}"
-                        if jwt_claims.get("sub") is not None
-                        else None
-                    ),
+                    "account_label": jwt_label,
+                    "username": jwt_claims.get("preferred_username")
+                    or jwt_claims.get("email")
+                    or jwt_claims.get("name"),
                     "source": "forge_jwt tool",
                     "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
                     "cookies": {},
@@ -7849,8 +8030,7 @@ async def _do_agentic_thinking_loop(
                     "phase": "thinking_step",
                     "status": "complete",
                     "message": (
-                        f"Step {step}: JWT forge "
-                        f"{'succeeded' if jwt_label else 'failed'}"
+                        f"Step {step}: JWT forge {'succeeded' if jwt_label else 'failed'}"
                     ),
                     "data": {"step": step, "note": note},
                 },
@@ -8167,6 +8347,7 @@ async def _do_agentic_thinking_loop(
                     session_vault[ra_created_label] = {
                         "label": ra_created_label,
                         "kind": _session_kind(ra_resp_cookies, ra_extra_hdrs),
+                        "account_label": ra_store_as,
                         "username": ra_account["username"],
                         "source": "register_account",
                         "extra_headers": ra_extra_hdrs,
@@ -8232,10 +8413,7 @@ async def _do_agentic_thinking_loop(
                     f'Registration succeeded. Session stored as "{ra_created_label}".\n'
                     f"Status: {ra_resp_status}\nBody: {ra_resp_body[:500]}"
                 )
-            return (
-                f"Registration attempted. Status: {ra_resp_status}\n"
-                f"Body: {ra_resp_body[:500]}"
-            )
+            return f"Registration attempted. Status: {ra_resp_status}\nBody: {ra_resp_body[:500]}"
 
         # ── agent_dispatch ────────────────────────────────────────────────────
         if tool_name == "agent_dispatch":
@@ -8330,10 +8508,7 @@ async def _do_agentic_thinking_loop(
                         "response_body": f"Specialist dispatch dropped: {drop_reason}.",
                     }
                 )
-                return (
-                    f"Specialist dispatch dropped ({drop_reason}). "
-                    "Continue investigating directly."
-                )
+                return f"Specialist dispatch dropped ({drop_reason}). Continue investigating directly."
 
         # ── http_request (default) ────────────────────────────────────────────
         hr_method = str(tool_input.get("method") or "GET").upper()
@@ -8556,8 +8731,8 @@ async def _do_agentic_thinking_loop(
         _resp_body_for_history = hr_resp_body
         if _js_paths:
             _resp_body_for_history = (
-                f"[{len(_js_paths)} API path(s) auto-extracted from JS: "
-                f"{', '.join(_js_paths[:15])}]\n\n" + hr_resp_body
+                f"[{len(_js_paths)} API path(s) auto-extracted from JS: {', '.join(_js_paths[:15])}]\n\n"
+                + hr_resp_body
             )
         history.append(
             {
@@ -8583,11 +8758,35 @@ async def _do_agentic_thinking_loop(
             from aespa.services.web_workprogram import _normalize_url
 
             completion_policy.record_progress(
-                f"coverage:{_normalize_url(hr_url)}:{_hr_owasp}:"
-                f"{_hr_test_class or 'unspecified'}"
+                f"coverage:{_normalize_url(hr_url)}:{_hr_owasp}:{_hr_test_class or 'unspecified'}"
             )
         for _path in _js_paths:
             completion_policy.record_progress(f"route:{_path}")
+        if not is_api_run and hr_resp_status:
+            try:
+                from aespa.services.web_route_inventory import enrich_dynamic_route
+
+                await enrich_dynamic_route(
+                    run_id=run_id,
+                    llm_cfg=llm_cfg,
+                    url=hr_url,
+                    method=hr_method,
+                    request_headers=hr_headers,
+                    request_body=hr_req_body_str,
+                    response_status=hr_resp_status,
+                    response_headers=hr_resp_headers,
+                    response_body=hr_resp_body,
+                    authenticated=bool(
+                        hr_use_session
+                        or hr_sent_cookies
+                        or any(
+                            str(key).lower() in {"authorization", "cookie"}
+                            for key in hr_headers
+                        )
+                    ),
+                )
+            except Exception as _route_exc:
+                log.debug("Dynamic HTTP route enrichment failed: %s", _route_exc)
         # Notify the web/API coverage tracker with the declared OWASP category.
         if post_probe_fn is not None:
             if _hr_owasp:
@@ -8596,7 +8795,11 @@ async def _do_agentic_thinking_loop(
                         post_probe_fn(hr_url, hr_method, _hr_owasp)
                     else:
                         post_probe_fn(
-                            hr_url, hr_method, _hr_owasp, _hr_test_class or None
+                            hr_url,
+                            hr_method,
+                            _hr_owasp,
+                            _hr_test_class or None,
+                            hr_resp_status,
                         )
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
@@ -8710,6 +8913,143 @@ async def _do_agentic_thinking_loop(
             completion_state=completion_policy.to_state(),
         )
 
+    async def _before_tool_execution(
+        tool_name: str, tool_input: dict, step: int
+    ) -> tuple[str, str | None, str | None]:
+        exec_mon = completion_policy.execution_monitor
+        browser_page_url = ""
+        if tool_name == "browser" and pw_page is not None:
+            try:
+                browser_page_url = str(pw_page.url or "")
+            except Exception:
+                browser_page_url = ""
+        state, rationale = exec_mon.observe_tool_call(
+            tool_name,
+            tool_input,
+            step,
+            browser_page_url=browser_page_url,
+        )
+
+        if state != InterventionState.NORMAL:
+            label = {
+                InterventionState.INVOKE_MENTOR_DUPLICATE: "MENTOR REQUESTED — DUPLICATE ACTION",
+                InterventionState.INVOKE_MENTOR_STAGNATION: "MENTOR REQUESTED — STALLED PROGRESS",
+                InterventionState.HARD_BLOCK_DUPLICATE: "HARD BLOCK — DUPLICATE ACTION",
+                InterventionState.ENFORCE_STRATEGY_SHIFT: "BLOCK — STRATEGY CONTRACT",
+            }[state]
+            contract = exec_mon.active_contract
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "execution_monitor",
+                    "status": (
+                        "error"
+                        if state == InterventionState.HARD_BLOCK_DUPLICATE
+                        else "warning"
+                    ),
+                    "message": (
+                        f"Execution Monitor Intervention — {label} — Step {step} "
+                        f"tool={tool_name}: {rationale or state.value}"
+                    ),
+                    "data": {
+                        "emitter": "Execution Monitor",
+                        "intervention": state.value,
+                        "step": step,
+                        "tool": tool_name,
+                        "blocked": state
+                        in {
+                            InterventionState.HARD_BLOCK_DUPLICATE,
+                            InterventionState.ENFORCE_STRATEGY_SHIFT,
+                        },
+                        "reason": rationale,
+                        **exec_mon.last_intervention_details,
+                        "contract_diagnosis": (
+                            contract.diagnosis if contract is not None else None
+                        ),
+                        "contract_vectors": (
+                            [
+                                {"id": vector.id, "title": vector.title}
+                                for vector in contract.suggested_vectors
+                            ]
+                            if contract is not None
+                            else []
+                        ),
+                    },
+                    "_persist": True,
+                },
+            )
+
+        if state == InterventionState.HARD_BLOCK_DUPLICATE:
+            return "block", rationale, None
+
+        if state == InterventionState.ENFORCE_STRATEGY_SHIFT:
+            return "block", rationale, None
+
+        if state in (
+            InterventionState.INVOKE_MENTOR_DUPLICATE,
+            InterventionState.INVOKE_MENTOR_STAGNATION,
+        ):
+            from aespa.services.mentor import run_mentor_adviser
+
+            advice = await run_mentor_adviser(
+                run_id=run_id,
+                trigger_reason=rationale or state.value,
+                target_url=base_url,
+                history_snippet=history,
+                is_api_run=is_api_run,
+                loop_context={
+                    "recon_summary": recon_summary or {},
+                    "known_pages": pages_snapshot[:30],
+                    "known_findings": findings_snapshot[-10:],
+                    "recent_progress_keys": sorted(completion_policy.progress_keys)[
+                        -50:
+                    ],
+                },
+            )
+            if (
+                state == InterventionState.INVOKE_MENTOR_STAGNATION
+                and advice.suggested_vectors
+            ):
+                exec_mon.set_strategy_contract(
+                    step=step,
+                    diagnosis=advice.diagnosis,
+                    suggested_vectors=advice.suggested_vectors,
+                )
+            return "proceed", None, advice.format_xml_block()
+
+        return "proceed", None, None
+
+    def _after_tool_execution(
+        tool_name: str, tool_input: dict, result: str, step: int
+    ) -> str:
+        comparison = completion_policy.execution_monitor.observe_executed_result(
+            tool_name, result, step
+        )
+        if comparison is not None:
+            changed = "yes" if comparison["result_changed"] else "no"
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "execution_monitor",
+                    "status": "complete",
+                    "message": (
+                        "Execution Monitor Evidence — DUPLICATE OUTCOME — "
+                        f"Step {step} vs Step {comparison['previous_step']} "
+                        f"tool={tool_name}: result changed={changed}; "
+                        f"action={comparison['action_summary']}"
+                    ),
+                    "data": {
+                        "emitter": "Execution Monitor",
+                        "intervention": "duplicate_outcome_comparison",
+                        **comparison,
+                    },
+                    "_persist": True,
+                },
+            )
+        return completion_policy.observe_tool_result(result, executed=True)
+
     await llm_svc.thinking_agentic_loop(
         llm_cfg,
         system_message=system_message_override
@@ -8717,11 +9057,13 @@ async def _do_agentic_thinking_loop(
         else _THINKING_AGENT_SYSTEM,
         initial_user_message=initial_message,
         tool_executor=_tool_executor,
+        before_tool_execution=_before_tool_execution,
         emit_fn=lambda evt: events_svc.emit(run_id, evt),
         stop_check=lambda: run_id in _thinking_stop_requested,
         done_check=_agentic_done_check,
-        after_tool_result=lambda _name, _input, result, _step: (
-            completion_policy.observe_tool_result(result)
+        after_tool_result=_after_tool_execution,
+        after_tool_rejection=lambda _name, _input, result, _step: (
+            completion_policy.observe_tool_result(result, executed=False)
         ),
         termination_check=completion_policy.check_termination,
         resume_messages=resume_messages,
@@ -9001,8 +9343,10 @@ async def _run_auth_matrix_module(
         )
         if not anon_result:
             continue
-        if _is_successful_access(anon_result) and _target_requires_auth_or_sensitive(
-            target
+        if (
+            _is_successful_access(anon_result)
+            and not anon_result.get("sent_authenticated")
+            and _target_requires_auth_or_sensitive(target)
         ):
             findings.append(
                 _auth_matrix_finding(
@@ -9019,12 +9363,26 @@ async def _run_auth_matrix_module(
                 )
             )
 
-        if not cred_sessions or "/admin" not in url.lower():
+        known_authorized = set(target.get("accessible_by") or [])
+        if (
+            not cred_sessions
+            or "/admin" not in url.lower()
+            # A missing positive baseline means "not observed", not "denied".
+            # Do not infer a role boundary until at least one configured identity
+            # is known to have reached the target during the crawl.
+            or not known_authorized
+        ):
             await sleep_between_probes(scanner_policy)
             continue
 
         for cred_id, session in cred_sessions.items():
-            if cred_id in set(target.get("accessible_by") or []):
+            # Vault tokens recovered from arbitrary HTTP responses have synthetic
+            # negative ids. Their role is unknown; treating them as low privilege
+            # caused valid admin-login tokens to be reported as authorization
+            # bypasses on the next resume.
+            if not isinstance(cred_id, int) or cred_id <= 0:
+                continue
+            if cred_id in known_authorized:
                 continue
             result = await _fetch_matrix_url(
                 run_id,
@@ -9065,11 +9423,17 @@ async def _run_idor_matrix_module(
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Compare object-reference pages across users using crawled ground truth."""
-    if not cred_sessions or len(cred_sessions) < 2:
+    identified_sessions = {
+        cred_id: session
+        for cred_id, session in (cred_sessions or {}).items()
+        if isinstance(cred_id, int) and cred_id > 0
+    }
+    if len(identified_sessions) < 2:
         return []
     timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
     follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
     with Session(get_engine()) as s:
+        valid_credential_ids, views_by_page = _canonical_credential_access(s, run_id)
         pages = list(
             s.exec(
                 select(CrawledPage)
@@ -9084,15 +9448,17 @@ async def _run_idor_matrix_module(
         page
         for page in pages
         if _url_has_object_reference(page.url)
-        and json.loads(page.accessible_by or "[]")
+        and _canonical_page_accessible_by(page, valid_credential_ids, views_by_page)
     ]
     for page in id_pages[:80]:
         if run_id in _thinking_stop_requested:
             break
-        accessible = set(json.loads(page.accessible_by or "[]"))
+        accessible = _canonical_page_accessible_by(
+            page, valid_credential_ids, views_by_page
+        )
         unauthorized = [
             (cred_id, session)
-            for cred_id, session in cred_sessions.items()
+            for cred_id, session in identified_sessions.items()
             if cred_id not in accessible
         ]
         if not unauthorized:
@@ -9129,9 +9495,54 @@ async def _run_idor_matrix_module(
     return findings
 
 
+def _canonical_credential_access(
+    session: Session, run_id: int
+) -> tuple[set[int], dict[int, set[int]]]:
+    """Return current credential ids and remapped per-page access observations."""
+    run = session.get(TestRun, run_id)
+    valid_credential_ids = (
+        set(
+            session.exec(
+                select(Credential.id).where(Credential.site_id == run.site_id)
+            ).all()
+        )
+        if run is not None
+        else set()
+    )
+    credential_views = list(
+        session.exec(
+            select(PageCredentialView)
+            .where(PageCredentialView.test_run_id == run_id)
+            .where(PageCredentialView.credential_id != None)  # noqa: E711
+        )
+    )
+    views_by_page: dict[int, set[int]] = {}
+    for view in credential_views:
+        if view.page_id is None or view.credential_id not in valid_credential_ids:
+            continue
+        views_by_page.setdefault(view.page_id, set()).add(view.credential_id)
+    return valid_credential_ids, views_by_page
+
+
+def _canonical_page_accessible_by(
+    page: CrawledPage,
+    valid_credential_ids: set[int],
+    views_by_page: dict[int, set[int]],
+) -> set[int]:
+    try:
+        stored_access = set(json.loads(page.accessible_by or "[]"))
+    except (TypeError, ValueError):
+        stored_access = set()
+    # PageCredentialView is individually remapped on import and therefore
+    # repairs already-imported runs whose legacy accessible_by JSON still
+    # contains ids from the source database.
+    return (stored_access & valid_credential_ids) | views_by_page.get(page.id, set())
+
+
 def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
     targets: dict[str, dict] = {}
     with Session(get_engine()) as s:
+        valid_credential_ids, views_by_page = _canonical_credential_access(s, run_id)
         pages = list(
             s.exec(
                 select(CrawledPage)
@@ -9148,6 +9559,9 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
         )
 
     for page in pages:
+        accessible_by = _canonical_page_accessible_by(
+            page, valid_credential_ids, views_by_page
+        )
         targets[page.url] = {
             "url": page.url,
             "method": "GET",
@@ -9155,7 +9569,7 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
             "req_auth": page.req_auth,
             "has_object_ref": page.has_object_ref,
             "has_business_logic": page.has_business_logic,
-            "accessible_by": json.loads(page.accessible_by or "[]"),
+            "accessible_by": sorted(accessible_by),
             "page_id": page.id,
         }
     for item in intel:
@@ -9250,6 +9664,9 @@ async def _fetch_matrix_url(
             "body": resp.text[:BODY_READ_LIMIT],
             "request_evidence": request_evidence,
             "response_evidence": response_evidence,
+            "sent_authenticated": bool(
+                _sent_cookie_hdr or _sent_hdrs.get("authorization")
+            ),
         }
     except Exception as exc:
         log.debug("Deterministic matrix request failed for %s: %s", url, exc)
@@ -10063,10 +10480,7 @@ async def _run_thinking_browser_action(
         + f"Visible text excerpt:\n{visible_text[:3000]}\n\n"
         + f"HTML excerpt:\n{html[:3000]}"
     )
-    request_evidence = (
-        f"BROWSER ACTION\nInitial URL: {url or default_url}\n"
-        f"Steps:\n{json.dumps(steps, indent=2)[:3000]}"
-    )
+    request_evidence = f"BROWSER ACTION\nInitial URL: {url or default_url}\nSteps:\n{json.dumps(steps, indent=2)[:3000]}"
     response_evidence = (
         f"Final URL: {final_url}\n"
         f"Title: {title}\n"
@@ -10143,13 +10557,26 @@ async def _analyse_js_sinks(
     if not script_items:
         return []
 
+    unique_script_urls = sorted(
+        list(
+            {
+                item.value or item.url or item.key
+                for item in script_items
+                if (item.value or item.url or item.key)
+            }
+        )
+    )
+
+    if not unique_script_urls:
+        return []
+
     events_svc.emit(
         run_id,
         {
             "type": "scanner_phase",
             "phase": "js_sink_analysis",
             "status": "start",
-            "message": f"JS sink analysis: scanning {len(script_items)} script file(s) for unsanitized innerHTML sinks…",
+            "message": f"JS sink analysis: scanning {len(unique_script_urls)} script file(s) for unsanitized innerHTML sinks…",
         },
     )
 
@@ -10171,8 +10598,7 @@ async def _analyse_js_sinks(
     found_sinks: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    for script_item in script_items:
-        js_url = script_item.value or script_item.url or script_item.key
+    for js_url in unique_script_urls:
         if not js_url:
             continue
         try:
