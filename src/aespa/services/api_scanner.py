@@ -925,9 +925,7 @@ def _make_api_context_tool_fn(collection_id: int, api_run_id: int):
         return {
             "tool": tool_name,
             "error": "unknown or unavailable context tool for API scans",
-            "available_tools": sorted(
-                _API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS
-            ),
+            "available_tools": sorted(_API_CONTEXT_COMMANDS | _SHARED_CONTEXT_COMMANDS),
         }
 
     return _fn
@@ -1270,6 +1268,7 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # without this, API findings never flip their work-program cells. Mirrors
     # web's _do_thinking_scan. ponytail: popped in the finally below.
     from aespa.services.scanner import _finding_hooks
+
     _finding_hooks[api_run_id] = post_finding_fn
 
     events_svc.emit(

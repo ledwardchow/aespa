@@ -29,6 +29,7 @@ export function WebRunSessionsTab({ runId, active, scanActive, onTotalChange }) 
       data={data}
       refresh={() => void load().catch(() => {})}
       onUpdate={(sessionId, update) => api.updateScannerSession(runId, sessionId, update)}
+      onValidate={() => api.validateScannerSessions(runId)}
     />
   </div>;
 }

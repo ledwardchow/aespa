@@ -90,7 +90,7 @@ Everything is asyncio. Crawl, scan, SAST, and ALICE jobs run as background `asyn
 
 ## Database And Migrations
 
-SQLite via SQLModel, single file `aespa.db` (gitignored; do not read or commit it). There is no Alembic. All schema evolution is hand-rolled in `db.py::_migrate()`, run on every startup.
+SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. There is no Alembic. All schema evolution is hand-rolled in `db.py::_migrate()`, run on every startup.
 
 Migration rules:
 

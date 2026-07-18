@@ -3,6 +3,7 @@
 Pure functions taking a SQLModel ``Session``. The upcoming crawler can import
 these helpers directly without going through HTTP.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,7 +66,9 @@ def get_site_by_name(session: Session, name: str) -> Site | None:
     return session.exec(select(Site).where(Site.name == name)).first()
 
 
-def _ensure_unique_name(session: Session, name: str, *, ignore_id: int | None = None) -> None:
+def _ensure_unique_name(
+    session: Session, name: str, *, ignore_id: int | None = None
+) -> None:
     existing = get_site_by_name(session, name)
     if existing is None:
         return
@@ -145,13 +148,19 @@ def delete_site(session: Session, site_id: int) -> None:
     # Manually cascade to test runs and their children (SQLite FK off by default)
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:
-        links = session.exec(select(PageLink).where(PageLink.test_run_id == run.id)).all()
+        links = session.exec(
+            select(PageLink).where(PageLink.test_run_id == run.id)
+        ).all()
         for lnk in links:
             session.delete(lnk)
-        views = session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == run.id)).all()
+        views = session.exec(
+            select(PageCredentialView).where(PageCredentialView.test_run_id == run.id)
+        ).all()
         for view in views:
             session.delete(view)
-        pages = session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run.id)).all()
+        pages = session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+        ).all()
         for pg in pages:
             session.delete(pg)
         session.delete(run)
@@ -162,7 +171,9 @@ def delete_site(session: Session, site_id: int) -> None:
 def add_credential(session: Session, site_id: int, payload: CredentialIn) -> Credential:
     site = get_site(session, site_id)
     if not site.requires_auth:
-        raise SiteServiceError("Cannot add credentials to a site that does not require auth")
+        raise SiteServiceError(
+            "Cannot add credentials to a site that does not require auth"
+        )
     if not site.login_url and not payload.login_url:
         raise SiteServiceError(
             "Credential login_url is required when the site has no default login_url"
@@ -195,6 +206,7 @@ def delete_credential(session: Session, site_id: int, credential_id: int) -> Non
 
 
 # ── Export / Import ──────────────────────────────────────────────────────────
+
 
 def export_site(session: Session, site_id: int) -> dict:
     """Return a portable dict containing the site and every related row.
@@ -231,51 +243,103 @@ def export_site(session: Session, site_id: int) -> dict:
     run_bundles = []
     for run in runs:
         rid = run.id
-        pages   = list(session.exec(select(CrawledPage).where(CrawledPage.test_run_id == rid)).all())
-        links   = list(session.exec(select(PageLink).where(PageLink.test_run_id == rid)).all())
-        traffic = list(session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == rid)).all())
-        sessions_ = list(session.exec(
-            select(ScannerSession)
-            .where(ScannerSession.test_run_id == rid)
-            .where(ScannerSession.run_kind == "web")
-        ).all())
-        views   = list(session.exec(select(PageCredentialView).where(PageCredentialView.test_run_id == rid)).all())
-        intel   = list(session.exec(select(TargetIntelItem).where(TargetIntelItem.test_run_id == rid)).all())
-        findings = list(session.exec(select(ScanFinding).where(ScanFinding.test_run_id == rid)).all())
-        logs    = list(session.exec(
-            select(ScanLog).where(ScanLog.test_run_id == rid).where(ScanLog.run_kind == "web")
-        ).all())
-        owasp_tests = list(session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == rid)).all())
-        checkpoints = list(session.exec(select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == rid)).all())
-        agent_logs  = list(session.exec(
-            select(AgentLog).where(AgentLog.test_run_id == rid).where(AgentLog.run_kind == "web")
-        ).all())
-        alice_sessions = list(session.exec(
-            select(AliceChatSession)
-            .where(AliceChatSession.test_run_id == rid)
-            .where(AliceChatSession.run_kind == "web")
-        ).all())
+        pages = list(
+            session.exec(
+                select(CrawledPage).where(CrawledPage.test_run_id == rid)
+            ).all()
+        )
+        links = list(
+            session.exec(select(PageLink).where(PageLink.test_run_id == rid)).all()
+        )
+        traffic = list(
+            session.exec(
+                select(TrafficEntry).where(TrafficEntry.test_run_id == rid)
+            ).all()
+        )
+        sessions_ = list(
+            session.exec(
+                select(ScannerSession)
+                .where(ScannerSession.test_run_id == rid)
+                .where(ScannerSession.run_kind == "web")
+            ).all()
+        )
+        views = list(
+            session.exec(
+                select(PageCredentialView).where(PageCredentialView.test_run_id == rid)
+            ).all()
+        )
+        intel = list(
+            session.exec(
+                select(TargetIntelItem).where(TargetIntelItem.test_run_id == rid)
+            ).all()
+        )
+        findings = list(
+            session.exec(
+                select(ScanFinding).where(ScanFinding.test_run_id == rid)
+            ).all()
+        )
+        logs = list(
+            session.exec(
+                select(ScanLog)
+                .where(ScanLog.test_run_id == rid)
+                .where(ScanLog.run_kind == "web")
+            ).all()
+        )
+        owasp_tests = list(
+            session.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == rid)
+            ).all()
+        )
+        checkpoints = list(
+            session.exec(
+                select(ScanCheckpoint).where(ScanCheckpoint.test_run_id == rid)
+            ).all()
+        )
+        agent_logs = list(
+            session.exec(
+                select(AgentLog)
+                .where(AgentLog.test_run_id == rid)
+                .where(AgentLog.run_kind == "web")
+            ).all()
+        )
+        alice_sessions = list(
+            session.exec(
+                select(AliceChatSession)
+                .where(AliceChatSession.test_run_id == rid)
+                .where(AliceChatSession.run_kind == "web")
+            ).all()
+        )
         alice_sess_ids = [s.id for s in alice_sessions]
-        alice_messages = list(session.exec(
-            select(AliceChatMessage).where(AliceChatMessage.session_id.in_(alice_sess_ids))
-        ).all()) if alice_sess_ids else []
+        alice_messages = (
+            list(
+                session.exec(
+                    select(AliceChatMessage).where(
+                        AliceChatMessage.session_id.in_(alice_sess_ids)
+                    )
+                ).all()
+            )
+            if alice_sess_ids
+            else []
+        )
 
-        run_bundles.append({
-            "test_run": _row(run),
-            "crawled_pages": [_row(p) for p in pages],
-            "page_links": [_row(link) for link in links],
-            "traffic_entries": [_row(t) for t in traffic],
-            "scanner_sessions": [_row(s) for s in sessions_],
-            "page_credential_views": [_row(v) for v in views],
-            "target_intel_items": [_row(i) for i in intel],
-            "scan_findings": [_row(f) for f in findings],
-            "scan_logs": [_row(lg) for lg in logs],
-            "page_owasp_tests": [_row(o) for o in owasp_tests],
-            "scan_checkpoints": [_row(c) for c in checkpoints],
-            "agent_logs": [_row(a) for a in agent_logs],
-            "alice_chat_sessions": [_row(s) for s in alice_sessions],
-            "alice_chat_messages": [_row(m) for m in alice_messages],
-        })
+        run_bundles.append(
+            {
+                "test_run": _row(run),
+                "crawled_pages": [_row(p) for p in pages],
+                "page_links": [_row(link) for link in links],
+                "traffic_entries": [_row(t) for t in traffic],
+                "scanner_sessions": [_row(s) for s in sessions_],
+                "page_credential_views": [_row(v) for v in views],
+                "target_intel_items": [_row(i) for i in intel],
+                "scan_findings": [_row(f) for f in findings],
+                "scan_logs": [_row(lg) for lg in logs],
+                "page_owasp_tests": [_row(o) for o in owasp_tests],
+                "scan_checkpoints": [_row(c) for c in checkpoints],
+                "agent_logs": [_row(a) for a in agent_logs],
+                "alice_chat_sessions": [_row(s) for s in alice_sessions],
+                "alice_chat_messages": [_row(m) for m in alice_messages],
+            }
+        )
 
     return {
         "export_version": 1,
@@ -317,8 +381,11 @@ def import_site(session: Session, bundle: dict) -> Site:
         )
 
     # ── Site ─────────────────────────────────────────────────────────────────
-    site_data = {k: v for k, v in bundle["site"].items()
-                 if k not in ("id", "created_at", "updated_at")}
+    site_data = {
+        k: v
+        for k, v in bundle["site"].items()
+        if k not in ("id", "created_at", "updated_at")
+    }
     name = site_data["name"]
     candidate, counter = name, 2
     while get_site_by_name(session, candidate) is not None:
@@ -344,8 +411,7 @@ def import_site(session: Session, bundle: dict) -> Site:
 
     # ── Test runs ─────────────────────────────────────────────────────────────
     for rb in bundle.get("test_runs", []):
-        run_data = {k: v for k, v in rb["test_run"].items()
-                    if k not in ("id",)}
+        run_data = {k: v for k, v in rb["test_run"].items() if k not in ("id",)}
         run_data["site_id"] = new_site_id
         run_data["llm_config_id"] = None  # cannot map across installations
         _parse_datetimes(run_data, "created_at", "started_at", "completed_at")
@@ -361,6 +427,21 @@ def import_site(session: Session, bundle: dict) -> Site:
             p = dict(p)
             old_pid = p.pop("id")
             p["test_run_id"] = new_run_id
+            # ``accessible_by`` stores credential primary keys inside JSON, so it
+            # needs the same remapping as ScannerSession and PageCredentialView.
+            # Leaving the exported ids in place makes every imported credential
+            # look like a different identity to the deterministic auth matrix.
+            try:
+                old_accessible_by = json.loads(p.get("accessible_by") or "[]")
+            except (TypeError, ValueError):
+                old_accessible_by = []
+            p["accessible_by"] = json.dumps(
+                [
+                    cred_id_map[old_cid]
+                    for old_cid in old_accessible_by
+                    if old_cid in cred_id_map
+                ]
+            )
             _parse_datetimes(p, "discovered_at")
             page = CrawledPage(**p)
             session.add(page)

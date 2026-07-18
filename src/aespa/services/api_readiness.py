@@ -6,6 +6,7 @@ produce a structured gap analysis.  Results are persisted to
 ``ApiCollection.readiness_json`` and the three ``prereq_*`` fields on each
 ``ApiEndpoint``.
 """
+
 from __future__ import annotations
 
 import json
@@ -184,7 +185,9 @@ def _build_prompt(
         else ""
     )
 
-    schemes_str = json.dumps(security_schemes, indent=2) if security_schemes else "(none found)"
+    schemes_str = (
+        json.dumps(security_schemes, indent=2) if security_schemes else "(none found)"
+    )
     creds_str = json.dumps(credentials, indent=2) if credentials else "(none)"
     eps_str = json.dumps(endpoints, indent=2) if endpoints else "(none)"
 
@@ -275,9 +278,7 @@ def _parse_llm_result(raw: str, endpoints: list, collection_id: int) -> dict:
 
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if not m:
-        raise ReadinessError(
-            f"LLM did not return a JSON object. Response: {raw[:300]}"
-        )
+        raise ReadinessError(f"LLM did not return a JSON object. Response: {raw[:300]}")
     try:
         data = json.loads(m.group(0))
     except json.JSONDecodeError as exc:
@@ -308,12 +309,14 @@ def _parse_llm_result(raw: str, endpoints: list, collection_id: int) -> dict:
         eid = item.get("endpoint_id")
         if eid not in known_ids:
             continue
-        ep_list.append({
-            "endpoint_id": eid,
-            "can_test": bool(item.get("can_test", True)),
-            "can_test_auth": bool(item.get("can_test_auth", True)),
-            "notes": [str(n) for n in (item.get("notes") or [])],
-        })
+        ep_list.append(
+            {
+                "endpoint_id": eid,
+                "can_test": bool(item.get("can_test", True)),
+                "can_test_auth": bool(item.get("can_test_auth", True)),
+                "notes": [str(n) for n in (item.get("notes") or [])],
+            }
+        )
     data["endpoints"] = ep_list
     data["collection_id"] = collection_id
     data["assessed_at"] = datetime.now(timezone.utc).isoformat()

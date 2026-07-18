@@ -2,6 +2,7 @@
 
 Crawler and scanner push events here; the SSE endpoint drains them to clients.
 """
+
 from __future__ import annotations
 
 import asyncio

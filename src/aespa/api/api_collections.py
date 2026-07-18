@@ -145,14 +145,18 @@ def export_collection(
     try:
         bundle = api_collections_service.export_collection(session, collection_id)
     except api_collections_service.ApiCollectionNotFound as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     name = bundle["collection"]["name"]
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
     headers = {"Content-Disposition": f'attachment; filename="{safe}.aespa-api.json"'}
     return JSONResponse(content=bundle, headers=headers)
 
 
-@router.post("/import", response_model=ApiCollectionDetail, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/import", response_model=ApiCollectionDetail, status_code=status.HTTP_201_CREATED
+)
 async def import_collection(
     request: Request, session: Session = Depends(get_session)
 ) -> ApiCollectionDetail:
@@ -262,7 +266,9 @@ async def parse_document(
     try:
         _ = api_documents_service.get_document(session, collection_id, document_id)
     except api_documents_service.ApiDocumentNotFound as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     await api_docs_service.parse_document(session, collection_id, document_id)
     doc = api_documents_service.get_document(session, collection_id, document_id)
     return _doc_to_out(doc)
@@ -316,7 +322,9 @@ def list_endpoints(
 ) -> list[ApiEndpointOut]:
     collection = session.get(ApiCollection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
     endpoints = session.exec(
         select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
     ).all()
@@ -327,7 +335,9 @@ class _ScopePayload(_BaseModel):
     in_scope: bool
 
 
-@router.patch("/{collection_id}/endpoints/{endpoint_id}/scope", response_model=ApiEndpointOut)
+@router.patch(
+    "/{collection_id}/endpoints/{endpoint_id}/scope", response_model=ApiEndpointOut
+)
 def patch_endpoint_scope(
     collection_id: int,
     endpoint_id: int,
@@ -336,7 +346,9 @@ def patch_endpoint_scope(
 ) -> ApiEndpointOut:
     ep = session.get(ApiEndpoint, endpoint_id)
     if ep is None or ep.collection_id != collection_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Endpoint not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Endpoint not found"
+        )
     ep.in_scope = payload.in_scope
     session.add(ep)
     session.commit()
@@ -354,7 +366,9 @@ def list_credentials(
 ) -> list[ApiCredentialOut]:
     collection = session.get(ApiCollection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
     creds = session.exec(
         select(ApiCredential).where(ApiCredential.collection_id == collection_id)
     ).all()
@@ -373,7 +387,9 @@ def create_credential(
 ) -> ApiCredentialOut:
     collection = session.get(ApiCollection, collection_id)
     if collection is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
     cred = ApiCredential(
         collection_id=collection_id,
         scheme=payload.scheme,
@@ -401,7 +417,9 @@ def delete_credential(
 ) -> None:
     cred = session.get(ApiCredential, credential_id)
     if cred is None or cred.collection_id != collection_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credential not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Credential not found"
+        )
     session.delete(cred)
     session.commit()
 
@@ -505,6 +523,7 @@ def purge_collection_data(
 
 def _utcnow():
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc)
 
 
@@ -513,7 +532,9 @@ def list_api_test_runs(
     collection_id: int, session: Session = Depends(get_session)
 ) -> list[ApiTestRunSummary]:
     if session.get(ApiCollection, collection_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
     runs = session.exec(
         select(ApiTestRun)
         .where(ApiTestRun.collection_id == collection_id)
@@ -533,11 +554,16 @@ def create_api_test_run(
     session: Session = Depends(get_session),
 ) -> ApiTestRunSummary:
     if session.get(ApiCollection, collection_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
     if payload.llm_profile_id is not None:
         from aespa.models import LLMProfile
+
         if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan profile not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Scan profile not found"
+            )
     name = payload.name or f"Run {_utcnow().strftime('%Y-%m-%d %H:%M')}"
     run = ApiTestRun(
         collection_id=collection_id,

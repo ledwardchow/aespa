@@ -35,7 +35,10 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert r.status_code == 200
     assert r.json()["enabled"] is False
     assert r.json()["api_url"] == "http://127.0.0.1:1337"
-    assert r.json()["scan_configuration_name"] == "Audit checks - all except time-based detection methods"
+    assert (
+        r.json()["scan_configuration_name"]
+        == "Audit checks - all except time-based detection methods"
+    )
     assert r.json()["scan_sqli"] is True
     assert r.json()["scan_xss"] is True
     assert r.json()["scan_command_injection"] is True
@@ -143,7 +146,9 @@ def test_create_profile_with_optional_temperature(client: TestClient):
     assert provider_r.status_code == 200
     provider = provider_r.json()
 
-    profile_r = _make_profile(client, provider["id"], name="OptionalTempProfile", temperature=None)
+    profile_r = _make_profile(
+        client, provider["id"], name="OptionalTempProfile", temperature=None
+    )
     assert profile_r.status_code == 200
     profile = profile_r.json()
     assert profile["temperature"] is None
@@ -239,13 +244,16 @@ def test_provider_update_changes_runtime_profile_connection(client: TestClient):
     provider = _make_provider(client, api_key="sk-1").json()
     _make_profile(client, provider["id"])
 
-    r = client.put(f"/api/settings/llm/providers/{provider['id']}", json={
-        "name": "Local OpenAI",
-        "api_format": "openai",
-        "base_url": "http://localhost:11434/v1",
-        "models": ["llama-3", "gpt-4o"],
-        "api_key": "sk-2",
-    })
+    r = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": "Local OpenAI",
+            "api_format": "openai",
+            "base_url": "http://localhost:11434/v1",
+            "models": ["llama-3", "gpt-4o"],
+            "api_key": "sk-2",
+        },
+    )
     assert r.status_code == 200
 
     active = client.get("/api/settings/llm").json()
@@ -270,41 +278,50 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert p_item["api_key"] is None
 
     # 3. Update provider with api_key: null - key is preserved
-    up_resp = client.put(f"/api/settings/llm/providers/{provider['id']}", json={
-        "name": "Secret Provider Renamed",
-        "api_format": "openai",
-        "base_url": "http://localhost:1234/v1/",
-        "models": ["llama-3", "gpt-4o"],
-        "api_key": None,
-    })
+    up_resp = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": "Secret Provider Renamed",
+            "api_format": "openai",
+            "base_url": "http://localhost:1234/v1/",
+            "models": ["llama-3", "gpt-4o"],
+            "api_key": None,
+        },
+    )
     assert up_resp.status_code == 200
     assert up_resp.json()["has_api_key"] is True
 
     # 4. Update provider with api_key: "" - key is cleared
-    clear_resp = client.put(f"/api/settings/llm/providers/{provider['id']}", json={
-        "name": "Secret Provider Renamed",
-        "api_format": "openai",
-        "base_url": "http://localhost:1234/v1/",
-        "models": ["llama-3", "gpt-4o"],
-        "api_key": "",
-    })
+    clear_resp = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": "Secret Provider Renamed",
+            "api_format": "openai",
+            "base_url": "http://localhost:1234/v1/",
+            "models": ["llama-3", "gpt-4o"],
+            "api_key": "",
+        },
+    )
     assert clear_resp.status_code == 200
     assert clear_resp.json()["has_api_key"] is False
 
     # 5. Burp REST API key write-only test
-    burp_put = client.put("/api/settings/burp-rest-api", json={
-        "enabled": True,
-        "api_url": "http://127.0.0.1:1337",
-        "api_key": "burp-secret-key",
-        "scan_configuration_name": "Audit",
-        "scan_sqli": True,
-        "scan_xss": True,
-        "scan_command_injection": True,
-        "scan_path_traversal": True,
-        "scan_ssrf": True,
-        "scan_xxe": True,
-        "scan_ssti": True,
-    })
+    burp_put = client.put(
+        "/api/settings/burp-rest-api",
+        json={
+            "enabled": True,
+            "api_url": "http://127.0.0.1:1337",
+            "api_key": "burp-secret-key",
+            "scan_configuration_name": "Audit",
+            "scan_sqli": True,
+            "scan_xss": True,
+            "scan_command_injection": True,
+            "scan_path_traversal": True,
+            "scan_ssrf": True,
+            "scan_xxe": True,
+            "scan_ssti": True,
+        },
+    )
     assert burp_put.status_code == 200
     assert burp_put.json()["has_api_key"] is True
     assert burp_put.json()["api_key"] is None
@@ -410,6 +427,7 @@ def test_upsert_invalid_max_tokens(client: TestClient):
 
 # ── Scanner policy ───────────────────────────────────────────────────────────
 
+
 def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
@@ -425,14 +443,16 @@ def test_get_scanner_policy_defaults(client: TestClient):
 
 def test_upsert_scanner_policy(client: TestClient):
     payload = client.get("/api/settings/scanner-policy").json()
-    payload.update({
-        "scan_mode": "aggressive",
-        "max_probes_per_page": 25,
-        "thinking_max_steps": 180,
-        "request_timeout_s": 12.5,
-        "min_delay_s": 0.1,
-        "blocked_headers": ["host", "cookie", "x-admin"],
-    })
+    payload.update(
+        {
+            "scan_mode": "aggressive",
+            "max_probes_per_page": 25,
+            "thinking_max_steps": 180,
+            "request_timeout_s": 12.5,
+            "min_delay_s": 0.1,
+            "blocked_headers": ["host", "cookie", "x-admin"],
+        }
+    )
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 200
     data = r.json()
@@ -477,9 +497,9 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
                 "base_url": "http://localhost:5678/v1",
                 "models": ["gpt-4"],
                 "api_key": "some-other-key",
-            }
+            },
         ],
-        "profiles": []
+        "profiles": [],
     }
     r = client.post("/api/settings/llm/import", json=payload_dup_provider)
     assert r.status_code == 422
@@ -515,8 +535,8 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
                 "temperature": 0.5,
                 "use_vision": False,
                 "is_active": False,
-            }
-        ]
+            },
+        ],
     }
     r = client.post("/api/settings/llm/import", json=payload_dup_profile)
     assert r.status_code == 422
@@ -525,17 +545,14 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
 
 def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
     provider = _make_provider(client).json()
-    
+
     # Verify defaults to True
     profile = _make_profile(client, provider["id"], name="Profile With Force").json()
     assert profile["force_tool_choice"] is True
 
     # Disable it explicitly
     profile_disabled = _make_profile(
-        client, 
-        provider["id"], 
-        name="Profile Without Force", 
-        force_tool_choice=False
+        client, provider["id"], name="Profile Without Force", force_tool_choice=False
     ).json()
     assert profile_disabled["force_tool_choice"] is False
 
@@ -547,21 +564,31 @@ def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
 
 def test_export_import_write_only_keys(client: TestClient):
     # 1. Setup provider with key
-    p = _make_provider(client, name="ExportProvider", api_key="secret-export-key").json()
+    p = _make_provider(
+        client, name="ExportProvider", api_key="secret-export-key"
+    ).json()
 
     # 2. Direct loopback export includes raw key
     exp_r = client.get("/api/settings/llm/export")
     assert exp_r.status_code == 200
     export_data = exp_r.json()
-    exp_p = next(item for item in export_data["providers"] if item["name"] == "ExportProvider")
+    exp_p = next(
+        item for item in export_data["providers"] if item["name"] == "ExportProvider"
+    )
     assert exp_p["has_api_key"] is True
     assert exp_p["api_key"] == "secret-export-key"
 
     # 3. Export via proxy (e.g. Cloudflare Access headers present) masks raw key
-    proxied_exp_r = client.get("/api/settings/llm/export", headers={"CF-Connecting-IP": "203.0.113.1"})
+    proxied_exp_r = client.get(
+        "/api/settings/llm/export", headers={"CF-Connecting-IP": "203.0.113.1"}
+    )
     assert proxied_exp_r.status_code == 200
     proxied_export_data = proxied_exp_r.json()
-    p_exp_p = next(item for item in proxied_export_data["providers"] if item["name"] == "ExportProvider")
+    p_exp_p = next(
+        item
+        for item in proxied_export_data["providers"]
+        if item["name"] == "ExportProvider"
+    )
     assert p_exp_p["has_api_key"] is True
     assert p_exp_p["api_key"] is None
 

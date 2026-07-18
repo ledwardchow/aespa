@@ -227,7 +227,7 @@ Defines execution parameters linked to a provider:
 
 #### 3. Multi-Role Model Profile (`LLMProfile` model)
 
-Maps agent roles (`crawler`, `test_lead`, `specialist`, `validator`, `reporting`, `alice`, `sast`) to specific `LLMConfig` instances:
+Maps agent roles (`crawler`, `test_lead`, `mentor`, `specialist`, `validator`, `reporting`, `alice`, `sast`) to specific `LLMConfig` instances. An unassigned `mentor` inherits the `test_lead` model before falling back to the profile default:
 
 | Field | Default | Description |
 |---|---|---|
@@ -523,6 +523,15 @@ a second, competing TLS finding. The **API scanner** runs the same module before
 its agentic loop for any `https://` collection base URL (`is_api_run=True`, keyed
 on `api_test_run_id`, categorised `API8 · Security Misconfiguration`).
 
+**Deterministic authorization identity rules.** Role and IDOR matrices only use
+sessions bound to current configured credential IDs. Tokens recovered from an
+arbitrary HTTP response have unknown role provenance and are excluded until they
+are bound to an identity. Role probes also require a positive authorized crawl
+baseline for the target. Per-page access combines current `PageCredentialView`
+rows with `CrawledPage.accessible_by`; imported credential IDs are remapped, and
+stale IDs from older imports are ignored. An anonymous result is eligible only
+when the request actually sent neither cookies nor an Authorization header.
+
 ### Scan resume
 
 The checkpoint service (`services/checkpoint.py`) serialises the LLM conversation history to the database at regular intervals. If a scan is interrupted (server restart, user stop) it can be resumed with `start_thinking_scan_resume(run_id)`, which restores the conversation at the last saved checkpoint rather than starting over.
@@ -543,6 +552,22 @@ The loop terminates when:
 - The bounded completion policy observes 50 consecutive tool calls without a new
   route/category coverage transition, finding, lead resolution, specialist handoff,
   or session use. It warns after 40 and records the automatic stop in the Test Lead log.
+- The Execution Monitor reaches a bounded rejection limit after the Test Lead keeps
+  retrying a hard-blocked duplicate or refuses an active Mentor Strategy Shift Contract.
+
+`execution_monitor.py` fingerprints semantically relevant tool inputs while removing
+known transport noise. A second consecutive normalized duplicate invokes the run-scoped
+Mentor; a third is blocked. Eight completed steps without a persisted progress signal
+invoke the Mentor and establish a structured Strategy Shift Contract containing two or
+three route/category/class vectors. Calls that match none of those constraints are
+rejected unless they carry an explicit `strategy_pivot_justification`. Executed and
+rejected steps share the same completion accounting, so supervision cannot itself form
+an unbounded rejection loop. Monitor and contract state are stored in scan checkpoints.
+Persisted activity entries use explicit emitter tags: `Execution Monitor` records every
+Mentor trigger, hard block, and contract rejection; `Mentor Guidance` records the full
+diagnosis, structured alternate vectors, and tactical next step; invalid-session
+evictions are tagged `Session Validator`; and completion challenges are tagged
+`Test Lead Completion Gate` rather than the generic `Completion_Policy`.
 
 `done` is mediated by a bounded policy rather than an open-ended completeness gate.
 An active session that has never been attempted may trigger one challenge, and Track
