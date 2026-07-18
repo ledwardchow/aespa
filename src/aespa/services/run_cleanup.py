@@ -15,6 +15,7 @@ disambiguated by ``run_kind`` / ``producer_run_type``.
 The helpers ``session.delete`` rows but do not commit — the caller commits once,
 so a collection delete can cascade many runs atomically.
 """
+
 from __future__ import annotations
 
 from sqlmodel import Session, select
@@ -119,6 +120,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         if run.source_archive_path:
             try:
                 import os
+
                 if os.path.isfile(run.source_archive_path):
                     os.remove(run.source_archive_path)
             except Exception:

@@ -1,4 +1,5 @@
 """Service layer for ScanLead CRUD and context formatting."""
+
 from __future__ import annotations
 
 import logging
@@ -15,6 +16,7 @@ _UTC = timezone.utc
 
 # Confidence threshold — only leads at or above this are kept.
 CONFIDENCE_THRESHOLD = 0.7
+
 
 def create_lead(
     *,
@@ -61,12 +63,14 @@ def list_leads_for_run(producer_run_id: int) -> list[ScanLead]:
     excluded so the SAST tab only ever shows the pristine originals.
     """
     with Session(get_engine(), expire_on_commit=False) as s:
-        return list(s.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_id == producer_run_id)
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .order_by(ScanLead.id)
-        ).all())
+        return list(
+            s.exec(
+                select(ScanLead)
+                .where(ScanLead.producer_run_id == producer_run_id)
+                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                .order_by(ScanLead.id)
+            ).all()
+        )
 
 
 def copy_leads_to_run(
@@ -95,13 +99,15 @@ def copy_leads_to_run(
         if already is not None:
             return 0
 
-        originals = list(s.exec(
-            select(ScanLead)
-            .where(ScanLead.producer_run_id == sast_run_id)
-            .where(ScanLead.producer_run_type == "sast")
-            .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-            .order_by(ScanLead.id)
-        ).all())
+        originals = list(
+            s.exec(
+                select(ScanLead)
+                .where(ScanLead.producer_run_id == sast_run_id)
+                .where(ScanLead.producer_run_type == "sast")
+                .where(ScanLead.imported_into_run_id == None)  # noqa: E711
+                .order_by(ScanLead.id)
+            ).all()
+        )
 
         made = 0
         now = datetime.now(_UTC)
@@ -133,24 +139,28 @@ def copy_leads_to_run(
 def get_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
     """Return open leads imported into a dynamic run (consumed by that scan)."""
     with Session(get_engine(), expire_on_commit=False) as s:
-        return list(s.exec(
-            select(ScanLead)
-            .where(ScanLead.imported_into_run_type == target_run_type)
-            .where(ScanLead.imported_into_run_id == target_run_id)
-            .where(ScanLead.status == "open")
-            .order_by(ScanLead.severity.desc(), ScanLead.confidence.desc())  # type: ignore[attr-defined]
-        ).all())
+        return list(
+            s.exec(
+                select(ScanLead)
+                .where(ScanLead.imported_into_run_type == target_run_type)
+                .where(ScanLead.imported_into_run_id == target_run_id)
+                .where(ScanLead.status == "open")
+                .order_by(ScanLead.severity.desc(), ScanLead.confidence.desc())  # type: ignore[attr-defined]
+            ).all()
+        )
 
 
 def get_all_leads_for_run(target_run_type: str, target_run_id: int) -> list[ScanLead]:
     """Return ALL leads imported into a dynamic run, regardless of status."""
     with Session(get_engine(), expire_on_commit=False) as s:
-        return list(s.exec(
-            select(ScanLead)
-            .where(ScanLead.imported_into_run_type == target_run_type)
-            .where(ScanLead.imported_into_run_id == target_run_id)
-            .order_by(ScanLead.id)
-        ).all())
+        return list(
+            s.exec(
+                select(ScanLead)
+                .where(ScanLead.imported_into_run_type == target_run_type)
+                .where(ScanLead.imported_into_run_id == target_run_id)
+                .order_by(ScanLead.id)
+            ).all()
+        )
 
 
 def _promote_lead_to_finding(
@@ -171,7 +181,8 @@ def _promote_lead_to_finding(
     if run_id is None:
         log.warning(
             "update_lead: lead %d confirmed without finding and no run_id to "
-            "attribute one — cannot auto-promote", lead.id,
+            "attribute one — cannot auto-promote",
+            lead.id,
         )
         return None
 
@@ -214,7 +225,10 @@ def _promote_lead_to_finding(
     s.flush()  # populate finding.id within this transaction
     log.info(
         "update_lead: auto-promoted confirmed lead %d to finding %s (run_type=%s run_id=%s)",
-        lead.id, finding.id, run_type, run_id,
+        lead.id,
+        finding.id,
+        run_type,
+        run_id,
     )
     return finding.id
 
@@ -267,11 +281,13 @@ def _link_promoted_finding_to_coverage(
         return None
 
     with Session(get_engine()) as s:
-        endpoints = list(s.exec(
-            select(ApiEndpoint)
-            .where(ApiEndpoint.collection_id == collection_id)
-            .where(ApiEndpoint.in_scope == True)  # noqa: E712
-        ).all())
+        endpoints = list(
+            s.exec(
+                select(ApiEndpoint)
+                .where(ApiEndpoint.collection_id == collection_id)
+                .where(ApiEndpoint.in_scope == True)  # noqa: E712
+            ).all()
+        )
         coll = s.get(ApiCollection, collection_id)
         base = (coll.base_url if coll else "").rstrip("/")
 
@@ -283,14 +299,18 @@ def _link_promoted_finding_to_coverage(
     if ep is None or ep.id is None:
         log.info(
             "update_lead: promoted finding %s not linked to coverage — no endpoint "
-            "matched lead path hints %s", finding_id, tokens,
+            "matched lead path hints %s",
+            finding_id,
+            tokens,
         )
         return None
 
     update_coverage_cell(run_id, ep.id, cat, "finding", finding_id=finding_id)
     log.info(
         "update_lead: promoted finding %s flipped work-program cell endpoint=%s category=%s",
-        finding_id, ep.id, cat,
+        finding_id,
+        ep.id,
+        cat,
     )
     return {"endpoint_id": ep.id, "owasp_api_category": cat}
 
@@ -354,7 +374,12 @@ def update_lead(
                 "run_id": run_id,
                 "category_raw": lead.category,
                 "finding_id": promoted_id,
-                "hint_texts": [lead.location, lead.title, lead.description, lead.evidence],
+                "hint_texts": [
+                    lead.location,
+                    lead.title,
+                    lead.description,
+                    lead.evidence,
+                ],
             }
         s.commit()
         s.refresh(lead)
@@ -379,9 +404,7 @@ def format_leads_for_run(
     Used by web scans, keyed on the run that imported the leads. Returns an empty
     string if no open leads have been imported.
     """
-    return _format_leads_block(
-        get_leads_for_run(target_run_type, target_run_id)[:cap]
-    )
+    return _format_leads_block(get_leads_for_run(target_run_type, target_run_id)[:cap])
 
 
 def _format_leads_block(leads: list[ScanLead]) -> str:
@@ -400,15 +423,17 @@ def _format_leads_block(leads: list[ScanLead]) -> str:
     for lead in leads:
         sev = (lead.severity or "medium").upper()
         conf_pct = int((lead.confidence or 0) * 100)
+        lines.append(f"[Lead #{lead.id}] [{sev}] {lead.title}")
         lines.append(
-            f"[Lead #{lead.id}] [{sev}] {lead.title}"
+            f"  Category: {lead.category or 'unknown'}  Confidence: {conf_pct}%"
         )
-        lines.append(f"  Category: {lead.category or 'unknown'}  Confidence: {conf_pct}%")
         lines.append(f"  Location: {lead.location or 'unknown'}")
         lines.append(f"  Description: {lead.description}")
         if lead.evidence:
             # Trim evidence to keep context size reasonable
-            evidence_preview = lead.evidence[:400] + ("…" if len(lead.evidence) > 400 else "")
+            evidence_preview = lead.evidence[:400] + (
+                "…" if len(lead.evidence) > 400 else ""
+            )
             lines.append(f"  Evidence: {evidence_preview}")
         lines.append("")
 

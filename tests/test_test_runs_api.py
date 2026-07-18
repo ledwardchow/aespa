@@ -456,6 +456,36 @@ def test_update_scanner_session_renames_and_deactivates():
         engine.dispose()
 
 
+def test_validate_scanner_sessions_route(client: TestClient, monkeypatch):
+    from aespa.services import scanner_sessions
+
+    site = _make_site(client, base_url="https://target.local")
+    run = _make_run(client, site["id"]).json()
+    captured = {}
+
+    async def validate(db, run_id, **kwargs):
+        captured.update(run_id=run_id, **kwargs)
+        return {
+            "checked": 2,
+            "valid": 1,
+            "evicted": 1,
+            "errors": 0,
+            "skipped": 0,
+            "results": [],
+        }
+
+    monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
+    response = client.post(
+        f"/api/test-runs/{run['id']}/scanner-sessions/validate"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evicted"] == 1
+    assert captured["run_id"] == run["id"]
+    assert captured["run_kind"] == "web"
+    assert captured["default_url"].rstrip("/") == "https://target.local"
+
+
 def test_get_run_not_found(client: TestClient):
     r = client.get("/api/test-runs/9999")
     assert r.status_code == 404

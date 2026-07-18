@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 # ---- helpers ----------------------------------------------------------------
 
+
 def make_site(client: TestClient, **kwargs):
     defaults = {
         "name": "Juice Shop",
@@ -13,6 +14,7 @@ def make_site(client: TestClient, **kwargs):
 
 # ---- health -----------------------------------------------------------------
 
+
 def test_health(client):
     r = client.get("/api/health")
     assert r.status_code == 200
@@ -20,6 +22,7 @@ def test_health(client):
 
 
 # ---- create -----------------------------------------------------------------
+
 
 def test_create_site_no_auth(client):
     r = make_site(client)
@@ -44,8 +47,12 @@ def test_scan_guidance_round_trips(client):
 
     upd = client.put(
         f"/api/sites/{site_id}",
-        json={"name": "Guided", "base_url": "https://juice.local",
-              "requires_auth": False, "scan_guidance": "Updated steps."},
+        json={
+            "name": "Guided",
+            "base_url": "https://juice.local",
+            "requires_auth": False,
+            "scan_guidance": "Updated steps.",
+        },
     )
     assert upd.status_code == 200
     assert upd.json()["scan_guidance"] == "Updated steps."
@@ -147,6 +154,7 @@ def test_create_duplicate_name(client):
 
 # ---- list / get -------------------------------------------------------------
 
+
 def test_list_sites_empty(client):
     r = client.get("/api/sites")
     assert r.status_code == 200
@@ -181,6 +189,7 @@ def test_get_site_not_found(client):
 
 
 # ---- update -----------------------------------------------------------------
+
 
 def test_update_site_replaces_credentials(client):
     created = make_site(
@@ -224,12 +233,17 @@ def test_update_duplicate_name(client):
     b = make_site(client, name="Beta").json()
     r = client.put(
         f"/api/sites/{b['id']}",
-        json={"name": "Alpha", "base_url": "https://beta.local", "requires_auth": False},
+        json={
+            "name": "Alpha",
+            "base_url": "https://beta.local",
+            "requires_auth": False,
+        },
     )
     assert r.status_code == 409
 
 
 # ---- delete -----------------------------------------------------------------
+
 
 def test_delete_site(client):
     created = make_site(client).json()
@@ -259,6 +273,7 @@ def test_delete_site_not_found(client):
 
 
 # ---- individual credential endpoints ----------------------------------------
+
 
 def test_add_credential(client):
     site = make_site(
