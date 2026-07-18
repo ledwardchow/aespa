@@ -20,7 +20,7 @@ You will need to provide:
 
 - For web app testing - URL and (optionally) credentials
 - For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
-- (Optionally) ZIP of the source code for the API. It will perform a "SAST-lite" agentic examination of the code to identify leads to investigate during the DAST API testing
+- (Optionally) ZIP of the source code for the web app/API. You can run SAST as a standalone operation or load the SAST findings into a web or API scan, which will validate the finding with dynamic testing
 - An API key for an OpenAI or an Anthropic-format LLM provider
 
 ## Performance
