@@ -20,6 +20,7 @@ bundled OpenSSL (``nassl``/``sslyze``), which is AGPL and intentionally not a de
 
 All socket work is blocking; the public entry point ``scan_tls`` runs it in a thread.
 """
+
 from __future__ import annotations
 
 import asyncio

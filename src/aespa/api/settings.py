@@ -56,9 +56,13 @@ def upsert_llm_config(
 
 # ── Models (provider + model + params; formerly "profiles") ───────────────────
 
+
 @router.get("/llm/model-configs", response_model=list[LLMConfigOut])
 def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOut]:
-    return [settings_service.llm_profile_out_model(session, cfg) for cfg in settings_service.list_llm_profiles(session)]
+    return [
+        settings_service.llm_profile_out_model(session, cfg)
+        for cfg in settings_service.list_llm_profiles(session)
+    ]
 
 
 @router.post("/llm/model-configs", response_model=LLMConfigOut)
@@ -100,9 +104,13 @@ def delete_llm_model(
 
 # ── Scan profiles (per-agent-role model assignment) ───────────────────────────
 
+
 @router.get("/llm/profiles", response_model=list[LLMProfileOut])
 def list_scan_profiles(session: Session = Depends(get_session)) -> list[LLMProfileOut]:
-    return [settings_service.llm_profile_out(session, p) for p in settings_service.list_scan_profiles(session)]
+    return [
+        settings_service.llm_profile_out(session, p)
+        for p in settings_service.list_scan_profiles(session)
+    ]
 
 
 @router.post("/llm/profiles", response_model=LLMProfileOut)
@@ -143,7 +151,9 @@ def delete_scan_profile(
 
 
 @router.get("/llm/providers", response_model=list[LLMProviderConfigOut])
-def list_llm_providers(session: Session = Depends(get_session)) -> list[LLMProviderConfigOut]:
+def list_llm_providers(
+    session: Session = Depends(get_session),
+) -> list[LLMProviderConfigOut]:
     return settings_service.list_llm_providers(session)
 
 
@@ -211,7 +221,9 @@ def upsert_scanner_policy(
 
 
 @router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def get_burp_rest_api_config(session: Session = Depends(get_session)) -> BurpRestApiConfigOut:
+def get_burp_rest_api_config(
+    session: Session = Depends(get_session),
+) -> BurpRestApiConfigOut:
     return settings_service.get_burp_rest_api_config(session)
 
 
@@ -233,7 +245,9 @@ async def test_burp_rest_api_connection(
 
 
 @router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)
-def get_upstream_proxy_config(session: Session = Depends(get_session)) -> UpstreamProxyConfigOut:
+def get_upstream_proxy_config(
+    session: Session = Depends(get_session),
+) -> UpstreamProxyConfigOut:
     return settings_service.get_upstream_proxy_config(session)
 
 

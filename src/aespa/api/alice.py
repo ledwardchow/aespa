@@ -1,4 +1,5 @@
 """A.L.I.C.E. chat API."""
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,7 @@ def _now() -> datetime:
 
 # ── Request shapes ────────────────────────────────────────────────────────────
 
+
 class AliceRunRequest(BaseModel):
     message: str
     history: list[dict] = []
@@ -38,6 +40,7 @@ class AliceSessionsRequest(BaseModel):
 
 
 # ── Chat session persistence helpers ──────────────────────────────────────────
+
 
 def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict:
     run = session.get(TestRun, run_id)
@@ -61,6 +64,7 @@ def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict
             .where(AliceChatMessage.session_id == s.id)
             .order_by(AliceChatMessage.position, AliceChatMessage.id)
         ).all()
+
         def _safe_step_data(raw: str) -> dict:
             try:
                 parsed = json.loads(raw or "{}")
@@ -68,18 +72,27 @@ def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict
             except Exception:
                 return {}
 
-        chats.append({
-            "id": s.session_key,
-            "title": s.title,
-            "messages": [
-                {"id": m.message_key, "sender": m.sender,
-                 "type": m.type, "text": m.text, "ts": m.ts,
-                 "stepData": _safe_step_data(m.step_data_json)}
-                for m in msg_rows
-            ],
-        })
+        chats.append(
+            {
+                "id": s.session_key,
+                "title": s.title,
+                "messages": [
+                    {
+                        "id": m.message_key,
+                        "sender": m.sender,
+                        "type": m.type,
+                        "text": m.text,
+                        "ts": m.ts,
+                        "stepData": _safe_step_data(m.step_data_json),
+                    }
+                    for m in msg_rows
+                ],
+            }
+        )
 
-    active = next((s for s in sess_rows if s.is_active), sess_rows[0] if sess_rows else None)
+    active = next(
+        (s for s in sess_rows if s.is_active), sess_rows[0] if sess_rows else None
+    )
     latest_updated = max((s.updated_at for s in sess_rows), default=None)
     return {
         "chats": chats,
@@ -89,7 +102,9 @@ def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict
     }
 
 
-def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session, run_kind: str = "web") -> None:
+def _save_sessions(
+    run_id: int, req: AliceSessionsRequest, session: Session, run_kind: str = "web"
+) -> None:
     incoming_keys = {chat["id"] for chat in req.chats}
     now = _now()
 
@@ -137,7 +152,9 @@ def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session, run
         existing_msgs = session.exec(
             select(AliceChatMessage).where(AliceChatMessage.session_id == sess_row.id)
         ).all()
-        msgs_by_key: dict[str, AliceChatMessage] = {m.message_key: m for m in existing_msgs}
+        msgs_by_key: dict[str, AliceChatMessage] = {
+            m.message_key: m for m in existing_msgs
+        }
 
         for m in existing_msgs:
             if m.message_key not in incoming_msg_keys:
@@ -148,25 +165,34 @@ def _save_sessions(run_id: int, req: AliceSessionsRequest, session: Session, run
             if msg_key in msgs_by_key:
                 row = msgs_by_key[msg_key]
                 row.text = msg.get("text", row.text)
-                row.step_data_json = json.dumps(msg.get("stepData") or {}, separators=(",", ":"), default=str)
+                row.step_data_json = json.dumps(
+                    msg.get("stepData") or {}, separators=(",", ":"), default=str
+                )
                 row.position = msg_pos
                 row.updated_at = now
             else:
-                session.add(AliceChatMessage(
-                    session_id=sess_row.id,
-                    message_key=msg_key,
-                    sender=msg.get("sender", "alice"),
-                    type=msg.get("type", "message"),
-                    text=msg.get("text", ""),
-                    step_data_json=json.dumps(msg.get("stepData") or {}, separators=(",", ":"), default=str),
-                    ts=msg.get("ts", ""),
-                    position=msg_pos,
-                ))
+                session.add(
+                    AliceChatMessage(
+                        session_id=sess_row.id,
+                        message_key=msg_key,
+                        sender=msg.get("sender", "alice"),
+                        type=msg.get("type", "message"),
+                        text=msg.get("text", ""),
+                        step_data_json=json.dumps(
+                            msg.get("stepData") or {},
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                        ts=msg.get("ts", ""),
+                        position=msg_pos,
+                    )
+                )
 
     session.commit()
 
 
 # ── Session persistence endpoints ─────────────────────────────────────────────
+
 
 @router.get("/api/test-runs/{run_id}/alice/sessions")
 def get_alice_sessions(
@@ -191,6 +217,7 @@ def save_alice_sessions(
 
 
 # ── Background task endpoints ─────────────────────────────────────────────────
+
 
 @router.post("/api/test-runs/{run_id}/alice/run")
 async def start_alice_run(

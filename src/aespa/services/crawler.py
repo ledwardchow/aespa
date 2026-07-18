@@ -172,7 +172,9 @@ async def _crawl_task(run_id: int) -> None:
 class _CrawlShared:
     def __init__(self, crawled_norms: dict, state_keys: dict, pages_done: int) -> None:
         self.crawled_norms: dict[str, int] = crawled_norms  # norm_url → page_id
-        self.state_keys: dict[str, int] = state_keys  # SPA interaction fingerprint → page_id
+        self.state_keys: dict[str, int] = (
+            state_keys  # SPA interaction fingerprint → page_id
+        )
         self.lock: asyncio.Lock = asyncio.Lock()
         self.pages_done: int = pages_done
 
@@ -259,7 +261,9 @@ async def _do_crawl_inner(run_id: int) -> None:
     requires_auth = site.requires_auth
     max_depth = run.max_depth
     max_pages = run.max_pages
-    crawler_mode = run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
+    crawler_mode = (
+        run.crawler_mode if run.crawler_mode in {"url", "interactive"} else "url"
+    )
     _parsed = urlparse(base_url)
     base_netloc = _parsed.netloc
     _bp = _parsed.path
@@ -1188,12 +1192,24 @@ async def _interactive_state_snapshot(page) -> dict | None:
 
 
 async def _explore_interactive_states(
-    *, run_id: int, page, root_url: str, root_page_id: int, root_depth: int,
-    shared: _CrawlShared, max_depth: int, max_pages: int, credential_id: Optional[int],
-    username: Optional[str], llm_cfg, base_netloc: str,
+    *,
+    run_id: int,
+    page,
+    root_url: str,
+    root_page_id: int,
+    root_depth: int,
+    shared: _CrawlShared,
+    max_depth: int,
+    max_pages: int,
+    credential_id: Optional[int],
+    username: Optional[str],
+    llm_cfg,
+    base_netloc: str,
 ) -> None:
     """Breadth-first exploration of safe client-side states beneath one URL page."""
-    pending: deque[tuple[list[dict], int, int]] = deque([([], root_page_id, root_depth)])
+    pending: deque[tuple[list[dict], int, int]] = deque(
+        [([], root_page_id, root_depth)]
+    )
     seen_recipes: set[str] = set()
     while pending and run_id not in _stop_requested:
         steps, parent_id, state_depth = pending.popleft()
@@ -1218,37 +1234,94 @@ async def _explore_interactive_states(
                     shared.pages_done += 1
             action = steps[-1]
             _save_link(
-                run_id, parent_id, page_id, page.url, link_text=action["name"],
-                action_kind="click", action_data={"replay_steps": steps},
+                run_id,
+                parent_id,
+                page_id,
+                page.url,
+                link_text=action["name"],
+                action_kind="click",
+                action_data={"replay_steps": steps},
             )
             if is_new:
                 context = "[Interactive SPA state reached by replay]"
-                cats = {"req_auth": None, "takes_input": None, "has_object_ref": None, "has_business_logic": None}
+                cats = {
+                    "req_auth": None,
+                    "takes_input": None,
+                    "has_object_ref": None,
+                    "has_business_logic": None,
+                }
                 try:
                     context, _unused, cats = await llm_svc.analyse_page(
-                        llm_cfg, page.url, snapshot["title"], snapshot["text"][:8000], snapshot["screenshot_b64"]
+                        llm_cfg,
+                        page.url,
+                        snapshot["title"],
+                        snapshot["text"][:8000],
+                        snapshot["screenshot_b64"],
                     )
                 except Exception as exc:
                     log.debug("Interactive state analysis failed: %s", exc)
-                page_label = _page_function_label(cats.get("page_label")) or snapshot["label"]
+                page_label = (
+                    _page_function_label(cats.get("page_label")) or snapshot["label"]
+                )
                 _update_page(
-                    page_id, url=page.url, state_key=snapshot["key"], state_label=page_label,
-                    state_kind="interactive", replay_steps_json=json.dumps(steps), title=snapshot["title"],
-                    page_text=snapshot["text"][:10_000], screenshot_b64=snapshot["screenshot_b64"],
-                    llm_context=context, status="crawled", depth=state_depth,
-                    req_auth=cats.get("req_auth"), takes_input=cats.get("takes_input"),
-                    has_object_ref=cats.get("has_object_ref"), has_business_logic=cats.get("has_business_logic"),
-                    owasp_applicable_json=json.dumps(cats.get("owasp_applicable") or {}),
+                    page_id,
+                    url=page.url,
+                    state_key=snapshot["key"],
+                    state_label=page_label,
+                    state_kind="interactive",
+                    replay_steps_json=json.dumps(steps),
+                    title=snapshot["title"],
+                    page_text=snapshot["text"][:10_000],
+                    screenshot_b64=snapshot["screenshot_b64"],
+                    llm_context=context,
+                    status="crawled",
+                    depth=state_depth,
+                    req_auth=cats.get("req_auth"),
+                    takes_input=cats.get("takes_input"),
+                    has_object_ref=cats.get("has_object_ref"),
+                    has_business_logic=cats.get("has_business_logic"),
+                    owasp_applicable_json=json.dumps(
+                        cats.get("owasp_applicable") or {}
+                    ),
                 )
                 _update_run(run_id, pages_discovered=shared.pages_done)
-                events_svc.emit(run_id, {"type": "page_added", "username": username, "node": {
-                    "id": page_id, "url": page.url, "state_label": page_label, "state_kind": "interactive",
-                    "title": snapshot["title"], "depth": state_depth, "status": "crawled", "context": context,
-                    "in_scope": True, "scan_status": "pending", "accessible_by": [credential_id] if credential_id else [],
-                    "accessible_anonymously": credential_id is None,
-                }, "link": {"source": parent_id, "target": page_id, "link_text": action["name"], "action_kind": "click"}})
-            _save_credential_view(page_id, run_id, credential_id, username, snapshot["screenshot_b64"],
-                                  "[Interactive SPA state]", snapshot["text"][:10_000], {})
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "page_added",
+                        "username": username,
+                        "node": {
+                            "id": page_id,
+                            "url": page.url,
+                            "state_label": page_label,
+                            "state_kind": "interactive",
+                            "title": snapshot["title"],
+                            "depth": state_depth,
+                            "status": "crawled",
+                            "context": context,
+                            "in_scope": True,
+                            "scan_status": "pending",
+                            "accessible_by": [credential_id] if credential_id else [],
+                            "accessible_anonymously": credential_id is None,
+                        },
+                        "link": {
+                            "source": parent_id,
+                            "target": page_id,
+                            "link_text": action["name"],
+                            "action_kind": "click",
+                        },
+                    },
+                )
+            _save_credential_view(
+                page_id,
+                run_id,
+                credential_id,
+                username,
+                snapshot["screenshot_b64"],
+                "[Interactive SPA state]",
+                snapshot["text"][:10_000],
+                {},
+            )
             _update_accessible_by(page_id, credential_id)
             current_id = page_id
         else:
@@ -1438,16 +1511,19 @@ def _save_intel_item(
         :4000
     ]
     with Session(get_engine()) as s:
-        existing = s.exec(
+        query = (
             select(TargetIntelItem)
             .where(TargetIntelItem.test_run_id == run_id)
             .where(TargetIntelItem.kind == kind)
             .where(TargetIntelItem.key == key)
             .where(TargetIntelItem.value == value)
-            .where(TargetIntelItem.url == url)
-            .where(TargetIntelItem.method == method)
-            .where(TargetIntelItem.source == source)
-        ).first()
+        )
+        if kind not in ("script", "asset"):
+            query = query.where(TargetIntelItem.url == url)
+        query = query.where(TargetIntelItem.method == method).where(
+            TargetIntelItem.source == source
+        )
+        existing = s.exec(query).first()
         if existing:
             return
         s.add(
@@ -2633,8 +2709,15 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
         raw_cookies = await page.context.cookies()
         cookies = {c["name"]: c["value"] for c in raw_cookies}
         token = None
-        for key in ("access_token", "token", "jwt", "auth_token", "id_token",
-                    "authToken", "accessToken"):
+        for key in (
+            "access_token",
+            "token",
+            "jwt",
+            "auth_token",
+            "id_token",
+            "authToken",
+            "accessToken",
+        ):
             try:
                 val = await page.evaluate(
                     "(k) => localStorage.getItem(k) || sessionStorage.getItem(k)",
@@ -2653,6 +2736,7 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
             run_id,
             label=f"recon_{cred.id}",
             kind="bearer" if token and not cookies else "cookie",
+            account_label=cred.label,
             username=cred.username,
             credential_id=cred.id,
             source="reconcile_login",
@@ -2660,8 +2744,11 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
             extra_headers={"Authorization": f"Bearer {token}"} if token else None,
         )
     except Exception as exc:
-        log.warning("  reconcile: could not persist session for %s: %s",
-                    getattr(cred, "username", "?"), exc)
+        log.warning(
+            "  reconcile: could not persist session for %s: %s",
+            getattr(cred, "username", "?"),
+            exc,
+        )
 
 
 async def _reconcile_direct_access(
@@ -4104,6 +4191,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 run_id,
                 label=f"guided_{credential.id}",
                 kind="cookie",
+                account_label=credential.label,
                 username=credential.username,
                 credential_id=credential.id,
                 source="guided_login",
@@ -4381,8 +4469,9 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
 
         try:
             password_locator = page.locator("input[type='password']").first
-            pw_visible = await password_locator.count() > 0 and await _locator_is_exposed(
-                password_locator, actionable=True
+            pw_visible = (
+                await password_locator.count() > 0
+                and await _locator_is_exposed(password_locator, actionable=True)
             )
         except Exception:
             pw_visible = False

@@ -14,6 +14,7 @@ The scan:
    filter_lead / done.
 4. Persists high-confidence (≥ CONFIDENCE_THRESHOLD) candidates as ScanLead rows.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -57,6 +58,7 @@ _GREP_MAX_RESULTS = 200
 
 # ── Safe archive extraction ────────────────────────────────────────────────────
 
+
 def _safe_unzip(archive_path: str, target_dir: str) -> None:
     """Extract a zip archive, rejecting any entries that would escape target_dir."""
     target = Path(target_dir).resolve()
@@ -73,6 +75,7 @@ def _safe_unzip(archive_path: str, target_dir: str) -> None:
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
+
 
 def _increment_sast_leads_count(sast_run_id: int) -> None:
     """Increment SastRun.leads_count by 1 (best-effort, never raises)."""
@@ -92,10 +95,13 @@ def _count_persisted_leads(sast_run_id: int) -> int:
     """Return the number of ScanLead rows already persisted for this run."""
     try:
         from sqlmodel import func
+
         with Session(get_engine()) as s:
             from aespa.models import ScanLead
+
             return s.exec(
-                select(func.count()).select_from(ScanLead)
+                select(func.count())
+                .select_from(ScanLead)
                 .where(ScanLead.producer_run_id == sast_run_id)
             ).one()
     except Exception:
@@ -140,6 +146,7 @@ def _flush_unfiltered_candidates(sast_run_id: int, collection_id: int) -> int:
 
 # ── Path jail helpers ──────────────────────────────────────────────────────────
 
+
 def _jail(root: Path, rel: str) -> Path:
     """Resolve *rel* within *root*, raising ValueError if it escapes."""
     if not rel:
@@ -153,6 +160,7 @@ def _jail(root: Path, rel: str) -> Path:
 
 
 # ── File tool implementations ──────────────────────────────────────────────────
+
 
 def _tool_list_files(root: Path, path: str = "", max_depth: int = 3) -> str:
     try:
@@ -189,7 +197,9 @@ def _tool_glob(root: Path, pattern: str) -> str:
     return "\n".join(matches[:500]) or "(no matches)"
 
 
-def _tool_read_file(root: Path, path: str, start_line: int | None, end_line: int | None) -> str:
+def _tool_read_file(
+    root: Path, path: str, start_line: int | None, end_line: int | None
+) -> str:
     try:
         target = _jail(root, path)
     except ValueError as exc:
@@ -248,6 +258,7 @@ def _tool_grep(
 
 # ── Tool executor factory ─────────────────────────────────────────────────────
 
+
 def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
     """Return an async tool_executor closure for the SAST agentic loop.
 
@@ -265,12 +276,15 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
 
         if tool_name == "list_files":
             path = tool_input.get("path", "") or "."
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_tool",
-                "status": "running",
-                "message": f"list_files: {path}",
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_tool",
+                    "status": "running",
+                    "message": f"list_files: {path}",
+                },
+            )
             return _tool_list_files(
                 root,
                 path=path if path != "." else "",
@@ -279,12 +293,15 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
 
         if tool_name == "glob":
             pattern = tool_input.get("pattern", "")
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_tool",
-                "status": "running",
-                "message": f"glob: {pattern}",
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_tool",
+                    "status": "running",
+                    "message": f"glob: {pattern}",
+                },
+            )
             return _tool_glob(root, pattern)
 
         if tool_name == "read_file":
@@ -292,12 +309,15 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
             sl = tool_input.get("start_line")
             el = tool_input.get("end_line")
             line_note = f" (lines {sl}–{el})" if sl or el else ""
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_tool",
-                "status": "running",
-                "message": f"read_file: {path}{line_note}",
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_tool",
+                    "status": "running",
+                    "message": f"read_file: {path}{line_note}",
+                },
+            )
             return _tool_read_file(root, path=path, start_line=sl, end_line=el)
 
         if tool_name == "grep":
@@ -305,12 +325,15 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
             path = str(tool_input.get("path", "")) or "."
             inc = str(tool_input.get("include_pattern", ""))
             inc_note = f" [{inc}]" if inc else ""
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_tool",
-                "status": "running",
-                "message": f"grep: {pattern!r} in {path}{inc_note}",
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_tool",
+                    "status": "running",
+                    "message": f"grep: {pattern!r} in {path}{inc_note}",
+                },
+            )
             return _tool_grep(
                 root,
                 pattern=pattern,
@@ -333,13 +356,18 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
                 "confidence": None,  # set by filter_lead
             }
             _candidates[sast_run_id].append(candidate)
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_candidate",
-                "status": "running",
-                "message": f"Candidate: {candidate['title']}",
-            })
-            return f"Candidate #{cid} recorded. Now call filter_lead with lead_id={cid}."
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_candidate",
+                    "status": "running",
+                    "message": f"Candidate: {candidate['title']}",
+                },
+            )
+            return (
+                f"Candidate #{cid} recorded. Now call filter_lead with lead_id={cid}."
+            )
 
         if tool_name == "filter_lead":
             cid = int(tool_input.get("lead_id", -1))
@@ -373,15 +401,18 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
                     _increment_sast_leads_count(sast_run_id)
                 except Exception as persist_exc:
                     log.warning("filter_lead: failed to persist lead: %s", persist_exc)
-            events_svc.emit(sast_run_id, {
-                "type": "scanner_phase",
-                "phase": "sast_filter",
-                "status": "running",
-                "message": (
-                    f"{'KEPT' if kept else 'DISCARDED'} candidate #{cid}: "
-                    f"{match['title']} (confidence={confidence:.0%})"
-                ),
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "sast_filter",
+                    "status": "running",
+                    "message": (
+                        f"{'KEPT' if kept else 'DISCARDED'} candidate #{cid}: "
+                        f"{match['title']} (confidence={confidence:.0%})"
+                    ),
+                },
+            )
             return (
                 f"Candidate #{cid}: confidence={confidence:.0%} — "
                 f"{'KEPT (will become a ScanLead)' if kept else 'DISCARDED (below threshold)'}."
@@ -397,6 +428,7 @@ def _make_tool_executor(sast_run_id: int, root: Path, collection_id: int):
 
 
 # ── SAST scan task ─────────────────────────────────────────────────────────────
+
 
 def _build_initial_message(
     collection: ApiCollection | None,
@@ -427,7 +459,9 @@ def _build_initial_message(
             summary_note = f" — {ep.summary}" if ep.summary else ""
             lines.append(f"  [{ep.method}] {ep.path}{auth_note}{summary_note}")
         if len(endpoints) > 60:
-            lines.append(f"  … and {len(endpoints) - 60} more (discover via file tools)")
+            lines.append(
+                f"  … and {len(endpoints) - 60} more (discover via file tools)"
+            )
     else:
         lines.append(
             "No pre-extracted endpoints are available. Use glob/grep to discover "
@@ -459,7 +493,9 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 raise ValueError(f"SastRun {sast_run_id} not found")
             # New SAST runs are standalone. Collection/document linkage remains
             # readable for legacy and imported rows.
-            coll = s.get(ApiCollection, run.collection_id) if run.collection_id else None
+            coll = (
+                s.get(ApiCollection, run.collection_id) if run.collection_id else None
+            )
             # Resolve the source archive. Legacy rows may still use ApiDocument;
             # new standalone runs store the archive path on the run itself.
             doc: ApiDocument | None = None
@@ -483,13 +519,21 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 raise ValueError("No source archive found for this SAST run.")
             llm_cfg_obj = get_llm_config_for_role(s, run, "sast")  # type: ignore[arg-type]
             if llm_cfg_obj is None:
-                raise RuntimeError("No LLM configuration. Configure it in Settings first.")
-            endpoints = list(s.exec(
-                select(ApiEndpoint)
-                .where(ApiEndpoint.collection_id == run.collection_id)
-                .where(ApiEndpoint.in_scope == True)  # noqa: E712
-                .order_by(ApiEndpoint.path, ApiEndpoint.method)
-            ).all()) if run.collection_id else []
+                raise RuntimeError(
+                    "No LLM configuration. Configure it in Settings first."
+                )
+            endpoints = (
+                list(
+                    s.exec(
+                        select(ApiEndpoint)
+                        .where(ApiEndpoint.collection_id == run.collection_id)
+                        .where(ApiEndpoint.in_scope == True)  # noqa: E712
+                        .order_by(ApiEndpoint.path, ApiEndpoint.method)
+                    ).all()
+                )
+                if run.collection_id
+                else []
+            )
             for obj in [run, coll, doc, llm_cfg_obj]:
                 if obj is not None:
                     s.expunge(obj)
@@ -505,12 +549,15 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         tmpdir = str(extract_root / str(sast_run_id))
         shutil.rmtree(tmpdir, ignore_errors=True)
         os.makedirs(tmpdir, exist_ok=True)
-        events_svc.emit(sast_run_id, {
-            "type": "scanner_phase",
-            "phase": "sast_extract",
-            "status": "start",
-            "message": f"Extracting source archive: {archive_name}",
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "sast_extract",
+                "status": "start",
+                "message": f"Extracting source archive: {archive_name}",
+            },
+        )
         _safe_unzip(archive_path, tmpdir)
         root = Path(tmpdir).resolve()
 
@@ -525,15 +572,18 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             run_kind="sast",
         )
 
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "active",
-            "current_task": "Starting static analysis…",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "active",
+                "current_task": "Starting static analysis…",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
 
         def _stop_check() -> bool:
             return sast_run_id in _sast_stop_requested
@@ -552,24 +602,30 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         # ── Leads already persisted inline during filter_lead calls. ─────────
         # Count what's now in the DB for this run (source of truth).
         leads_count = _count_persisted_leads(sast_run_id)
-        events_svc.emit(sast_run_id, {
-            "type": "scanner_phase",
-            "phase": "sast_complete",
-            "status": "complete",
-            "message": (
-                f"SAST analysis complete. {leads_count} lead(s) recorded "
-                f"({len(_candidates.get(sast_run_id, [])) - leads_count} discarded). {summary}"
-            ),
-        })
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "complete",
-            "current_task": "Analysis complete",
-            "outcome": f"{leads_count} lead(s) recorded",
-            "_persist": True,
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "sast_complete",
+                "status": "complete",
+                "message": (
+                    f"SAST analysis complete. {leads_count} lead(s) recorded "
+                    f"({len(_candidates.get(sast_run_id, [])) - leads_count} discarded). {summary}"
+                ),
+            },
+        )
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "complete",
+                "current_task": "Analysis complete",
+                "outcome": f"{leads_count} lead(s) recorded",
+                "_persist": True,
+            },
+        )
 
         with Session(get_engine()) as s:
             r = s.get(SastRun, sast_run_id)
@@ -596,21 +652,27 @@ async def _sast_scan_task(sast_run_id: int) -> None:
         else:
             flushed, total = 0, 0
         _update_sast_run_status(sast_run_id, "cancelled")
-        events_svc.emit(sast_run_id, {
-            "type": "scanner_phase",
-            "phase": "sast_stopped",
-            "status": "warning",
-            "message": f"SAST scan stopped. {total} lead(s) preserved ({flushed} unscored).",
-        })
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "stopped",
-            "current_task": "Scan stopped",
-            "outcome": "cancelled",
-            "_persist": True,
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "sast_stopped",
+                "status": "warning",
+                "message": f"SAST scan stopped. {total} lead(s) preserved ({flushed} unscored).",
+            },
+        )
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "stopped",
+                "current_task": "Scan stopped",
+                "outcome": "cancelled",
+                "_persist": True,
+            },
+        )
     except Exception as exc:
         log.exception("SAST scan error: sast_run_id=%s", sast_run_id)
         # Flush any candidates recorded before the failure.
@@ -627,21 +689,27 @@ async def _sast_scan_task(sast_run_id: int) -> None:
             except Exception:
                 pass
         _update_sast_run_status(sast_run_id, "failed", str(exc))
-        events_svc.emit(sast_run_id, {
-            "type": "scanner_phase",
-            "phase": "sast_stopped",
-            "status": "error",
-            "message": f"SAST scan failed: {exc}",
-        })
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "failed",
-            "current_task": "Scan failed",
-            "outcome": str(exc),
-            "_persist": True,
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "sast_stopped",
+                "status": "error",
+                "message": f"SAST scan failed: {exc}",
+            },
+        )
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "failed",
+                "current_task": "Scan failed",
+                "outcome": str(exc),
+                "_persist": True,
+            },
+        )
     finally:
         _sast_tasks.pop(sast_run_id, None)
         _sast_stop_requested.discard(sast_run_id)
@@ -654,12 +722,14 @@ async def _sast_scan_task(sast_run_id: int) -> None:
                 pass
         try:
             from aespa.services import llm as llm_svc
+
             llm_svc.clear_run_context()
         except Exception:
             pass
 
 
 # ── Public lifecycle API ───────────────────────────────────────────────────────
+
 
 def create_sast_run(
     *,
@@ -722,15 +792,18 @@ async def start_sast_scan(sast_run_id: int) -> None:
             s.add(run)
             s.commit()
 
-        events_svc.emit(sast_run_id, {
-            "type": "agent_status",
-            "agent_id": "sast-scanner",
-            "role": "SAST Analyst",
-            "status": "active",
-            "current_task": "SAST scan starting…",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "sast-scanner",
+                "role": "SAST Analyst",
+                "status": "active",
+                "current_task": "SAST scan starting…",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
 
         task = asyncio.create_task(
             _sast_scan_task(sast_run_id),
@@ -766,15 +839,18 @@ async def stop_sast_scan(sast_run_id: int) -> bool:
         # persisted agent_status row defaults to run_kind='web' and leaks into a
         # colliding web run (events.py has no id-keyed fallback any more).
         with events_svc.run_kind_scope("sast"):
-            events_svc.emit(sast_run_id, {
-                "type": "agent_status",
-                "agent_id": "sast-scanner",
-                "role": "SAST Analyst",
-                "status": "idle",
-                "current_task": "Scan stopped",
-                "outcome": "stopped",
-                "_persist": True,
-            })
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "sast-scanner",
+                    "role": "SAST Analyst",
+                    "status": "idle",
+                    "current_task": "Scan stopped",
+                    "outcome": "stopped",
+                    "_persist": True,
+                },
+            )
         return True
     return False
 

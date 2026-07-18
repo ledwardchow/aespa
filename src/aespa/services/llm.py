@@ -92,6 +92,7 @@ def _is_llm_refusal(exc: BaseException) -> bool:
     text = " ".join(parts).lower()
     return any(marker in text for marker in _REFUSAL_MARKERS)
 
+
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
@@ -138,7 +139,8 @@ class AsyncTokenBucketLimiter:
                 now = time.monotonic()
                 elapsed = now - self.last_token_update
                 self.available_tokens = min(
-                    self.max_tokens, self.available_tokens + elapsed * self.tokens_per_second
+                    self.max_tokens,
+                    self.available_tokens + elapsed * self.tokens_per_second,
                 )
                 self.last_token_update = now
 
@@ -146,7 +148,8 @@ class AsyncTokenBucketLimiter:
                     req_elapsed = now - self.last_request_update
                     self.available_requests = min(
                         self.max_requests,
-                        self.available_requests + req_elapsed * self.requests_per_second,
+                        self.available_requests
+                        + req_elapsed * self.requests_per_second,
                     )
                     self.last_request_update = now
 
@@ -239,8 +242,9 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     return _limiters.get(key)
 
 
-
-def _load_bucket_from_db(run_id: int, run_kind: str = "web") -> dict[str, dict[str, int]]:
+def _load_bucket_from_db(
+    run_id: int, run_kind: str = "web"
+) -> dict[str, dict[str, int]]:
     """Load persisted token usage for a run from the DB (best-effort)."""
     try:
         from sqlmodel import Session as _Session
@@ -249,7 +253,13 @@ def _load_bucket_from_db(run_id: int, run_kind: str = "web") -> dict[str, dict[s
         from aespa.models import ApiTestRun, SastRun, TestRun
 
         with _Session(get_engine()) as s:
-            model_cls = SastRun if run_kind == "sast" else ApiTestRun if run_kind == "api" else TestRun
+            model_cls = (
+                SastRun
+                if run_kind == "sast"
+                else ApiTestRun
+                if run_kind == "api"
+                else TestRun
+            )
             run = s.get(model_cls, run_id)
             if run and run.token_usage_json:
                 return json.loads(run.token_usage_json)
@@ -267,7 +277,13 @@ def _persist_bucket_to_db(run_id: int, bucket: dict, run_kind: str = "web") -> N
         from aespa.models import ApiTestRun, SastRun, TestRun
 
         with _Session(get_engine()) as s:
-            model_cls = SastRun if run_kind == "sast" else ApiTestRun if run_kind == "api" else TestRun
+            model_cls = (
+                SastRun
+                if run_kind == "sast"
+                else ApiTestRun
+                if run_kind == "api"
+                else TestRun
+            )
             run = s.get(model_cls, run_id)
             if run:
                 run.token_usage_json = json.dumps(bucket)
@@ -453,15 +469,17 @@ def _emit_rate_limit_cleared(model: str, used_tokens: int) -> None:
             "phase": "rate_limit",
             "status": "complete",
             "message": (
-                f"LLM rate limit cleared — resuming "
-                f"(used {used_tokens:,} tokens for {model})."
+                f"LLM rate limit cleared — resuming (used {used_tokens:,} tokens for {model})."
             ),
         }
     )
 
 
 # Identifying headers attached to every outbound LLM request (e.g. for OpenRouter attribution).
-_LLM_HEADERS = {"HTTP-Referer": "https://github.com/ledwardchow/aespa", "X-Title": "AESPA"}
+_LLM_HEADERS = {
+    "HTTP-Referer": "https://github.com/ledwardchow/aespa",
+    "X-Title": "AESPA",
+}
 
 
 def _llm_client_kwargs() -> dict:
@@ -893,9 +911,12 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         raise
 
 
-async def plain_completion(config: LLMConfig, prompt: str) -> str:
+async def plain_completion(
+    config: LLMConfig, prompt: str, *, system_prompt: str | None = None
+) -> str:
     """Send a plain text prompt and return the raw response text."""
-    return await _call(config, prompt, None)
+    combined = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+    return await _call(config, combined, None)
 
 
 async def stream_chat_completion(
@@ -2240,8 +2261,7 @@ async def plan_probes(
         ]
     except Exception as _exc:
         log.warning(
-            "plan_probes: failed to extract probe list from LLM response (%s). "
-            "Raw response (first 500 chars): %r",
+            "plan_probes: failed to extract probe list from LLM response (%s). Raw response (first 500 chars): %r",
             _exc,
             (raw or "")[:500],
         )
@@ -2283,10 +2303,12 @@ async def analyse_probes(
             async with semaphore:
                 return await _analyse(turn_num, batch)
 
-        batch_findings = await asyncio.gather(*(
-            _limited(turn_num, batch)
-            for turn_num, batch in enumerate(batches, start=1)
-        ))
+        batch_findings = await asyncio.gather(
+            *(
+                _limited(turn_num, batch)
+                for turn_num, batch in enumerate(batches, start=1)
+            )
+        )
     return [finding for batch in batch_findings for finding in batch]
 
 
@@ -2346,8 +2368,7 @@ async def _analyse_probe_batch(
             config, url, result_texts, prompt, raw or "", [], parse_error=str(exc)
         )
         log.warning(
-            "analyse_probes: failed to extract findings from LLM response (%s). "
-            "Raw response (first 500 chars): %r",
+            "analyse_probes: failed to extract findings from LLM response (%s). Raw response (first 500 chars): %r",
             exc,
             (raw or "")[:500],
         )
@@ -3418,9 +3439,7 @@ async def _call_with_tools_impl(
                         "input_tokens": _bdt_u.get("inputTokens", 0),
                         "output_tokens": _bdt_u.get("outputTokens", 0),
                         "cache_read_tokens": _bdt_u.get("cacheReadInputTokens", 0),
-                        "cache_write_tokens": _bdt_u.get(
-                            "cacheWriteInputTokens", 0
-                        ),
+                        "cache_write_tokens": _bdt_u.get("cacheWriteInputTokens", 0),
                     },
                     "metrics": data.get("metrics") or {},
                     "transport": bedrock_transport,
@@ -3764,9 +3783,7 @@ async def _call_with_tools_impl(
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-        _record_google_usage(
-            config.model, getattr(g_resp, "usage_metadata", None)
-        )
+        _record_google_usage(config.model, getattr(g_resp, "usage_metadata", None))
         return blocks, stop_reason, blocks
 
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
@@ -3786,6 +3803,8 @@ async def thinking_agentic_loop(
     resume_messages: list[dict] | None = None,
     on_checkpoint=None,
     tools: list[dict] | None = None,
+    before_tool_execution=None,
+    after_tool_rejection=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -3793,6 +3812,9 @@ async def thinking_agentic_loop(
     verbatim instead of from a lossy reconstructed summary.
 
     tool_executor: async (tool_name: str, tool_input: dict, step: int) -> str
+
+    before_tool_execution: optional async callable ``(tool_name: str, tool_input: dict, step: int) -> tuple[str, str | None, str | None]``
+        evaluates ExecutionMonitor state before executing tool. Returns (action, block_msg, mentor_xml).
 
     resume_messages: if provided, the loop restores this conversation history
         instead of building a fresh one from initial_user_message.  Used when
@@ -3803,11 +3825,19 @@ async def thinking_agentic_loop(
         current conversation state to durable storage.
 
     after_tool_result: optional callable that may annotate a completed tool result.
+    after_tool_rejection: optional callable that records a blocked, unexecuted step.
     termination_check: optional callable returning a reason when an owning scan's
         progress policy requires a bounded automatic stop.
 
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
+    if before_tool_execution:
+        from aespa.services.execution_monitor import add_strategy_justification_to_tools
+
+        tools = add_strategy_justification_to_tools(
+            tools if tools is not None else THINKING_AGENT_TOOLS
+        )
+
     resume_repair: dict[str, Any] | None = None
     if resume_messages is not None:
         messages = list(resume_messages)
@@ -3888,7 +3918,9 @@ async def thinking_agentic_loop(
                 try:
                     termination_reason = termination_check()
                 except Exception as exc:
-                    log.warning("thinking_agentic_loop: termination_check failed: %s", exc)
+                    log.warning(
+                        "thinking_agentic_loop: termination_check failed: %s", exc
+                    )
                     termination_reason = None
                 if termination_reason:
                     final_summary = str(termination_reason)
@@ -3914,8 +3946,7 @@ async def thinking_agentic_loop(
                             "phase": "thinking_step",
                             "status": "deciding",
                             "message": (
-                                f"Step {tool_call_count + 1}: "
-                                "LLM deciding next action\u2026"
+                                f"Step {tool_call_count + 1}: LLM deciding next action\u2026"
                             ),
                             "data": {
                                 "step": tool_call_count + 1,
@@ -3964,8 +3995,7 @@ async def thinking_agentic_loop(
                                     "phase": "llm_heartbeat",
                                     "status": "pending",
                                     "message": (
-                                        f"Step {_step_no}: waiting for LLM response "
-                                        f"({_elapsed}s elapsed)\u2026"
+                                        f"Step {_step_no}: waiting for LLM response ({_elapsed}s elapsed)\u2026"
                                     ),
                                 }
                             )
@@ -3998,10 +4028,7 @@ async def thinking_agentic_loop(
                                 "Please refresh your AWS credentials and resume the pentest."
                             )
                         elif _is_refusal:
-                            _msg = (
-                                f"Step {tool_call_count + 1}: LLM provider refused the "
-                                f"scan request — {exc}"
-                            )
+                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
                         else:
                             _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
                         emit_fn(
@@ -4020,8 +4047,7 @@ async def thinking_agentic_loop(
                         pass
                 if _is_refusal:
                     raise LLMRefusalError(
-                        f"LLM provider refused the scan request at step "
-                        f"{tool_call_count + 1}: {exc}"
+                        f"LLM provider refused the scan request at step {tool_call_count + 1}: {exc}"
                     ) from exc
                 # A provider/serialization failure is not a successful terminal
                 # condition. Propagate it so the owning scan is marked failed and
@@ -4043,9 +4069,9 @@ async def thinking_agentic_loop(
             no_usable_content = not tool_use_blocks and not text_blocks
             response_data = {
                 "step": tool_call_count + 1,
-                "raw_response": "\n".join(
-                    b.get("text", "") for b in text_blocks
-                )[:4000],
+                "raw_response": "\n".join(b.get("text", "") for b in text_blocks)[
+                    :4000
+                ],
                 "provider": config.provider,
                 "model": config.model,
                 "native_stop_reason": stop_reason,
@@ -4064,10 +4090,7 @@ async def thinking_agentic_loop(
                 if tool_use_blocks:
                     action_label = ", ".join(b["name"] for b in tool_use_blocks)
                     response_status = "complete"
-                    response_message = (
-                        f"Step {tool_call_count + 1}: LLM → {action_label} "
-                        f"(stop: {stop_reason})"
-                    )
+                    response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
                 else:
                     response_status = "warning"
                     response_kind = (
@@ -4111,8 +4134,7 @@ async def thinking_agentic_loop(
                 consecutive_text_only_turns += 1
                 if consecutive_text_only_turns >= 3:
                     log.warning(
-                        "thinking_agentic_loop: model returned %d consecutive text-only "
-                        "turns; ending assessment.",
+                        "thinking_agentic_loop: model returned %d consecutive text-only turns; ending assessment.",
                         consecutive_text_only_turns,
                     )
                     if emit_fn:
@@ -4216,6 +4238,46 @@ async def thinking_agentic_loop(
                     session_done = True
                     break
 
+                mentor_annotation = None
+                if before_tool_execution:
+                    try:
+                        action, block_msg, mentor_xml = await before_tool_execution(
+                            tool_name, tool_input, tool_call_count
+                        )
+                        if action == "block":
+                            rejection = (
+                                block_msg
+                                or "Tool execution blocked by Execution Monitor."
+                            )
+                            if after_tool_rejection:
+                                try:
+                                    rejection = after_tool_rejection(
+                                        tool_name,
+                                        tool_input,
+                                        rejection,
+                                        tool_call_count,
+                                    )
+                                except Exception as exc:
+                                    log.warning(
+                                        "thinking_agentic_loop: after_tool_rejection failed: %s",
+                                        exc,
+                                    )
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id,
+                                    "content": rejection,
+                                }
+                            )
+                            continue
+                        if mentor_xml:
+                            mentor_annotation = mentor_xml
+                    except Exception as exc:
+                        log.warning(
+                            "thinking_agentic_loop: before_tool_execution failed: %s",
+                            exc,
+                        )
+
                 try:
                     result_str = await tool_executor(
                         tool_name, tool_input, tool_call_count
@@ -4228,6 +4290,9 @@ async def thinking_agentic_loop(
                         exc,
                     )
                     result_str = f"Tool execution error: {exc}"
+
+                if mentor_annotation:
+                    result_str = f"{result_str}\n\n{mentor_annotation}"
 
                 if after_tool_result:
                     try:

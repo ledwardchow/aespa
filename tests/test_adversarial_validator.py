@@ -1,4 +1,5 @@
 """Tests for Phase 3: adversarial validator config, API, and LLM tools."""
+
 from __future__ import annotations
 
 import pytest
@@ -14,6 +15,7 @@ from aespa.services.llm import (
 
 # ── Config defaults ────────────────────────────────────────────────────────────
 
+
 def test_adversarial_validator_config_defaults(client: TestClient):
     resp = client.get("/api/settings/adversarial-validator-config")
     assert resp.status_code == 200
@@ -28,6 +30,7 @@ def test_adversarial_validator_config_defaults(client: TestClient):
 
 
 # ── API round-trip ─────────────────────────────────────────────────────────────
+
 
 def test_upsert_adversarial_validator_config(client: TestClient):
     payload = {
@@ -85,6 +88,7 @@ def test_upsert_is_idempotent(client: TestClient):
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
+
 def test_min_severity_rejects_invalid(client: TestClient):
     payload = {
         "enabled": True,
@@ -137,6 +141,7 @@ def test_end_scan_concurrency_rejects_out_of_range(client: TestClient, value: in
 
 # ── LLM tool list ─────────────────────────────────────────────────────────────
 
+
 def test_validator_agent_tools_contains_required_tools():
     names = {t["name"] for t in VALIDATOR_AGENT_TOOLS}
     assert "http_request" in names
@@ -187,6 +192,7 @@ def test_compare_responses_tool_schema():
 
 # ── Disproof hints ────────────────────────────────────────────────────────────
 
+
 def test_disproof_hints_a01():
     hints = _disproof_hints_for_finding("A01")
     assert hints
@@ -196,7 +202,11 @@ def test_disproof_hints_a01():
 def test_disproof_hints_a03():
     hints = _disproof_hints_for_finding("A03")
     assert hints
-    assert "xss" in hints.lower() or "sqli" in hints.lower() or "injection" in hints.lower()
+    assert (
+        "xss" in hints.lower()
+        or "sqli" in hints.lower()
+        or "injection" in hints.lower()
+    )
 
 
 def test_disproof_hints_with_year_suffix():
@@ -228,6 +238,7 @@ def test_all_disproof_hint_keys_are_valid_owasp_prefixes():
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
+
 def test_adversarial_validator_system_prompt_contains_key_concepts():
     prompt = _ADVERSARIAL_VALIDATOR_SYSTEM.lower()
     assert "disprove" in prompt
@@ -238,17 +249,21 @@ def test_adversarial_validator_system_prompt_contains_key_concepts():
 
 # ── Severity threshold ────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("severity,threshold,expected", [
-    ("critical", "low",      True),
-    ("high",     "low",      True),
-    ("medium",   "low",      True),
-    ("low",      "low",      True),
-    ("info",     "low",      False),
-    ("info",     "info",     True),
-    ("low",      "high",     False),
-    ("high",     "high",     True),
-    ("critical", "critical", True),
-    ("high",     "critical", False),
-])
+
+@pytest.mark.parametrize(
+    "severity,threshold,expected",
+    [
+        ("critical", "low", True),
+        ("high", "low", True),
+        ("medium", "low", True),
+        ("low", "low", True),
+        ("info", "low", False),
+        ("info", "info", True),
+        ("low", "high", False),
+        ("high", "high", True),
+        ("critical", "critical", True),
+        ("high", "critical", False),
+    ],
+)
 def test_severity_meets_threshold(severity, threshold, expected):
     assert severity_meets_threshold(severity, threshold) == expected

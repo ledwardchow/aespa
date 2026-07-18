@@ -21,6 +21,7 @@ from aespa.models import (
     ScanFinding,
     ScanLog,
     ScannerSession,
+    Site,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
@@ -39,6 +40,7 @@ from aespa.schemas import (
     ScannerSessionOut,
     ScannerSessionSummary,
     ScannerSessionUpdate,
+    ScannerSessionValidationResult,
     ScopeUpdate,
     TargetIntelItemOut,
     TargetIntelSummary,
@@ -350,6 +352,7 @@ def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
         test_run_id=record.test_run_id,
         label=record.label,
         kind=record.kind,
+        account_label=record.account_label,
         username=record.username,
         credential_id=record.credential_id,
         source=record.source,
@@ -1491,6 +1494,52 @@ def get_scanner_sessions(
     return ScannerSessionSummary(
         counts=counts,
         sessions=[_scanner_session_out(record) for record in records],
+    )
+
+
+@router.post(
+    "/api/test-runs/{run_id}/scanner-sessions/validate",
+    response_model=ScannerSessionValidationResult,
+)
+async def validate_scanner_sessions(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> ScannerSessionValidationResult:
+    run = _get_run_or_404(session, run_id)
+    site = session.get(Site, run.site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="Site not found")
+
+    pages = session.exec(
+        select(CrawledPage)
+        .where(CrawledPage.test_run_id == run_id)
+        .where(CrawledPage.in_scope != False)  # noqa: E712
+        .where(CrawledPage.req_auth == True)  # noqa: E712
+        .order_by(CrawledPage.depth, CrawledPage.id)
+    ).all()
+    sessions = session.exec(
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+        .where(ScannerSession.is_active == True)  # noqa: E712
+    ).all()
+    probe_urls: dict[int, str] = {}
+    for record in sessions:
+        for page in pages:
+            try:
+                accessible_by = json.loads(page.accessible_by or "[]")
+            except Exception:
+                accessible_by = []
+            if record.credential_id is None or record.credential_id in accessible_by:
+                probe_urls[record.id] = page.url
+                break
+
+    return await scanner_session_svc.validate_active_sessions(
+        session,
+        run_id,
+        run_kind="web",
+        default_url=site.base_url,
+        probe_urls=probe_urls,
     )
 
 

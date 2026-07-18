@@ -20,7 +20,9 @@ def _javascript_bundle(client: TestClient) -> str:
             # chunk would create a second module identity (and a second React).
             assert not re.search(r'from["\'](?:\.\./|/)app\.js["\']', response.text)
         sources.append(response.text)
-        for asset in re.findall(r'["\'](?:\./)?(assets/[^"\']+\.js)["\']', response.text):
+        for asset in re.findall(
+            r'["\'](?:\./)?(assets/[^"\']+\.js)["\']', response.text
+        ):
             pending.append(f"/{asset}")
     return "\n".join(sources)
 
@@ -31,8 +33,8 @@ def test_index_uses_versioned_no_cache_assets(client: TestClient):
     assert response.status_code == 200
     assert "no-store" in response.headers["cache-control"]
     assert "__AESPA_ASSET_VERSION__" not in response.text
-    assert '/app.js?v=' in response.text
-    assert '/styles.css?v=' in response.text
+    assert "/app.js?v=" in response.text
+    assert "/styles.css?v=" in response.text
 
 
 def test_static_assets_are_no_cache(client: TestClient):
@@ -56,7 +58,10 @@ def test_run_topbar_has_clear_only_crawl_action(client: TestClient):
     assert "Clear crawl" in source
     assert "Clear & restart" not in source
     assert "clearCrawl" in source
-    assert 'btn sm secondary" title=${!graph||graph.nodes.length===0 ? "No site map yet' not in source
+    assert (
+        'btn sm secondary" title=${!graph||graph.nodes.length===0 ? "No site map yet'
+        not in source
+    )
 
 
 def test_external_integrations_content_can_scroll(client: TestClient):

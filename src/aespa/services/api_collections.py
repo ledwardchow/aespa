@@ -2,6 +2,7 @@
 
 Pure functions taking a SQLModel ``Session``, mirroring ``services.sites``.
 """
+
 from __future__ import annotations
 
 import json
@@ -160,6 +161,7 @@ def delete_collection(session: Session, collection_id: int) -> None:
 # workprogram/logs/ALICE), and SAST runs + leads (+ SAST logs). source_zip bytes
 # are dropped — leads are self-contained text; only re-running SAST needs them.
 
+
 def export_collection(session: Session, collection_id: int) -> dict:
     """Return a portable, self-contained dict for a collection and all its data.
 
@@ -200,66 +202,142 @@ def export_collection(session: Session, collection_id: int) -> dict:
             row["content_b64"] = None
         else:
             try:
-                row["content_b64"] = base64.b64encode(Path(doc.stored_path).read_bytes()).decode("ascii")
+                row["content_b64"] = base64.b64encode(
+                    Path(doc.stored_path).read_bytes()
+                ).decode("ascii")
             except OSError:
                 row["content_b64"] = None  # file gone — metadata still travels
         row.pop("stored_path", None)  # rewritten on import
         return row
 
-    docs      = list(session.exec(select(ApiDocument).where(ApiDocument.collection_id == collection_id)).all())
-    endpoints = list(session.exec(select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)).all())
-    creds     = list(session.exec(select(ApiCredential).where(ApiCredential.collection_id == collection_id)).all())
-    runs      = list(session.exec(select(ApiTestRun).where(ApiTestRun.collection_id == collection_id)).all())
-    sast_runs = list(session.exec(select(SastRun).where(SastRun.collection_id == collection_id)).all())
-    leads     = list(session.exec(select(ScanLead).where(ScanLead.collection_id == collection_id)).all())
+    docs = list(
+        session.exec(
+            select(ApiDocument).where(ApiDocument.collection_id == collection_id)
+        ).all()
+    )
+    endpoints = list(
+        session.exec(
+            select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
+        ).all()
+    )
+    creds = list(
+        session.exec(
+            select(ApiCredential).where(ApiCredential.collection_id == collection_id)
+        ).all()
+    )
+    runs = list(
+        session.exec(
+            select(ApiTestRun).where(ApiTestRun.collection_id == collection_id)
+        ).all()
+    )
+    sast_runs = list(
+        session.exec(
+            select(SastRun).where(SastRun.collection_id == collection_id)
+        ).all()
+    )
+    leads = list(
+        session.exec(
+            select(ScanLead).where(ScanLead.collection_id == collection_id)
+        ).all()
+    )
 
     sast_bundles = []
     for sr in sast_runs:
         srid = sr.id
-        sast_bundles.append({
-            "sast_run": _row(sr),
-            "scan_logs": [_row(sl) for sl in session.exec(
-                select(ScanLog).where(ScanLog.test_run_id == srid).where(ScanLog.run_kind == "sast")
-            ).all()],
-            "agent_logs": [_row(a) for a in session.exec(
-                select(AgentLog).where(AgentLog.test_run_id == srid).where(AgentLog.run_kind == "sast")
-            ).all()],
-        })
+        sast_bundles.append(
+            {
+                "sast_run": _row(sr),
+                "scan_logs": [
+                    _row(sl)
+                    for sl in session.exec(
+                        select(ScanLog)
+                        .where(ScanLog.test_run_id == srid)
+                        .where(ScanLog.run_kind == "sast")
+                    ).all()
+                ],
+                "agent_logs": [
+                    _row(a)
+                    for a in session.exec(
+                        select(AgentLog)
+                        .where(AgentLog.test_run_id == srid)
+                        .where(AgentLog.run_kind == "sast")
+                    ).all()
+                ],
+            }
+        )
 
     run_bundles = []
     for run in runs:
         rid = run.id
-        findings = list(session.exec(select(ScanFinding).where(ScanFinding.api_test_run_id == rid)).all())
-        traffic  = list(session.exec(select(TrafficEntry).where(TrafficEntry.api_test_run_id == rid)).all())
-        cells    = list(session.exec(select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == rid)).all())
-        sessions_ = list(session.exec(
-            select(ScannerSession).where(ScannerSession.test_run_id == rid).where(ScannerSession.run_kind == "api")
-        ).all())
-        logs = list(session.exec(
-            select(ScanLog).where(ScanLog.test_run_id == rid).where(ScanLog.run_kind == "api")
-        ).all())
-        agent_logs = list(session.exec(
-            select(AgentLog).where(AgentLog.test_run_id == rid).where(AgentLog.run_kind == "api")
-        ).all())
-        alice_sessions = list(session.exec(
-            select(AliceChatSession).where(AliceChatSession.test_run_id == rid).where(AliceChatSession.run_kind == "api")
-        ).all())
+        findings = list(
+            session.exec(
+                select(ScanFinding).where(ScanFinding.api_test_run_id == rid)
+            ).all()
+        )
+        traffic = list(
+            session.exec(
+                select(TrafficEntry).where(TrafficEntry.api_test_run_id == rid)
+            ).all()
+        )
+        cells = list(
+            session.exec(
+                select(ApiEndpointTest).where(ApiEndpointTest.api_test_run_id == rid)
+            ).all()
+        )
+        sessions_ = list(
+            session.exec(
+                select(ScannerSession)
+                .where(ScannerSession.test_run_id == rid)
+                .where(ScannerSession.run_kind == "api")
+            ).all()
+        )
+        logs = list(
+            session.exec(
+                select(ScanLog)
+                .where(ScanLog.test_run_id == rid)
+                .where(ScanLog.run_kind == "api")
+            ).all()
+        )
+        agent_logs = list(
+            session.exec(
+                select(AgentLog)
+                .where(AgentLog.test_run_id == rid)
+                .where(AgentLog.run_kind == "api")
+            ).all()
+        )
+        alice_sessions = list(
+            session.exec(
+                select(AliceChatSession)
+                .where(AliceChatSession.test_run_id == rid)
+                .where(AliceChatSession.run_kind == "api")
+            ).all()
+        )
         alice_sess_ids = [s.id for s in alice_sessions]
-        alice_messages = list(session.exec(
-            select(AliceChatMessage).where(AliceChatMessage.session_id.in_(alice_sess_ids))
-        ).all()) if alice_sess_ids else []
+        alice_messages = (
+            list(
+                session.exec(
+                    select(AliceChatMessage).where(
+                        AliceChatMessage.session_id.in_(alice_sess_ids)
+                    )
+                ).all()
+            )
+            if alice_sess_ids
+            else []
+        )
 
-        run_bundles.append({
-            "api_test_run": _row(run),
-            "scan_findings": [_row(f) for f in findings],
-            "traffic_entries": [_row(t) for t in traffic],
-            "endpoint_tests": [_row(c) for c in cells],
-            "scanner_sessions": [_row(s) for s in sessions_],
-            "scan_logs": [_row(sl) for sl in logs],
-            "agent_logs": [_row(a) for a in agent_logs],
-            "alice_chat_sessions": [_row(s) for s in alice_sessions],
-            "alice_chat_messages": [_row(m) for m in alice_messages],
-        })
+        run_bundles.append(
+            {
+                "api_test_run": _row(run),
+                "scan_findings": [_row(f) for f in findings],
+                "traffic_entries": [_row(t) for t in traffic],
+                "endpoint_tests": [_row(c) for c in cells],
+                "scanner_sessions": [_row(s) for s in sessions_],
+                "scan_logs": [_row(sl) for sl in logs],
+                "agent_logs": [_row(a) for a in agent_logs],
+                "alice_chat_sessions": [_row(s) for s in alice_sessions],
+                "alice_chat_messages": [_row(m) for m in alice_messages],
+            }
+        )
 
     return {
         "export_version": 1,
@@ -310,8 +388,11 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
         )
 
     # ── Collection ─────────────────────────────────────────────────────────────
-    col_data = {k: v for k, v in bundle["collection"].items()
-                if k not in ("id", "created_at", "updated_at")}
+    col_data = {
+        k: v
+        for k, v in bundle["collection"].items()
+        if k not in ("id", "created_at", "updated_at")
+    }
     name = col_data["name"]
     candidate, counter = name, 2
     while get_collection_by_name(session, candidate) is not None:
@@ -334,6 +415,7 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
         if content_b64:
             ext = Path(d.get("filename", "")).suffix
             import uuid
+
             path = _storage_dir(new_cid) / f"{uuid.uuid4().hex}{ext}"
             path.write_bytes(base64.b64decode(content_b64))
             d["stored_path"] = str(path)
@@ -384,8 +466,10 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
         run_data = {k: v for k, v in src.items() if k != "id"}
         run_data["collection_id"] = new_cid
         run_data["llm_config_id"] = None  # cannot map across installations
-        run_data["sast_run_id"] = None    # back-patched once SAST runs are imported
-        _parse_datetimes(run_data, "created_at", "updated_at", "started_at", "completed_at")
+        run_data["sast_run_id"] = None  # back-patched once SAST runs are imported
+        _parse_datetimes(
+            run_data, "created_at", "updated_at", "started_at", "completed_at"
+        )
         run = ApiTestRun(**run_data)
         session.add(run)
         session.flush()
@@ -438,7 +522,9 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
             s = dict(s)
             s.pop("id")
             s["test_run_id"] = new_run_id
-            s["credential_id"] = None  # web-credential FK; not meaningful for API import
+            s["credential_id"] = (
+                None  # web-credential FK; not meaningful for API import
+            )
             _parse_datetimes(s, "created_at", "updated_at")
             session.add(ScannerSession(**s))
 
@@ -489,7 +575,9 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
             sr["document_id"] = doc_id_map.get(old_doc)
         # Only api runs are in this bundle; a web trigger can't be mapped.
         if sr.get("triggered_by_run_type") == "api":
-            sr["triggered_by_run_id"] = api_run_id_map.get(sr.get("triggered_by_run_id"))
+            sr["triggered_by_run_id"] = api_run_id_map.get(
+                sr.get("triggered_by_run_id")
+            )
         else:
             sr["triggered_by_run_type"] = None
             sr["triggered_by_run_id"] = None
@@ -523,13 +611,17 @@ def import_collection(session: Session, bundle: dict) -> ApiCollection:
         if old_prod is not None:
             ld["producer_run_id"] = sast_run_id_map.get(old_prod, old_prod)
         if ld.get("investigated_by_run_type") == "api":
-            ld["investigated_by_run_id"] = api_run_id_map.get(ld.get("investigated_by_run_id"))
+            ld["investigated_by_run_id"] = api_run_id_map.get(
+                ld.get("investigated_by_run_id")
+            )
         else:
             ld["investigated_by_run_type"] = None
             ld["investigated_by_run_id"] = None
         old_link = ld.get("linked_finding_id")
         if old_link is not None:
-            ld["linked_finding_id"] = finding_id_map.get(old_link)  # None if cross-bundle
+            ld["linked_finding_id"] = finding_id_map.get(
+                old_link
+            )  # None if cross-bundle
         _parse_datetimes(ld, "created_at", "updated_at")
         session.add(ScanLead(**ld))
 

@@ -1,4 +1,5 @@
 """Tests for Slice 4: readiness assessment."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ from aespa.db import get_session
 from aespa.main import create_app
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture()
 def data_dir(tmp_path, monkeypatch):
@@ -27,6 +29,7 @@ def client(data_dir):
         poolclass=StaticPool,
     )
     from aespa import models as _models  # noqa: F401
+
     SQLModel.metadata.create_all(engine)
 
     def _override_session():
@@ -45,6 +48,7 @@ def client(data_dir):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _make_collection(client: TestClient, name: str = "Test API") -> int:
     r = client.post(
         "/api/api-collections",
@@ -54,8 +58,13 @@ def _make_collection(client: TestClient, name: str = "Test API") -> int:
     return r.json()["id"]
 
 
-def _upload(client: TestClient, cid: int, filename: str, content: bytes,
-            content_type: str = "application/octet-stream") -> dict:
+def _upload(
+    client: TestClient,
+    cid: int,
+    filename: str,
+    content: bytes,
+    content_type: str = "application/octet-stream",
+) -> dict:
     r = client.post(
         f"/api/api-collections/{cid}/documents",
         files=[("files", (filename, content, content_type))],
@@ -149,14 +158,20 @@ def _mock_assess(monkeypatch, canned_response: dict):
                 {
                     "endpoint_id": ep.id,
                     "can_test": True,
-                    "can_test_auth": canned_response["overall"]["has_credentials"] or not ep.auth_required,
-                    "notes": [] if (canned_response["overall"]["has_credentials"] or not ep.auth_required)
-                             else ["No credentials for required auth"],
+                    "can_test_auth": canned_response["overall"]["has_credentials"]
+                    or not ep.auth_required,
+                    "notes": []
+                    if (
+                        canned_response["overall"]["has_credentials"]
+                        or not ep.auth_required
+                    )
+                    else ["No credentials for required auth"],
                 }
                 for ep in endpoints
             ]
 
         from aespa.models import ApiCollection
+
         collection = session.get(ApiCollection, collection_id)
         collection.readiness_json = json.dumps(result)
         session.add(collection)
@@ -174,7 +189,9 @@ def _mock_assess(monkeypatch, canned_response: dict):
                 ep.prereq_can_test = True
                 ep.prereq_can_test_auth = not ep.auth_required or overall_has_creds
                 ep.prereq_notes = json.dumps(
-                    [] if ep.prereq_can_test_auth else ["No credentials for required auth"]
+                    []
+                    if ep.prereq_can_test_auth
+                    else ["No credentials for required auth"]
                 )
             session.add(ep)
 
@@ -185,6 +202,7 @@ def _mock_assess(monkeypatch, canned_response: dict):
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
 
 def test_get_readiness_not_assessed(client):
     """GET /readiness before any assessment returns {status: not_assessed}."""
@@ -229,8 +247,10 @@ def test_readiness_no_credentials_flags_gap(client, monkeypatch):
     cid = _make_collection(client)
     # Upload an OpenAPI spec (parses with real parser — OpenAPI, no LLM needed)
     import aespa.services.api_docs as api_docs_mod
+
     async def _no_parse(session, cid_, doc_id):
         pass
+
     monkeypatch.setattr(api_docs_mod, "parse_document", _no_parse)
     r = client.post(f"/api/api-collections/{cid}/readiness")
     assert r.status_code == 200
@@ -289,10 +309,15 @@ def test_prereq_columns_green_with_credentials(client, monkeypatch):
     client.post(f"/api/api-collections/{cid}/documents/{doc['id']}/parse")
 
     # Add a bearer credential
-    cr = client.post(f"/api/api-collections/{cid}/credentials", json={
-        "scheme": "bearer", "name": "Authorization",
-        "value": "Bearer test-token", "label": "test",
-    })
+    cr = client.post(
+        f"/api/api-collections/{cid}/credentials",
+        json={
+            "scheme": "bearer",
+            "name": "Authorization",
+            "value": "Bearer test-token",
+            "label": "test",
+        },
+    )
     assert cr.status_code == 201
 
     client.post(f"/api/api-collections/{cid}/readiness")
@@ -339,6 +364,7 @@ def test_readiness_db_migration(tmp_path, monkeypatch):
     engine = sa.create_engine(f"sqlite:///{tmp_path}/test.db")
 
     from aespa import models as _m  # noqa: F401
+
     SQLModel.metadata.create_all(engine)
 
     # Run twice — must not raise
