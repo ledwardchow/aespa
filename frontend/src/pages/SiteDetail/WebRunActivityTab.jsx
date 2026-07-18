@@ -1,5 +1,6 @@
 import React from "react";
 import { IconSend } from "../../components/Icons";
+import { TokenUsageBar } from "../../components/TokenUsageBar";
 import { api } from "../../lib/api";
 import { truncUrl } from "../../lib/utilities";
 import { renderMarkdown, parseAliceTurnSegments, renderAliceTraceBox, renderAliceBlocks } from "../../lib/aliceRender";
@@ -9,39 +10,8 @@ export function WebRunActivityTab(props) {
     <>
       <div className="activity-panel">
           {(() => {
-          
-          const fmtTok = n => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M" : n >= 1_000 ? (n / 1_000).toFixed(1) + "K" : String(n || 0);
-          const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
           return <>
-              <div className="activity-token-bar" onClick={hasTokens ? () => setTokenExpanded(p => !p) : undefined} style={{
-              cursor: hasTokens ? "pointer" : "default"
-            }}>
-                {hasTokens ? <>
-                  <span className="token-bar-label">Tokens</span>
-                  <span className="token-bar-in" title="Input tokens">↑{fmtTok(tokenUsage.total_input)} in</span>
-                  <span className="token-bar-sep">·</span>
-                  <span className="token-bar-out" title="Output tokens">↓{fmtTok(tokenUsage.total_output)} out</span>
-                  {tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0 ? <>
-                    <span className="token-bar-sep">·</span>
-                    {tokenUsage.total_cache_read > 0 ? <span className="token-bar-cache-read" title="Cache read tokens">⚡{fmtTok(tokenUsage.total_cache_read)} cached</span> : null}
-                    {tokenUsage.total_cache_write > 0 ? <span className="token-bar-cache-write" title="Cache write tokens">✎{fmtTok(tokenUsage.total_cache_write)} written</span> : null}
-                  </> : null}
-                  <span className="activity-expand-chevron" style={{
-                  marginLeft: 4
-                }}>{tokenExpanded ? "▲" : "▼"}</span>
-                </> : <span className="token-bar-empty">No token data yet</span>}
-              </div>
-              {tokenExpanded && hasTokens && <div className="token-breakdown">
-                  {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => <div key={model} className="token-breakdown-row">
-                      <span className="token-model-name">{model}</span>
-                      <span className="token-in">↑{fmtTok(v.input)}</span>
-                      <span className="token-out">↓{fmtTok(v.output)}</span>
-                      {v.cache_read > 0 || v.cache_write > 0 ? <>
-                        {v.cache_read > 0 ? <span className="token-cache-read" title="Cache read">⚡{fmtTok(v.cache_read)}</span> : null}
-                        {v.cache_write > 0 ? <span className="token-cache-write" title="Cache write">✎{fmtTok(v.cache_write)}</span> : null}
-                      </> : null}
-                    </div>)}
-                </div>}
+              <TokenUsageBar tokenUsage={tokenUsage} tokenExpanded={tokenExpanded} setTokenExpanded={setTokenExpanded} />
               <div className="activity-sub-tab-bar">
                 <button className={"activity-sub-tab-btn" + (activitySubTab === "agents" ? " active" : "")} onClick={() => setActivitySubTab("agents")}>Agents{agents.map(normalizeAgentForRun).some(a => a.status === "active") ? " ●" : ""}</button>
                 <button className={"activity-sub-tab-btn" + (activitySubTab === "specialists" ? " active" : "")} onClick={() => setActivitySubTab("specialists")}>Specialist{agents.filter(a => a.id.startsWith("specialist-")).some(a => a.status === "active") ? " ●" : ""}</button>
@@ -177,6 +147,22 @@ export function WebRunActivityTab(props) {
               post_review_turn: {
                 label: "Review",
                 cls: entry.data?.low_confidence > 0 ? "phase-warning" : "phase-ok"
+              },
+              execution_monitor: {
+                label: "Execution Monitor",
+                cls: "phase-warning"
+              },
+              mentor_guidance: {
+                label: "Mentor Guidance",
+                cls: "phase-warning"
+              },
+              session_validator: {
+                label: "Session Validator",
+                cls: "phase-warning"
+              },
+              test_lead_completion_policy: {
+                label: "Test Lead Completion Gate",
+                cls: "phase-other"
               }
             };
             const _baseMeta = PHASE_META[entry.phase] || {
@@ -196,7 +182,8 @@ export function WebRunActivityTab(props) {
             const hasThinkingDetail = entry.phase === "thinking_step" && !!(entry.data?.observation || entry.data?.hypothesis || entry.data?.payload_purpose || entry.data?.payload_summary || entry.data?.tool_input || entry.data?.tool_output);
             const hasReportingDetail = entry.phase === "reporting_turn" && entry.data?.titles?.length > 0;
             const hasLlmDiagnostics = !!(entry.data?.native_stop_reason || entry.data?.provider_diagnostics?.length || entry.data?.termination_reason);
-            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail || hasLlmDiagnostics);
+            const hasInterventionDetail = entry.phase === "execution_monitor" || entry.phase === "mentor_guidance" || entry.phase === "session_validator" || entry.phase === "test_lead_completion_policy";
+            const hasPayload = !!(entry.data?.prompt || entry.data?.raw_response || hasThinkingDetail || hasReportingDetail || hasLlmDiagnostics || hasInterventionDetail);
             const isExpanded = expandedLogIds.has(entry._id);
             return <div key={entry._id}>
                   <div className={"activity-entry" + (hasPayload ? " activity-entry--expandable" : "")} onClick={hasPayload ? () => toggleLogId(entry._id) : undefined}>
@@ -230,6 +217,9 @@ export function WebRunActivityTab(props) {
                           explicit_done: entry.data?.explicit_done,
                           provider_diagnostics: entry.data?.provider_diagnostics
                         }, null, 2)}</pre></>}
+                      {hasInterventionDetail && <>
+                        <div className="activity-payload-label">{entry.data?.emitter || "Scan supervisor"} details</div>
+                        <pre>{JSON.stringify(entry.data, null, 2)}</pre></>}
                       {hasThinkingDetail && <>
                         {entry.data?.observation && <>
                           <div className="activity-payload-label">Observation</div>

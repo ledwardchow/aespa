@@ -31,8 +31,8 @@ def test_clear_traffic_preserves_scanner_visible_crawl_state(monkeypatch):
         "Request Content-Type: application/json\n"
         "HTTP status: 200\n"
         "Response Content-Type: application/json\n\n"
-        "Request body excerpt:\n{\"accountId\":\"10000001\"}\n\n"
-        "Response body excerpt:\n{\"ok\":true}"
+        'Request body excerpt:\n{"accountId":"10000001"}\n\n'
+        'Response body excerpt:\n{"ok":true}'
     )
 
     with Session(engine) as session:
@@ -46,7 +46,7 @@ def test_clear_traffic_preserves_scanner_visible_crawl_state(monkeypatch):
             url="https://target.local/api/accounts/lookup",
             title="API POST 200 /api/accounts/lookup",
             page_text=request_summary,
-            llm_context="[API endpoint]\nRequest body excerpt:\n{\"accountId\":\"10000001\"}",
+            llm_context='[API endpoint]\nRequest body excerpt:\n{"accountId":"10000001"}',
             has_object_ref=True,
             takes_input=True,
         )
@@ -87,7 +87,12 @@ def test_clear_traffic_preserves_scanner_visible_crawl_state(monkeypatch):
     traffic.clear_traffic(run_id)
 
     with Session(engine) as session:
-        assert session.exec(select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)).all() == []
+        assert (
+            session.exec(
+                select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
+            ).all()
+            == []
+        )
 
         page = session.get(CrawledPage, page_id)
         view = session.get(PageCredentialView, view_id)
@@ -112,15 +117,17 @@ def test_page_credential_view_out_includes_api_transcript_text():
         page_text=(
             "=== HTTP exchange observed during crawl ===\n"
             "\nREQUEST\nPOST https://target.local/api/accounts/lookup\n"
-            "\nBody:\n{\"accountId\":\"10000001\"}\n"
-            "\nRESPONSE\nStatus: 200\n\nBody:\n{\"ok\":true}"
+            '\nBody:\n{"accountId":"10000001"}\n'
+            '\nRESPONSE\nStatus: 200\n\nBody:\n{"ok":true}'
         ),
         llm_context="[API endpoint] Observed POST request during crawl.",
     )
 
     payload = PageCredentialViewOut.model_validate(view).model_dump()
 
-    assert payload["page_text"].startswith("=== HTTP exchange observed during crawl ===")
+    assert payload["page_text"].startswith(
+        "=== HTTP exchange observed during crawl ==="
+    )
     assert '"accountId":"10000001"' in payload["page_text"]
 
 
@@ -141,7 +148,7 @@ async def test_logging_async_client_success(monkeypatch):
         text="Success Body",
         request=httpx.Request("GET", "https://target.local/test"),
     )
-    
+
     # We monkeypatch the superclass's send method
     monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
 
@@ -173,10 +180,16 @@ async def test_logging_async_client_failure(monkeypatch):
     monkeypatch.setattr(traffic, "get_engine", lambda: engine)
 
     # Mock the underlying super().send to raise a ConnectTimeout exception
-    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out")))
+    monkeypatch.setattr(
+        httpx.AsyncClient,
+        "send",
+        AsyncMock(side_effect=httpx.ConnectTimeout("Connection timed out")),
+    )
 
     async with LoggingAsyncClient(run_id=42, username="test_user") as client:
-        req = httpx.Request("POST", "https://target.local/timeout", content=b"Request Data")
+        req = httpx.Request(
+            "POST", "https://target.local/timeout", content=b"Request Data"
+        )
         with pytest.raises(httpx.ConnectTimeout):
             await client.send(req)
 
@@ -188,7 +201,10 @@ async def test_logging_async_client_failure(monkeypatch):
         assert entry.method == "POST"
         assert entry.url == "https://target.local/timeout"
         assert entry.status is None
-        assert "[Request Failed: ConnectTimeout - Connection timed out]" in entry.response_body
+        assert (
+            "[Request Failed: ConnectTimeout - Connection timed out]"
+            in entry.response_body
+        )
         assert entry.username == "test_user"
         assert entry.request_body == "Request Data"
 
@@ -205,11 +221,13 @@ async def test_playwright_logging_request_failed(monkeypatch):
 
     # Mock Playwright objects
     mock_ctx = MagicMock()
-    
+
     # We will capture the listeners registered on the context
     listeners = {}
+
     def on_event(event_name, handler):
         listeners[event_name] = handler
+
     mock_ctx.on = on_event
 
     setup_playwright_logging(mock_ctx, run_id=100, username="pw_user")
@@ -226,9 +244,10 @@ async def test_playwright_logging_request_failed(monkeypatch):
     mock_req.post_data = None
     mock_req.post_data_json = None
     mock_req.failure = "net::ERR_CONNECTION_REFUSED"
-    
+
     async def mock_all_headers():
         return {"Host": "target.local"}
+
     mock_req.all_headers = mock_all_headers
     mock_req.headers = {"Host": "target.local"}
 
@@ -246,7 +265,10 @@ async def test_playwright_logging_request_failed(monkeypatch):
         assert entry.method == "GET"
         assert entry.url == "https://target.local/fail"
         assert entry.status is None
-        assert "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]" in entry.response_body
+        assert (
+            "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]"
+            in entry.response_body
+        )
         assert entry.username == "pw_user"
 
 
@@ -288,7 +310,6 @@ async def test_playwright_logging_skips_noisy_resource_types(monkeypatch):
         assert session.exec(select(TrafficEntry)).all() == []
 
 
-
 @pytest.mark.anyio
 async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
     """ALICE/API traffic must land on api_test_run_id (not test_run_id) so it
@@ -303,7 +324,9 @@ async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
 
     hooks = traffic.make_httpx_hooks(None, username="alice", api_run_id=7)
     req = httpx.Request("GET", "https://api.target.local/v1/users")
-    resp = httpx.Response(200, headers={"Content-Type": "application/json"}, text="[]", request=req)
+    resp = httpx.Response(
+        200, headers={"Content-Type": "application/json"}, text="[]", request=req
+    )
     for h in hooks["request"]:
         await h(req)
     for h in hooks["response"]:

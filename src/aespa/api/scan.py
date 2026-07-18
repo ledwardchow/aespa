@@ -1,4 +1,5 @@
 """Scan API — start/stop/status/findings/validation endpoints."""
+
 from __future__ import annotations
 
 import json
@@ -56,7 +57,9 @@ async def start_thinking_scan(
     """Start an LLM-directed scan that dynamically chooses what to test next."""
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+        raise HTTPException(
+            status_code=409, detail="Crawl is still running — wait for it to finish"
+        )
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     if body and body.coverage_mode in ("track", "enforce"):
@@ -66,6 +69,7 @@ async def start_thinking_scan(
     # Seed workprogram synchronously so it's populated before the response returns.
     try:
         from aespa.services.web_workprogram import seed_web_workprogram
+
         seed_web_workprogram(run_id)
     except Exception as _se:
         pass  # non-fatal
@@ -74,8 +78,11 @@ async def start_thinking_scan(
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/stop")
-async def stop_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def stop_thinking_scan(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
     import asyncio
+
     _get_run_or_404(session, run_id)
     scanner_svc.request_thinking_stop(run_id)
     await asyncio.sleep(0)  # yield to event loop so queued SSE events are flushed
@@ -102,11 +109,15 @@ def thinking_scan_checkpoint_status(
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/resume")
-async def resume_thinking_scan(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def resume_thinking_scan(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
     run = _get_run_or_404(session, run_id)
     if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Crawl is still running — wait for it to finish")
+        raise HTTPException(
+            status_code=409, detail="Crawl is still running — wait for it to finish"
+        )
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
     status = checkpoint_svc.checkpoint_status(run_id)
@@ -114,12 +125,12 @@ async def resume_thinking_scan(run_id: int, session: Session = Depends(get_sessi
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")
     try:
         from aespa.services.web_workprogram import seed_web_workprogram
+
         seed_web_workprogram(run_id)
     except Exception:
         pass
     await scanner_svc.start_thinking_scan_resume(run_id)
     return scanner_svc.get_thinking_scan_status(run_id)
-
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
@@ -136,7 +147,9 @@ def delete_finding(
     session.commit()
 
 
-@router.patch("/api/test-runs/{run_id}/findings/{finding_id}", response_model=ScanFindingOut)
+@router.patch(
+    "/api/test-runs/{run_id}/findings/{finding_id}", response_model=ScanFindingOut
+)
 def update_finding(
     run_id: int,
     finding_id: int,
@@ -158,7 +171,10 @@ def update_finding(
 @router.delete("/api/test-runs/{run_id}/findings", status_code=204)
 def delete_findings_group(
     run_id: int,
-    title: str | None = Query(default=None, description="Delete all findings with this title. Omit to clear ALL findings."),
+    title: str | None = Query(
+        default=None,
+        description="Delete all findings with this title. Omit to clear ALL findings.",
+    ),
     session: Session = Depends(get_session),
 ) -> None:
     """Delete findings for this run.  If *title* is supplied, only that group is
@@ -263,9 +279,7 @@ def import_findings(
             and validation_status != "validating"
         )
         import_validation_status = (
-            validation_status
-            if keep_validation
-            else "unvalidated"
+            validation_status if keep_validation else "unvalidated"
         )
         page = _page_for_imported_finding(session, run, item.affected_url)
         finding = ScanFinding(
@@ -307,6 +321,7 @@ def import_findings(
 
 # ── Validation endpoints ──────────────────────────────────────────────────────
 
+
 @router.post("/api/test-runs/{run_id}/validate", response_model=ValidationStatusOut)
 async def start_validation(
     run_id: int,
@@ -320,7 +335,9 @@ async def start_validation(
     return ValidationStatusOut(**validator_svc.get_validation_status(run_id))
 
 
-@router.post("/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut)
+@router.post(
+    "/api/test-runs/{run_id}/validate/stop", response_model=ValidationStatusOut
+)
 def stop_validation(
     run_id: int,
     session: Session = Depends(get_session),
@@ -346,7 +363,9 @@ async def validate_single_finding(
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
     if validator_svc.is_validating(run_id):
-        raise HTTPException(status_code=409, detail="Validation already running for this run")
+        raise HTTPException(
+            status_code=409, detail="Validation already running for this run"
+        )
     # Mark as validating immediately so the UI updates before the task starts.
     finding.validation_status = "validating"
     finding.validation_note = None
@@ -357,7 +376,9 @@ async def validate_single_finding(
     return ScanFindingOut.model_validate(finding)
 
 
-@router.get("/api/test-runs/{run_id}/validate/status", response_model=ValidationStatusOut)
+@router.get(
+    "/api/test-runs/{run_id}/validate/status", response_model=ValidationStatusOut
+)
 def get_validation_status(
     run_id: int,
     session: Session = Depends(get_session),
@@ -502,19 +523,21 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         complete_d = next((d for e, d in evts if e.status == "complete"), {})
         resp_status = complete_d.get("status", "")
 
-        method       = main_d.get("method", "")
-        url          = main_d.get("url", "")
-        tool         = main_d.get("tool", "")
-        note         = main_d.get("note") or complete_d.get("note") or ""
-        observation  = main_d.get("observation", "")
-        hypothesis   = main_d.get("hypothesis", "")
+        method = main_d.get("method", "")
+        url = main_d.get("url", "")
+        tool = main_d.get("tool", "")
+        note = main_d.get("note") or complete_d.get("note") or ""
+        observation = main_d.get("observation", "")
+        hypothesis = main_d.get("hypothesis", "")
         payload_purp = main_d.get("payload_purpose", "")
-        payload_sum  = main_d.get("payload_summary", "")
-        finding_id   = complete_d.get("finding_id")
+        payload_sum = main_d.get("payload_summary", "")
+        finding_id = complete_d.get("finding_id")
         affected_url = complete_d.get("affected_url", "")
         ts = main_e.created_at.strftime("%H:%M:%S") if main_e.created_at else ""
 
-        max_steps = next((d.get("max_steps") for _, d in evts if d.get("max_steps")), "?")
+        max_steps = next(
+            (d.get("max_steps") for _, d in evts if d.get("max_steps")), "?"
+        )
 
         if tool:
             heading = f"### `{ts}` Step {step_num}/{max_steps} — tool `{tool}`"
@@ -540,7 +563,11 @@ def _build_thinking_log_markdown(run_id: int, entries: list[ScanLog]) -> str:
         if payload_sum:
             lines += ["**Payload:**", "```", payload_sum, "```", ""]
         if finding_id and affected_url:
-            lines += [f"**Affected URL:** {affected_url}  ", f"**Finding ID:** {finding_id}", ""]
+            lines += [
+                f"**Affected URL:** {affected_url}  ",
+                f"**Finding ID:** {finding_id}",
+                "",
+            ]
 
         lines += ["---", ""]
 
@@ -582,10 +609,12 @@ def export_thinking_log(
 
 # ── Guided login endpoints ────────────────────────────────────────────────────
 
+
 @router.get("/api/test-runs/{run_id}/guided-login/status")
 def guided_login_status(run_id: int) -> dict:
     """Return which credential IDs are currently waiting for guided-login confirmation."""
     from aespa.services.crawler import _guided_ready_registry, _guided_registry
+
     return {
         "pending_credential_ids": list(_guided_registry.keys()),
         "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),
@@ -599,6 +628,7 @@ async def ready_guided_login(run_id: int, credential_id: int) -> dict:
     Must be async for the same reason as confirm_guided_login.
     """
     from aespa.services.crawler import _guided_ready_registry
+
     event = _guided_ready_registry.get(credential_id)
     if event is None:
         raise HTTPException(
@@ -626,6 +656,7 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
     (sync endpoint) can silently fail to wake the waiting coroutine.
     """
     from aespa.services.crawler import _guided_registry
+
     event = _guided_registry.get(credential_id)
     if event is None:
         raise HTTPException(
@@ -638,3 +669,22 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
         )
     event.set()
     return {"status": "confirmed", "credential_id": credential_id}
+
+
+@router.post("/api/test-runs/{run_id}/entra-authenticator/{credential_id}/retry")
+async def retry_entra_authenticator(run_id: int, credential_id: int) -> dict:
+    """Signal that the user is ready to retry an Entra Authenticator approval."""
+    from aespa.services.crawler import _entra_retry_registry
+
+    event = _entra_retry_registry.get((run_id, credential_id))
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No Entra Authenticator retry is pending for credential {credential_id}. "
+                "Either the crawl is not running, the approval has already moved on, "
+                "or the retry window timed out."
+            ),
+        )
+    event.set()
+    return {"status": "retrying", "credential_id": credential_id}

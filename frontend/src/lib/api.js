@@ -68,10 +68,13 @@ export const api = {
   getSastScanStatus:   (id)       => req(`/api/sast-runs/${id}/scan/status`),
   getSastAgentLog:     (id)       => req(`/api/sast-runs/${id}/agent-log`),
   getSastLeads:        (id)       => req(`/api/sast-runs/${id}/leads`),
-  createStandaloneSastRun: (file, name) => {
+  getSastTokenUsage:   (id)       => req(`/api/sast-runs/${id}/token-usage`),
+  getApiTokenUsage:    (id)       => req(`/api/api-test-runs/${id}/token-usage`),
+  createStandaloneSastRun: (file, name, llm_profile_id) => {
     const fd = new FormData();
     fd.append("file", file);
     if (name) fd.append("name", name);
+    if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
     return fetch(`/api/sast-runs`, { method:"POST", body:fd })
       .then(async r => { const t = await r.text(); const d = t?JSON.parse(t):null; if(!r.ok){ const e=new Error(formatError(d)||`${r.status} ${r.statusText}`); e.status=r.status; throw e; } return d; });
   },
@@ -153,8 +156,10 @@ export const api = {
   getTargetIntelligence: (id,kind="") => req(`/api/test-runs/${id}/target-intelligence${kind?`?kind=${encodeURIComponent(kind)}`:""}`),
   getScannerSessions: (id, includeInactive=true) => req(`/api/test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateScannerSession: (runId, sessionId, b) => req(`/api/test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  validateScannerSessions: id => req(`/api/test-runs/${id}/scanner-sessions/validate`, { method:"POST" }),
   getApiScannerSessions: (id, includeInactive=true) => req(`/api/api-test-runs/${id}/scanner-sessions${includeInactive?"?include_inactive=true":""}`),
   updateApiScannerSession: (runId, sessionId, b) => req(`/api/api-test-runs/${runId}/scanner-sessions/${sessionId}`, { method:"PATCH", body:b }),
+  validateApiScannerSessions: id => req(`/api/api-test-runs/${id}/scanner-sessions/validate`, { method:"POST" }),
   getReconSummary:  (id)          => req(`/api/test-runs/${id}/recon-summary`),
   setPageScope:     (runId,pgId,b)=> req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method:"PATCH", body:b }),
   updateScopeHosts: (siteId, hosts) => req(`/api/sites/${siteId}/scope-hosts`, { method:"PUT", body:{scope_hosts:hosts} }),

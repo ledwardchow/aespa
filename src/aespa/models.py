@@ -17,6 +17,7 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"  # existing single-page Playwright form fill
     totp = "totp"  # auto + TOTP 2FA code from stored seed
+    entra_id = "entra_id"  # Microsoft Entra ID multi-page browser flow
     guided = "guided"  # open headed browser, user logs in manually
 
 
@@ -641,6 +642,7 @@ class ScannerSession(SQLModel, table=True):
     kind: str = Field(
         default="cookie", index=True
     )  # anonymous | cookie | bearer | mixed
+    account_label: Optional[str] = Field(default=None, index=True)
     username: Optional[str] = Field(default=None, index=True)
     credential_id: Optional[int] = Field(
         default=None, foreign_key="credential.id", index=True
