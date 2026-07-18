@@ -669,3 +669,22 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
         )
     event.set()
     return {"status": "confirmed", "credential_id": credential_id}
+
+
+@router.post("/api/test-runs/{run_id}/entra-authenticator/{credential_id}/retry")
+async def retry_entra_authenticator(run_id: int, credential_id: int) -> dict:
+    """Signal that the user is ready to retry an Entra Authenticator approval."""
+    from aespa.services.crawler import _entra_retry_registry
+
+    event = _entra_retry_registry.get((run_id, credential_id))
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No Entra Authenticator retry is pending for credential {credential_id}. "
+                "Either the crawl is not running, the approval has already moved on, "
+                "or the retry window timed out."
+            ),
+        )
+    event.set()
+    return {"status": "retrying", "credential_id": credential_id}
