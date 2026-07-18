@@ -899,6 +899,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "interactive/modal login). Reuse it later via use_session."
                     ),
                 },
+                "capture_username": {
+                    "type": "string",
+                    "description": (
+                        "Target account username or email used to create capture_session. "
+                        "Set this whenever the browser steps perform a login so the session "
+                        "store records which account produced the session."
+                    ),
+                },
                 "owasp_category": {
                     "type": "string",
                     "description": (

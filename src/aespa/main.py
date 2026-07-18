@@ -59,7 +59,11 @@ def _verify_cloudflare_jwt(token: str, audience: str | None = None) -> str | Non
         # 1. Unverified decode to extract the issuer
         unverified = jwt.decode(token, options={"verify_signature": False})
         issuer = unverified.get("iss")
-        if not issuer or not issuer.startswith("https://") or not issuer.endswith(".cloudflareaccess.com"):
+        if (
+            not issuer
+            or not issuer.startswith("https://")
+            or not issuer.endswith(".cloudflareaccess.com")
+        ):
             return None
 
         # 2. Get JWKS dynamically from verified issuer
@@ -125,7 +129,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, session: Session = Depends(get_session)
     ) -> dict[str, str | None]:
         # Extract JWT assertion header if present
-        jwt_token = request.headers.get("cf-access-jwt-assertion") or request.headers.get("Cf-Access-Jwt-Assertion")
+        jwt_token = request.headers.get(
+            "cf-access-jwt-assertion"
+        ) or request.headers.get("Cf-Access-Jwt-Assertion")
         username = None
         if jwt_token:
             audience = get_cloudflare_access_config(session).audience
@@ -147,26 +153,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return HTMLResponse(html, headers=_NO_CACHE)
 
         app.add_api_route("/", _index_html, methods=["GET"], include_in_schema=False)
-        app.add_api_route("/index.html", _index_html, methods=["GET"], include_in_schema=False)
+        app.add_api_route(
+            "/index.html", _index_html, methods=["GET"], include_in_schema=False
+        )
 
         # Serve key mutable assets as explicit routes so StaticFiles never gets
         # a chance to return a 304 Not Modified.  A 304 tells the browser to use
         # its cached copy even when Cache-Control: no-store is set on the 304
         # response — the browser has already committed to serving the old file.
-        _JS_TYPE  = "application/javascript; charset=utf-8"
+        _JS_TYPE = "application/javascript; charset=utf-8"
         _CSS_TYPE = "text/css; charset=utf-8"
         for _fname, _ctype in [("app.js", _JS_TYPE), ("styles.css", _CSS_TYPE)]:
             _fpath = web_dir / _fname
             if _fpath.exists():
+
                 def _make_handler(p: Path, ct: str):
                     def _handler() -> Response:
-                        return Response(content=p.read_bytes(), media_type=ct, headers=_NO_CACHE)
+                        return Response(
+                            content=p.read_bytes(), media_type=ct, headers=_NO_CACHE
+                        )
+
                     return _handler
-                app.add_api_route(f"/{_fname}", _make_handler(_fpath, _ctype),
-                                  methods=["GET"], include_in_schema=False)
+
+                app.add_api_route(
+                    f"/{_fname}",
+                    _make_handler(_fpath, _ctype),
+                    methods=["GET"],
+                    include_in_schema=False,
+                )
 
         app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
     else:
+
         @app.get("/")
         def _no_spa() -> JSONResponse:
             return JSONResponse(
@@ -196,7 +214,9 @@ def _build_frontend_if_stale() -> None:
     if not frontend.exists():
         return  # installed without sources; nothing to build
     src = frontend / "src"
-    newest_src = max((p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0)
+    newest_src = max(
+        (p.stat().st_mtime for p in src.rglob("*") if p.is_file()), default=0
+    )
     if built.exists() and built.stat().st_mtime >= newest_src:
         return
     print("[aespa] frontend changed — running npm run build...")

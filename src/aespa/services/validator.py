@@ -8,6 +8,7 @@ For each unvalidated finding:
   4. LLM reviews the probe traffic and returns a verdict: confirmed | false_positive.
   5. finding.validation_status and finding.validation_note are updated, and an event is emitted.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,9 +49,7 @@ _UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 REQUEST_TIMEOUT = 10.0
-_INTERRUPTED_VALIDATION_NOTE = (
-    "Validation was interrupted before a verdict (process restart); reset for re-validation."
-)
+_INTERRUPTED_VALIDATION_NOTE = "Validation was interrupted before a verdict (process restart); reset for re-validation."
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -68,11 +67,11 @@ def get_validation_status(run_id: int) -> dict:
             select(ScanFinding).where(ScanFinding.test_run_id == run_id)
         ).all()
     total = len(findings)
-    confirmed   = sum(1 for f in findings if f.validation_status == "confirmed")
-    false_pos   = sum(1 for f in findings if f.validation_status == "false_positive")
+    confirmed = sum(1 for f in findings if f.validation_status == "confirmed")
+    false_pos = sum(1 for f in findings if f.validation_status == "false_positive")
     unconfirmed = sum(1 for f in findings if f.validation_status == "unconfirmed")
-    skipped     = sum(1 for f in findings if f.validation_status == "skipped")
-    validating  = sum(1 for f in findings if f.validation_status == "validating")
+    skipped = sum(1 for f in findings if f.validation_status == "skipped")
+    validating = sum(1 for f in findings if f.validation_status == "validating")
     unvalidated = sum(1 for f in findings if f.validation_status == "unvalidated")
     if run_id in _stop_requested:
         status = "stopped"
@@ -95,6 +94,7 @@ def get_validation_status(run_id: int) -> dict:
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
+
 
 async def start_validation(
     run_id: int,
@@ -125,12 +125,19 @@ async def start_validation(
     def _on_validation_done(_task: asyncio.Task) -> None:
         _validation_tasks.pop(run_id, None)
         try:
-            events_svc.emit(run_id, {
-                "type": "validation_status_update",
-                **get_validation_status(run_id),
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "validation_status_update",
+                    **get_validation_status(run_id),
+                },
+            )
         except Exception:
-            log.debug("Failed to emit final validation status for run_id=%s", run_id, exc_info=True)
+            log.debug(
+                "Failed to emit final validation status for run_id=%s",
+                run_id,
+                exc_info=True,
+            )
 
     task.add_done_callback(_on_validation_done)
 
@@ -152,7 +159,8 @@ async def resume_interrupted_validations() -> None:
     for run_id, finding_ids in by_run.items():
         log.info(
             "Resuming %d interrupted validation(s) for run_id=%s",
-            len(finding_ids), run_id,
+            len(finding_ids),
+            run_id,
         )
         await start_validation(run_id, finding_ids=finding_ids)
 
@@ -190,7 +198,8 @@ async def validate_finding_inline(
         if finding.api_test_run_id is not None:
             log.info(
                 "Skipping inline validation for API finding %s (run_id=%s)",
-                finding_id, run_id,
+                finding_id,
+                run_id,
             )
             return
         site = s.get(Site, run.site_id)
@@ -212,21 +221,27 @@ async def validate_finding_inline(
             if obj is not None:
                 s.expunge(obj)
 
-    events_svc.emit(run_id, {
-        "type": "finding_validation_update",
-        "finding_id": finding_id,
-        "validation_status": "validating",
-        "validation_note": "Validation running.",
-    })
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": f"validator-{finding_id}",
-        "role": "Validator",
-        "status": "active",
-        "current_task": f"Validating: {finding.title[:80]}",
-        "outcome": None,
-        "_persist": True,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "finding_validation_update",
+            "finding_id": finding_id,
+            "validation_status": "validating",
+            "validation_note": "Validation running.",
+        },
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": f"validator-{finding_id}",
+            "role": "Validator",
+            "status": "active",
+            "current_task": f"Validating: {finding.title[:80]}",
+            "outcome": None,
+            "_persist": True,
+        },
+    )
 
     if llm_cfg is None:
         await _persist_verdict(
@@ -240,24 +255,40 @@ async def validate_finding_inline(
         return
 
     if cred_sessions is None:
-        cred_sessions = await _get_or_create_sessions(
-            run_id, str(site.base_url or "").strip(), site.login_url,
-            creds, site.requires_auth,
-        ) if site else {}
+        cred_sessions = (
+            await _get_or_create_sessions(
+                run_id,
+                str(site.base_url or "").strip(),
+                site.login_url,
+                creds,
+                site.requires_auth,
+            )
+            if site
+            else {}
+        )
 
     users_list: list[dict] | None = [
         {"username": cs["username"], "label": cs.get("label")}
         for cs in cred_sessions.values()
     ] or None
-    user_sessions: dict[str, dict] = {cs["username"]: cs for cs in cred_sessions.values()}
+    user_sessions: dict[str, dict] = {
+        cs["username"]: cs for cs in cred_sessions.values()
+    }
 
     await _validate_one(
-        run_id, finding, llm_cfg, user_sessions, users_list,
-        scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
+        run_id,
+        finding,
+        llm_cfg,
+        user_sessions,
+        users_list,
+        scanner_policy,
+        cred_sessions=cred_sessions,
+        validator_cfg=validator_cfg,
     )
 
 
 # ── Task wrapper ──────────────────────────────────────────────────────────────
+
 
 async def _validation_task(
     run_id: int,
@@ -277,13 +308,16 @@ async def _validation_task(
         _reset_validating_findings(run_id, "Validation stopped by user.")
     except Exception:
         log.exception("Validation task failed for run_id=%s", run_id)
-        _reset_validating_findings(run_id, "Validation failed before a verdict was reached.")
+        _reset_validating_findings(
+            run_id, "Validation failed before a verdict was reached."
+        )
     finally:
         _stop_requested.discard(run_id)
         llm_svc.clear_run_context()
 
 
 # ── Core validation ───────────────────────────────────────────────────────────
+
 
 async def _run_validation_batch(
     findings: list[ScanFinding],
@@ -303,6 +337,7 @@ async def _run_validation_batch(
             await validate_one(finding)
 
     await asyncio.gather(*(_validate_limited(finding) for finding in findings))
+
 
 async def _do_validate(
     run_id: int,
@@ -349,40 +384,57 @@ async def _do_validate(
                 s.add(row)
         s.commit()
     for f in findings:
-        events_svc.emit(run_id, {
-            "type": "finding_validation_update",
-            "finding_id": f.id,
-            "validation_status": "validating",
-        })
-        events_svc.emit(run_id, {
-            "type": "agent_status",
-            "agent_id": f"validator-{f.id}",
-            "role": "Validator",
-            "status": "active",
-            "current_task": f"Validating: {f.title[:80]}",
-            "outcome": None,
-            "_persist": True,
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "finding_validation_update",
+                "finding_id": f.id,
+                "validation_status": "validating",
+            },
+        )
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": f"validator-{f.id}",
+                "role": "Validator",
+                "status": "active",
+                "current_task": f"Validating: {f.title[:80]}",
+                "outcome": None,
+                "_persist": True,
+            },
+        )
 
     # Bootstrap sessions (reuse from active scan if possible).
     cred_sessions = await _get_or_create_sessions(
-        run_id, str(site.base_url or "").strip(), site.login_url,
-        creds, site.requires_auth,
+        run_id,
+        str(site.base_url or "").strip(),
+        site.login_url,
+        creds,
+        site.requires_auth,
     )
 
     users_list: list[dict] | None = [
         {"username": cs["username"], "label": cs.get("label")}
         for cs in cred_sessions.values()
     ] or None
-    user_sessions: dict[str, dict] = {cs["username"]: cs for cs in cred_sessions.values()}
+    user_sessions: dict[str, dict] = {
+        cs["username"]: cs for cs in cred_sessions.values()
+    }
 
     async def _validate_safely(finding: ScanFinding) -> None:
         if run_id in _stop_requested:
             return
         try:
             await _validate_one(
-                run_id, finding, llm_cfg, user_sessions, users_list,
-                scanner_policy, cred_sessions=cred_sessions, validator_cfg=validator_cfg,
+                run_id,
+                finding,
+                llm_cfg,
+                user_sessions,
+                users_list,
+                scanner_policy,
+                cred_sessions=cred_sessions,
+                validator_cfg=validator_cfg,
             )
         except Exception as exc:
             log.exception("Validation failed for finding id=%s", finding.id)
@@ -432,7 +484,9 @@ async def _run_adversarial_validator_loop(
         f"**Scanner evidence**\n{finding.evidence or 'No evidence provided.'}"
     )
     if disproof_hints:
-        initial_message += f"\n\n**Category-specific disproof strategies**\n{disproof_hints}"
+        initial_message += (
+            f"\n\n**Category-specific disproof strategies**\n{disproof_hints}"
+        )
     if validator_cfg.require_concrete_disproof:
         initial_message += (
             "\n\n**Validation mode: strict**\n"
@@ -455,11 +509,19 @@ async def _run_adversarial_validator_loop(
         step_counter[0] = step
         if tool_name == "http_request":
             return await _validator_http_request(
-                tool_input, primary_session, user_sessions_by_name, scanner_policy, run_id=run_id
+                tool_input,
+                primary_session,
+                user_sessions_by_name,
+                scanner_policy,
+                run_id=run_id,
             )
         if tool_name == "compare_responses":
             return await _validator_compare_responses(
-                tool_input, primary_session, user_sessions_by_name, scanner_policy, run_id=run_id
+                tool_input,
+                primary_session,
+                user_sessions_by_name,
+                scanner_policy,
+                run_id=run_id,
             )
         if tool_name == "context_tool":
             return await _validator_context_tool(tool_input, run_id, finding)
@@ -468,15 +530,18 @@ async def _run_adversarial_validator_loop(
             reasoning = tool_input.get("reasoning", "")
             confidence = tool_input.get("confidence", "medium")
             verdict_holder.append((verdict, reasoning, confidence, dict(tool_input)))
-            events_svc.emit(run_id, {
-                "type": "agent_status",
-                "agent_id": f"validator-{finding.id}",
-                "role": "Validator",
-                "status": "active",
-                "current_task": f"Verdict reached: {verdict}",
-                "outcome": None,
-                "_persist": True,
-            })
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": f"validator-{finding.id}",
+                    "role": "Validator",
+                    "status": "active",
+                    "current_task": f"Verdict reached: {verdict}",
+                    "outcome": None,
+                    "_persist": True,
+                },
+            )
             return {"verdict": verdict, "reasoning": reasoning}
         log.warning("Adversarial validator: unknown tool call '%s'", tool_name)
         return {"error": f"Unknown tool: {tool_name}"}
@@ -530,6 +595,7 @@ async def _validator_http_request(
             content = str(body).encode()
 
     from aespa.services.traffic import LoggingAsyncClient
+
     try:
         async with LoggingAsyncClient(
             run_id=run_id,
@@ -565,7 +631,9 @@ async def _validator_compare_responses(
     """Execute baseline and test requests then return a comparison."""
 
     async def _fetch(spec: dict) -> dict:
-        return await _validator_http_request(spec, primary_session, user_sessions, scanner_policy, run_id=run_id)
+        return await _validator_http_request(
+            spec, primary_session, user_sessions, scanner_policy, run_id=run_id
+        )
 
     baseline_spec = tool_input.get("baseline", {})
     test_spec = tool_input.get("test", {})
@@ -583,12 +651,12 @@ async def _validator_compare_responses(
     test_body = test_res.get("body", "")
     len_diff = len(test_body) - len(baseline_body)
     status_diff = (
-        "same" if baseline_status == test_status
+        "same"
+        if baseline_status == test_status
         else f"changed from {baseline_status} to {test_status}"
     )
     body_diff_summary = (
-        f"Body length changed by {len_diff:+d} characters. "
-        f"Status: {status_diff}."
+        f"Body length changed by {len_diff:+d} characters. Status: {status_diff}."
     )
 
     return {
@@ -599,7 +667,9 @@ async def _validator_compare_responses(
     }
 
 
-async def _validator_context_tool(tool_input: dict, run_id: int, finding: ScanFinding) -> dict:
+async def _validator_context_tool(
+    tool_input: dict, run_id: int, finding: ScanFinding
+) -> dict:
     """Provide finding context to the validator. Limited subset of the full context tool."""
     action = tool_input.get("action", "")
     if action == "get_finding":
@@ -613,7 +683,9 @@ async def _validator_context_tool(tool_input: dict, run_id: int, finding: ScanFi
             "evidence": finding.evidence,
         }
     # For other actions, return a helpful message rather than an error.
-    return {"message": f"context_tool action '{action}' is not available to the validator. Use http_request or compare_responses to gather evidence directly."}
+    return {
+        "message": f"context_tool action '{action}' is not available to the validator. Use http_request or compare_responses to gather evidence directly."
+    }
 
 
 async def _validate_one(
@@ -627,20 +699,25 @@ async def _validate_one(
     validator_cfg=None,
 ) -> None:
     log.info("Validating finding id=%s: %s", finding.id, finding.title)
-    events_svc.emit(run_id, {
-        "type": "scanner_phase",
-        "phase": "thinking_step",
-        "status": "start",
-        "message": f"Validating finding: {finding.title!r} — {finding.affected_url or 'no URL'}",
-        "data": {"finding_id": finding.id},
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "thinking_step",
+            "status": "start",
+            "message": f"Validating finding: {finding.title!r} — {finding.affected_url or 'no URL'}",
+            "data": {"finding_id": finding.id},
+        },
+    )
 
     # Load validator config lazily if not provided (e.g., from inline validation).
     if validator_cfg is None:
         with Session(get_engine()) as s:
             validator_cfg = get_adversarial_validator_config(s)
 
-    deterministic = await _deterministic_validate_finding(finding, cred_sessions or {}, scanner_policy)
+    deterministic = await _deterministic_validate_finding(
+        finding, cred_sessions or {}, scanner_policy
+    )
     if deterministic:
         verdict, reasoning, poc_spec = deterministic
         await _persist_verdict(
@@ -653,7 +730,8 @@ async def _validate_one(
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
-                run_id, finding,
+                run_id,
+                finding,
                 done_input=poc_spec,
                 cred_sessions=cred_sessions or {},
                 scanner_policy=scanner_policy,
@@ -666,7 +744,9 @@ async def _validate_one(
     ):
         log.info(
             "  Skipping validation for finding %s (severity %s below threshold %s)",
-            finding.id, finding.severity, validator_cfg.min_severity,
+            finding.id,
+            finding.severity,
+            validator_cfg.min_severity,
         )
         await _persist_verdict(
             run_id,
@@ -682,7 +762,12 @@ async def _validate_one(
     if validator_cfg.enabled:
         done_input: dict = {}
         try:
-            verdict, reasoning, confidence, done_input = await _run_adversarial_validator_loop(
+            (
+                verdict,
+                reasoning,
+                confidence,
+                done_input,
+            ) = await _run_adversarial_validator_loop(
                 run_id=run_id,
                 finding=finding,
                 validator_cfg=validator_cfg,
@@ -691,10 +776,20 @@ async def _validate_one(
                 scanner_policy=scanner_policy,
             )
         except Exception as e:
-            log.warning("Adversarial validator loop failed for finding %s: %s", finding.id, e)
-            verdict, reasoning = "confirmed", f"Adversarial validator encountered an error: {e}"
+            log.warning(
+                "Adversarial validator loop failed for finding %s: %s", finding.id, e
+            )
+            verdict, reasoning = (
+                "confirmed",
+                f"Adversarial validator encountered an error: {e}",
+            )
             confidence = "low"
-        log.info("  Finding %s adversarial verdict: %s (confidence: %s)", finding.id, verdict, confidence)
+        log.info(
+            "  Finding %s adversarial verdict: %s (confidence: %s)",
+            finding.id,
+            verdict,
+            confidence,
+        )
         await _persist_verdict(
             run_id,
             finding.id,
@@ -705,7 +800,8 @@ async def _validate_one(
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
-                run_id, finding,
+                run_id,
+                finding,
                 done_input=done_input,
                 cred_sessions=cred_sessions or {},
                 scanner_policy=scanner_policy,
@@ -733,14 +829,18 @@ async def _validate_one(
 
     # Phase 2: Execute probes.
     results: list[dict] = []
-    primary_session = next(iter(user_sessions.values()), None) if user_sessions else None
+    primary_session = (
+        next(iter(user_sessions.values()), None) if user_sessions else None
+    )
 
     for probe in probes:
         try:
             as_user_name = probe.get("as_user") or None
             session = user_sessions.get(as_user_name) if as_user_name else None
             result = await _run_validation_probe(
-                probe, primary_session, session,
+                probe,
+                primary_session,
+                session,
                 run_id=run_id,
                 page_url=finding.affected_url,
                 scanner_policy=scanner_policy,
@@ -812,65 +912,85 @@ def _validation_evidence_items(
     for idx, result in enumerate((validation_results or [])[:3], start=1):
         summary = str(result.get("desc") or f"Validation probe {idx}")
         status = result.get("status")
-        items.append({
-            "type": "validation_probe",
-            "label": f"Validation probe {idx}",
-            "value": f"{summary}\nURL: {result.get('url') or ''}\nStatus: {status}",
-            "confidence": verdict,
-            "source": source,
-            "metadata": {"url": result.get("url"), "status": status, "as_user": result.get("as_user")},
-        })
+        items.append(
+            {
+                "type": "validation_probe",
+                "label": f"Validation probe {idx}",
+                "value": f"{summary}\nURL: {result.get('url') or ''}\nStatus: {status}",
+                "confidence": verdict,
+                "source": source,
+                "metadata": {
+                    "url": result.get("url"),
+                    "status": status,
+                    "as_user": result.get("as_user"),
+                },
+            }
+        )
         if result.get("duration_ms") is not None:
-            items.append({
-                "type": "timing",
-                "label": f"Validation timing {idx}",
-                "value": f"{round(float(result.get('duration_ms') or 0), 1)} ms",
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "timing",
+                    "label": f"Validation timing {idx}",
+                    "value": f"{round(float(result.get('duration_ms') or 0), 1)} ms",
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
         if result.get("timing_delta_ms") is not None:
-            items.append({
-                "type": "timing_delta",
-                "label": f"Validation timing delta {idx}",
-                "value": f"{round(float(result.get('timing_delta_ms') or 0), 1)} ms",
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "timing_delta",
+                    "label": f"Validation timing delta {idx}",
+                    "value": f"{round(float(result.get('timing_delta_ms') or 0), 1)} ms",
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
         if result.get("body_diff"):
             diff = result.get("body_diff")
-            items.append({
-                "type": "body_diff",
-                "label": f"Validation body diff {idx}",
-                "value": json.dumps(diff, indent=2, sort_keys=True) if isinstance(diff, dict) else str(diff),
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "body_diff",
+                    "label": f"Validation body diff {idx}",
+                    "value": json.dumps(diff, indent=2, sort_keys=True)
+                    if isinstance(diff, dict)
+                    else str(diff),
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
         if result.get("action_outcome"):
-            items.append({
-                "type": "action_outcome",
-                "label": f"Validation action outcome {idx}",
-                "value": str(result.get("action_outcome") or ""),
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "action_outcome",
+                    "label": f"Validation action outcome {idx}",
+                    "value": str(result.get("action_outcome") or ""),
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
         if result.get("request_evidence"):
-            items.append({
-                "type": "validation_request",
-                "label": f"Validation request {idx}",
-                "value": str(result.get("request_evidence") or ""),
-                "format": "http",
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "validation_request",
+                    "label": f"Validation request {idx}",
+                    "value": str(result.get("request_evidence") or ""),
+                    "format": "http",
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
         if result.get("response_evidence"):
-            items.append({
-                "type": "validation_response",
-                "label": f"Validation response {idx}",
-                "value": str(result.get("response_evidence") or ""),
-                "format": "http",
-                "confidence": verdict,
-                "source": source,
-            })
+            items.append(
+                {
+                    "type": "validation_response",
+                    "label": f"Validation response {idx}",
+                    "value": str(result.get("response_evidence") or ""),
+                    "format": "http",
+                    "confidence": verdict,
+                    "source": source,
+                }
+            )
     return items
 
 
@@ -904,14 +1024,17 @@ async def _persist_verdict(
             s.add(row)
         s.commit()
 
-    events_svc.emit(run_id, {
-        "type": "finding_validation_update",
-        "finding_id": finding_id,
-        "validation_status": verdict,
-        "validation_note": reasoning,
-        "evidence_json": evidence_json,
-        "evidence_items": _evidence_items_from_json(evidence_json),
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "finding_validation_update",
+            "finding_id": finding_id,
+            "validation_status": verdict,
+            "validation_note": reasoning,
+            "evidence_json": evidence_json,
+            "evidence_items": _evidence_items_from_json(evidence_json),
+        },
+    )
     # Emit agent_status complete for this validator agent.
     outcome_map = {
         "confirmed": "Confirmed",
@@ -919,15 +1042,18 @@ async def _persist_verdict(
         "unconfirmed": "Unconfirmed",
     }
     outcome_str = outcome_map.get(verdict, verdict.capitalize())
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": f"validator-{finding_id}",
-        "role": "Validator",
-        "status": "complete",
-        "current_task": finding_title,
-        "outcome": outcome_str,
-        "_persist": True,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": f"validator-{finding_id}",
+            "role": "Validator",
+            "status": "complete",
+            "current_task": finding_title,
+            "outcome": outcome_str,
+            "_persist": True,
+        },
+    )
 
 
 def _reset_validating_findings(run_id: int, note: str) -> None:
@@ -944,12 +1070,15 @@ def _reset_validating_findings(run_id: int, note: str) -> None:
         s.commit()
 
     for finding in findings:
-        events_svc.emit(run_id, {
-            "type": "finding_validation_update",
-            "finding_id": finding.id,
-            "validation_status": "unvalidated",
-            "validation_note": note,
-        })
+        events_svc.emit(
+            run_id,
+            {
+                "type": "finding_validation_update",
+                "finding_id": finding.id,
+                "validation_status": "unvalidated",
+                "validation_note": note,
+            },
+        )
 
 
 async def _deterministic_validate_finding(
@@ -960,36 +1089,52 @@ async def _deterministic_validate_finding(
     if not _is_access_control_finding(finding):
         return None
     if not cred_sessions:
-        return ("unconfirmed", "Access-control validation could not run because no alternate user sessions were available.", None)
+        return (
+            "unconfirmed",
+            "Access-control validation could not run because no alternate user sessions were available.",
+            None,
+        )
 
     with Session(get_engine()) as s:
         page = (
-            s.get(CrawledPage, finding.page_id)
-            if finding.page_id is not None
-            else None
+            s.get(CrawledPage, finding.page_id) if finding.page_id is not None else None
         )
         accessible_by = json.loads(page.accessible_by or "[]") if page else []
         page_text = page.page_text or "" if page else ""
         page_title = page.title or "" if page else ""
 
     if not accessible_by:
-        return ("unconfirmed", "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.", None)
+        return (
+            "unconfirmed",
+            "The crawl did not record a user that could access this page, so there is no access-control baseline to compare against.",
+            None,
+        )
 
     unauthorized = {
-        cred_id: session for cred_id, session in cred_sessions.items()
+        cred_id: session
+        for cred_id, session in cred_sessions.items()
         if cred_id not in accessible_by
     }
     if not unauthorized:
-        return ("unconfirmed", "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.", None)
+        return (
+            "unconfirmed",
+            "No lower-privileged or unauthorized user session was available to reproduce the access-control issue.",
+            None,
+        )
 
     url = finding.affected_url or ""
     if not url:
-        return ("unconfirmed", "The finding did not include an affected URL to re-test.", None)
+        return (
+            "unconfirmed",
+            "The finding did not include an affected URL to re-test.",
+            None,
+        )
 
     for cred_id, session in unauthorized.items():
         username = session.get("username") or f"credential {cred_id}"
         try:
             from aespa.services.traffic import LoggingAsyncClient
+
             async with LoggingAsyncClient(
                 run_id=finding.test_run_id,
                 username=username,
@@ -1001,7 +1146,11 @@ async def _deterministic_validate_finding(
             ) as client:
                 resp = await client.get(url)
         except Exception as exc:
-            return ("unconfirmed", f"Validation request as {username} failed: {exc}", None)
+            return (
+                "unconfirmed",
+                f"Validation request as {username} failed: {exc}",
+                None,
+            )
 
         if _response_denies_access(resp):
             continue
@@ -1015,7 +1164,10 @@ async def _deterministic_validate_finding(
         if evidence_match:
             poc_spec = {
                 "poc_request": {"method": "GET", "url": url, "use_session": username},
-                "poc_expect": {"status": resp.status_code, "body_contains": evidence_match},
+                "poc_expect": {
+                    "status": resp.status_code,
+                    "body_contains": evidence_match,
+                },
                 "poc_auth": {
                     "mechanism": "cookie_httponly",
                     "instructions": (
@@ -1038,37 +1190,89 @@ async def _deterministic_validate_finding(
 
 
 def _is_access_control_finding(finding: ScanFinding) -> bool:
-    text = " ".join([
-        finding.owasp_category or "",
-        finding.title or "",
-        finding.description or "",
-    ]).lower()
-    return any(term in text for term in (
-        "a01", "access control", "authorization", "authorisation", "auth bypass",
-        "broken access", "idor", "unauthorized", "unauthorised",
-    ))
+    text = " ".join(
+        [
+            finding.owasp_category or "",
+            finding.title or "",
+            finding.description or "",
+        ]
+    ).lower()
+    return any(
+        term in text
+        for term in (
+            "a01",
+            "access control",
+            "authorization",
+            "authorisation",
+            "auth bypass",
+            "broken access",
+            "idor",
+            "unauthorized",
+            "unauthorised",
+        )
+    )
 
 
 def _response_denies_access(resp: httpx.Response) -> bool:
     if resp.status_code in (401, 403, 404):
         return True
-    if resp.status_code in (301, 302, 303, 307, 308) and "login" in str(resp.headers.get("location", "")).lower():
+    if (
+        resp.status_code in (301, 302, 303, 307, 308)
+        and "login" in str(resp.headers.get("location", "")).lower()
+    ):
         return True
     body_lower = resp.text[:3000].lower()
-    login_hits = sum(1 for marker in ("login", "sign in", "type=\"password\"", "type='password'", "forgot password") if marker in body_lower)
-    denied_hits = sum(1 for marker in ("access denied", "forbidden", "unauthorized", "unauthorised", "not authorized", "not authorised") if marker in body_lower)
+    login_hits = sum(
+        1
+        for marker in (
+            "login",
+            "sign in",
+            'type="password"',
+            "type='password'",
+            "forgot password",
+        )
+        if marker in body_lower
+    )
+    denied_hits = sum(
+        1
+        for marker in (
+            "access denied",
+            "forbidden",
+            "unauthorized",
+            "unauthorised",
+            "not authorized",
+            "not authorised",
+        )
+        if marker in body_lower
+    )
     return login_hits >= 2 or denied_hits >= 1
 
 
 def _looks_like_spa_shell(body: str, content_type: str) -> bool:
-    if "html" not in content_type.lower() and not body.lstrip().lower().startswith("<!doctype html"):
+    if "html" not in content_type.lower() and not body.lstrip().lower().startswith(
+        "<!doctype html"
+    ):
         return False
     body_lower = body[:5000].lower()
-    shell_markers = sum(1 for marker in (
-        '<div id="root"', "<div id='root'", '<div id="app"', "<div id='app'",
-        "bundle.js", "main.js", "app.js", "vite", "webpack", "static/js",
-    ) if marker in body_lower)
-    text_only = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", body_lower)
+    shell_markers = sum(
+        1
+        for marker in (
+            '<div id="root"',
+            "<div id='root'",
+            '<div id="app"',
+            "<div id='app'",
+            "bundle.js",
+            "main.js",
+            "app.js",
+            "vite",
+            "webpack",
+            "static/js",
+        )
+        if marker in body_lower
+    )
+    text_only = re.sub(
+        r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", body_lower
+    )
     words = re.findall(r"[a-z0-9]{3,}", text_only)
     return shell_markers >= 1 and len(set(words)) < 80
 
@@ -1134,11 +1338,9 @@ def _emit_poc_outcome(
         "verification_failed": f"Couldn't reproduce the issue for {short}",
         "no_request": f"No proof attached for {short} — validator gave no request to replay",
         "out_of_scope": f"Proof skipped (request points outside the target) for {short}",
-        "method_suppressed":
-            f"Proof skipped (would change data via {method}) for {short}",
+        "method_suppressed": f"Proof skipped (would change data via {method}) for {short}",
         "no_assertion": f"Proof skipped (no way to confirm success) for {short}",
-        "auth_unresolved":
-            f"Proof skipped (couldn't get the required login) for {short}",
+        "auth_unresolved": f"Proof skipped (couldn't get the required login) for {short}",
         "url_too_long": f"Proof skipped (URL too long) for {short}",
     }
     message = messages.get(status, f"PoC outcome [{status}] for {short}")
@@ -1147,32 +1349,41 @@ def _emit_poc_outcome(
 
     log.info(
         "PoC [%s] finding=%s title=%r: %s",
-        status, finding.id, title, detail or url or method,
+        status,
+        finding.id,
+        title,
+        detail or url or method,
     )
 
-    events_svc.emit(run_id, {
-        "type": "scanner_phase",
-        "phase": "poc_verify",
-        "status": "complete",
-        "message": message,
-        "data": {
-            "finding_id": finding.id,
-            "poc_status": status,
-            "method": method,
-            "url": url,
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "poc_verify",
+            "status": "complete",
+            "message": message,
+            "data": {
+                "finding_id": finding.id,
+                "poc_status": status,
+                "method": method,
+                "url": url,
+            },
         },
-    })
-    events_svc.emit(run_id, {
-        "type": "agent_status",
-        "agent_id": "reporting",
-        "role": "Reporting",
-        # A PoC outcome is terminal, not ongoing work — mark it complete so the
-        # Reporting panel doesn't sit lit on "active" until the next event.
-        "status": "complete",
-        "current_task": message,
-        "outcome": detail or None,
-        "_persist": True,
-    })
+    )
+    events_svc.emit(
+        run_id,
+        {
+            "type": "agent_status",
+            "agent_id": "reporting",
+            "role": "Reporting",
+            # A PoC outcome is terminal, not ongoing work — mark it complete so the
+            # Reporting panel doesn't sit lit on "active" until the next event.
+            "status": "complete",
+            "current_task": message,
+            "outcome": detail or None,
+            "_persist": True,
+        },
+    )
 
 
 async def _attach_poc_if_confirmed(
@@ -1196,13 +1407,18 @@ async def _attach_poc_if_confirmed(
     }
     try:
         built = await _build_and_verify_poc(
-            finding, done_input, user_sessions_by_name, scanner_policy,
+            finding,
+            done_input,
+            user_sessions_by_name,
+            scanner_policy,
             run_id=run_id,
         )
     except Exception as exc:  # pragma: no cover - defensive
         log.warning("PoC build/verify raised for finding %s: %s", finding.id, exc)
         _emit_poc_outcome(
-            run_id, finding, status="verification_failed",
+            run_id,
+            finding,
+            status="verification_failed",
             detail=f"exception during build/verify: {exc}",
         )
         return
@@ -1219,12 +1435,15 @@ async def _attach_poc_if_confirmed(
         s.commit()
     finding.poc_command = command
     finding.poc_setup = setup
-    events_svc.emit(run_id, {
-        "type": "finding_validation_update",
-        "finding_id": finding.id,
-        "poc_command": command,
-        "poc_setup": setup,
-    })
+    events_svc.emit(
+        run_id,
+        {
+            "type": "finding_validation_update",
+            "finding_id": finding.id,
+            "poc_command": command,
+            "poc_setup": setup,
+        },
+    )
     log.info("Verified PoC attached to finding %s (id=%s)", finding.id, finding.id)
 
 
@@ -1247,7 +1466,9 @@ async def _build_and_verify_poc(
         if run_id is not None:
             affected_host = urlparse(finding.affected_url or "").netloc or "empty"
             _emit_poc_outcome(
-                run_id, finding, status="out_of_scope",
+                run_id,
+                finding,
+                status="out_of_scope",
                 detail=f"poc url host does not match finding ({affected_host})",
                 url=url,
             )
@@ -1255,8 +1476,11 @@ async def _build_and_verify_poc(
     if len(url) > _POC_MAX_URL_LEN:
         if run_id is not None:
             _emit_poc_outcome(
-                run_id, finding, status="url_too_long",
-                detail=f"url len {len(url)} > {_POC_MAX_URL_LEN}", url=url,
+                run_id,
+                finding,
+                status="url_too_long",
+                detail=f"url len {len(url)} > {_POC_MAX_URL_LEN}",
+                url=url,
             )
         return None
 
@@ -1267,8 +1491,11 @@ async def _build_and_verify_poc(
         # already-authorised target; methods outside the allow-list are refused.
         if run_id is not None:
             _emit_poc_outcome(
-                run_id, finding, status="method_suppressed",
-                method=method, url=url,
+                run_id,
+                finding,
+                status="method_suppressed",
+                method=method,
+                url=url,
                 detail="only GET, HEAD, and POST are accepted",
             )
         return None
@@ -1279,7 +1506,11 @@ async def _build_and_verify_poc(
     if expect is None:
         if run_id is not None:
             _emit_poc_outcome(
-                run_id, finding, status="no_assertion", method=method, url=url,
+                run_id,
+                finding,
+                status="no_assertion",
+                method=method,
+                url=url,
                 detail="poc_expect has no positive status or body_contains",
             )
         return None
@@ -1293,23 +1524,35 @@ async def _build_and_verify_poc(
         if not session:
             if run_id is not None:
                 _emit_poc_outcome(
-                    run_id, finding, status="auth_unresolved",
-                    method=method, url=url,
+                    run_id,
+                    finding,
+                    status="auth_unresolved",
+                    method=method,
+                    url=url,
                     detail=f"no live session for user {use_session!r}",
                 )
             return None
-        poc_auth = done_input.get("poc_auth") if isinstance(done_input.get("poc_auth"), dict) else {}
+        poc_auth = (
+            done_input.get("poc_auth")
+            if isinstance(done_input.get("poc_auth"), dict)
+            else {}
+        )
         mechanism = str(poc_auth.get("mechanism") or "cookie_httponly")
         auth = _resolve_poc_auth(session, mechanism)
         if not auth:
             if run_id is not None:
                 _emit_poc_outcome(
-                    run_id, finding, status="auth_unresolved",
-                    method=method, url=url,
+                    run_id,
+                    finding,
+                    status="auth_unresolved",
+                    method=method,
+                    url=url,
                     detail=f"no credential for mechanism {mechanism!r}",
                 )
             return None
-        setup = _build_poc_setup(mechanism, use_session, str(poc_auth.get("instructions") or ""))
+        setup = _build_poc_setup(
+            mechanism, use_session, str(poc_auth.get("instructions") or "")
+        )
 
     command = _build_curl_command(
         method,
@@ -1339,7 +1582,11 @@ async def _build_and_verify_poc(
     if not verified:
         if run_id is not None:
             _emit_poc_outcome(
-                run_id, finding, status="verification_failed", method=method, url=url,
+                run_id,
+                finding,
+                status="verification_failed",
+                method=method,
+                url=url,
                 detail=(
                     f"curl re-run did not match assertion "
                     f"(status={expect.get('status')!r})"
@@ -1349,7 +1596,11 @@ async def _build_and_verify_poc(
 
     if run_id is not None:
         _emit_poc_outcome(
-            run_id, finding, status="verified", method=method, url=url,
+            run_id,
+            finding,
+            status="verified",
+            method=method,
+            url=url,
             detail="auth required" if auth else "unauthenticated",
         )
     return command, setup
@@ -1412,7 +1663,11 @@ def _resolve_poc_auth(session: dict, mechanism: str) -> dict | None:
             token = token[7:].strip()
         if not token:
             return None
-        return {"file_value": token, "header_name": "Authorization", "header_prefix": "Bearer "}
+        return {
+            "file_value": token,
+            "header_name": "Authorization",
+            "header_prefix": "Bearer ",
+        }
 
     # cookie_readable / cookie_httponly both reproduce via the Cookie header.
     cookies = session.get("cookies", {}) or {}
@@ -1506,7 +1761,10 @@ def _build_curl_argv(
             args += ["--data-raw", str(body)]
 
     if auth:
-        args += ["-H", f"{auth['header_name']}: {auth['header_prefix']}{auth['file_value']}"]
+        args += [
+            "-H",
+            f"{auth['header_name']}: {auth['header_prefix']}{auth['file_value']}",
+        ]
     args.append(url)
     return args
 
@@ -1565,9 +1823,13 @@ def _build_poc_setup(mechanism: str, username: str, instructions: str) -> str:
     )
     if mechanism == "bearer":
         lines.append("")
-        lines.append("In the browser DevTools Console (adjust the storage key for the app):")
+        lines.append(
+            "In the browser DevTools Console (adjust the storage key for the app):"
+        )
         lines.append("```js")
-        lines.append("const token = localStorage.getItem('token'); // or sessionStorage")
+        lines.append(
+            "const token = localStorage.getItem('token'); // or sessionStorage"
+        )
         lines.append("const a = document.createElement('a');")
         lines.append(
             "a.href = URL.createObjectURL(new Blob([token], {type:'text/plain'}));"
@@ -1592,11 +1854,14 @@ def _build_poc_setup(mechanism: str, username: str, instructions: str) -> str:
             f"copy the full `Cookie:` request header value into `{_POC_AUTH_FILE}`."
         )
     lines.append("")
-    lines.append(f"Then move `{_POC_AUTH_FILE}` next to where you run the command below.")
+    lines.append(
+        f"Then move `{_POC_AUTH_FILE}` next to where you run the command below."
+    )
     return "\n".join(lines)
 
 
 # ── Probe execution ───────────────────────────────────────────────────────────
+
 
 async def _run_validation_probe(
     probe: dict,
@@ -1607,20 +1872,22 @@ async def _run_validation_probe(
     run_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Execute a single HTTP probe using the appropriate session."""
-    method     = probe.get("method", "GET").upper()
-    url        = probe.get("url", "")
-    params     = probe.get("params") or {}
-    body       = probe.get("body")
+    method = probe.get("method", "GET").upper()
+    url = probe.get("url", "")
+    params = probe.get("params") or {}
+    body = probe.get("body")
     extra_hdrs = probe.get("headers") or {}
-    desc       = probe.get("desc", url)
-    as_user    = probe.get("as_user") or None
+    desc = probe.get("desc", url)
+    as_user = probe.get("as_user") or None
 
     rejection = scanner_svc._probe_policy_rejection(probe, page_url, scanner_policy)
     if rejection:
         log.info("  Validation probe rejected by policy: %s (%s)", rejection, desc)
         return None
 
-    content, request_headers, body_preview = scanner_svc._prepare_probe_body(body, extra_hdrs)
+    content, request_headers, body_preview = scanner_svc._prepare_probe_body(
+        body, extra_hdrs
+    )
 
     # Use the override session (specific user) if provided, else the primary.
     session = override_session or primary_session
@@ -1629,6 +1896,7 @@ async def _run_validation_probe(
 
     try:
         from aespa.services.traffic import LoggingAsyncClient
+
         async with LoggingAsyncClient(
             run_id=run_id,
             username=as_user or "validator",
@@ -1639,15 +1907,20 @@ async def _run_validation_probe(
             verify=False,
         ) as client:
             req = client.build_request(
-                method, url,
+                method,
+                url,
                 params=params,
                 content=content,
                 headers=request_headers,
             )
             started = time.perf_counter()
-            resp = await client.send(req, follow_redirects=scanner_policy.follow_redirects)
+            resp = await client.send(
+                req, follow_redirects=scanner_policy.follow_redirects
+            )
             duration_ms = int((time.perf_counter() - started) * 1000)
-            resp_body = resp.text[:min(800, scanner_policy.response_body_read_limit_bytes)]
+            resp_body = resp.text[
+                : min(800, scanner_policy.response_body_read_limit_bytes)
+            ]
             req_hdrs_text = "\n".join(
                 f"{k}: {v}" for k, v in req.headers.items() if k.lower() != "cookie"
             )
@@ -1660,9 +1933,7 @@ async def _run_validation_probe(
             response_evidence = scanner_svc._response_evidence(
                 f"HTTP/1.1 {resp.status_code}\n{resp_hdrs_text}\n\n{resp_body}"
             )
-            evidence = (
-                f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}"
-            )
+            evidence = f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}"
             return {
                 "desc": desc,
                 "url": str(resp.url),
@@ -1680,8 +1951,11 @@ async def _run_validation_probe(
         request_evidence = scanner_svc._request_evidence(f"{method} {url} HTTP/1.1")
         response_evidence = scanner_svc._response_evidence(f"REQUEST ERROR: {e}")
         return {
-            "desc": desc, "url": url, "status": None,
-            "headers": {}, "body": str(e),
+            "desc": desc,
+            "url": url,
+            "status": None,
+            "headers": {},
+            "body": str(e),
             "action_outcome": "Validation probe failed before receiving a response.",
             "evidence": f"REQUEST:\n{request_evidence}\n\nRESPONSE:\n{response_evidence}",
             "request_evidence": request_evidence,
@@ -1691,6 +1965,7 @@ async def _run_validation_probe(
 
 
 # ── Session management ────────────────────────────────────────────────────────
+
 
 async def _get_or_create_sessions(
     run_id: int,
@@ -1713,10 +1988,13 @@ async def _get_or_create_sessions(
     # available after a scan has ended, and can include identities that were not
     # selected as the dynamic scanner's primary account.
     from aespa.services import scanner_sessions as session_svc
+
     try:
         vault = session_svc.load_session_vault(run_id)
     except Exception as e:
-        log.warning("Validator: failed to load session vault for run_id=%s: %s", run_id, e)
+        log.warning(
+            "Validator: failed to load session vault for run_id=%s: %s", run_id, e
+        )
         vault = {}
 
     synthetic_id = -1
@@ -1743,7 +2021,11 @@ async def _get_or_create_sessions(
         }
 
     if sessions:
-        log.info("Validator: collected %d active/stored sessions for run_id=%s", len(sessions), run_id)
+        log.info(
+            "Validator: collected %d active/stored sessions for run_id=%s",
+            len(sessions),
+            run_id,
+        )
 
     # Configured credentials are explicit user intent.  Try any identities that
     # were not recoverable from active or stored sessions even when an older
@@ -1751,10 +2033,16 @@ async def _get_or_create_sessions(
     # role coverage during access-control validation.
     missing_creds = [cred for cred in creds if cred.id not in sessions]
     if missing_creds:
-        log.info("Validator: bootstrapping %d missing session(s) for run_id=%s", len(missing_creds), run_id)
+        log.info(
+            "Validator: bootstrapping %d missing session(s) for run_id=%s",
+            len(missing_creds),
+            run_id,
+        )
     for cred in missing_creds:
         try:
-            cookies, token = await scanner_svc._export_cred_session(base_url, login_url, cred)
+            cookies, token = await scanner_svc._export_cred_session(
+                base_url, login_url, cred
+            )
             sessions[cred.id] = {
                 "username": cred.username,
                 "label": getattr(cred, "label", None),
@@ -1763,5 +2051,7 @@ async def _get_or_create_sessions(
             }
             log.info("  Bootstrapped session for user=%s", cred.username)
         except Exception as e:
-            log.warning("  Failed to bootstrap session for user=%s: %s", cred.username, e)
+            log.warning(
+                "  Failed to bootstrap session for user=%s: %s", cred.username, e
+            )
     return sessions

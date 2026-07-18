@@ -39,7 +39,9 @@ def _apply_upstream_proxy(session: Session) -> None:
     llm_svc.set_llm_proxy(cfg.proxy_url if cfg.proxy_llm else None)
     log.info(
         "ALICE upstream proxy: url=%s scanner=%s llm=%s",
-        cfg.proxy_url, cfg.proxy_scanner, cfg.proxy_llm,
+        cfg.proxy_url,
+        cfg.proxy_scanner,
+        cfg.proxy_llm,
     )
 
 
@@ -175,10 +177,10 @@ def _split_visible_and_thinking_text(text: str) -> tuple[list[str], str]:
     # remainder as reasoning instead of leaking it into the reply bubble.
     open_match = _re.search(r"<think(?:ing)?\b[^>]*>", visible, flags=_re.IGNORECASE)
     if open_match:
-        tail = visible[open_match.end():].strip()
+        tail = visible[open_match.end() :].strip()
         if tail:
             thinking_parts.append(tail)
-        visible = visible[:open_match.start()]
+        visible = visible[: open_match.start()]
 
     visible = _re.sub(r"</think(?:ing)?>", "", visible, flags=_re.IGNORECASE).strip()
     return thinking_parts, visible
@@ -263,7 +265,8 @@ async def _execute_alice_tool(
         _url = str(tool_input.get("url") or base_url)
         # Single scope predicate reused for the initial URL and every redirect hop.
         _alice_scope = (
-            scope_check_fn if scope_check_fn
+            scope_check_fn
+            if scope_check_fn
             else (lambda u: check_scope(u, site_id, run_id))
         )
         scope_err = _alice_scope(_url)
@@ -297,7 +300,9 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
+            event_hooks=traffic_svc.make_httpx_hooks(
+                _traffic_run_id, username="alice", api_run_id=api_run_id
+            ),
         ) as hx:
             try:
                 kwargs: dict = {}
@@ -477,7 +482,6 @@ async def _execute_alice_tool(
 
     # ── forge_jwt ─────────────────────────────────────────────────────────────
     if tool_name == "forge_jwt":
-
         from aespa.services.scanner import (
             _record_session,
             _sign_hs256_jwt,
@@ -505,9 +509,10 @@ async def _execute_alice_tool(
                 session_data={
                     "label": label,
                     "kind": "bearer",
-                    "username": f"sub:{jwt_claims.get('sub')}"
-                    if jwt_claims.get("sub") is not None
-                    else None,
+                    "account_label": label,
+                    "username": jwt_claims.get("preferred_username")
+                    or jwt_claims.get("email")
+                    or jwt_claims.get("name"),
                     "source": "forge_jwt tool",
                     "extra_headers": {"Authorization": f"Bearer {jwt_token}"},
                     "cookies": {},
@@ -569,7 +574,8 @@ async def _execute_alice_tool(
         if not r_host:
             return "tls_scan: no host provided."
         _alice_scope = (
-            scope_check_fn if scope_check_fn
+            scope_check_fn
+            if scope_check_fn
             else (lambda u: check_scope(u, site_id, run_id))
         )
         scope_err = _alice_scope(f"https://{r_host}:{r_port}/")
@@ -615,7 +621,9 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=False,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
+            event_hooks=traffic_svc.make_httpx_hooks(
+                _traffic_run_id, username="alice", api_run_id=api_run_id
+            ),
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -644,9 +652,7 @@ async def _execute_alice_tool(
                             session_label = _session_label(username, session_vault)
                             session_data = {
                                 "label": session_label,
-                                "kind": _session_kind(
-                                    response_cookies, extra_headers
-                                ),
+                                "kind": _session_kind(response_cookies, extra_headers),
                                 "username": username,
                                 "source": "alice_credential_check",
                                 "cookies": response_cookies,
@@ -658,9 +664,7 @@ async def _execute_alice_tool(
                                 session_data=session_data,
                                 source="alice_credential_check",
                                 metadata={"login_url": cred_url},
-                                run_kind=(
-                                    "api" if api_run_id is not None else "web"
-                                ),
+                                run_kind=("api" if api_run_id is not None else "web"),
                             )
                             session_vault[session_label] = session_data
                     results.append(
@@ -700,7 +704,8 @@ async def _execute_alice_tool(
 
         reg_url = str(tool_input.get("url") or base_url)
         _alice_scope = (
-            scope_check_fn if scope_check_fn
+            scope_check_fn
+            if scope_check_fn
             else (lambda u: check_scope(u, site_id, run_id))
         )
         scope_err = _alice_scope(reg_url)
@@ -733,7 +738,9 @@ async def _execute_alice_tool(
             timeout=timeout,
             follow_redirects=True,
             verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(_traffic_run_id, username="alice", api_run_id=api_run_id),
+            event_hooks=traffic_svc.make_httpx_hooks(
+                _traffic_run_id, username="alice", api_run_id=api_run_id
+            ),
         ) as hx:
             try:
                 _reg_kwargs = {"headers": req_headers}
@@ -752,12 +759,11 @@ async def _execute_alice_tool(
                 success = resp.status_code in success_statuses
                 token = _extract_bearer_token_from_body(resp.text) if success else None
                 response_cookies = dict(resp.cookies) if success else {}
-                extra_headers = (
-                    {"Authorization": f"Bearer {token}"} if token else {}
-                )
+                extra_headers = {"Authorization": f"Bearer {token}"} if token else {}
                 session_data: dict = {
                     "label": store_as,
                     "kind": _session_kind(response_cookies, extra_headers),
+                    "account_label": store_as,
                     "username": body.get(username_field) or body.get(email_field),
                     "source": "register_account tool",
                     "extra_headers": extra_headers,
@@ -775,6 +781,8 @@ async def _execute_alice_tool(
                     session_vault[store_as] = {
                         "label": store_as,
                         "kind": session_data["kind"],
+                        "account_label": session_data["account_label"],
+                        "username": session_data["username"],
                         "cookies": response_cookies,
                         "extra_headers": extra_headers,
                     }
@@ -825,7 +833,8 @@ async def _execute_alice_tool(
 
         # Scope-check the entry url and every goto step before driving the browser.
         _alice_scope = (
-            scope_check_fn if scope_check_fn
+            scope_check_fn
+            if scope_check_fn
             else (lambda u: check_scope(u, site_id, run_id))
         )
         candidate_urls = [url] + [
@@ -890,19 +899,38 @@ async def _execute_alice_tool(
             try:
                 cookies = {c["name"]: c["value"] for c in await ctx.cookies()}
                 extra = (selected or {}).get("extra_headers") or {}
+                capture_username = tool_input.get("capture_username")
+                if (
+                    not isinstance(capture_username, str)
+                    or not capture_username.strip()
+                ):
+                    capture_username = (selected or {}).get("username")
+                if isinstance(capture_username, str):
+                    capture_username = capture_username.strip() or None
+                credential_id = (selected or {}).get("credential_id")
                 rec = session_svc.upsert_session(
                     run_id,
                     label=capture_label.strip(),
                     kind="browser_captured",
+                    account_label=(selected or {}).get("account_label")
+                    or capture_label.strip(),
+                    username=capture_username,
+                    credential_id=credential_id,
                     source="alice_browser",
                     cookies=cookies,
                     extra_headers=extra,
-                    metadata={"captured_from": result.get("url")},
+                    metadata={
+                        "captured_from": result.get("url"),
+                        "derived_from_session": (selected or {}).get("label"),
+                    },
                     run_kind="api" if api_run_id is not None else "web",
                 )
                 session_vault[rec.label] = {
                     "label": rec.label,
                     "kind": "browser_captured",
+                    "account_label": rec.account_label,
+                    "username": rec.username,
+                    "credential_id": rec.credential_id,
                     "cookies": cookies,
                     "extra_headers": extra,
                 }
@@ -1214,6 +1242,7 @@ async def run_alice_turn_stream(
     leads_block = ""
     try:
         from aespa.services.scan_leads import format_leads_for_run
+
         leads_block = format_leads_for_run("web", run_id)
     except Exception:
         pass
@@ -1221,7 +1250,9 @@ async def run_alice_turn_stream(
     # Append the current instruction as the latest user message, with the leads
     # block prepended so ALICE sees the investigation targets in context.
     if leads_block:
-        messages.append({"role": "user", "content": f"{leads_block}\n\n{user_instruction}"})
+        messages.append(
+            {"role": "user", "content": f"{leads_block}\n\n{user_instruction}"}
+        )
     else:
         messages.append({"role": "user", "content": user_instruction})
 
@@ -1748,7 +1779,6 @@ def _run_api_context_tool(
 
     # ── report_finding ────────────────────────────────────────────────────────
     if tool_name == "report_finding":
-
         from sqlmodel import Session as _Session
 
         from aespa.db import get_engine as _ge
@@ -1765,7 +1795,11 @@ def _run_api_context_tool(
         # silently reverting whatever severity was set here. ponytail: midpoint
         # scores, switch to a real CVSS vector if report_finding ever takes one.
         cvss_score = {
-            "critical": 9.5, "high": 8.0, "medium": 6.0, "low": 3.5, "info": 0.0,
+            "critical": 9.5,
+            "high": 8.0,
+            "medium": 6.0,
+            "low": 3.5,
+            "info": 0.0,
         }[severity]
 
         owasp = _as_text(
