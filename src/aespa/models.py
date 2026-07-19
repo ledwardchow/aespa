@@ -236,6 +236,7 @@ class ApiEndpointTest(SQLModel, table=True):
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
+    github_copilot = "github_copilot"
     openai = "openai"
     openai_compatible = "openai_compatible"
     openrouter = "openrouter"
@@ -258,6 +259,8 @@ class LLMProviderConfig(SQLModel, table=True):
     api_format: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Optional Copilot CLI account login. Blank uses Copilot CLI's default.
+    username: Optional[str] = Field(default=None)
     # Bedrock Mantle project id (proj_…); sent as the OpenAI-Project header for
     # cost/usage attribution. Ignored by other provider formats.
     project_id: Optional[str] = Field(default=None)
@@ -281,6 +284,8 @@ class LLMConfig(SQLModel, table=True):
     provider: str = Field(default=LLMProviderAPI.anthropic)
     api_key: Optional[str] = Field(default=None)
     base_url: Optional[str] = Field(default=None)
+    # Denormalized from the provider for the Copilot SDK adapter.
+    username: Optional[str] = Field(default=None)
     # Denormalized from the provider (see LLMProviderConfig.project_id).
     project_id: Optional[str] = Field(default=None)
     model: str = Field(default="claude-opus-4-5")
@@ -320,6 +325,7 @@ class ScannerPolicy(SQLModel, table=True):
     __tablename__ = "scanner_policy"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    execution_monitor_enabled: bool = Field(default=False)
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
