@@ -182,9 +182,12 @@ class ScanCompletionPolicy:
         )
         return _fingerprint(payload)
 
-    def repeated_probe_message(self, signature: str) -> str | None:
+    def repeated_probe_message(
+        self, signature: str, *, intentional_repeat_limit: int | None = None
+    ) -> str | None:
         state = self.probe_outcomes.get(signature) or {}
-        if int(state.get("count") or 0) < self.repeat_limit:
+        limit = intentional_repeat_limit or self.repeat_limit
+        if int(state.get("count") or 0) < limit:
             return None
         return (
             "[REPEATED PROBE SUPPRESSED] This exact request has already produced "

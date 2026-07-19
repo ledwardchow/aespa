@@ -160,8 +160,8 @@ AESPA_PORT         = 8000
        ▼                       ▼
 ┌─────────────┐       ┌─────────────────────────────────────┐
 │  Services   │       │  LLM Provider                       │
-│  ─────────  │       │  (Anthropic / OpenAI / Google /     │
-│  crawler    │◄──────│   Bedrock / Azure / OpenRouter)     │
+│  ─────────  │       │  (Copilot / Anthropic / OpenAI /    │
+│  crawler    │◄──────│   Google / Bedrock / Azure / etc.)  │
 │  scanner    │       └─────────────────────────────────────┘
 │  findings   │
 │  validator  │       ┌─────────────────────────────────────┐
@@ -202,9 +202,10 @@ Defines API connections, optional project identifiers, and rate limits for LLM b
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
+| `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
 | `project_id` | — | Bedrock Mantle project ID (sent as `OpenAI-Project` header for cost/usage attribution) |
 | `models_json` | `[]` | JSON list of available model names for this provider |
 | `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider |
@@ -242,6 +243,7 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 
 | Field | Default | Description |
 |---|---|---|
+| `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
 | `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
 | `max_probes_per_page` | `50` | Cap on probe attempts per crawled page |
 | `thinking_max_steps` | `120` | Legacy compatibility setting; the active Test Lead loop is deliberately uncapped and does not read this value |
@@ -557,7 +559,7 @@ Two execution modes depending on the configured LLM provider:
 
 | Mode | Providers | Description |
 |---|---|---|
-| **Native tool-use** | Any provider in `llm.AGENTIC_LOOP_PROVIDERS` (currently every supported provider) | Single continuous session; the LLM natively calls tools. Produces tighter reasoning chains. |
+| **Native tool-use** | Any provider in `llm.AGENTIC_LOOP_PROVIDERS` (currently every supported provider) | The provider returns native tool calls and AESPA preserves the conversation between turns. |
 | **Step-by-step** | DEPRECATED — dormant fallback for providers outside `AGENTIC_LOOP_PROVIDERS` | Each iteration sends the full conversation history; the LLM emits a JSON action; the harness executes it and appends the result. |
 
 The loop terminates when:
@@ -570,14 +572,19 @@ The loop terminates when:
 - The Execution Monitor reaches a bounded rejection limit after the Test Lead keeps
   retrying a hard-blocked duplicate or refuses an active Mentor Strategy Shift Contract.
 
-`execution_monitor.py` fingerprints semantically relevant tool inputs while removing
+The Execution Monitor is disabled by default and can be enabled in the Scanner settings.
+When enabled, `execution_monitor.py` fingerprints meaningful tool inputs while removing
 known transport noise. A second consecutive normalized duplicate invokes the run-scoped
-Mentor; a third is blocked. Eight completed steps without a persisted progress signal
-invoke the Mentor and establish a structured Strategy Shift Contract containing two or
-three route/category/class vectors. Calls that match none of those constraints are
-rejected unless they carry an explicit `strategy_pivot_justification`. Executed and
-rejected steps share the same completion accounting, so supervision cannot itself form
-an unbounded rejection loop. Monitor and contract state are stored in scan checkpoints.
+Mentor; a third is blocked. Intentional bounded repetition tests are treated differently:
+rate-limit, lockout, credential-stuffing, password-spraying, and OTP-guessing probes can
+declare a `repeat_sequence` and `repeat_limit` of up to 20 requests. The standard login
+rate-limit check permits six identical requests before either duplicate guard intervenes.
+Eight completed steps without a persisted progress signal invoke the Mentor and establish
+a structured Strategy Shift Contract containing two or three route/category/class vectors.
+Calls that match none of those constraints are rejected unless they carry an explicit
+`strategy_pivot_justification`. Executed and rejected steps share the same completion
+accounting, so supervision cannot itself form an unbounded rejection loop. Monitor and
+contract state are stored in scan checkpoints.
 Persisted activity entries use explicit emitter tags: `Execution Monitor` records every
 Mentor trigger, hard block, and contract rejection; `Mentor Guidance` records the full
 diagnosis, structured alternate vectors, and tactical next step; invalid-session
@@ -759,6 +766,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 
 | Provider | SDK used |
 |---|---|
+| `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
 | `google` | `google-generativeai` |
@@ -768,7 +776,11 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
 
-All structured outputs (probe lists, finding objects, page analysis) are produced via **JSON mode** or tool-use — the LLM is never asked to produce free-form text that is parsed by regex.
+When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
+
+Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
+
+Structured outputs such as probe lists, finding objects, and page analysis are requested as JSON or produced through tool calls. AESPA does not parse free-form model text with regular expressions.
 
 ### Agent tool sets
 
@@ -790,7 +802,7 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 
 ### Upstream proxy
 
-All LLM SDK clients (Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). When `UpstreamProxyConfig.proxy_llm` is enabled, every outbound LLM request flows through the configured proxy. TLS certificate verification is left **on** for direct connections and is disabled **only when a proxy is active**, to support HTTPS interception setups (e.g. Burp Suite's proxy listener) — so the API key and prompt data are never sent without certificate validation in the normal (no-proxy) case.
+All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). Copilot receives this through its child-process `HTTP_PROXY` and `HTTPS_PROXY` environment. The direct HTTP clients use the proxy configuration described in `llm.py`.
 
 ### Rate Limiting & Pacing
 
@@ -946,7 +958,7 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 
 ### Telemetry rendering (`TokenUsageBar`)
 
-Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. It renders per-model breakdowns of input, output, and prompt-cache tokens along with estimated usage costs derived from `token_usage_json`.
+Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. For GitHub Copilot it leads with AI credits or legacy premium requests, model-call counts, and available allowance information, with token/cache details in the expanded view. The data is persisted in `token_usage_json`.
 
 ### WebSocket event types (emitted by `services/events.py`)
 

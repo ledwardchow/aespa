@@ -52,6 +52,7 @@ export function LLMProviderForm({
           api_format: e.target.value
         })}>
           <option value="anthropic">Anthropic API</option>
+          <option value="github_copilot">GitHub Copilot subscription</option>
           <option value="openai">OpenAI API</option>
           <option value="openai_compatible">OpenAI-compatible API</option>
           <option value="openrouter">OpenRouter</option>
@@ -68,6 +69,7 @@ export function LLMProviderForm({
           base_url: e.target.value
         })} />
         {form.api_format === "bedrock" && <div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>}
+        {form.api_format === "github_copilot" && <div className="field-hint">No base URL is needed. AESPA uses the official GitHub Copilot SDK.</div>}
         {form.api_format === "bedrock_mantle" && <div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>}
       </div>
       {form.api_format === "bedrock_mantle" && <div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
@@ -76,14 +78,21 @@ export function LLMProviderForm({
         })} />
         <div className="field-hint">Sent as the OpenAI-Project header to attribute usage/cost to a Bedrock Mantle project. Use the project id (proj_…) from the Bedrock console, not its name. Leave blank for the account default project.</div>
       </div>}
+      {form.api_format === "github_copilot" && <div className="field">
+        <label>Copilot username <span className="field-optional">(optional)</span></label>
+        <input type="text" autoComplete="off" value={form.username} placeholder="Use Copilot CLI's selected default account" onChange={e => upd({
+          username: e.target.value
+        })} />
+        <div className="field-hint">Enter a login from Copilot CLI's <code>/user</code> list. Leave blank to use its selected default account.</div>
+      </div>}
       <div className="field"><label>Model names</label>
-        <textarea required rows="5" value={form.models} placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
+        <textarea rows="5" value={form.models} placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           models: e.target.value
         })}></textarea>
-        <div className="field-hint">Enter one model per line, or separate models with commas.</div>
+        <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
       </div>
       <div className="field">
-        <label>API Key <span className="field-optional">(optional)</span></label>
+        <label>{form.api_format === "github_copilot" ? "GitHub token" : "API Key"} <span className="field-optional">(optional)</span></label>
         <div className="row" style={{ gap: "8px" }}>
           <input
             type="password"
@@ -119,6 +128,7 @@ export function LLMProviderForm({
         </div>
         {form.api_format === "bedrock" && <div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>}
         {form.api_format === "bedrock_mantle" && <div className="field-hint">With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role — the same fallback as the Bedrock Runtime provider.</div>}
+        {form.api_format === "github_copilot" && <div className="field-hint">Leave blank to use the Copilot username above, or Copilot CLI's selected default account when no username is set. An explicit token takes precedence. For headless use, enter a GitHub user token whose account has Copilot access or set COPILOT_GITHUB_TOKEN.</div>}
       </div>
       <div className="divider" />
       <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
