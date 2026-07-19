@@ -4,6 +4,28 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
+## July 19 Update — GitHub Copilot, usage reporting, and newer model defaults
+
+### GitHub Copilot provider
+
+- **Run scans through a Copilot subscription** (`services/copilot_provider.py`, LLM settings, models/API): GitHub Copilot is now available as an LLM provider. Users can authenticate with Copilot CLI or provide a GitHub token. AESPA keeps one Copilot session alive for each agent conversation, which preserves conversation state and gives Copilot a chance to reuse cached prompt content instead of starting a new session for every turn.
+- **Choose the Copilot account** (`services/copilot_provider.py`, provider settings): A provider can name an account from Copilot CLI's `/user` list. Leave both the username and token blank to use Copilot CLI's selected default account. A configured GitHub token takes precedence over the username. Named-account credentials are read locally and passed directly to the SDK without being displayed or copied into AESPA's database.
+- **Keep scans isolated**: Copilot runs from a temporary working directory and cannot discover repository instructions, skills, memory, hooks, host Git operations, or saved Copilot sessions. It can use only the scan tools that AESPA explicitly provides.
+
+### Copilot usage reporting
+
+- **AI credits and request counts in the run UI** (`services/llm.py`, `TokenUsageBar.jsx`): Copilot-backed runs now show the AI credits and model calls used by that run. Accounts on the older billing system show premium requests instead. The expanded view includes token and prompt-cache details, along with the latest allowance percentage and reset date reported by Copilot.
+- **Reliable background usage events**: Usage callbacks are tied to the run that created them, and AESPA briefly waits for Copilot's final usage event before closing a turn. This prevents usage from being lost or assigned to another concurrent scan.
+
+### Models and provider settings
+
+- **New Copilot and OpenAI model defaults** (`schemas.py`, provider settings): GitHub Copilot is prefilled with Auto, GPT-5.6 Luna, Terra, and Sol, Claude Sonnet 5, and Claude Opus 4.8. Direct OpenAI providers now also include GPT-5.6 Luna, Terra, and Sol in their defaults.
+- **Optional model list** (`Settings.jsx`, `LLMProviderForm.jsx`): The model names field can now be left blank for every provider. AESPA saves the model names shown in that provider's placeholder text.
+
+### Packaging and tests
+
+- Added the official GitHub Copilot SDK dependency, database migrations for Copilot account selection, updated documentation, and backend/frontend coverage for the new provider and settings.
+
 ## [PR #242] July 18 Update — Microsoft login, loop recovery, and improved coverage
 
 **Branch:** `develop -> main`
