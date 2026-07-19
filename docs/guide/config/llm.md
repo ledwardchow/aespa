@@ -1,6 +1,6 @@
 # Configuring LLMs
 
-For AESPA to work, you need to set up model providers. AESPA supports AWS Bedrock Runtime, Azure OpenAI, OpenAI-compatible and Anthropic API formats.
+For AESPA to work, you need to set up a model provider. AESPA supports GitHub Copilot subscriptions, AWS Bedrock Runtime, Azure OpenAI, OpenAI-compatible, Anthropic, and other API formats.
 
 A **Provider** is an API endpoint and a list of models which it can supply.
 
@@ -14,6 +14,7 @@ Click on "New Provider" on the top right to create one:
 Set a name for your LLM provider (it will show up in the profile creation as this name).
 ![alt text](images/createprovider.png)
 The following providers can be selected as an API format to pre-fill the Base URL:
+- GitHub Copilot subscription (no base URL is needed)
 - OpenRouter (https://openrouter.ai/api/v1)
 - Anthropic API (https://api.anthropic.com)
 - OpenAI API (https://api.openai.com/v1)
@@ -27,8 +28,15 @@ The following API format selector values will require you to input your base URL
 - Azure AI Foundry (OpenAI API) (https://RESOURCENAME.services.ai.azure.com/openai/v1)
 - Azure AI Foundry (Anthropic API) (https://RESOURCENAME.services.ai.azure.com/anthropic/v1)
 
-You will need to enter model names (you can obtain these from your provider) - one per line.
-For all providers (except Amazon Bedrock Runtime), you must enter an API key. If you selected Amazon Bedrock Runtime, you can provide an API key OR leave it blank to use the default AWS SDK/boto3 profile installed on your machine. Amazon Bedrock Mantle is OpenAI-compatible: supply an Amazon Bedrock API key (sent as a Bearer token), OR leave the key blank to authenticate with AWS credentials — requests are then SigV4-signed using the boto3 credential chain (AWS_PROFILE, environment variables, SSO, or an IAM role), the same fallback as the Amazon Bedrock Runtime provider. AESPA drives Mantle via the OpenAI **Responses** API, so it works with the frontier `openai.gpt-5.x` models and the `openai.gpt-oss-*` models. Claude models are not available over Mantle's OpenAI APIs — use the Amazon Bedrock Runtime provider for those.
+Enter model names one per line, or leave the field blank to save the model names shown in that provider's placeholder. This works for every provider format.
+
+Most providers require an API key. GitHub Copilot is different: leave both the username and token blank to use Copilot CLI's selected default account. To use another account from Copilot CLI's `/user` list, enter its login in the username field. You can instead provide a GitHub user token for an account with Copilot access; an explicit token takes precedence over the username. The first request may download the official Copilot CLI runtime. Copilot calls count against the chosen account's Copilot usage allowance.
+
+Use `auto` as the model name to let Copilot choose an available model. AESPA also prefills GPT-5.6 Luna, Terra, and Sol, plus Claude Sonnet 5 and Opus 4.8. Availability depends on the signed-in account's Copilot plan and organization policies. The Copilot SDK does not currently expose temperature or per-call output-token settings, so those two profile fields are not forwarded for this provider.
+
+During a Copilot-backed scan, the Status tab shows the AI credits and model calls used by that AESPA run. Accounts that still use GitHub's older billing model show premium requests instead. Expand the usage bar to see token/cache details and the latest allowance information GitHub provided.
+
+For Amazon Bedrock Runtime, you can provide an API key or leave it blank to use the default AWS SDK/boto3 profile installed on your machine. Amazon Bedrock Mantle is OpenAI-compatible: supply an Amazon Bedrock API key (sent as a Bearer token), or leave the key blank to authenticate with AWS credentials. AESPA drives Mantle via the OpenAI **Responses** API, so it works with the frontier `openai.gpt-5.x` models and the `openai.gpt-oss-*` models. Claude models are not available over Mantle's OpenAI APIs; use the Amazon Bedrock Runtime provider for those.
 
 If you have a rate limit/quota on your LLM provider, enter them here and AESPA will pace LLM calls to ensure you don't exceed it. If you leave it blank, it will run as fast as it can - I've seen it consume up to ~10m TPM for a single scan in bursts. (If you have a limit and you don't fill this in, your LLM calls will fail and your scans will break. An error message will show up in the scan log if this is the case.)
 

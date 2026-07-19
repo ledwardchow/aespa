@@ -370,6 +370,8 @@ Recommended assessment strategy, distilled from effective manual pentest workflo
          with no throttling, missing rate-limiting is a confirmed finding — this bounded probe
          is authorized and expected; do not skip it as "brute-force". Apply the same bounded
          check to other guessable endpoints (forgot-password, OTP/2FA verify, voucher redeem).
+         Set test_class="rate_limit", repeat_sequence to one stable label, and repeat_limit=6
+         on every http_request in the sequence so the repetition guards allow the full test.
      - Re-check CSP, HSTS, X-Frame-Options, content sniffing, and referrer-policy headers on
          representative HTML and API responses.
 
@@ -860,6 +862,23 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "sqli, reflected_xss, stored_xss, command_injection, ssti, idor, "
                         "or auth_bypass. Required for A03 probes so one injection class "
                         "does not count as coverage of another."
+                    ),
+                },
+                "repeat_sequence": {
+                    "type": "string",
+                    "description": (
+                        "Stable label for an intentional bounded repetition test, such as "
+                        "login-rate-limit. Use only for rate limiting, account lockout, "
+                        "credential stuffing, password spraying, or OTP guessing."
+                    ),
+                },
+                "repeat_limit": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 20,
+                    "description": (
+                        "Maximum requests in repeat_sequence. Use 6 for the standard "
+                        "login rate-limit check."
                     ),
                 },
                 "observation": {"type": "string"},

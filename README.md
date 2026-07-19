@@ -21,7 +21,7 @@ You will need to provide:
 - For web app testing - URL and (optionally) credentials
 - For API testing - documentation so that the scanner can understand the structure of the APIs in scope (OpenAPI YAML, text dumps of Confluence pages, markdown, free text files containing API credentials; just upload whatever you have and the scanner will figure it out!)
 - (Optionally) ZIP of the source code for the web app/API. You can run SAST as a standalone operation or load the SAST findings into a web or API scan, which will validate the finding with dynamic testing
-- An API key for an OpenAI or an Anthropic-format LLM provider
+- An API key for a supported LLM provider, AWS credentials, or a GitHub Copilot subscription
 
 ## Performance
 
@@ -47,8 +47,7 @@ The [User Guide](docs/guide/index.md)!
 ## Requirements
 
 - Burp Suite Professional, if you want to use the active scan integration
-- Anthropic/OpenAI/Google/AWS Bedrock API key **OR**
-- A local model - some suggestions at the bottom
+- One of: an Anthropic/OpenAI/Google/AWS Bedrock API key, a GitHub Copilot subscription, or a local model
 
 Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
 
@@ -156,7 +155,7 @@ If you don't do this, it will use the values above as the default.
 
 Open the app, go to **LLM Settings**, and configure:
 
-- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and one or more model names. Built-in formats include Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Runtime, Azure OpenAI, and Azure AI Foundry. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
+- **Providers** — reusable connection settings with a name, API format, optional base URL, API key, and model names. Built-in formats include GitHub Copilot, Anthropic, OpenAI, OpenAI-compatible, OpenRouter, Google Gemini, Amazon Bedrock Runtime, Azure OpenAI, and Azure AI Foundry. Leave model names blank to use the examples shown in the field. Use OpenAI-compatible for local models such as LM Studio (`http://localhost:1234/v1`) or Ollama (`http://localhost:11434/v1`). For GitHub Copilot, leave the username and token blank to use Copilot CLI's selected default account, or enter a username from its `/user` list. For Bedrock, leave the API key blank to use boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.
 - **Profiles** — named runtime choices that select a provider and one model from that provider's configured model list. Runs can use the system default profile or a specific profile.
 
 ## Use
@@ -211,4 +210,3 @@ API Scan Findings
 - Opus 4.8 also triggers refusals if not on CVP, but usually not immediately (it'll complete a "quick" mode scan most of the time)
 - Minimax M3
 - GLM 5.2 
-

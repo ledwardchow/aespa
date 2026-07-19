@@ -15,6 +15,7 @@ def test_get_default_models(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert "github_copilot" in data
     assert "openai" in data
     assert "openai_compatible" in data
     assert "openrouter" in data
@@ -24,6 +25,19 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
+    assert data["github_copilot"] == [
+        "auto",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+        "claude-opus-4.8",
+    ]
+    assert data["openai"][:3] == [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+    ]
     assert data["bedrock"][:2] == [
         "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
@@ -183,6 +197,29 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+
+
+def test_create_github_copilot_provider_without_token(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Copilot",
+        api_format="github_copilot",
+        base_url=None,
+        username="copilot-user",
+        models=["auto"],
+        api_key=None,
+    )
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "github_copilot"
+    assert provider["username"] == "copilot-user"
+    assert provider["models"] == ["auto"]
+    assert provider["has_api_key"] is False
+
+    profile_r = _make_profile(client, provider["id"], model="auto")
+    assert profile_r.status_code == 200
+    assert profile_r.json()["provider"] == "github_copilot"
+    assert profile_r.json()["username"] == "copilot-user"
 
 
 def test_bedrock_mantle_project_id_round_trips(client: TestClient):
@@ -432,6 +469,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
     data = r.json()
+    assert data["execution_monitor_enabled"] is False
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -446,6 +484,7 @@ def test_upsert_scanner_policy(client: TestClient):
     payload.update(
         {
             "scan_mode": "aggressive",
+            "execution_monitor_enabled": True,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
@@ -456,6 +495,7 @@ def test_upsert_scanner_policy(client: TestClient):
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 200
     data = r.json()
+    assert data["execution_monitor_enabled"] is True
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180

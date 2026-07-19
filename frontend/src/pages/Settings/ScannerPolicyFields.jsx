@@ -7,6 +7,15 @@ export function ScannerPolicyFields({
   disabled = false
 }) {
   return <>
+    <div className="form-section-title">Agent</div>
+    <label className="toggle-row">
+      <input type="checkbox" disabled={disabled} checked={form.execution_monitor_enabled} onChange={e => upd({
+        execution_monitor_enabled: e.target.checked
+      })} />
+      <span>Enable execution monitor</span>
+    </label>
+    <div className="subtle">Detect repeated or stalled agent actions and ask the Mentor to redirect the scan.</div>
+    <div className="divider" />
     <div className="form-section-title">Mode</div>
     <div className="field">
       <label>Scan mode</label>

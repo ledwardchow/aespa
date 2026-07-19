@@ -39,6 +39,32 @@ _HOUSEKEEPING_TOOLS = frozenset(
         "done",
     }
 )
+_REPETITION_INTENT_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "rate limiting",
+    "rate-limiting",
+    "brute force",
+    "brute-force",
+    "account lockout",
+    "throttl",
+    "credential stuffing",
+    "password spraying",
+    "otp guessing",
+)
+_REPETITION_TEST_CLASSES = frozenset(
+    {
+        "rate_limit",
+        "rate_limiting",
+        "brute_force",
+        "account_lockout",
+        "credential_stuffing",
+        "password_spraying",
+        "otp_guessing",
+    }
+)
+_DEFAULT_REPETITION_LIMIT = 6
+_MAX_REPETITION_LIMIT = 20
 
 
 def normalize_url(url: str, *, preserve_fragment: bool = False) -> str:
@@ -182,6 +208,53 @@ def summarize_tool_action(tool_name: str, tool_input: dict[str, Any] | None) -> 
     return "browser " + ("; ".join(descriptions) if descriptions else "default action")
 
 
+def intentional_repetition_contract(
+    tool_name: str, tool_input: dict[str, Any] | None
+) -> tuple[str, int] | None:
+    """Return a bounded sequence key and limit for an intentional repeat test."""
+    source = tool_input if isinstance(tool_input, dict) else {}
+    explicit_sequence = str(source.get("repeat_sequence") or "").strip()
+    test_class = re.sub(r"[\s-]+", "_", str(source.get("test_class") or "").lower())
+    intent_text = " ".join(
+        str(source.get(key) or "").lower()
+        for key in ("observation", "hypothesis", "payload_purpose", "note")
+    )
+    has_repeat_intent = bool(
+        explicit_sequence
+        or test_class in _REPETITION_TEST_CLASSES
+        or any(marker in intent_text for marker in _REPETITION_INTENT_MARKERS)
+    )
+    if not has_repeat_intent:
+        return None
+
+    try:
+        requested_limit = int(source.get("repeat_limit") or _DEFAULT_REPETITION_LIMIT)
+    except (TypeError, ValueError):
+        requested_limit = _DEFAULT_REPETITION_LIMIT
+    limit = min(_MAX_REPETITION_LIMIT, max(2, requested_limit))
+
+    body = _normalize_body(source.get("body"))
+    identity: dict[str, Any] = {}
+    if isinstance(body, dict):
+        for key in ("username", "email", "user", "account", "phone"):
+            if key in body:
+                identity[key] = body[key]
+    sequence_data = {
+        "sequence": explicit_sequence,
+        "tool": str(tool_name or "").strip().lower(),
+        "method": str(source.get("method") or "GET").upper(),
+        "url": normalize_url(str(source.get("url") or "")),
+        "session": str(source.get("use_session") or "").strip(),
+        "test_class": test_class,
+        "identity": identity,
+    }
+    serialized = json.dumps(
+        sequence_data, sort_keys=True, separators=(",", ":"), default=str
+    )
+    key = hashlib.sha256(serialized.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return key, limit
+
+
 def add_strategy_justification_to_tools(tools: list[dict] | None) -> list[dict] | None:
     """Return tool schemas that permit an explicit, auditable contract override."""
     if tools is None:
@@ -284,12 +357,14 @@ def _input_parameter_names(tool_input: dict[str, Any]) -> set[str]:
 
 @dataclass
 class ExecutionMonitor:
+    enabled: bool = True
     duplicate_mentor_threshold: int = 2
     duplicate_hard_block_threshold: int = 3
     stagnation_mentor_threshold: int = 8
     max_hard_block_rejections: int = 3
     max_contract_rejections: int = 3
     probe_signature_counts: dict[str, int] = field(default_factory=dict)
+    intentional_repetition_counts: dict[str, int] = field(default_factory=dict)
     last_signature: str | None = None
     last_step: int | None = None
     last_action_summary: str = ""
@@ -316,12 +391,14 @@ class ExecutionMonitor:
                 "rejections_count": self.active_contract.rejections_count,
             }
         return {
+            "enabled": self.enabled,
             "duplicate_mentor_threshold": self.duplicate_mentor_threshold,
             "duplicate_hard_block_threshold": self.duplicate_hard_block_threshold,
             "stagnation_mentor_threshold": self.stagnation_mentor_threshold,
             "max_hard_block_rejections": self.max_hard_block_rejections,
             "max_contract_rejections": self.max_contract_rejections,
             "probe_signature_counts": self.probe_signature_counts,
+            "intentional_repetition_counts": self.intentional_repetition_counts,
             "last_signature": self.last_signature,
             "last_step": self.last_step,
             "last_action_summary": self.last_action_summary,
@@ -361,6 +438,12 @@ class ExecutionMonitor:
             if isinstance(raw.get("probe_signature_counts"), dict)
             else {}
         )
+        monitor.intentional_repetition_counts = (
+            raw.get("intentional_repetition_counts")
+            if isinstance(raw.get("intentional_repetition_counts"), dict)
+            else {}
+        )
+        monitor.enabled = bool(raw.get("enabled", True))
         monitor.last_signature = (
             str(raw["last_signature"]) if raw.get("last_signature") else None
         )
@@ -417,6 +500,8 @@ class ExecutionMonitor:
         browser_page_url: str | None = None,
     ) -> tuple[InterventionState, str | None]:
         """Evaluate a proposed action before execution."""
+        if not self.enabled:
+            return InterventionState.NORMAL, None
         if tool_name in _HOUSEKEEPING_TOOLS:
             self._reset_duplicate_sequence()
             return InterventionState.NORMAL, None
@@ -473,6 +558,28 @@ class ExecutionMonitor:
                 )
             self.pending_contract_satisfaction = True
 
+        repetition = intentional_repetition_contract(tool_name, tool_input)
+        if repetition is not None:
+            sequence_key, sequence_limit = repetition
+            sequence_count = self.intentional_repetition_counts.get(sequence_key, 0) + 1
+            self.intentional_repetition_counts[sequence_key] = sequence_count
+            self._reset_duplicate_sequence()
+            self.last_intervention_details = {
+                "intentional_repetition": True,
+                "sequence": sequence_key,
+                "occurrence": sequence_count,
+                "limit": sequence_limit,
+                "current_step": step,
+                "action_summary": action_summary,
+            }
+            if sequence_count <= sequence_limit:
+                return InterventionState.NORMAL, None
+            return InterventionState.HARD_BLOCK_DUPLICATE, (
+                "[EXECUTION MONITOR HARD BLOCK] The declared repeated-action sequence "
+                f"has reached its bounded limit of {sequence_limit}: {action_summary}. "
+                "Review the sequence results and choose a different action."
+            )
+
         if self.consecutive_duplicate_count >= self.duplicate_hard_block_threshold:
             self.hard_block_rejections += 1
             if self.hard_block_rejections >= self.max_hard_block_rejections:
@@ -527,6 +634,8 @@ class ExecutionMonitor:
 
     def finish_step(self, *, progress_made: bool, executed: bool) -> None:
         """Finalize every executed or rejected tool step exactly once."""
+        if not self.enabled:
+            return
         if progress_made:
             self.nonprogress_steps = 0
             self.stagnation_mentor_emitted = False
@@ -545,6 +654,17 @@ class ExecutionMonitor:
     ) -> None:
         self.active_contract = StrategyShiftContract(step, diagnosis, suggested_vectors)
         self.pending_contract_satisfaction = False
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable supervision, or clear its active state when disabled."""
+        self.enabled = bool(enabled)
+        if not self.enabled:
+            self._reset_duplicate_sequence()
+            self.active_contract = None
+            self.pending_contract_satisfaction = False
+            self.nonprogress_steps = 0
+            self.stagnation_mentor_emitted = False
+            self.termination_reason = ""
 
     def check_strategy_pivot(
         self, tool_name: str, tool_input: dict[str, Any]
@@ -595,4 +715,4 @@ class ExecutionMonitor:
         )
 
     def check_termination(self) -> str | None:
-        return self.termination_reason or None
+        return (self.termination_reason or None) if self.enabled else None
