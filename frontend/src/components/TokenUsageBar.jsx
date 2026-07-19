@@ -7,26 +7,66 @@ export function fmtTok(n) {
   return String(n);
 }
 
+export function fmtCredits(n) {
+  const value = Number(n || 0);
+  if (value >= 100) return value.toFixed(1);
+  if (value >= 1) return value.toFixed(2);
+  return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
+  const hasCopilot = tokenUsage && (
+    tokenUsage.total_requests > 0 ||
+    tokenUsage.total_ai_credits > 0 ||
+    tokenUsage.total_premium_requests > 0
+  );
+  const hasUsage = hasTokens || hasCopilot;
+  const quota = tokenUsage?.copilot_quota;
 
   return (
     <>
       <div
         className="activity-token-bar"
-        onClick={hasTokens ? () => setTokenExpanded?.(p => !p) : undefined}
-        style={{ cursor: hasTokens ? "pointer" : "default" }}
+        onClick={hasUsage ? () => setTokenExpanded?.(p => !p) : undefined}
+        style={{ cursor: hasUsage ? "pointer" : "default" }}
       >
-        {hasTokens ? (
+        {hasUsage ? (
           <>
-            <span className="token-bar-label">Tokens</span>
-            <span className="token-bar-in" title="Input tokens">
-              ↑{fmtTok(tokenUsage.total_input)} in
-            </span>
-            <span className="token-bar-sep">·</span>
-            <span className="token-bar-out" title="Output tokens">
-              ↓{fmtTok(tokenUsage.total_output)} out
-            </span>
+            <span className="token-bar-label">{hasCopilot ? "Copilot usage" : "Tokens"}</span>
+            {tokenUsage.total_ai_credits > 0 ? (
+              <span className="token-bar-in" title="GitHub AI credits used by this run">
+                {fmtCredits(tokenUsage.total_ai_credits)} AI credits
+              </span>
+            ) : null}
+            {tokenUsage.total_premium_requests > 0 ? (
+              <>
+                {tokenUsage.total_ai_credits > 0 ? <span className="token-bar-sep">·</span> : null}
+                <span className="token-bar-in" title="Legacy Copilot premium requests used by this run">
+                  {fmtCredits(tokenUsage.total_premium_requests)} premium requests
+                </span>
+              </>
+            ) : null}
+            {hasCopilot ? (
+              <>
+                {tokenUsage.total_ai_credits > 0 || tokenUsage.total_premium_requests > 0 ? <span className="token-bar-sep">·</span> : null}
+                <span className="token-bar-out" title="Copilot model calls made by this run">
+                  {fmtTok(tokenUsage.total_requests)} calls
+                </span>
+              </>
+            ) : null}
+            {hasTokens ? (
+              <>
+                {hasCopilot ? <span className="token-bar-sep">·</span> : null}
+                <span className="token-bar-in" title="Input tokens">
+                  ↑{fmtTok(tokenUsage.total_input)} in
+                </span>
+                <span className="token-bar-sep">·</span>
+                <span className="token-bar-out" title="Output tokens">
+                  ↓{fmtTok(tokenUsage.total_output)} out
+                </span>
+              </>
+            ) : null}
             {tokenUsage.total_cache_read > 0 || tokenUsage.total_cache_write > 0 ? (
               <>
                 <span className="token-bar-sep">·</span>
@@ -47,16 +87,30 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
             </span>
           </>
         ) : (
-          <span className="token-bar-empty">No token data yet</span>
+          <span className="token-bar-empty">No usage data yet</span>
         )}
       </div>
-      {tokenExpanded && hasTokens && (
+      {tokenExpanded && hasUsage && (
         <div className="token-breakdown">
+          {quota && Number.isFinite(Number(quota.remaining_percentage)) ? (
+            <div className="token-breakdown-row">
+              <span className="token-model-name">Copilot allowance</span>
+              <span className="token-in">{Number(quota.remaining_percentage).toFixed(0)}% remaining</span>
+              {quota.reset_at ? (
+                <span className="token-out" title={quota.reset_at}>
+                  resets {new Date(quota.reset_at).toLocaleDateString()}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => (
             <div key={model} className="token-breakdown-row">
               <span className="token-model-name">{model}</span>
-              <span className="token-in">↑{fmtTok(v.input)}</span>
-              <span className="token-out">↓{fmtTok(v.output)}</span>
+              {v.ai_credits > 0 ? <span className="token-in">{fmtCredits(v.ai_credits)} credits</span> : null}
+              {v.premium_requests > 0 ? <span className="token-in">{fmtCredits(v.premium_requests)} premium</span> : null}
+              {v.requests > 0 ? <span className="token-out">{fmtTok(v.requests)} calls</span> : null}
+              {v.input > 0 ? <span className="token-in">↑{fmtTok(v.input)}</span> : null}
+              {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
               {v.cache_read > 0 || v.cache_write > 0 ? (
                 <>
                   {v.cache_read > 0 ? (

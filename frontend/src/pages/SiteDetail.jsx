@@ -460,8 +460,15 @@ export function TestRunDetail({
     runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent,
     setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData,
     setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts,
-    setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts
+    setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts, setCheckpointStatus
   });
+
+  // Fetch checkpoint status whenever dynamic scan transitions to an inactive status (stopped/complete/failed/idle)
+  useEffect(() => {
+    if (thinkingStatus?.status && !isDynamicScanActive(thinkingStatus.status)) {
+      api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(() => {});
+    }
+  }, [runId, thinkingStatus?.status]);
 
   // Poll run metadata (including per_user_progress current URLs) while crawling
   // or while the backend is unwinding after a stop request.
@@ -514,7 +521,10 @@ export function TestRunDetail({
       setThinkingStopReq(true);
       const s = await api.stopThinkingScan(runId);
       setThinkingStatus(s);
-      if (!isDynamicScanActive(s.status)) setThinkingStopReq(false);
+      if (!isDynamicScanActive(s.status)) {
+        setThinkingStopReq(false);
+        api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(() => {});
+      }
     } catch (e) {
       setThinkingStopReq(false);
       setError(e.message);
