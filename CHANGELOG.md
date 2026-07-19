@@ -4,112 +4,133 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ---
 
-## [PR #242] July 18 Update - Entra ID login, loop supervision, full coverage obligations
+## July 19 Update — GitHub Copilot, usage reporting, and newer model defaults
+
+### GitHub Copilot provider
+
+- **Run scans through a Copilot subscription** (`services/copilot_provider.py`, LLM settings, models/API): GitHub Copilot is now available as an LLM provider. Users can authenticate with Copilot CLI or provide a GitHub token. AESPA keeps one Copilot session alive for each agent conversation, which preserves conversation state and gives Copilot a chance to reuse cached prompt content instead of starting a new session for every turn.
+- **Choose the Copilot account** (`services/copilot_provider.py`, provider settings): A provider can name an account from Copilot CLI's `/user` list. Leave both the username and token blank to use Copilot CLI's selected default account. A configured GitHub token takes precedence over the username. Named-account credentials are read locally and passed directly to the SDK without being displayed or copied into AESPA's database.
+- **Keep scans isolated**: Copilot runs from a temporary working directory and cannot discover repository instructions, skills, memory, hooks, host Git operations, or saved Copilot sessions. It can use only the scan tools that AESPA explicitly provides.
+
+### Copilot usage reporting
+
+- **AI credits and request counts in the run UI** (`services/llm.py`, `TokenUsageBar.jsx`): Copilot-backed runs now show the AI credits and model calls used by that run. Accounts on the older billing system show premium requests instead. The expanded view includes token and prompt-cache details, along with the latest allowance percentage and reset date reported by Copilot.
+- **Reliable background usage events**: Usage callbacks are tied to the run that created them, and AESPA briefly waits for Copilot's final usage event before closing a turn. This prevents usage from being lost or assigned to another concurrent scan.
+
+### Models and provider settings
+
+- **New Copilot and OpenAI model defaults** (`schemas.py`, provider settings): GitHub Copilot is prefilled with Auto, GPT-5.6 Luna, Terra, and Sol, Claude Sonnet 5, and Claude Opus 4.8. Direct OpenAI providers now also include GPT-5.6 Luna, Terra, and Sol in their defaults.
+- **Optional model list** (`Settings.jsx`, `LLMProviderForm.jsx`): The model names field can now be left blank for every provider. AESPA saves the model names shown in that provider's placeholder text.
+
+### Packaging and tests
+
+- Added the official GitHub Copilot SDK dependency, database migrations for Copilot account selection, updated documentation, and backend/frontend coverage for the new provider and settings.
+
+## [PR #242] July 18 Update — Microsoft login, loop recovery, and improved coverage
 
 **Branch:** `develop -> main`
 
-### Microsoft Entra ID authentication
+### Microsoft Entra ID login
 
-- **Dedicated Entra ID auth mode** (`services/crawler.py`, site configuration UI): credentials can use a Microsoft-aware multi-page login flow that handles account selection, username/password entry, consent, stay-signed-in prompts, Authenticator notification approval, and optional TOTP codes.
-- **Interactive MFA status and retry** (`api/scan.py`, run events/UI): Authenticator number-matching prompts, success/time-out states, and retry actions are surfaced in the run view. Entra and guided logins are coordinated so one interactive login can be captured and reused by the crawl, dynamic scan, and A.L.I.C.E.
-- **Persisted Entra sessions**: successful browser authentication is saved to the run's session vault with provider and MFA metadata, making it available to later scan phases without repeating the login unnecessarily.
+- **Microsoft-aware login flow** (`services/crawler.py`, site settings): AESPA can now sign in through Microsoft Entra ID. It handles account selection, username and password screens, consent requests, “stay signed in” prompts, Authenticator approval, and optional one-time codes.
+- **Visible MFA progress and retries** (`api/scan.py`, run events/UI): The run page now shows Authenticator number-matching requests, successful approvals, timeouts, and retry controls. After login, the same authenticated browser session can be reused by the crawler, dynamic scanner, and A.L.I.C.E.
+- **Saved login sessions**: Successful Entra ID sessions are stored securely for the run, along with basic provider and MFA details. Later scan stages can reuse the session instead of asking the user to sign in again.
 
-### Agent loop supervision
+### Agent loop recovery
 
-- **Execution Monitor and Mentor** (`services/execution_monitor.py`, `services/mentor.py`): successive identical tool calls are now intercepted ("Execution Monitor") and sent back to the LLM for a change in strategy ("Mentor"), to unblock loops.
+- **Detect and recover from repeated actions** (`services/execution_monitor.py`, `services/mentor.py`): AESPA now detects when an agent repeatedly makes the same tool call. It asks the agent to change its approach, helping scans recover instead of becoming stuck in a loop.
 
-### Coverage, SAST, telemetry, and settings
+### Coverage, SAST, usage data, and settings
 
-- **Quick and Full coverage modes** (`services/web_workprogram.py`, web/API run UI): renamed Track and Enforce modes to Quick and Full. Full mode now additionally enforces testing for RXSS, PXSS and SQLi as part of A03 (previously only enforced against the whole category as one item)
-- **Standalone SAST creation and token telemetry** (`SastRuns.jsx`, `TokenUsageBar.jsx`): SAST runs now also have a token counter displayed.
-- **API key privacy** (`services/settings.py`, settings UI): API keys can no longer be copied out of settings fields. Exporting LLM settings still works if you're accessing the app via localhost (LLM settings are exported without keys if reverse proxied)
+- **Quick and Full scan modes** (`services/web_workprogram.py`, web/API run UI): Track and Enforce modes have been renamed Quick and Full. Full mode now requires separate testing for reflected XSS, stored XSS, and SQL injection—not just a general check of the OWASP A03 category.
+- **Token usage for SAST runs** (`SastRuns.jsx`, `TokenUsageBar.jsx`): SAST runs now display how many LLM tokens they have used.
+- **Better API key privacy** (`services/settings.py`, settings UI): Saved API keys can no longer be copied from settings fields. LLM settings exported through localhost can still include keys; exports made through a reverse proxy leave them out.
 
-## [PR #237] July 15 Update — evidence-driven scanning, bounded completion, unified coverage UI
+## [PR #237] July 15 Update — evidence-based scanning, reliable completion, and a clearer coverage view
 
 **Branch:** `develop → main`
 
-### Evidence-driven scan engine
+### Evidence-based scanning
 
-- **Recon is now a live attack-surface projection** (`services/recon_summary.py`, scanner/API/models): the synthetic persisted hypothesis/task graph has been removed. The Test Lead now receives compact, evidence-backed canonical routes, methods, parameters, access observations, provenance, signals, and real OWASP coverage gaps derived from crawl and traffic data.
-- **Systematic continuation rules** (`services/prompts/test_lead.py`): web and API Test Leads treat findings and specialist dispatches as milestones rather than exit conditions, continue across the route inventory, and only request completion after input-bearing surfaces have been exercised.
-- **Published scan comparisons** (`docs/results/BankOfEd/`): adds July 14 multi-model scan outputs, consolidated vulnerability results, and a model comparison for GPT-5.6, MiniMax M3, Claude Opus 4.8, and Claude Sonnet 5.
+- **Simpler attack-surface view** (`services/recon_summary.py`, scanner/API/models): The old task graph has been replaced with an inventory of routes and input fields. AESPA tracks which OWASP categories have been tested for each endpoint and shares that progress with the test lead.
+- **More thorough coverage guidance** (`services/prompts/test_lead.py`): The test lead is now encouraged to test the target more comprehensively.
 
-### Bounded completion and reliable resume
+### Reliable scan completion and resuming
 
-- **Completion cannot loop indefinitely** (`services/scan_completion.py`, `services/scanner.py`): a bounded policy mediates `done`, permits only limited session/coverage challenges, warns after prolonged inactivity, and automatically stops after 50 tool calls without meaningful coverage, finding, lead, specialist, or session progress.
-- **Checkpoint repair** (`services/checkpoint.py`, `services/llm.py`): resumed conversations ending on assistant output or interrupted tool use are repaired with a continuation prompt or matching tool results before being sent to providers that reject assistant-message prefill.
-- **Provider diagnostics survive reloads** (`services/llm.py`, activity UI): LLM response/protocol events record provider, model, stop reason, usable content blocks, context size, retry state, and safe Bedrock request/usage metadata, making empty and no-tool responses diagnosable from the run log.
+- **Scans can no longer run forever without progress** (`services/scan_completion.py`, `services/scanner.py`): Completion checks now have clear limits. AESPA warns when a scan has been inactive for too long and stops it after 50 tool calls that produce no meaningful progress, such as new coverage, findings, leads, specialist work, or sessions.
+- **Safer scan resuming** (`services/checkpoint.py`, `services/llm.py`): AESPA repairs incomplete conversation history before resuming a scan. This prevents errors from LLM providers that reject conversations ending with unfinished assistant messages or tool calls.
+- **Better troubleshooting after a reload** (`services/llm.py`, activity UI): Run logs now preserve useful details about LLM responses, including the provider, model, stop reason, available content, context size, retries, and safe Bedrock metadata. This makes empty or unexpected responses easier to investigate.
 
-### OWASP coverage and run UI
+### OWASP coverage and run interface
 
-- **Per-vulnerability-class web coverage** (`services/web_workprogram.py`, models/migration/tests): A03 cells independently track SQL injection, reflected XSS, and stored XSS obligations. Probes declare their test class, while constrained browser `dom_check` assertions record explicit canary pass/fail results without arbitrary JavaScript execution.
-- **Unified Attack Surface & Coverage tab** (`frontend/src/pages/SiteDetail/`): OWASP progress and matrix, route/input inventory, evidence signals, access observations, technologies, and Target Intelligence now live under aligned **OWASP**, **Attack Surface**, and **Intelligence** subtabs. The full-width panels keep their scrollbars at the viewport edge.
-- **Scrollbar regressions fixed**: Intelligence, Sessions, and the retired Task Graph views correctly expose their internal scroll regions.
+- **Separate coverage for common injection flaws** (`services/web_workprogram.py`, models/migration/tests): AESPA now tracks SQL injection, reflected XSS, and stored XSS separately under OWASP A03. Browser checks record clear pass-or-fail canary results without running unrestricted JavaScript.
+- **Combined Attack Surface & Coverage tab** (`frontend/src/pages/SiteDetail/`): OWASP progress, endpoints, inputs, evidence, access details, detected technologies, and target intelligence are now grouped into **OWASP**, **Attack Surface**, and **Intelligence** sections. Wide panels also place their scrollbars at the edge of the window, where they are easier to use.
+- **Scrollbar fixes**: Internal scrolling now works correctly in the Intelligence and Sessions views, as well as the retired Task Graph view.
 
 ### Packaging and documentation
 
-- **macOS notarisation stapling fixed** (`make_dmg.sh`, `notarize_only_mac.sh`): the release flow staples the notarisation ticket correctly before distributing the DMG.
-- **Repository documentation refreshed** (`README.md`, `docs/architecture.md`, guides): architecture and scan UI documentation match the new scan model, and the DeepWiki badge links directly to this repository's DeepWiki page.
+- **Fixed macOS notarisation** (`make_dmg.sh`, `notarize_only_mac.sh`): The release process now attaches Apple’s notarisation ticket correctly before the DMG is distributed.
+- **Updated documentation** (`README.md`, `docs/architecture.md`, guides): The documentation now reflects the current scanning model and interface. The DeepWiki badge also links directly to this repository’s page.
 
-## [develop → main] July 13 Update — routeless crawling, detached SAST leads, API scan isolation
-
-**Branch:** `develop → main`
-
-### Routeless SPA crawling
-
-- **New routeless crawler mode** (`services/crawler.py`, run models/API/UI): test runs can crawl single-page applications whose meaningful states do not change the browser URL. The crawler records distinct UI states, navigation actions, and state-aware page identities so these applications produce a useful sitemap and dynamic-scan context instead of collapsing into one route.
-- **Clearer sitemap identity and ownership** (`SiteDetail/*`, crawler/LLM helpers): scraped-page titles no longer inherit possessive user labels, page metadata exposes crawler mode, and sitemap nodes retain the correct credential/user colouring as live events arrive.
-
-### Standalone SAST and fresh per-run leads
-
-- **SAST is detached from API collections** (`api/sast_runs.py`, `services/sast_scanner.py`, API collection UI): API scans no longer auto-create or await a collection-bound SAST pre-phase. SAST runs are standalone, while source ZIP uploads on API collections remain available solely for deriving endpoints and routes.
-- **Explicit imports for API test runs** (`api/sast_runs.py`, `services/scan_leads.py`, API run UI): completed SAST results can be imported into an API test run just like a web run. Every import creates run-owned lead copies, so each test run independently reassesses every lead without mutating the source SAST result or inheriting another run's outcome.
-- **Run-scoped lead management**: API lead listing, ALICE context, scanner context, deletion, and cleanup now filter by run type and run id. This removes duplicate collection-wide leads and prevents repeated or stale results from appearing in unrelated API runs.
-- **Responsive SAST lead UI** (`frontend/src/styles/run.css`, shared lead tab): the API run lead panel now wraps and shrinks within the viewport instead of overflowing horizontally.
-
-### API scanner isolation and session safety
-
-- **API-aware tool surface and scope checks** (`services/api_scanner.py`, `services/prompts/test_lead.py`): API Test Leads receive a restricted API tool set, reject web-only inventory commands, and apply API collection scope checks to requests and redirects. API ALICE also withholds unsafe web-oriented finding and specialist paths.
-- **Run-kind-safe sessions** (`services/scanner.py`, `services/alice.py`): credentials, JWTs, registrations, and captured bearer/cookie sessions are persisted under the correct web/API run kind, avoiding collisions between independently numbered run tables.
-- **Coverage and regression tests**: expanded API scanner, API ALICE, scan-lead, crawler, LLM, and test-run API coverage; rebuilt the served Vite assets and refreshed architecture/tool-reference documentation.
-
-## [PR #227] July 12 Update — scan lifecycle, reporting concurrency, crawl export/import
+## [develop → main] July 13 Update — better single-page app crawling, standalone SAST, and safer API scans
 
 **Branch:** `develop → main`
 
-### Scan lifecycle, reporting, and validation
+### Crawling single-page apps without URL changes
 
-- **Clear Test Lead handoff and true scan completion** (`services/scanner.py`, `useActivity.js`): once testing ends, the Test Lead now logs *"Testing complete - handed traffic to reporting agent for analysis..."*. The UI remains active through Reporting's probe analysis and receives a final *"Scan complete"* event only after reporting and scan finalisation finish.
-- **Reliable, visible validator work** (`services/validator.py`, `api/test_runs.py`, `ActiveJobs.jsx`): validator sessions are recovered from the vault and configured credentials when possible; reporting-created findings are queued for managed validation; interrupted work is recovered at startup; and a run now shows one Validation active job while validators are working, including after a refresh.
-- **Concurrent end-of-scan validators** (`models.py`, `schemas.py`, `db.py`, `ValidatorSettings.jsx`): final validation is bounded by a configurable concurrency limit (default **4**). Manual/recovery validation remains controlled separately.
-- **Skipped is no longer unconfirmed** (`services/findings.py`, `db.py`, findings UI): informational findings beneath the configured validation threshold are explicitly marked skipped/not validated rather than unconfirmed.
+- **New crawler mode for apps that stay on one URL** (`services/crawler.py`, run models/API/UI): AESPA can now crawl single-page apps where buttons and other actions change the screen without changing the URL. It records each distinct screen state and the actions used to reach it, producing a useful sitemap and better context for the dynamic scan.
+- **Clearer sitemap labels** (`SiteDetail/*`, crawler/LLM helpers): Page titles no longer inherit possessive user labels. Page details show which crawler mode was used, and sitemap nodes keep the correct user or credential colour while new results arrive.
+
+### Standalone SAST and independent leads for each run
+
+- **SAST no longer runs automatically with API collections** (`api/sast_runs.py`, `services/sast_scanner.py`, API collection UI): SAST runs are now created and run separately. Source ZIP files attached to API collections are still used to discover endpoints and routes, but they no longer trigger a SAST phase before the API scan.
+- **Import SAST results into API runs** (`api/sast_runs.py`, `services/scan_leads.py`, API run UI): Completed SAST results can now be imported into an API test run, just as they can with a web run. Each import creates a separate copy of the leads, allowing every test run to assess them independently without changing the original SAST results or reusing another run’s decisions.
+- **Leads stay with the correct run**: Lead lists, A.L.I.C.E. context, scanner context, deletion, and cleanup now use both the run type and run ID. This prevents duplicate or outdated leads from appearing in unrelated API runs.
+- **SAST leads fit smaller screens** (`frontend/src/styles/run.css`, shared lead tab): The API run’s lead panel now wraps and shrinks to fit the window instead of overflowing horizontally.
+
+### Safer API scans and sessions
+
+- **API-specific tools and safety checks** (`services/api_scanner.py`, `services/prompts/test_lead.py`): API test leads now receive only the tools intended for API testing. Web-only inventory commands are rejected, and requests and redirects are checked against the API collection’s allowed scope. API A.L.I.C.E. also hides web-focused finding and specialist actions that are unsafe in this context.
+- **Sessions are saved under the correct run type** (`services/scanner.py`, `services/alice.py`): Credentials, JWTs, registrations, bearer tokens, and cookies are now clearly associated with either a web or API run. This prevents sessions from being mixed up when web and API runs happen to share the same numeric ID.
+- **More tests and updated documentation**: Test coverage was expanded for the API scanner, API A.L.I.C.E., scan leads, crawler, LLM integration, and test-run APIs. The served frontend files and technical documentation were also updated.
+
+## [PR #227] July 12 Update — clearer scan progress, faster reporting, and reusable crawl data
+
+**Branch:** `develop → main`
+
+### Scan progress and validation
+
+- **Clearer handoff from testing to reporting** (`services/scanner.py`, `useActivity.js`): When testing finishes, the test lead now says that traffic has been handed to the reporting agent. The run remains active while reporting analyses the probes, and the UI shows “Scan complete” only after reporting and final cleanup have finished.
+- **Validation work is reliable and visible** (`services/validator.py`, `api/test_runs.py`, `ActiveJobs.jsx`): Validators reuse saved sessions and configured credentials when possible. Findings created during reporting are queued for validation, interrupted validation resumes after startup, and the run shows a Validation job while this work is active—even after the page is refreshed.
+- **Several findings can be validated at once** (`models.py`, `schemas.py`, `db.py`, `ValidatorSettings.jsx`): End-of-scan validation now supports a configurable number of simultaneous validators, with a default of **4**. Manual and recovery validation use separate controls.
+- **Skipped findings are labelled clearly** (`services/findings.py`, `db.py`, findings UI): Informational findings below the chosen validation threshold are now marked as skipped or not validated instead of unconfirmed.
 
 ### Concurrent reporting
 
-- **Probe-analysis batches run concurrently** (`services/llm.py`, `services/scanner.py`): Reporting processes final probe batches under a bounded semaphore, preserving ordered output while reducing end-of-scan wait time.
-- **New Reporting settings tab** (`ReportingSettings.jsx`): exposes the reporting batch concurrency limit (default **4**) in Scan Policy settings.
+- **Reporting can analyse several batches at once** (`services/llm.py`, `services/scanner.py`): The reporting agent now processes a limited number of probe batches at the same time. Results remain in order, while the final reporting stage completes sooner.
+- **New Reporting settings tab** (`ReportingSettings.jsx`): Scan Policy settings now include the number of reporting batches that may run at once, with a default of **4**.
 
-### Crawl data and frontend structure
+### Crawl data and frontend cleanup
 
-- **Crawl export/import** (`services/*`, API/UI): crawl data can be exported and imported, including its OWASP classifications.
-- **Run UI modularisation** (`frontend/src/`): further separates the Site Detail/run UI and sitemap components, with related ALICE/validator UI fixes and rebuilt served frontend assets.
+- **Export and import crawl data** (`services/*`, API/UI): Crawl results can now be exported and imported, including their OWASP classifications.
+- **Simpler frontend structure** (`frontend/src/`): The Site Detail, run, and sitemap interfaces were split into smaller components. This update also includes A.L.I.C.E. and validator interface fixes and refreshed served frontend files.
 
-## [PR #222] July 8 Update — frontend component extraction, macOS crawl fix
+## [PR #222] July 8 Update — frontend cleanup and a macOS crawling fix
 
 **Branch:** `frontend-refactor`
 
-### Crawls no longer die immediately on the macOS build (`sign_app.sh`)
+### Crawling now works in the packaged macOS app (`sign_app.sh`)
 
-- **Nested Mach-O binaries now sign with the app entitlements.** Playwright's bundled `node` driver runs V8, which JITs (write+execute memory). Under hardened runtime without `allow-jit` / `allow-unsigned-executable-memory` the OS killed it on startup (`Failed to reserve virtual memory for CodeRange`), Playwright reported *"Connection closed while reading from the driver"*, and every crawl ended instantly. `sign_app.sh` previously passed `--entitlements` only to the outer bundle; it now passes them to every nested Mach-O too. Fixes the GitHub Actions release build as well (CI signs via the same script). Requires a rebuild + re-sign + re-notarize — already-shipped DMGs stay broken.
+- **Playwright’s bundled programs are now signed with the permissions they need.** The packaged macOS app previously closed the Playwright driver as soon as a crawl started because some programs inside the app were missing required runtime permissions. The signing script now applies those permissions to every nested macOS executable, which also fixes release builds made by GitHub Actions. The fix requires a newly built, signed, and notarised DMG; previously released DMGs remain affected.
 
-### Frontend refactor — extract shared components & split god-files
+### Frontend files split into smaller, reusable parts
 
-No behavior change intended; this is structural cleanup of the Vite/React SPA.
+This is a structural cleanup of the Vite/React app, with no intended change to how it works.
 
-- **Shared components** (`frontend/src/components/`): `PageHeader` (+ `Crumb`/`Sep`) replaces the topbar/breadcrumb markup copy-pasted across ~9 pages; `EmptyState` standardises the icon+message+action empty card; `StatusBadge` centralises status→colour mapping. `StatusBadge` also **fixes drifted badge colours** — some pages used `success`/`warning` variants that had no CSS rule and rendered colourless.
-- `**ApiCollections.jsx` (1315 lines) split** into an `ApiCollections/` module: `ApiCollectionsList`, `ApiCollectionForm`, `ApiCollectionDetail`, `ApiFilesManager`, `ApiTestRunDetail`, `ApiTestRunForm`, with a barrel `index.js` as the router's import surface.
-- `**SiteDetail.jsx` slimmed (743 → ~120 lines):** extracted `TestRunForm`, plus `useActivity` and `useFindings` hooks that each own one tab's state (event log/agent roster/token usage; findings list/validation/dedup) instead of threading ~40 loose props through `TestRunDetail`.
-- **A.L.I.C.E. session split** (`frontend/src/lib/`): `aliceSession.jsx` → `aliceRender.jsx` (render helpers) + `aliceSession.js` (the module-level singleton stream store that keeps the reader loop alive across component unmounts).
+- **Reusable interface components** (`frontend/src/components/`): Shared page headers and breadcrumbs replace repeated code across about nine pages. Empty states now use one consistent design, and status badges share one colour mapping. This also fixes badges that appeared without a colour because some pages used unsupported styles.
+- **Smaller API collection files**: The 1,315-line `ApiCollections.jsx` file was split into focused components for the collection list, forms, details, files, and test runs under `ApiCollections/`.
+- **Smaller site details page**: `SiteDetail.jsx` was reduced from 743 lines to about 120. The test-run form and the logic for activity and findings now live in their own components and hooks, instead of passing about 40 separate values through `TestRunDetail`.
+- **Clearer A.L.I.C.E. session code** (`frontend/src/lib/`): Display helpers were moved to `aliceRender.jsx`, while `aliceSession.js` now contains the shared stream state that keeps A.L.I.C.E. connected when interface components are removed and recreated.
 
 ## [PR #220] July 7 Update — upstream proxy fixes, macOS clipboard, packaging
 

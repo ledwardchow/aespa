@@ -2726,6 +2726,7 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
         model="deepseek-v4-pro-custom",
         max_tokens=2048,
         temperature=0.0,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw_content = asyncio.run(
@@ -2780,6 +2781,7 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
         model="openai.gpt-5.5",
         max_tokens=256,
         temperature=0.2,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw = asyncio.run(
@@ -3073,6 +3075,34 @@ def test_token_usage_tracking_for_sast_and_api():
 
     assert web_usage["total_input"] == 200
     assert web_usage["total_output"] == 80
+
+
+def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
+    run_id = 888889
+    events = []
+    llm.set_run_context(run_id, emit_fn=events.append, run_kind="api")
+    callback = llm._copilot_usage_callback()
+    llm.clear_run_context()
+
+    callback(
+        "gpt-5.6-terra",
+        1_200,
+        300,
+        800,
+        0,
+        ai_credits=1.25,
+        premium_requests=0,
+        requests=1,
+        copilot_quota={"remaining_percentage": 74, "reset_at": None},
+    )
+
+    usage = llm.get_run_token_usage(run_id, run_kind="api")
+    assert usage["total_input"] == 1_200
+    assert usage["total_cache_read"] == 800
+    assert usage["total_ai_credits"] == 1.25
+    assert usage["total_requests"] == 1
+    assert usage["copilot_quota"]["remaining_percentage"] == 74
+    assert events[-1]["totals"] == usage
 
 
 def test_google_usage_treats_none_counters_as_zero(monkeypatch):

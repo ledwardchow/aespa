@@ -257,7 +257,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "llm_config", "provider_id", "INTEGER")
     _ensure_column(engine, "llm_config", "use_vision", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(
-        engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 1"
+        engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 0"
     )
     _ensure_column(engine, "llm_config", "project_id", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
@@ -354,11 +354,19 @@ def _migrate(engine: Engine) -> None:
         engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120"
     )
     _ensure_column(
+        engine,
+        "scanner_policy",
+        "execution_monitor_enabled",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"
     )
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
+    _ensure_column(engine, "llm_provider_config", "username", "TEXT")
+    _ensure_column(engine, "llm_config", "username", "TEXT")
     # agent_log / scan_log share the test_run_id column between web TestRuns and
     # ApiTestRuns, whose ids come from independent counters and collide.  Tag each
     # row with the run kind so the two panels stop reading each other's rows.
@@ -1088,6 +1096,7 @@ def _ensure_llm_provider_config_migration(engine: Engine) -> None:
                 api_format TEXT NOT NULL DEFAULT 'anthropic',
                 api_key TEXT,
                 base_url TEXT,
+                username TEXT,
                 models_json TEXT NOT NULL DEFAULT '[]',
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )

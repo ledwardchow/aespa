@@ -11,6 +11,7 @@ import os
 import re
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
@@ -101,8 +102,8 @@ _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
 
-# Per-run token usage accumulator: {(run_kind, run_id): {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
-_run_token_usage: dict[tuple[str, int], dict[str, dict[str, int]]] = {}
+# Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
+_run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
@@ -202,7 +203,12 @@ def estimate_tokens(
     if screenshot_b64:
         if provider == "anthropic":
             vision_tokens = 1600
-        elif provider in ("openai", "azure_openai", "openrouter"):
+        elif provider in (
+            "openai",
+            "azure_openai",
+            "openrouter",
+            "github_copilot",
+        ):
             vision_tokens = 765
         else:
             vision_tokens = 258
@@ -244,7 +250,7 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
 
 def _load_bucket_from_db(
     run_id: int, run_kind: str = "web"
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, Any]]:
     """Load persisted token usage for a run from the DB (best-effort)."""
     try:
         from sqlmodel import Session as _Session
@@ -316,8 +322,19 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                         "cache_read": 0,
                         "cache_write": 0,
                     }
-                for k in ("input", "output", "cache_read", "cache_write"):
+                for k in (
+                    "input",
+                    "output",
+                    "cache_read",
+                    "cache_write",
+                    "ai_credits",
+                    "premium_requests",
+                    "requests",
+                ):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
+                for k in ("provider", "copilot_quota"):
+                    if counts.get(k) is not None:
+                        bucket[model][k] = counts[k]
         _run_token_seeded.add(key)
 
 
@@ -327,21 +344,71 @@ def clear_run_context() -> None:
     _emit_fn_var.set(None)
 
 
+@dataclass(frozen=True)
+class _UsageContext:
+    run_id: int | None
+    run_kind: str
+    emit_fn: Any | None
+
+
+def _capture_usage_context() -> _UsageContext:
+    """Capture run routing before an SDK moves callbacks to another context."""
+    return _UsageContext(
+        run_id=_run_id_var.get(),
+        run_kind=_run_kind_var.get(),
+        emit_fn=_emit_fn_var.get(),
+    )
+
+
+def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    quotas = [
+        value["copilot_quota"]
+        for value in bucket.values()
+        if value.get("copilot_quota")
+    ]
+    quota = max(
+        quotas,
+        key=lambda value: str(value.get("observed_at") or ""),
+        default=None,
+    )
+    return {
+        "total_input": sum(v.get("input", 0) for v in bucket.values()),
+        "total_output": sum(v.get("output", 0) for v in bucket.values()),
+        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
+        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
+        "total_ai_credits": sum(v.get("ai_credits", 0) for v in bucket.values()),
+        "total_premium_requests": sum(
+            v.get("premium_requests", 0) for v in bucket.values()
+        ),
+        "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "copilot_quota": quota,
+        "by_model": {m: dict(v) for m, v in bucket.items()},
+    }
+
+
 def _record_usage(
     model: str,
     input_tokens: int,
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    usage_context: _UsageContext | None = None,
+    provider: str | None = None,
+    ai_credits: float = 0,
+    premium_requests: float = 0,
+    requests: int = 0,
+    copilot_quota: dict[str, Any] | None = None,
 ) -> None:
-    """Accumulate token counts for the active run and fire a SSE event."""
+    """Accumulate provider usage for a run and fire a live update."""
     _last_call_tokens_var.set(
         {"input": input_tokens + cache_read_tokens, "output": output_tokens}
     )
-    run_id = _run_id_var.get()
+    context = usage_context or _capture_usage_context()
+    run_id = context.run_id
     if run_id is None:
         return
-    run_kind = _run_kind_var.get()
+    run_kind = context.run_kind
     key = (run_kind, run_id)
     bucket = _run_token_usage.setdefault(key, {})
     entry = bucket.setdefault(
@@ -351,14 +418,19 @@ def _record_usage(
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
+    if provider:
+        entry["provider"] = provider
+    entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
+    entry["premium_requests"] = (
+        entry.get("premium_requests", 0) + premium_requests
+    )
+    entry["requests"] = entry.get("requests", 0) + requests
+    if copilot_quota:
+        entry["copilot_quota"] = copilot_quota
     _persist_bucket_to_db(run_id, bucket, run_kind)
-    emit_fn = _emit_fn_var.get()
+    emit_fn = context.emit_fn
     if emit_fn:
         try:
-            total_in = sum(v["input"] for v in bucket.values())
-            total_out = sum(v["output"] for v in bucket.values())
-            total_cache_read = sum(v.get("cache_read", 0) for v in bucket.values())
-            total_cache_write = sum(v.get("cache_write", 0) for v in bucket.values())
             emit_fn(
                 {
                     "type": "token_usage_update",
@@ -367,13 +439,9 @@ def _record_usage(
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
-                    "totals": {
-                        "total_input": total_in,
-                        "total_output": total_out,
-                        "total_cache_read": total_cache_read,
-                        "total_cache_write": total_cache_write,
-                        "by_model": {m: dict(v) for m, v in bucket.items()},
-                    },
+                    "ai_credits": ai_credits,
+                    "premium_requests": premium_requests,
+                    "totals": _usage_totals(bucket),
                 }
             )
         except Exception:
@@ -407,13 +475,7 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
     bucket = _run_token_usage.get(key)
     if bucket is None:
         bucket = _load_bucket_from_db(run_id, run_kind)
-    return {
-        "total_input": sum(v["input"] for v in bucket.values()),
-        "total_output": sum(v["output"] for v in bucket.values()),
-        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
-        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
-        "by_model": {m: dict(v) for m, v in bucket.items()},
-    }
+    return _usage_totals(bucket)
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -842,6 +904,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     limiter = get_limiter_for_config(config)
     if limiter is None:
+        if config.provider == "github_copilot":
+            return await _github_copilot(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
         if config.provider == "google":
@@ -875,7 +939,9 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     )
 
     try:
-        if config.provider == "anthropic":
+        if config.provider == "github_copilot":
+            resp = await _github_copilot(config, prompt, screenshot_b64)
+        elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
         elif config.provider == "google":
             resp = await _google(config, prompt, screenshot_b64)
@@ -925,7 +991,21 @@ async def stream_chat_completion(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
     """Stream a chat completion from the configured LLM provider in real-time."""
-    if config.provider == "anthropic":
+    if config.provider == "github_copilot":
+        # Copilot's full response still travels through the same provider adapter.
+        # Yielding it as one chunk preserves this public generator contract.
+        combined = "\n\n".join(
+            [
+                system_message,
+                *[
+                    f"[{str(message.get('role') or 'user').upper()}]\n"
+                    f"{message.get('content') or ''}"
+                    for message in messages
+                ],
+            ]
+        )
+        yield await _github_copilot(config, combined, None)
+    elif config.provider == "anthropic":
         import anthropic as _ant
 
         client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
@@ -1358,6 +1438,47 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     )
     _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
+
+
+async def _github_copilot(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    """Call GitHub Copilot through its official SDK and user entitlement."""
+    from aespa.services import copilot_provider
+
+    return await copilot_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _copilot_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _copilot_usage_callback() -> Any:
+    """Bind Copilot's background SDK events to the calling AESPA run."""
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="github_copilot",
+            **details,
+        )
+
+    return record
 
 
 async def _openai_compat(
@@ -2926,6 +3047,7 @@ TOOL_RESULT_CHAR_LIMIT = 8_000
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "github_copilot",
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
@@ -3077,6 +3199,17 @@ async def _call_with_tools_impl(
     Anthropic-format so the growing messages list stays consistent).
     """
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "github_copilot":
+        from aespa.services import copilot_provider
+
+        return await copilot_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _copilot_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     # ── Anthropic (direct) ────────────────────────────────────────────────────
     if config.provider == "anthropic":
         import anthropic as _ant
@@ -3459,7 +3592,7 @@ async def _call_with_tools_impl(
         )
         # Force a tool call unless disabled; if the model rejects forced tool
         # choice, _create_response retries once without it.
-        if getattr(config, "force_tool_choice", True):
+        if getattr(config, "force_tool_choice", False):
             r_kwargs["tool_choice"] = "required"
         resp = await _create_response(client, r_kwargs)
 
@@ -3612,7 +3745,7 @@ async def _call_with_tools_impl(
         call_kwargs["tools"] = oai_tools
         model_lower = (config.model or "").lower()
         # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
-        if not getattr(config, "force_tool_choice", True):
+        if not getattr(config, "force_tool_choice", False):
             pass
         elif (
             "r1" in model_lower
@@ -4333,6 +4466,13 @@ async def thinking_agentic_loop(
                 break
 
     finally:
+        if config.provider == "github_copilot":
+            try:
+                from aespa.services import copilot_provider
+
+                await copilot_provider.close_conversation(messages)
+            except Exception:
+                log.debug("Failed to close Copilot conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised
         # by task.cancel() — so the conversation state is always recoverable.
         if on_checkpoint and len(messages) > 1:
