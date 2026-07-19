@@ -93,6 +93,27 @@ def test_identical_probe_is_suppressed_after_three_same_outcomes():
     assert "3 times" in message
 
 
+def test_intentional_repeat_limit_overrides_default_probe_suppression():
+    policy = ScanCompletionPolicy()
+    signature = policy.probe_signature(
+        method="POST",
+        url="https://target.local/api/auth/login",
+        body={"email": "known@example.com", "password": "wrong"},
+        session_label=None,
+        owasp_category="A07",
+        test_class="rate_limit",
+    )
+    for _ in range(6):
+        assert (
+            policy.repeated_probe_message(signature, intentional_repeat_limit=6) is None
+        )
+        policy.record_probe_outcome(signature, 401, '{"error":"unauthorized"}')
+
+    message = policy.repeated_probe_message(signature, intentional_repeat_limit=6)
+    assert message is not None
+    assert "6 times" in message
+
+
 def test_stagnation_warns_then_terminates_and_progress_resets_it():
     policy = ScanCompletionPolicy(stagnation_warning_calls=3, stagnation_stop_calls=5)
     assert "STAGNATION" not in policy.observe_tool_result("one")

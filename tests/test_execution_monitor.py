@@ -5,6 +5,7 @@ from aespa.services.execution_monitor import (
     InterventionState,
     StrategyVector,
     add_strategy_justification_to_tools,
+    intentional_repetition_contract,
     normalize_tool_signature,
     normalize_url,
 )
@@ -121,6 +122,57 @@ def test_duplicate_escalation_and_bounded_hard_block_termination():
         == InterventionState.HARD_BLOCK_DUPLICATE
     )
     assert "hard-blocked duplicate" in (monitor.check_termination() or "")
+
+
+def test_rate_limit_sequence_allows_six_identical_requests_before_blocking():
+    monitor = ExecutionMonitor()
+    tool_input = {
+        "url": "http://example.com/api/auth/login",
+        "method": "POST",
+        "body": {"email": "known@example.com", "password": "wrong"},
+        "test_class": "rate_limit",
+        "repeat_sequence": "known-user-login-rate-limit",
+        "repeat_limit": 6,
+    }
+
+    contract = intentional_repetition_contract("http_request", tool_input)
+    assert contract is not None
+    assert contract[1] == 6
+    for step in range(1, 7):
+        assert (
+            monitor.observe_tool_call("http_request", tool_input, step)[0]
+            == InterventionState.NORMAL
+        )
+    state, reason = monitor.observe_tool_call("http_request", tool_input, 7)
+    assert state == InterventionState.HARD_BLOCK_DUPLICATE
+    assert "bounded limit of 6" in (reason or "")
+    assert monitor.check_termination() is None
+
+
+def test_rate_limit_intent_is_inferred_from_existing_probe_notes():
+    tool_input = {
+        "url": "http://example.com/api/auth/login",
+        "method": "POST",
+        "payload_purpose": "Test missing rate-limiting (WSTG-ATHN-03)",
+    }
+
+    contract = intentional_repetition_contract("http_request", tool_input)
+    assert contract is not None
+    assert contract[1] == 6
+
+
+def test_disabled_monitor_never_intervenes_or_terminates():
+    monitor = ExecutionMonitor()
+    monitor.set_enabled(False)
+    tool_input = {"url": "http://example.com/test", "method": "GET"}
+
+    for step in range(1, 10):
+        assert (
+            monitor.observe_tool_call("http_request", tool_input, step)[0]
+            == InterventionState.NORMAL
+        )
+        monitor.finish_step(progress_made=False, executed=True)
+    assert monitor.check_termination() is None
 
 
 def test_stagnation_is_driven_by_completed_nonprogress_steps():
