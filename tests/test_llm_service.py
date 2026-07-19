@@ -2726,6 +2726,7 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
         model="deepseek-v4-pro-custom",
         max_tokens=2048,
         temperature=0.0,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw_content = asyncio.run(
@@ -2780,6 +2781,7 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
         model="openai.gpt-5.5",
         max_tokens=256,
         temperature=0.2,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw = asyncio.run(

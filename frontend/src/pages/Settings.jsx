@@ -157,7 +157,7 @@ export function llmProfileToForm(cfg, providers = []) {
       temperature: hasTemp ? cfg.temperature : 0.2,
       use_temperature: hasTemp,
       use_vision: cfg.use_vision ?? false,
-      force_tool_choice: cfg.force_tool_choice ?? true
+      force_tool_choice: cfg.force_tool_choice ?? false
     };
   }
   return {

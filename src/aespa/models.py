@@ -289,7 +289,7 @@ class LLMConfig(SQLModel, table=True):
     # Whether to include page screenshots in LLM prompts (requires vision model)
     use_vision: bool = Field(default=False)
     # Whether to force tool choice using the wire format tool_choice: required/any
-    force_tool_choice: bool = Field(default=True)
+    force_tool_choice: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
