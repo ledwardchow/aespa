@@ -546,20 +546,20 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
 def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
     provider = _make_provider(client).json()
 
-    # Verify defaults to True
-    profile = _make_profile(client, provider["id"], name="Profile With Force").json()
-    assert profile["force_tool_choice"] is True
+    # Verify defaults to False
+    profile = _make_profile(client, provider["id"], name="Profile Default").json()
+    assert profile["force_tool_choice"] is False
 
-    # Disable it explicitly
-    profile_disabled = _make_profile(
-        client, provider["id"], name="Profile Without Force", force_tool_choice=False
+    # Enable it explicitly
+    profile_enabled = _make_profile(
+        client, provider["id"], name="Profile With Force", force_tool_choice=True
     ).json()
-    assert profile_disabled["force_tool_choice"] is False
+    assert profile_enabled["force_tool_choice"] is True
 
     # Get active config to verify it resolves correctly
-    client.post(f"/api/settings/llm/model-configs/{profile_disabled['id']}/activate")
+    client.post(f"/api/settings/llm/model-configs/{profile_enabled['id']}/activate")
     active = client.get("/api/settings/llm").json()
-    assert active["force_tool_choice"] is False
+    assert active["force_tool_choice"] is True
 
 
 def test_export_import_write_only_keys(client: TestClient):

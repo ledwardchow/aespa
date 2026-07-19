@@ -517,7 +517,7 @@ class LLMConfigIn(BaseModel):
     max_tokens: int = Field(default=70000, ge=1, le=256000)
     temperature: Optional[float] = Field(default=None)
     use_vision: bool = False
-    force_tool_choice: bool = True
+    force_tool_choice: bool = False
 
     @field_validator("temperature")
     @classmethod
@@ -889,7 +889,7 @@ class LLMExportProfileItem(BaseModel):
     max_tokens: int = 70000
     temperature: Optional[float] = None
     use_vision: bool = False
-    force_tool_choice: bool = True
+    force_tool_choice: bool = False
     is_active: bool = False
 
 

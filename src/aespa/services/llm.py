@@ -3459,7 +3459,7 @@ async def _call_with_tools_impl(
         )
         # Force a tool call unless disabled; if the model rejects forced tool
         # choice, _create_response retries once without it.
-        if getattr(config, "force_tool_choice", True):
+        if getattr(config, "force_tool_choice", False):
             r_kwargs["tool_choice"] = "required"
         resp = await _create_response(client, r_kwargs)
 
@@ -3612,7 +3612,7 @@ async def _call_with_tools_impl(
         call_kwargs["tools"] = oai_tools
         model_lower = (config.model or "").lower()
         # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
-        if not getattr(config, "force_tool_choice", True):
+        if not getattr(config, "force_tool_choice", False):
             pass
         elif (
             "r1" in model_lower

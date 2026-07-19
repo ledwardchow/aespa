@@ -217,7 +217,7 @@ export const DEFAULT_LLM_FORM = {
   temperature: 0.2,
   use_temperature: true,
   use_vision: false,
-  force_tool_choice: true
+  force_tool_choice: false
 };
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",
