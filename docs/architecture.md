@@ -223,7 +223,7 @@ Defines execution parameters linked to a provider:
 | `max_tokens` | `70000` | Max tokens per LLM call |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
-| `force_tool_choice` | `true` | Force tool selection via wire-format `tool_choice: required/any` |
+| `force_tool_choice` | `false` | Force tool selection via wire-format `tool_choice: required/any` |
 
 #### 3. Multi-Role Model Profile (`LLMProfile` model)
 
