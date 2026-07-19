@@ -44,7 +44,10 @@ from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
 from aespa.services import traffic as traffic_svc
-from aespa.services.execution_monitor import InterventionState
+from aespa.services.execution_monitor import (
+    InterventionState,
+    intentional_repetition_contract,
+)
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
 )
@@ -7249,6 +7252,12 @@ async def _do_agentic_thinking_loop(
     completion_policy = ScanCompletionPolicy.from_state(
         (resume_from or {}).get("completion_state")
     )
+    completion_policy.execution_monitor.set_enabled(
+        bool(
+            scanner_policy
+            and getattr(scanner_policy, "execution_monitor_enabled", False)
+        )
+    )
 
     def _mark_session_pending(label: str | None) -> None:
         completion_policy.session_created(label)
@@ -8544,7 +8553,15 @@ async def _do_agentic_thinking_loop(
             owasp_category=_hr_owasp,
             test_class=_hr_test_class,
         )
-        _repeat_message = completion_policy.repeated_probe_message(_hr_probe_signature)
+        _repetition_contract = intentional_repetition_contract(
+            "http_request", tool_input
+        )
+        _repeat_message = completion_policy.repeated_probe_message(
+            _hr_probe_signature,
+            intentional_repeat_limit=(
+                _repetition_contract[1] if _repetition_contract else None
+            ),
+        )
         if _repeat_message:
             _emit_completion_log(
                 f"Step {step}: repeated probe suppressed — {hr_method} {hr_url}",

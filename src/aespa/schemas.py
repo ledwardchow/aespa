@@ -348,6 +348,7 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "github_copilot",
     "openai",
     "openai_compatible",
     "openrouter",
@@ -361,6 +362,14 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "github_copilot": [
+        "auto",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+        "claude-opus-4.8",
+    ],
     "anthropic": [
         "claude-opus-4-8",
         "claude-opus-4-5",
@@ -370,6 +379,9 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-4.1",
@@ -458,6 +470,7 @@ class LLMProviderConfigIn(BaseModel):
     name: str = Field(default="Default Provider", min_length=1, max_length=120)
     api_format: LLMProviderAPILiteral = "anthropic"
     base_url: str | None = None
+    username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     api_key: str | None = None
@@ -499,6 +512,7 @@ class LLMProviderConfigOut(BaseModel):
     name: str
     api_format: str
     base_url: str | None
+    username: str | None = None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
     has_api_key: bool = False
@@ -539,6 +553,7 @@ class LLMConfigOut(BaseModel):
     has_api_key: bool = False
     api_key: str | None = None
     base_url: str | None
+    username: str | None = None
     project_id: str | None = None
     model: str
     max_tokens: int
@@ -588,6 +603,7 @@ DEFAULT_METHODS_BY_MODE: dict[str, list[str]] = {
 class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    execution_monitor_enabled: bool = False
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
@@ -874,6 +890,7 @@ class LLMExportProviderItem(BaseModel):
     name: str
     api_format: str
     base_url: str | None = None
+    username: str | None = None
     project_id: str | None = None
     models: list[str]
     has_api_key: bool = False

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { DEFAULT_SPECIALIST_AGENT_FORM } from "./Settings/UpstreamProxySettings";
-import { PROVIDER_DEFAULT_BASE_URLS, DEFAULT_PROVIDER_FORM, DEFAULT_LLM_FORM, API_FORMAT_LABELS } from "./Settings/BurpRestApiSettings";
+import { PROVIDER_DEFAULT_BASE_URLS, PROVIDER_MODEL_PLACEHOLDERS, DEFAULT_PROVIDER_FORM, DEFAULT_LLM_FORM, API_FORMAT_LABELS } from "./Settings/BurpRestApiSettings";
 import { AGENT_ROLE_LABELS } from "./Settings/LLMModelForm";
 import { DEFAULT_BURP_REST_API_FORM } from "./Settings/SpecialistAgentSettings";
 import { api } from "../lib/api";
@@ -111,6 +111,7 @@ export function providerToForm(provider) {
     name: provider.name || "",
     api_format: provider.api_format || "anthropic",
     base_url: provider.base_url || "",
+    username: provider.username || "",
     project_id: provider.project_id || "",
     models: (provider.models || []).join("\n"),
     api_key: "",
@@ -133,12 +134,14 @@ export function providerPayload(form) {
   } else {
     apiKeyPayload = null;
   }
+  const modelText = form.models.trim() || PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || "";
   return {
     name: form.name.trim(),
     api_format: form.api_format,
     base_url: form.base_url.trim() || null,
+    username: form.api_format === "github_copilot" ? form.username.trim() || null : null,
     project_id: form.api_format === "bedrock_mantle" ? form.project_id.trim() || null : null,
-    models: form.models.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),
+    models: modelText.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),
     api_key: apiKeyPayload,
     max_tpm: form.max_tpm !== "" ? Number(form.max_tpm) : null,
     max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null

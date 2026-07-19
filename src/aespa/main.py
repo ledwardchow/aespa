@@ -25,6 +25,7 @@ from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
+from aespa.services import copilot_provider as copilot_provider_svc
 from aespa.services import validator as validator_svc
 from aespa.services.settings import get_cloudflare_access_config
 
@@ -33,7 +34,10 @@ from aespa.services.settings import get_cloudflare_access_config
 async def _lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
     await validator_svc.resume_interrupted_validations()
-    yield
+    try:
+        yield
+    finally:
+        await copilot_provider_svc.close_clients()
 
 
 _JWKS_CACHE: dict[str, tuple[dict, float]] = {}
