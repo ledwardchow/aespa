@@ -204,6 +204,7 @@ def test_explicit_token_client_is_isolated_and_filters_environment(monkeypatch):
     monkeypatch.setattr(copilot, "CopilotClient", _FakeRuntimeClient)
     monkeypatch.setenv("AESPA_PRIVATE_SECRET", "must-not-be-forwarded")
     monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "environment-token")
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
     config = _config()
     config.api_key = "explicit-user-token"
 
@@ -221,6 +222,7 @@ def test_explicit_token_client_is_isolated_and_filters_environment(monkeypatch):
     assert client.kwargs["github_token"] == "explicit-user-token"
     assert "AESPA_PRIVATE_SECRET" not in client.kwargs["env"]
     assert client.kwargs["env"]["COPILOT_GITHUB_TOKEN"] == "environment-token"
+    assert client.kwargs["env"]["SYSTEMROOT"] == r"C:\Windows"
     assert client.kwargs["env"]["HTTPS_PROXY"] == "http://proxy.local:8080"
     assert not copilot_provider.Path(base_directory).exists()
 
