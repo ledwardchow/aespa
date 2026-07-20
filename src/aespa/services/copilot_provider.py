@@ -67,6 +67,7 @@ _conversations: dict[int, _ConversationState] = {}
 
 _COPILOT_ENV_ALLOWLIST = (
     "PATH",
+    "SYSTEMROOT",
     "HOME",
     "USER",
     "TMPDIR",
