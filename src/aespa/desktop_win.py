@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+from importlib import import_module
 
 import pystray
 import webview
@@ -67,8 +68,7 @@ def _on_quit(icon, _item) -> None:
 
 def main() -> None:
     if "--smoke-test" in sys.argv:
-        import webview.platforms.winforms
-
+        import_module("webview.platforms.winforms")
         return
 
     configure_browsers_path()
