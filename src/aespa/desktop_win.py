@@ -10,6 +10,7 @@ host in desktop.py.
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 import time
 
@@ -65,6 +66,11 @@ def _on_quit(icon, _item) -> None:
 
 
 def main() -> None:
+    if "--smoke-test" in sys.argv:
+        import webview.platforms.winforms
+
+        return
+
     configure_browsers_path()
     # First-run Chromium download runs in the background so the UI isn't blocked.
     threading.Thread(target=download_chromium_if_missing, daemon=True).start()
