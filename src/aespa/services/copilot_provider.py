@@ -488,6 +488,7 @@ async def completion_with_tools(
                 description=tool.get("description", ""),
                 parameters=tool.get("input_schema", {"type": "object"}),
                 handler=execute,
+                overrides_built_in_tool=True,
                 skip_permission=True,
                 defer="never",
             )

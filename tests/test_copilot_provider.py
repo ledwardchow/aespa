@@ -327,7 +327,16 @@ def test_completion_with_tools_returns_captured_tool_call(monkeypatch):
                         "properties": {"url": {"type": "string"}},
                         "required": ["url"],
                     },
-                }
+                },
+                {
+                    "name": "glob",
+                    "description": "Find files.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"pattern": {"type": "string"}},
+                        "required": ["pattern"],
+                    },
+                },
             ],
             lambda *args, **kwargs: usage.append((*args, kwargs)),
         )
@@ -383,6 +392,7 @@ def test_completion_with_tools_returns_captured_tool_call(monkeypatch):
     assert final_stop == "end_turn"
     assert final_blocks[0]["text"] == "assessment complete"
     assert len(client.sessions) == 1
+    assert all(tool.overrides_built_in_tool for tool in session.kwargs["tools"])
     assert list(session.kwargs["available_tools"]) == ["custom:*"]
     assert session.kwargs["enable_config_discovery"] is False
     assert session.kwargs["skip_custom_instructions"] is True
