@@ -5258,11 +5258,9 @@ async def _do_thinking_scan(run_id: int) -> None:
         for obj in [*creds, site, llm_cfg, run]:
             s.expunge(obj)
 
-    global_http_header: dict[str, str] = {}
-    if global_header_cfg.header_name and global_header_cfg.header_value:
-        global_http_header = {
-            global_header_cfg.header_name: global_header_cfg.header_value
-        }
+    global_http_header = {
+        header.header_name: header.header_value for header in global_header_cfg.headers
+    }
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)

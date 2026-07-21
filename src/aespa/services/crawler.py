@@ -300,11 +300,9 @@ async def _do_crawl_inner(run_id: int) -> None:
             s.expunge(obj)
 
     _pw_proxy = {"proxy": {"server": crawl_proxy_url}} if crawl_proxy_url else {}
-    _global_http_header: dict[str, str] = {}
-    if global_header_cfg.header_name and global_header_cfg.header_value:
-        _global_http_header = {
-            global_header_cfg.header_name: global_header_cfg.header_value
-        }
+    _global_http_header = {
+        header.header_name: header.header_value for header in global_header_cfg.headers
+    }
     base_url = _site_base_url(site.base_url)
     login_url = site.login_url or ""
     requires_auth = site.requires_auth

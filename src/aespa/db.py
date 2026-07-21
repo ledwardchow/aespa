@@ -250,6 +250,12 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
 def _migrate(engine: Engine) -> None:
     """Apply any missing columns that were added after the initial schema creation."""
+    _ensure_column(
+        engine,
+        "global_http_header_config",
+        "headers_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
     _ensure_column(engine, "site", "scope_hosts", "TEXT")
     _ensure_column(engine, "site", "scan_guidance", "TEXT")
     _ensure_column(engine, "llm_config", "name", "TEXT NOT NULL DEFAULT 'Default'")

@@ -397,6 +397,12 @@ th {
   overflow: hidden;
   position: relative;
 }
+
+.global-header-table-wrap { margin-bottom: 0; }
+.global-header-table { min-width: 600px; }
+.global-header-table td { padding: 7px 8px; }
+.global-header-table .form-input { width: 100%; }
+.global-header-empty { padding: 16px; text-align: center; }
 tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: rgba(255,255,255,0.02); }
 
