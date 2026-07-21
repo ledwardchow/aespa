@@ -95,6 +95,42 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     assert r.status_code == 200
     assert r.json()["audience"] is None
 
+
+def test_global_http_headers_round_trip(client: TestClient):
+    initial = client.get("/api/settings/global-http-header")
+    assert initial.status_code == 200
+    assert initial.json()["headers"] == []
+
+    payload = {
+        "headers": [
+            {"header_name": " X-Debug-Token ", "header_value": " secret "},
+            {"header_name": "X-Scan-Mode", "header_value": "active"},
+        ]
+    }
+    updated = client.put("/api/settings/global-http-header", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["headers"] == [
+        {"header_name": "X-Debug-Token", "header_value": "secret"},
+        {"header_name": "X-Scan-Mode", "header_value": "active"},
+    ]
+    assert (
+        client.get("/api/settings/global-http-header").json()["headers"]
+        == updated.json()["headers"]
+    )
+
+
+def test_global_http_headers_reject_duplicate_names(client: TestClient):
+    response = client.put(
+        "/api/settings/global-http-header",
+        json={
+            "headers": [
+                {"header_name": "X-Trace", "header_value": "one"},
+                {"header_name": "x-trace", "header_value": "two"},
+            ]
+        },
+    )
+    assert response.status_code == 422
+
     r = client.put("/api/settings/cloudflare-access", json={"audience": "  abc123  "})
     assert r.status_code == 200
     # Whitespace is trimmed on the way in.

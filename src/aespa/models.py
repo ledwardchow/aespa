@@ -430,11 +430,15 @@ class AdversarialValidatorConfig(SQLModel, table=True):
 
 
 class GlobalHttpHeaderConfig(SQLModel, table=True):
-    """Singleton row (id always = 1) for a global extra HTTP header added to all scanner/crawler requests."""
+    """Singleton row (id always = 1) for global headers sent by scanners and crawlers."""
 
     __tablename__ = "global_http_header_config"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    # JSON array of {"header_name": "...", "header_value": "..."}. The two
+    # legacy columns remain so existing databases can be upgraded without losing
+    # their configured header.
+    headers_json: str = Field(default="[]")
     header_name: Optional[str] = Field(default=None, max_length=200)
     header_value: Optional[str] = Field(default=None, max_length=2000)
     updated_at: datetime = Field(default_factory=_utcnow)
