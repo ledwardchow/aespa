@@ -319,12 +319,11 @@ Singleton row (id = 1). Controls the adversarial validation agent that attempts 
 
 ### Global Extra HTTP Header Config (`GlobalHttpHeaderConfig` model)
 
-Singleton row (id = 1). Configures a custom HTTP header appended to all outbound scanner and crawler HTTP requests:
+Singleton row (id = 1). Configures custom HTTP headers appended to all outbound scanner and crawler HTTP requests:
 
 | Field | Default | Description |
 |---|---|---|
-| `header_name` | `null` | Header name string |
-| `header_value` | `null` | Header value string |
+| `headers` | `[]` | List of header name and value pairs; header names are case-insensitively unique |
 
 ### Reporting Debug Config (`ReportingDebugConfig` model)
 

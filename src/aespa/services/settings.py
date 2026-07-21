@@ -792,9 +792,17 @@ def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut
         return GlobalHttpHeaderConfigOut(
             **GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow()
         )
+    try:
+        parsed_headers = json.loads(cfg.headers_json or "[]")
+        headers = parsed_headers if isinstance(parsed_headers, list) else []
+    except (TypeError, json.JSONDecodeError):
+        headers = []
+    # Databases created before multi-header support have values only in these
+    # legacy fields. Return that value until the user saves the new table.
+    if not headers and cfg.header_name and cfg.header_value:
+        headers = [{"header_name": cfg.header_name, "header_value": cfg.header_value}]
     return GlobalHttpHeaderConfigOut(
-        header_name=cfg.header_name,
-        header_value=cfg.header_value,
+        headers=headers,
         updated_at=cfg.updated_at,
     )
 
@@ -805,8 +813,14 @@ def upsert_global_http_header_config(
     cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = GlobalHttpHeaderConfig(id=_SINGLETON_ID)
-    cfg.header_name = payload.header_name
-    cfg.header_value = payload.header_value
+    cfg.headers_json = json.dumps(
+        [header.model_dump() for header in payload.headers], separators=(",", ":")
+    )
+    # Keep the old columns in sync with the first header for a graceful rollback
+    # to an earlier AESPA version.
+    first_header = payload.headers[0] if payload.headers else None
+    cfg.header_name = first_header.header_name if first_header else None
+    cfg.header_value = first_header.header_value if first_header else None
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()

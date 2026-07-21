@@ -816,30 +816,38 @@ class ValidatorConfigOut(ValidatorConfigBase):
 # ── Global HTTP header config schemas ─────────────────────────────────────────
 
 
-class GlobalHttpHeaderConfigBase(BaseModel):
+class GlobalHttpHeader(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    header_name: str | None = Field(default=None, max_length=200)
-    header_value: str | None = Field(default=None, max_length=2000)
+    header_name: str = Field(min_length=1, max_length=200)
+    header_value: str = Field(max_length=2000)
 
     @field_validator("header_name")
     @classmethod
-    def _normalize_header_name(cls, v: str | None) -> str | None:
-        if not v:
-            return None
+    def _normalize_header_name(cls, v: str) -> str:
         v = v.strip()
-        if not v:
-            return None
         if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
             raise ValueError(f"Invalid HTTP header name '{v}'")
         return v
 
     @field_validator("header_value")
     @classmethod
-    def _normalize_header_value(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        return v.strip() or None
+    def _normalize_header_value(cls, v: str) -> str:
+        return v.strip()
+
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    headers: list[GlobalHttpHeader] = Field(default_factory=list, max_length=100)
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_duplicate_headers(
+        cls, v: list[GlobalHttpHeader]
+    ) -> list[GlobalHttpHeader]:
+        names = [header.header_name.lower() for header in v]
+        if len(names) != len(set(names)):
+            raise ValueError("HTTP header names must be unique")
+        return v
 
 
 class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):

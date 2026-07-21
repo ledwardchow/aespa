@@ -1187,11 +1187,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     )
     llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
 
-    global_http_header: dict[str, str] = {}
-    if global_header_cfg.header_name and global_header_cfg.header_value:
-        global_http_header = {
-            global_header_cfg.header_name: global_header_cfg.header_value
-        }
+    global_http_header = {
+        header.header_name: header.header_value for header in global_header_cfg.headers
+    }
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
