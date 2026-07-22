@@ -19,7 +19,9 @@ def _gaps() -> dict:
 
 def test_failed_session_attempt_cannot_trap_completion():
     policy = ScanCompletionPolicy()
-    policy.session_created("forged_admin")
+    policy.session_created(
+        "forged_admin", lifecycle_state="verified", challenge_eligible=True
+    )
 
     allowed, feedback, _ = policy.check_done()
     assert allowed is False
@@ -35,7 +37,9 @@ def test_failed_session_attempt_cannot_trap_completion():
 
 def test_declined_session_challenge_is_only_issued_once():
     policy = ScanCompletionPolicy()
-    policy.session_created("unused")
+    policy.session_created(
+        "unused", lifecycle_state="verified", challenge_eligible=True
+    )
 
     assert policy.check_done()[0] is False
     allowed, _, message = policy.check_done()
@@ -49,19 +53,24 @@ def test_coverage_challenges_are_bounded_and_progress_aware():
 
     first = policy.check_done(_gaps)
     assert first[0] is False
-    assert "round (1/2)" in first[1]
+    assert "round (1/1)" in first[1]
 
     for index in range(3):
         policy.record_progress(f"coverage:{index}")
     second = policy.check_done(_gaps)
-    assert second[0] is False
-    assert "round (2/2)" in second[1]
+    assert second[0] is True
+    assert policy.total_rejections == 1
 
-    for index in range(3, 6):
-        policy.record_progress(f"coverage:{index}")
-    final = policy.check_done(_gaps)
-    assert final[0] is True
-    assert policy.total_rejections == 2
+
+def test_candidate_session_does_not_block_completion_and_403_does_not_evict():
+    policy = ScanCompletionPolicy()
+    policy.session_created("auto_token")
+    assert policy.pending_session_labels() == []
+    assert policy.check_done()[0] is True
+
+    policy.session_attempted("auto_token", 403)
+    assert policy.sessions["auto_token"]["active"] is True
+    assert policy.sessions["auto_token"]["lifecycle_state"] == "verified"
 
 
 def test_unproductive_coverage_challenge_allows_next_done():
@@ -93,6 +102,27 @@ def test_identical_probe_is_suppressed_after_three_same_outcomes():
     assert "3 times" in message
 
 
+def test_intentional_repeat_limit_overrides_default_probe_suppression():
+    policy = ScanCompletionPolicy()
+    signature = policy.probe_signature(
+        method="POST",
+        url="https://target.local/api/auth/login",
+        body={"email": "known@example.com", "password": "wrong"},
+        session_label=None,
+        owasp_category="A07",
+        test_class="rate_limit",
+    )
+    for _ in range(6):
+        assert (
+            policy.repeated_probe_message(signature, intentional_repeat_limit=6) is None
+        )
+        policy.record_probe_outcome(signature, 401, '{"error":"unauthorized"}')
+
+    message = policy.repeated_probe_message(signature, intentional_repeat_limit=6)
+    assert message is not None
+    assert "6 times" in message
+
+
 def test_stagnation_warns_then_terminates_and_progress_resets_it():
     policy = ScanCompletionPolicy(stagnation_warning_calls=3, stagnation_stop_calls=5)
     assert "STAGNATION" not in policy.observe_tool_result("one")
@@ -111,7 +141,9 @@ def test_stagnation_warns_then_terminates_and_progress_resets_it():
 
 def test_completion_state_round_trip_preserves_session_and_challenge_state():
     policy = ScanCompletionPolicy()
-    policy.session_created("customer")
+    policy.session_created(
+        "customer", lifecycle_state="verified", challenge_eligible=True
+    )
     policy.check_done()
     policy.record_progress("coverage:one")
 

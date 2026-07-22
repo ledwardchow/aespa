@@ -245,6 +245,9 @@ class ApiTestRunSummary(BaseModel):
     collection_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     coverage_mode: str
     llm_config_id: int | None
     llm_profile_id: int | None = None
@@ -348,6 +351,7 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "github_copilot",
     "openai",
     "openai_compatible",
     "openrouter",
@@ -361,6 +365,14 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "github_copilot": [
+        "auto",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+        "claude-opus-4.8",
+    ],
     "anthropic": [
         "claude-opus-4-8",
         "claude-opus-4-5",
@@ -370,6 +382,9 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-4.1",
@@ -458,6 +473,7 @@ class LLMProviderConfigIn(BaseModel):
     name: str = Field(default="Default Provider", min_length=1, max_length=120)
     api_format: LLMProviderAPILiteral = "anthropic"
     base_url: str | None = None
+    username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     api_key: str | None = None
@@ -499,6 +515,7 @@ class LLMProviderConfigOut(BaseModel):
     name: str
     api_format: str
     base_url: str | None
+    username: str | None = None
     project_id: str | None = None
     models: list[str] = Field(default_factory=list)
     has_api_key: bool = False
@@ -517,7 +534,7 @@ class LLMConfigIn(BaseModel):
     max_tokens: int = Field(default=70000, ge=1, le=256000)
     temperature: Optional[float] = Field(default=None)
     use_vision: bool = False
-    force_tool_choice: bool = True
+    force_tool_choice: bool = False
 
     @field_validator("temperature")
     @classmethod
@@ -539,6 +556,7 @@ class LLMConfigOut(BaseModel):
     has_api_key: bool = False
     api_key: str | None = None
     base_url: str | None
+    username: str | None = None
     project_id: str | None = None
     model: str
     max_tokens: int
@@ -588,6 +606,9 @@ DEFAULT_METHODS_BY_MODE: dict[str, list[str]] = {
 class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    execution_monitor_enabled: bool = False
+    max_consecutive_text_turns: int = Field(default=3, ge=0, le=50)
+    enforce_full_coverage_obligations: bool = True
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
@@ -800,30 +821,38 @@ class ValidatorConfigOut(ValidatorConfigBase):
 # ── Global HTTP header config schemas ─────────────────────────────────────────
 
 
-class GlobalHttpHeaderConfigBase(BaseModel):
+class GlobalHttpHeader(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    header_name: str | None = Field(default=None, max_length=200)
-    header_value: str | None = Field(default=None, max_length=2000)
+    header_name: str = Field(min_length=1, max_length=200)
+    header_value: str = Field(max_length=2000)
 
     @field_validator("header_name")
     @classmethod
-    def _normalize_header_name(cls, v: str | None) -> str | None:
-        if not v:
-            return None
+    def _normalize_header_name(cls, v: str) -> str:
         v = v.strip()
-        if not v:
-            return None
         if not re.fullmatch(r"[a-zA-Z0-9!#$%&'*+.^_`|~-]+", v):
             raise ValueError(f"Invalid HTTP header name '{v}'")
         return v
 
     @field_validator("header_value")
     @classmethod
-    def _normalize_header_value(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        return v.strip() or None
+    def _normalize_header_value(cls, v: str) -> str:
+        return v.strip()
+
+
+class GlobalHttpHeaderConfigBase(BaseModel):
+    headers: list[GlobalHttpHeader] = Field(default_factory=list, max_length=100)
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_duplicate_headers(
+        cls, v: list[GlobalHttpHeader]
+    ) -> list[GlobalHttpHeader]:
+        names = [header.header_name.lower() for header in v]
+        if len(names) != len(set(names)):
+            raise ValueError("HTTP header names must be unique")
+        return v
 
 
 class GlobalHttpHeaderConfigIn(GlobalHttpHeaderConfigBase):
@@ -874,6 +903,7 @@ class LLMExportProviderItem(BaseModel):
     name: str
     api_format: str
     base_url: str | None = None
+    username: str | None = None
     project_id: str | None = None
     models: list[str]
     has_api_key: bool = False
@@ -889,7 +919,7 @@ class LLMExportProfileItem(BaseModel):
     max_tokens: int = 70000
     temperature: Optional[float] = None
     use_vision: bool = False
-    force_tool_choice: bool = True
+    force_tool_choice: bool = False
     is_active: bool = False
 
 
@@ -947,6 +977,9 @@ class TestRunSummary(BaseModel):
     site_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     use_screenshots: bool
     max_depth: int
     max_pages: int
@@ -1112,6 +1145,10 @@ class ScannerSessionOut(BaseModel):
     cookie_names: list[str] = Field(default_factory=list)
     header_names: list[str] = Field(default_factory=list)
     token_hint: str | None
+    lifecycle_state: str = "candidate"
+    validation_url: str | None = None
+    last_status: int | None = None
+    last_validated_at: datetime | None = None
     session_metadata: dict = Field(default_factory=dict)
     is_active: bool
     created_at: datetime

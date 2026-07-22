@@ -163,7 +163,22 @@ export function ApiTestRunDetail({
         <Crumb href={run ? `#/apis/${run.collection_id}` : "#/apis"}>API collection</Crumb>
         <Sep />
         {run ? run.name : "…"}
-        {run && <> <StatusBadge status={run.status} /></>}
+        {run && (
+          <>
+            {" "}
+            <StatusBadge status={run.status} />
+            {run.phase && run.phase !== "created" && (
+              <span className="run-status-badge" style={{ marginLeft: 6, opacity: 0.85 }}>
+                phase: {run.phase}
+              </span>
+            )}
+            {run.terminal_reason && (
+              <span className="run-status-badge" style={{ marginLeft: 6, color: run.outcome === "complete" ? "var(--ok)" : "var(--warn)" }}>
+                reason: {run.terminal_reason.replace(/_/g, " ")}
+              </span>
+            )}
+          </>
+        )}
       </>}
       actions={<>
         {scanRunning ? <button className="btn danger-outline" disabled={scanBusy} onClick={onStopScan}>
