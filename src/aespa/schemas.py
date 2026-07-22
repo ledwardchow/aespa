@@ -245,6 +245,9 @@ class ApiTestRunSummary(BaseModel):
     collection_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     coverage_mode: str
     llm_config_id: int | None
     llm_profile_id: int | None = None
@@ -604,6 +607,8 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
+    max_consecutive_text_turns: int = Field(default=3, ge=0, le=50)
+    enforce_full_coverage_obligations: bool = True
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
@@ -972,6 +977,9 @@ class TestRunSummary(BaseModel):
     site_id: int
     name: str
     status: str
+    phase: str = "created"
+    outcome: str | None = None
+    terminal_reason: str | None = None
     use_screenshots: bool
     max_depth: int
     max_pages: int
@@ -1137,6 +1145,10 @@ class ScannerSessionOut(BaseModel):
     cookie_names: list[str] = Field(default_factory=list)
     header_names: list[str] = Field(default_factory=list)
     token_hint: str | None
+    lifecycle_state: str = "candidate"
+    validation_url: str | None = None
+    last_status: int | None = None
+    last_validated_at: datetime | None = None
     session_metadata: dict = Field(default_factory=dict)
     is_active: bool
     created_at: datetime

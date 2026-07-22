@@ -12,6 +12,8 @@ export const csv = (value, transform=(x)=>x) => String(value||"")
   .split(",").map(x=>transform(x.trim())).filter(Boolean);
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled:false,
+  max_consecutive_text_turns:3,
+  enforce_full_coverage_obligations:true,
   scan_mode:"aggressive",
   max_probes_per_page:50,
   thinking_max_steps:120,
@@ -36,6 +38,8 @@ export const policyToForm = (p) => {
   return {
     ...f,
     execution_monitor_enabled:p.execution_monitor_enabled ?? false,
+    max_consecutive_text_turns:p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
+    enforce_full_coverage_obligations:p.enforce_full_coverage_obligations ?? f.enforce_full_coverage_obligations,
     scan_mode:p.scan_mode || f.scan_mode,
     max_probes_per_page:p.max_probes_per_page ?? f.max_probes_per_page,
     thinking_max_steps:p.thinking_max_steps ?? f.thinking_max_steps,
@@ -56,6 +60,8 @@ export const policyToForm = (p) => {
 };
 export const policyPayload = (form) => ({
   execution_monitor_enabled:!!form.execution_monitor_enabled,
+  max_consecutive_text_turns:Number(form.max_consecutive_text_turns),
+  enforce_full_coverage_obligations:!!form.enforce_full_coverage_obligations,
   scan_mode:form.scan_mode,
   max_probes_per_page:Number(form.max_probes_per_page),
   thinking_max_steps:Number(form.thinking_max_steps),

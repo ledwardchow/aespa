@@ -506,6 +506,8 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
+    assert data["max_consecutive_text_turns"] == 3
+    assert data["enforce_full_coverage_obligations"] is True
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -521,6 +523,8 @@ def test_upsert_scanner_policy(client: TestClient):
         {
             "scan_mode": "aggressive",
             "execution_monitor_enabled": True,
+            "max_consecutive_text_turns": 0,
+            "enforce_full_coverage_obligations": False,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
@@ -532,6 +536,8 @@ def test_upsert_scanner_policy(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is True
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180

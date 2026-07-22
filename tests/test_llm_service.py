@@ -9,6 +9,52 @@ from aespa.models import LLMConfig
 from aespa.services import llm
 
 
+def test_agentic_context_compaction_preserves_recent_tool_pairs():
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(50):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"call-{index}",
+                        "name": "http_request",
+                        "input": {
+                            "method": "GET",
+                            "url": f"https://target.local/api/items/{index}",
+                            "secret": "must-not-enter-journal",
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"call-{index}",
+                        "content": "Status: 200 " + ("x" * 1500),
+                    }
+                ],
+            }
+        )
+
+    compacted, stats = llm.compact_agentic_messages(
+        messages, max_context_chars=30_000, recent_messages=12
+    )
+
+    assert stats is not None
+    assert stats["after_chars"] < stats["before_chars"]
+    assert compacted[0]["role"] == "user"
+    assert "CONTEXT JOURNAL" in str(compacted[0]["content"])
+    assert "must-not-enter-journal" not in str(compacted[0]["content"])
+    assert compacted[1]["role"] == "assistant"
+    assert compacted[-1]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this
@@ -781,6 +827,28 @@ The final answer is {"context": "Real JSON", "suggested_links": []}.
     data = llm._extract_json(raw, expect=dict)
 
     assert data["context"] == "Real JSON"
+
+
+def test_extract_json_handles_unclosed_think_tag_and_template_example():
+    raw = """<think>
+Let me analyze the original finding and rewrite it.
+Looking at the template:
+{
+  "owasp_category": "A03",
+  "title": "Short, report-ready title",
+  "description": "What is vulnerable and where."
+}
+Let me write the real report-ready version.
+Final output:{
+  "owasp_category": "A05",
+  "title": "Permissive CORS policy reflects arbitrary Origin header",
+  "description": "The API at http://192.168.3.101/ applies a permissive CORS policy."
+}"""
+
+    data = llm._extract_json(raw, expect=dict)
+
+    assert data["owasp_category"] == "A05"
+    assert data["title"] == "Permissive CORS policy reflects arbitrary Origin header"
 
 
 def test_page_analysis_parses_compact_function_label():

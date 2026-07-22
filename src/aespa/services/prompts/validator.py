@@ -1,5 +1,7 @@
 """Prompts and tool definitions for the adversarial Validator agent."""
 
+from copy import deepcopy
+
 from aespa.services.prompts.test_lead import THINKING_AGENT_TOOLS
 
 # ── Validator system prompt ───────────────────────────────────────────────────
@@ -316,8 +318,19 @@ _VALIDATOR_DONE_TOOL: dict = {
     },
 }
 
+_VALIDATOR_HTTP_REQUEST_TOOL = deepcopy(
+    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "http_request")
+)
+_VALIDATOR_HTTP_REQUEST_TOOL["input_schema"]["properties"]["use_session"][
+    "description"
+] = (
+    "Named authenticated session to use. Omit or leave empty for a genuinely "
+    "anonymous request with no session cookies or credential headers."
+)
+
+
 VALIDATOR_AGENT_TOOLS: list[dict] = [
-    next(t for t in THINKING_AGENT_TOOLS if t["name"] == "http_request"),
+    _VALIDATOR_HTTP_REQUEST_TOOL,
     _COMPARE_RESPONSES_TOOL,
     next(t for t in THINKING_AGENT_TOOLS if t["name"] == "context_tool"),
     _VALIDATOR_DONE_TOOL,

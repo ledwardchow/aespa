@@ -760,7 +760,7 @@ _API_THINKING_AGENT_SYSTEM = (
 )
 
 
-_THINKING_AGENT_SYSTEM = (
+_THINKING_AGENT_SYSTEM_BASE = (
     "You are an expert web application penetration tester conducting a hands-on "
     "security assessment.\n"
     "Use the provided tools to investigate the target. Work iteratively — after each "
@@ -845,7 +845,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "url": {"type": "string"},
                 "headers": {"type": "object"},
                 "body": {},
-                "use_session": {"type": "string"},
+                "use_session": {
+                    "type": "string",
+                    "description": (
+                        "Reusable session label. Omit to use the primary authenticated "
+                        "session. Set exactly 'anonymous' for a request with no session "
+                        "cookies or credential headers."
+                    ),
+                },
                 "owasp_category": {
                     "type": "string",
                     "description": (
@@ -862,6 +869,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "sqli, reflected_xss, stored_xss, command_injection, ssti, idor, "
                         "or auth_bypass. Required for A03 probes so one injection class "
                         "does not count as coverage of another."
+                    ),
+                },
+                "obligation_id": {
+                    "type": "integer",
+                    "description": (
+                        "Optional obligation ID from the Work Program queue to attribute "
+                        "this probe to. When provided, backend constraints are verified."
                     ),
                 },
                 "repeat_sequence": {
@@ -1474,6 +1488,10 @@ HTTP body rules:
 - Use a plain string for form-encoded or raw bodies.
 - Set use_session to one of the reusable session labels when you want the scanner to
   attach a discovered token/session automatically.
+- Omitted or null use_session means the primary authenticated session. For a genuinely
+  unauthenticated request, set use_session to "anonymous". Never describe a request as
+  unauthenticated unless its returned request evidence says Authorization: none and
+  Cookies: none.
 
 To use the browser:
 {{
@@ -1582,10 +1600,32 @@ Register-account rules:
 - Do not request privileged roles unless the registration endpoint itself exposes that field and the test is low-impact.
 - Omit username/email/password values unless the form requires specific values; the scanner generates safe disposable values.
 - Successful registration responses store a durable scanner session under store_as when cookies or bearer tokens are captured.
+"""
 
+_THINKING_AGENT_SYSTEM_STRICT_FINISH = """
 To finish the assessment ONLY after verifying via site_map that zero untested input routes remain, resolving imported leads, and covering all high-priority applicable Work Program areas:
-{{
+{
   "action": "done",
   "summary": "2-3 sentence summary of notable findings and tested areas"
-}}
+}
 """
+
+_THINKING_AGENT_SYSTEM_LENIENT_FINISH = """
+To finish the assessment (when key areas covered, or steps nearly exhausted):
+{
+  "action": "done",
+  "summary": "2-3 sentence summary of notable findings and tested areas"
+}
+"""
+
+
+def get_thinking_agent_system(enforce_full_coverage_obligations: bool = True) -> str:
+    finish = (
+        _THINKING_AGENT_SYSTEM_STRICT_FINISH
+        if enforce_full_coverage_obligations
+        else _THINKING_AGENT_SYSTEM_LENIENT_FINISH
+    )
+    return _THINKING_AGENT_SYSTEM_BASE + "\n\n" + finish.strip()
+
+
+_THINKING_AGENT_SYSTEM = get_thinking_agent_system(True)

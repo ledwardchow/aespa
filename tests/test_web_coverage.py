@@ -654,12 +654,11 @@ def test_enforce_loop_does_not_disguise_budget_exhaustion_as_skipped(
     async def _prober(page_obj, category, current_status):
         return ("covered", None)
 
-    with pytest.raises(RuntimeError, match="unresolved"):
-        asyncio.run(
-            _enforce_web_coverage_loop(
-                run.id, _prober, max_attempts=1, time_budget_s=999
-            )
-        )
+    stats = asyncio.run(
+        _enforce_web_coverage_loop(run.id, _prober, max_attempts=1, time_budget_s=999)
+    )
+    assert stats["budget_exhausted"] is True
+    assert stats["remaining"] == 1
 
     matrix = get_web_coverage_matrix(run.id)
     assert matrix["totals"]["covered"] == 1
@@ -680,6 +679,25 @@ def test_default_enforce_prober_rejects_applicable_untested_cell(
 
     assert status == "untested"
     assert "applicable but not tested" in reason
+
+
+def test_enforce_loop_leaves_untested_applicable_cell_unresolved(
+    db_engine, db_session, run
+):
+    _make_page(db_session, run, "http://example.com/admin", ["A01"])
+    seed_web_workprogram(run.id)
+
+    async def _prober(page_obj, category, current_status):
+        return ("untested", "applicable but not exercised")
+
+    stats = asyncio.run(_enforce_web_coverage_loop(run.id, _prober))
+
+    assert stats["untested"] == 1
+    assert stats["budget_exhausted"] is True
+    assert stats["remaining"] == 1
+    matrix = get_web_coverage_matrix(run.id)
+    assert matrix["totals"]["not_started"] == 1
+    assert matrix["totals"]["skipped"] == 0
 
 
 def test_skip_coverage_requires_real_blocker_evidence(db_engine, db_session, run):
