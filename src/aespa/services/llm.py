@@ -421,9 +421,7 @@ def _record_usage(
     if provider:
         entry["provider"] = provider
     entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
-    entry["premium_requests"] = (
-        entry.get("premium_requests", 0) + premium_requests
-    )
+    entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
     if copilot_quota:
         entry["copilot_quota"] = copilot_quota
@@ -596,6 +594,17 @@ def _strip_thinking_blocks(raw: str) -> str:
         text = re.sub(
             rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE
         )
+        # Handle unclosed reasoning tags (e.g. <think> without matching </think>)
+        if re.search(rf"<{tag}\b[^>]*>", text, flags=re.IGNORECASE):
+            # If an explicit final output marker exists after the tag, strip up to the marker
+            m_marker = re.search(
+                r"(?is)(?:final\s+(?:output|answer|json)|output|result)\s*:?\s*",
+                text,
+            )
+            if m_marker:
+                text = text[m_marker.end() :]
+            else:
+                text = re.sub(rf"<{tag}\b[^>]*>", "", text, flags=re.IGNORECASE)
 
     # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
     # closing tag when they are interrupted near the final JSON.
@@ -610,9 +619,11 @@ def _extract_json(raw: str, expect: type = list) -> Any:
 
     Handles:
     - <think>...</think> reasoning blocks (Gemma, QwQ, DeepSeek-R1, etc.)
+    - Unclosed <think> blocks
     - Markdown code fences (```json ... ```)
     - Preamble / explanation text before the JSON
     - Trailing prose after the closing bracket
+    - Multiple top-level JSON blocks (prefers the last valid container)
     """
     if not raw:
         raise ValueError("empty response")
@@ -627,51 +638,66 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Find the first balanced JSON container matching `expect` that parses.
     open_ch = "[" if expect is list else "{"
     close_ch = "]" if expect is list else "}"
-    starts = [i for i, ch in enumerate(text) if ch == open_ch]
-    if not starts:
-        # Stripped text has no JSON delimiters — the model may have embedded the answer
-        # inside a thinking block.  Try searching the un-stripped original text so we can
-        # still extract JSON that appears within <think>...</think> tags.
-        raw_no_fence = (
-            re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
-        )
-        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
-        if alt_starts:
-            text = raw_no_fence
-            starts = alt_starts
-        else:
-            raise ValueError(f"no '{open_ch}' found in LLM response")
 
-    for start in starts:
-        depth = 0
-        in_str = False
-        escape = False
-        for i, ch in enumerate(text[start:], start):
-            if escape:
-                escape = False
+    def _find_valid_containers(src_text: str) -> list[Any]:
+        candidates: list[Any] = []
+        idx = 0
+        n = len(src_text)
+        while idx < n:
+            if src_text[idx] != open_ch:
+                idx += 1
                 continue
-            if ch == "\\" and in_str:
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
+            depth = 0
+            in_str = False
+            escape = False
+            parsed_end = None
+            for i in range(idx, n):
+                ch = src_text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\" and in_str:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(src_text[idx : i + 1])
+                            candidates.append(val)
+                            parsed_end = i
+                        except json.JSONDecodeError:
+                            pass
                         break
+            if parsed_end is not None:
+                idx = parsed_end + 1
+            else:
+                idx += 1
+        return candidates
 
-    raise ValueError("could not extract balanced JSON from LLM response")
+    valid_containers = _find_valid_containers(text)
+    if valid_containers:
+        # Prefer the last valid top-level JSON container (the final answer block)
+        return valid_containers[-1]
+
+    # Stripped text has no valid JSON delimiters — try un-stripped original text
+    raw_no_fence = (
+        re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+    )
+    raw_containers = _find_valid_containers(raw_no_fence)
+    if raw_containers:
+        return raw_containers[-1]
+
+    raise ValueError(f"no valid '{open_ch}' container found in LLM response")
 
 
 def _extract_action_json(raw: str) -> dict:
@@ -3042,6 +3068,78 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+
+
+def compact_agentic_messages(
+    messages: list[dict],
+    *,
+    max_context_chars: int,
+    recent_messages: int = 32,
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Compact completed tool exchanges while preserving protocol-valid pairs.
+
+    The first user brief is retained. Older assistant/tool-result pairs become a
+    short mechanical journal, and a recent suffix remains verbatim. Raw secrets
+    and full response bodies are deliberately excluded from the journal.
+    """
+    before_chars = len(json.dumps(messages, default=str))
+    if max_context_chars <= 0 or before_chars <= max_context_chars or len(messages) < 8:
+        return messages, None
+
+    suffix_start = max(1, len(messages) - max(8, recent_messages))
+    while (
+        suffix_start < len(messages)
+        and messages[suffix_start].get("role") != "assistant"
+    ):
+        suffix_start += 1
+    if suffix_start >= len(messages) - 1:
+        return messages, None
+
+    removed = messages[1:suffix_start]
+    journal_lines: list[str] = []
+    for message in removed:
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_input = (
+                    block.get("input") if isinstance(block.get("input"), dict) else {}
+                )
+                details = [str(block.get("name") or "tool")]
+                for key in ("method", "url", "owasp_category", "test_class", "title"):
+                    value = tool_input.get(key)
+                    if value not in (None, ""):
+                        details.append(f"{key}={str(value)[:240]}")
+                journal_lines.append("- " + " ".join(details))
+            elif block.get("type") == "tool_result":
+                result = str(block.get("content") or "").replace("\n", " ").strip()
+                if result:
+                    journal_lines.append(f"  result: {result[:360]}")
+
+    journal = (
+        f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+        "Use context tools for full durable evidence.]\n"
+        + "\n".join(journal_lines[-80:])
+    )[:16_000]
+    first = dict(messages[0])
+    first_content = first.get("content")
+    if isinstance(first_content, list):
+        first["content"] = list(first_content) + [{"type": "text", "text": journal}]
+    else:
+        first["content"] = f"{first_content or ''}\n\n{journal}"
+    compacted = [first, *messages[suffix_start:]]
+    after_chars = len(json.dumps(compacted, default=str))
+    return compacted, {
+        "before_chars": before_chars,
+        "after_chars": after_chars,
+        "removed_messages": len(removed),
+        "remaining_messages": len(compacted),
+    }
+
+
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
 # wire format or the Bedrock Runtime toolConfig format.
@@ -3938,6 +4036,10 @@ async def thinking_agentic_loop(
     tools: list[dict] | None = None,
     before_tool_execution=None,
     after_tool_rejection=None,
+    execution_monitor_enabled: bool = True,
+    max_consecutive_text_turns: int = 3,
+    max_context_chars: int = 0,
+    on_context_compaction=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -3964,7 +4066,7 @@ async def thinking_agentic_loop(
 
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
-    if before_tool_execution:
+    if before_tool_execution and execution_monitor_enabled:
         from aespa.services.execution_monitor import add_strategy_justification_to_tools
 
         tools = add_strategy_justification_to_tools(
@@ -4070,6 +4172,34 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                     break
+
+            messages, compaction = compact_agentic_messages(
+                messages,
+                max_context_chars=max_context_chars,
+            )
+            if compaction:
+                if on_context_compaction:
+                    try:
+                        on_context_compaction(compaction)
+                    except Exception:
+                        pass
+                if emit_fn:
+                    try:
+                        emit_fn(
+                            {
+                                "type": "scanner_phase",
+                                "phase": "context_compaction",
+                                "status": "complete",
+                                "message": (
+                                    "Compacted older model context from "
+                                    f"{compaction['before_chars']:,} to "
+                                    f"{compaction['after_chars']:,} characters."
+                                ),
+                                "data": compaction,
+                            }
+                        )
+                    except Exception:
+                        pass
 
             if emit_fn:
                 try:
@@ -4265,7 +4395,10 @@ async def thinking_agentic_loop(
                 if text_blocks:
                     final_summary = (text_blocks[-1].get("text") or "")[:500]
                 consecutive_text_only_turns += 1
-                if consecutive_text_only_turns >= 3:
+                if (
+                    max_consecutive_text_turns > 0
+                    and consecutive_text_only_turns >= max_consecutive_text_turns
+                ):
                     log.warning(
                         "thinking_agentic_loop: model returned %d consecutive text-only turns; ending assessment.",
                         consecutive_text_only_turns,
@@ -4279,7 +4412,7 @@ async def thinking_agentic_loop(
                                     "status": "error",
                                     "message": (
                                         f"Step {tool_call_count + 1}: scan loop terminated "
-                                        "after 3 consecutive responses without a tool call; "
+                                        f"after {max_consecutive_text_turns} consecutive responses without a tool call; "
                                         "the model did not call done."
                                     ),
                                     "data": {
@@ -4437,7 +4570,11 @@ async def thinking_agentic_loop(
                             "thinking_agentic_loop: after_tool_result failed: %s", exc
                         )
 
-                limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+                limit = (
+                    CONTEXT_TOOL_RESULT_CHAR_LIMIT
+                    if tool_name == "context_tool"
+                    else TOOL_RESULT_CHAR_LIMIT
+                )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = (

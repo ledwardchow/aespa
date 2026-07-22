@@ -18,6 +18,16 @@
   --ok: #3fcf70;
   --ok-bg: rgba(63,207,112,0.1);
   --warn: #f5a623;
+  --coverage-not-started: #374151;
+  --coverage-in-progress: #1e3a5f;
+  --coverage-covered: #14532d;
+  --coverage-finding: #7f1d1d;
+  --coverage-skipped: #713f12;
+  --coverage-not-started-bright: #9ca3af;
+  --coverage-in-progress-bright: #60a5fa;
+  --coverage-covered-bright: #4ade80;
+  --coverage-finding-bright: #f87171;
+  --coverage-skipped-bright: #facc15;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
 }
@@ -1659,11 +1669,11 @@ legend {
 .cov-cell:hover { transform: scale(1.15); }
 .cov-cell.selected { outline: 2px solid var(--accent); }
 .coverage-legend-cell { flex: 0 0 24px; }
-.cov-not-started  { background: #374151;                 color: #f3f4f6;                border: 2px dashed #9ca3af; }
-.cov-in-progress  { background: #1e3a5f;                 color: #dbeafe;                border: 2px dotted #60a5fa; }
-.cov-covered      { background: #14532d;                 color: #dcfce7;                border: 2px solid #4ade80; }
-.cov-finding      { background: #7f1d1d;                 color: #fee2e2;                border: 2px double #f87171; }
-.cov-skipped      { background: #713f12;                 color: #fef3c7;                border: 2px solid #facc15; }
+.cov-not-started  { background: var(--coverage-not-started); color: #f3f4f6; border: 2px dashed var(--coverage-not-started-bright); }
+.cov-in-progress  { background: var(--coverage-in-progress); color: #dbeafe; border: 2px dotted var(--coverage-in-progress-bright); }
+.cov-covered      { background: var(--coverage-covered); color: #dcfce7; border: 2px solid var(--coverage-covered-bright); }
+.cov-finding      { background: var(--coverage-finding); color: #fee2e2; border: 2px double var(--coverage-finding-bright); }
+.cov-skipped      { background: var(--coverage-skipped); color: #fef3c7; border: 2px solid var(--coverage-skipped-bright); }
 .cov-not-started:empty::after { content: "○"; font-size: 13px; line-height: 1; }
 .cov-in-progress:empty::after { content: "…"; font-size: 13px; line-height: .7; }
 .cov-covered:empty::after { content: "✓"; font-size: 13px; line-height: 1; }

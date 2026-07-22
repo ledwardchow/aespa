@@ -9,6 +9,8 @@ const STATUS_LABELS = {
   skipped: "Skipped"
 };
 
+const PROGRESS_STATUS_ORDER = ["finding", "covered", "skipped", "in_progress", "not_started"];
+
 function Section({ id, title, detail, expanded, onToggle, children }) {
   return <div className="attack-surface-section">
     <button type="button" className="attack-surface-section-head" onClick={() => onToggle(id)}>
@@ -118,6 +120,25 @@ export function AttackSurfacePanel({ summary }) {
   </div>;
 }
 
+function MultiSegmentProgress({ statuses = {}, total = 0 }) {
+  if (!total) return <span className="surface-progress" />;
+
+  return (
+    <span className="surface-progress">
+      {PROGRESS_STATUS_ORDER.map(status => {
+        const label = STATUS_LABELS[status];
+        const count = statuses[status] || 0;
+        return count > 0 ? <span
+          key={status}
+          className={`surface-progress-segment status-${status}`}
+          style={{ width: `${count / total * 100}%` }}
+          title={`${label}: ${count}`}
+        /> : null;
+      })}
+    </span>
+  );
+}
+
 export function CoverageGapsPanel({ summary }) {
   const [expanded, setExpanded] = useState(true);
 
@@ -139,12 +160,10 @@ export function CoverageGapsPanel({ summary }) {
       <CoverageBadges statuses={coverage.statuses} />
       {(coverage.by_category || []).length ? <div className="surface-coverage-list">
         {coverage.by_category.map(item => {
-          const resolved = item.total - item.remaining;
-          const percent = item.total ? Math.round(100 * resolved / item.total) : 0;
           return <div key={item.category} className="surface-coverage-row">
             <span className="owasp-badge">{item.category}</span>
             <span className="surface-coverage-name">{item.label}</span>
-            <span className="surface-progress"><span style={{ width: `${percent}%` }} /></span>
+            <MultiSegmentProgress statuses={item.statuses} total={item.total} />
             <span className="surface-coverage-count">{item.remaining} remaining</span>
             {item.gap_route_total > 0 ? <span className="subtle">{item.gap_route_total} routes</span> : null}
           </div>;
