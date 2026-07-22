@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from aespa.services import validator
 from aespa.services.llm import (
     _ADVERSARIAL_VALIDATOR_SYSTEM,
     _DISPROOF_HINTS,
@@ -188,6 +192,59 @@ def test_compare_responses_tool_schema():
     assert "test" in props
     assert "baseline" in ct["input_schema"]["required"]
     assert "test" in ct["input_schema"]["required"]
+
+
+def test_validator_http_tool_documents_anonymous_default():
+    tool = next(t for t in VALIDATOR_AGENT_TOOLS if t["name"] == "http_request")
+    description = tool["input_schema"]["properties"]["use_session"]["description"]
+    assert "anonymous" in description
+    assert "omit" in description.lower()
+
+
+def test_validator_http_request_does_not_inherit_primary_session(monkeypatch):
+    captured = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.default_headers = kwargs["headers"]
+            self.default_cookies = kwargs["cookies"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def build_request(self, method, url, content=None, headers=None):
+            merged = {**self.default_headers, **(headers or {})}
+            return httpx.Request(method, url, content=content, headers=merged)
+
+        async def send(self, request):
+            captured.append((dict(request.headers), self.default_cookies))
+            return httpx.Response(401, text="unauthorized", request=request)
+
+    from aespa.services import traffic
+
+    monkeypatch.setattr(traffic, "LoggingAsyncClient", FakeClient)
+    primary = {
+        "cookies": {"session": "primary-secret"},
+        "extra_headers": {"Authorization": "Bearer primary-secret"},
+    }
+    policy = type("Policy", (), {"follow_redirects": True})()
+
+    asyncio.run(
+        validator._validator_http_request(
+            {"method": "GET", "url": "https://target.local/private"},
+            primary,
+            {"primary": primary},
+            policy,
+            run_id=1,
+        )
+    )
+
+    sent_headers, sent_cookies = captured[0]
+    assert "authorization" not in sent_headers
+    assert sent_cookies == {}
 
 
 # ── Disproof hints ────────────────────────────────────────────────────────────

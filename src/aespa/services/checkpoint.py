@@ -156,3 +156,76 @@ def checkpoint_status(run_id: int) -> dict[str, Any]:
     except Exception:
         log.exception("checkpoint.checkpoint_status failed for run_id=%s", run_id)
         return {"exists": False, "step_count": None, "updated_at": None}
+
+
+def save_phase_checkpoint(
+    run_id: int,
+    phase: str,
+    idempotency_key: str,
+    data: dict[str, Any] | None = None,
+    run_kind: str = "web",
+) -> None:
+    """Save a granular phase checkpoint for resume idempotence."""
+    from aespa.models import PhaseCheckpoint
+
+    try:
+        with Session(get_engine()) as s:
+            existing = s.exec(
+                select(PhaseCheckpoint)
+                .where(PhaseCheckpoint.run_kind == run_kind)
+                .where(PhaseCheckpoint.run_id == run_id)
+                .where(PhaseCheckpoint.phase == phase)
+                .where(PhaseCheckpoint.idempotency_key == idempotency_key)
+            ).first()
+            now = _utcnow()
+            if existing:
+                existing.data_json = json.dumps(data or {})
+                existing.completed_at = now
+                s.add(existing)
+            else:
+                row = PhaseCheckpoint(
+                    run_kind=run_kind,
+                    run_id=run_id,
+                    phase=phase,
+                    idempotency_key=idempotency_key,
+                    data_json=json.dumps(data or {}),
+                    completed_at=now,
+                )
+                s.add(row)
+            s.commit()
+    except Exception:
+        log.exception(
+            "save_phase_checkpoint failed for run_id=%s phase=%s key=%s",
+            run_id,
+            phase,
+            idempotency_key,
+        )
+
+
+def has_phase_checkpoint(
+    run_id: int,
+    phase: str,
+    idempotency_key: str,
+    run_kind: str = "web",
+) -> bool:
+    """Return True if a granular phase checkpoint exists."""
+    from aespa.models import PhaseCheckpoint
+
+    try:
+        with Session(get_engine()) as s:
+            row = s.exec(
+                select(PhaseCheckpoint)
+                .where(PhaseCheckpoint.run_kind == run_kind)
+                .where(PhaseCheckpoint.run_id == run_id)
+                .where(PhaseCheckpoint.phase == phase)
+                .where(PhaseCheckpoint.idempotency_key == idempotency_key)
+            ).first()
+            return row is not None
+    except Exception:
+        log.exception(
+            "has_phase_checkpoint failed for run_id=%s phase=%s key=%s",
+            run_id,
+            phase,
+            idempotency_key,
+        )
+        return False

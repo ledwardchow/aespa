@@ -1,11 +1,70 @@
 import asyncio
+import json
+from types import SimpleNamespace
 
 import httpx
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from aespa.models import ScanFinding
+from aespa.models import ScanFinding, Site, TestRun
 from aespa.services import burp_rest, scanner
+
+
+def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(scanner, "get_engine", lambda: engine)
+    with Session(engine) as session:
+        site = Site(name="target", base_url="https://target.local")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="snapshot",
+            recon_summary='{"schema_version":2,"routes":[]}',
+        )
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    scanner._persist_execution_snapshot(
+        run_id,
+        llm_cfg=SimpleNamespace(
+            provider="openai",
+            model="minimax/m3",
+            max_tokens=70_000,
+            temperature=0.2,
+            use_vision=False,
+            force_tool_choice=False,
+            api_key="must-not-be-persisted",
+        ),
+        scanner_policy=SimpleNamespace(
+            scan_mode="aggressive",
+            max_probes_per_page=50,
+            request_timeout_s=10,
+            min_delay_s=0.05,
+            follow_redirects=True,
+            allow_subdomains=True,
+            execution_monitor_enabled=False,
+            max_consecutive_text_turns=3,
+            enforce_full_coverage_obligations=True,
+        ),
+        pages_snapshot=[{"url": "https://target.local/", "req_auth": False}],
+        coverage_mode="enforce",
+        enforce_coverage=True,
+    )
+
+    with Session(engine) as session:
+        snapshot_raw = session.get(TestRun, run_id).execution_snapshot_json
+    snapshot = json.loads(snapshot_raw)
+    assert snapshot["model"]["model"] == "minimax/m3"
+    assert snapshot["coverage_mode"] == "enforce"
+    assert len(snapshot["crawl_sha256"]) == 64
+    assert "must-not-be-persisted" not in snapshot_raw
 
 
 def test_select_browser_auth_token_accepts_namespaced_token_key():
@@ -40,6 +99,7 @@ def test_authorization_header_is_case_insensitive():
         scanner._authorization_header({"authorization": "Bearer persisted"})
         == "Bearer persisted"
     )
+
 
 # ── scope-checked redirect following ──────────────────────────────────────────
 
@@ -594,6 +654,56 @@ def test_http_evidence_items_include_timing_diff_outcome_and_screenshot():
     } <= item_types
 
 
+def test_session_request_headers_remove_primary_credentials_for_anonymous():
+    primary = {
+        "extra_headers": {
+            "Authorization": "Bearer primary-secret",
+            "X-Session-Key": "primary-key",
+        }
+    }
+    anonymous = {"kind": "anonymous", "cookies": {}, "extra_headers": {}}
+
+    headers = scanner._session_request_headers(
+        {
+            "User-Agent": "aespa",
+            "Authorization": "Bearer primary-secret",
+            "X-Session-Key": "primary-key",
+            "Accept": "*/*",
+        },
+        anonymous,
+        default_session=primary,
+    )
+
+    assert "authorization" not in {key.lower() for key in headers}
+    assert "x-session-key" not in {key.lower() for key in headers}
+    assert headers["User-Agent"] == "aespa"
+    assert headers["Accept"] == "*/*"
+
+
+def test_session_request_headers_replace_primary_with_selected_identity():
+    headers = scanner._session_request_headers(
+        {"Authorization": "Bearer primary-secret", "User-Agent": "aespa"},
+        {"extra_headers": {"Authorization": "Bearer alternate-secret"}},
+        default_session={"extra_headers": {"Authorization": "Bearer primary-secret"}},
+    )
+
+    assert headers["Authorization"] == "Bearer alternate-secret"
+    assert "primary-secret" not in str(headers)
+
+
+def test_sent_request_auth_summary_reports_presence_without_secret():
+    summary = scanner._sent_request_auth_summary(
+        {
+            "Authorization": "Bearer secret-token",
+            "Cookie": "session=secret; theme=dark",
+        }
+    )
+
+    assert "Authorization: present" in summary
+    assert "Cookies: session, theme" in summary
+    assert "secret-token" not in summary
+
+
 def test_finding_from_llm_preserves_prebuilt_probe_evidence_items():
     evidence_json = scanner._http_evidence_items_json(
         "BROWSER ACTION\nInitial URL: https://target.local/admin",
@@ -772,13 +882,13 @@ def test_calibrate_finding_rating():
     assert "I:N" in vector
     assert "A:L" in vector
 
-    # 8. Unaffected findings (SQL Injection) should remain unchanged
+    # 8. Unaffected findings (SQL Injection) should remain unchanged even with verbose error in title
     score, severity, vector = scanner._calibrate_finding_rating(
-        "SQL injection error disclosure",
-        7.1,
-        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+        "SQL injection in admin customer search with verbose PDO error disclosure",
+        8.6,
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
     )
-    assert score == 7.1
+    assert score == 8.6
     assert severity == "high"
 
 

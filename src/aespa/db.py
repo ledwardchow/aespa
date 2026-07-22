@@ -275,6 +275,12 @@ def _migrate(engine: Engine) -> None:
         engine, "test_run", "scanner_policy_json", "TEXT NOT NULL DEFAULT '{}'"
     )
     _ensure_column(engine, "test_run", "crawler_mode", "TEXT NOT NULL DEFAULT 'url'")
+    _ensure_column(engine, "test_run", "phase", "TEXT NOT NULL DEFAULT 'created'")
+    _ensure_column(engine, "test_run", "outcome", "TEXT")
+    _ensure_column(engine, "test_run", "terminal_reason", "TEXT")
+    _ensure_column(engine, "api_test_run", "phase", "TEXT NOT NULL DEFAULT 'created'")
+    _ensure_column(engine, "api_test_run", "outcome", "TEXT")
+    _ensure_column(engine, "api_test_run", "terminal_reason", "TEXT")
     _ensure_column(engine, "credential", "login_url", "TEXT")
     _ensure_column(engine, "credential", "auth_mode", "TEXT NOT NULL DEFAULT 'auto'")
     _ensure_column(engine, "credential", "totp_seed", "TEXT")
@@ -340,6 +346,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "llm_config_id", "INTEGER")
     _ensure_column(engine, "test_run", "recon_summary", "TEXT")
     _ensure_column(engine, "test_run", "token_usage_json", "TEXT")
+    _ensure_column(engine, "test_run", "execution_snapshot_json", "TEXT")
+    _ensure_column(engine, "test_run", "scan_metrics_json", "TEXT")
     _ensure_llm_provider_config_migration(engine)
     _ensure_llm_config_temperature_nullable(engine)
     _ensure_column(
@@ -356,6 +364,16 @@ def _migrate(engine: Engine) -> None:
     )
     _ensure_column(engine, "traffic_entry", "username", "TEXT")
     _ensure_column(engine, "traffic_entry", "api_test_run_id", "INTEGER")
+    _ensure_column(engine, "scanner_session", "token_fingerprint", "TEXT")
+    _ensure_column(
+        engine,
+        "scanner_session",
+        "lifecycle_state",
+        "TEXT NOT NULL DEFAULT 'candidate'",
+    )
+    _ensure_column(engine, "scanner_session", "validation_url", "TEXT")
+    _ensure_column(engine, "scanner_session", "last_status", "INTEGER")
+    _ensure_column(engine, "scanner_session", "last_validated_at", "DATETIME")
     _ensure_column(
         engine, "scanner_policy", "thinking_max_steps", "INTEGER NOT NULL DEFAULT 120"
     )
@@ -364,6 +382,18 @@ def _migrate(engine: Engine) -> None:
         "scanner_policy",
         "execution_monitor_enabled",
         "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        engine,
+        "scanner_policy",
+        "max_consecutive_text_turns",
+        "INTEGER NOT NULL DEFAULT 3",
+    )
+    _ensure_column(
+        engine,
+        "scanner_policy",
+        "enforce_full_coverage_obligations",
+        "BOOLEAN NOT NULL DEFAULT 1",
     )
     _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"

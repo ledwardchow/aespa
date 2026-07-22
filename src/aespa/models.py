@@ -200,6 +200,16 @@ class ApiTestRun(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     recon_summary_json: Optional[str] = Field(default=None)
     token_usage_json: Optional[str] = Field(default=None)
+    phase: str = Field(
+        default="created",
+        sa_column=Column(String, nullable=False, server_default=text("'created'")),
+    )  # created|crawling|crawled|scanning|reporting|validating|finished
+    outcome: Optional[str] = Field(
+        default=None
+    )  # complete|incomplete|failed|stopped|null
+    terminal_reason: Optional[str] = Field(
+        default=None
+    )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
     # Legacy soft back-reference retained for imported databases; new API runs
     # use explicit run-owned ScanLead imports instead.
     sast_run_id: Optional[int] = Field(default=None, index=True)
@@ -326,6 +336,8 @@ class ScannerPolicy(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     execution_monitor_enabled: bool = Field(default=False)
+    max_consecutive_text_turns: int = Field(default=3)
+    enforce_full_coverage_obligations: bool = Field(default=True)
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
@@ -519,11 +531,26 @@ class TestRun(SQLModel, table=True):
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage: {model: {input, output, cache_read, cache_write}}
     token_usage_json: Optional[str] = Field(default=None)
+    # Reproducibility metadata captured when the dynamic scan starts. Secrets and
+    # provider connection details are intentionally excluded.
+    execution_snapshot_json: Optional[str] = Field(default=None)
+    # Compact operational metrics used to compare scanner architecture versions.
+    scan_metrics_json: Optional[str] = Field(default=None)
     # Coverage mode: "track" (observe) or "enforce" (drive every cell to terminal)
     coverage_mode: str = Field(
         default="track",
         sa_column=Column(String, nullable=False, server_default=text("'track'")),
     )
+    phase: str = Field(
+        default="created",
+        sa_column=Column(String, nullable=False, server_default=text("'created'")),
+    )  # created|crawling|crawled|scanning|reporting|validating|finished
+    outcome: Optional[str] = Field(
+        default=None
+    )  # complete|incomplete|failed|stopped|null
+    terminal_reason: Optional[str] = Field(
+        default=None
+    )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
 
 
 class CrawledPage(SQLModel, table=True):
@@ -662,6 +689,13 @@ class ScannerSession(SQLModel, table=True):
     extra_headers_json: str = Field(default="{}")
     session_metadata: str = Field(default="{}")
     token_hint: Optional[str] = Field(default=None)
+    token_fingerprint: Optional[str] = Field(default=None, index=True)
+    lifecycle_state: str = Field(
+        default="candidate", index=True
+    )  # candidate | verified | active | invalid
+    validation_url: Optional[str] = Field(default=None)
+    last_status: Optional[int] = Field(default=None)
+    last_validated_at: Optional[datetime] = Field(default=None)
     is_active: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -965,3 +999,82 @@ class AgentLog(SQLModel, table=True):
     status: str  # active | complete | failed
     current_task: str = Field(default="")
     outcome: Optional[str] = Field(default=None)
+
+
+# ── Phase Checkpoint & Obligation / Evidence Ledger ─────────────────────────
+
+
+class PhaseCheckpoint(SQLModel, table=True):
+    """Granular phase checkpoint with idempotency key for scan resume safety."""
+
+    __tablename__ = "phase_checkpoint"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    phase: str = Field(
+        index=True
+    )  # crawl | recon | obligations | dynamic_scan | reporting | validation
+    idempotency_key: str = Field(index=True)
+    data_json: Optional[str] = Field(default=None)
+    completed_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScanObligation(SQLModel, table=True):
+    """A required or exploratory security test obligation."""
+
+    __tablename__ = "scan_obligation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    scan_mode: str = Field(default="quick")  # quick | full
+    owasp_catalog: str = Field(default="web_2025")  # web_2025 | api_2023
+    owasp_category: str = Field(index=True)  # A01..A10 or API1..API10
+    vulnerability_technique: str = Field(index=True)  # sqli, idor, etc.
+    route_template: str = Field(index=True)
+    http_method: str = Field(default="GET")
+    parameter: Optional[str] = Field(default=None)
+    required_identity_comparison: Optional[str] = Field(default=None)
+    status: str = Field(
+        default="not_planned", index=True
+    )  # not_planned|queued|attempted|evaluated|passed|finding|inconclusive|not_applicable|blocked
+    exemption_reason: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ProbeExecution(SQLModel, table=True):
+    """An executed probe linked to a ScanObligation."""
+
+    __tablename__ = "probe_execution"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_kind: str = Field(default="web", index=True)  # web | api
+    run_id: int = Field(index=True)
+    obligation_id: int = Field(foreign_key="scan_obligation.id", index=True)
+    traffic_id: Optional[int] = Field(
+        default=None, foreign_key="traffic_entry.id", index=True
+    )
+    session_identity: Optional[str] = Field(default=None)
+    payload_preview: Optional[str] = Field(default=None)  # redacted max 512 bytes
+    status_code: Optional[int] = Field(default=None)
+    response_time_ms: Optional[float] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CoverageEvidence(SQLModel, table=True):
+    """Proof of test result for a ProbeExecution."""
+
+    __tablename__ = "coverage_evidence"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    execution_id: int = Field(foreign_key="probe_execution.id", index=True)
+    expected_behavior: Optional[str] = Field(default=None)
+    observed_behavior: Optional[str] = Field(default=None)
+    evaluation_oracle: str = Field(default="default_oracle")
+    outcome: str = Field(
+        default="inconclusive"
+    )  # passed|finding|inconclusive|not_applicable|blocked
+    evidence_hash: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow)
