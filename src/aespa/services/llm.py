@@ -11,6 +11,7 @@ import os
 import re
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 from urllib.parse import quote
@@ -101,8 +102,8 @@ _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
 
-# Per-run token usage accumulator: {(run_kind, run_id): {model: {"input": N, "output": N, "cache_read": N, "cache_write": N}}}
-_run_token_usage: dict[tuple[str, int], dict[str, dict[str, int]]] = {}
+# Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
+_run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
@@ -202,7 +203,12 @@ def estimate_tokens(
     if screenshot_b64:
         if provider == "anthropic":
             vision_tokens = 1600
-        elif provider in ("openai", "azure_openai", "openrouter"):
+        elif provider in (
+            "openai",
+            "azure_openai",
+            "openrouter",
+            "github_copilot",
+        ):
             vision_tokens = 765
         else:
             vision_tokens = 258
@@ -244,7 +250,7 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
 
 def _load_bucket_from_db(
     run_id: int, run_kind: str = "web"
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, Any]]:
     """Load persisted token usage for a run from the DB (best-effort)."""
     try:
         from sqlmodel import Session as _Session
@@ -316,8 +322,19 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                         "cache_read": 0,
                         "cache_write": 0,
                     }
-                for k in ("input", "output", "cache_read", "cache_write"):
+                for k in (
+                    "input",
+                    "output",
+                    "cache_read",
+                    "cache_write",
+                    "ai_credits",
+                    "premium_requests",
+                    "requests",
+                ):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
+                for k in ("provider", "copilot_quota"):
+                    if counts.get(k) is not None:
+                        bucket[model][k] = counts[k]
         _run_token_seeded.add(key)
 
 
@@ -327,21 +344,71 @@ def clear_run_context() -> None:
     _emit_fn_var.set(None)
 
 
+@dataclass(frozen=True)
+class _UsageContext:
+    run_id: int | None
+    run_kind: str
+    emit_fn: Any | None
+
+
+def _capture_usage_context() -> _UsageContext:
+    """Capture run routing before an SDK moves callbacks to another context."""
+    return _UsageContext(
+        run_id=_run_id_var.get(),
+        run_kind=_run_kind_var.get(),
+        emit_fn=_emit_fn_var.get(),
+    )
+
+
+def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    quotas = [
+        value["copilot_quota"]
+        for value in bucket.values()
+        if value.get("copilot_quota")
+    ]
+    quota = max(
+        quotas,
+        key=lambda value: str(value.get("observed_at") or ""),
+        default=None,
+    )
+    return {
+        "total_input": sum(v.get("input", 0) for v in bucket.values()),
+        "total_output": sum(v.get("output", 0) for v in bucket.values()),
+        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
+        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
+        "total_ai_credits": sum(v.get("ai_credits", 0) for v in bucket.values()),
+        "total_premium_requests": sum(
+            v.get("premium_requests", 0) for v in bucket.values()
+        ),
+        "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "copilot_quota": quota,
+        "by_model": {m: dict(v) for m, v in bucket.items()},
+    }
+
+
 def _record_usage(
     model: str,
     input_tokens: int,
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    usage_context: _UsageContext | None = None,
+    provider: str | None = None,
+    ai_credits: float = 0,
+    premium_requests: float = 0,
+    requests: int = 0,
+    copilot_quota: dict[str, Any] | None = None,
 ) -> None:
-    """Accumulate token counts for the active run and fire a SSE event."""
+    """Accumulate provider usage for a run and fire a live update."""
     _last_call_tokens_var.set(
         {"input": input_tokens + cache_read_tokens, "output": output_tokens}
     )
-    run_id = _run_id_var.get()
+    context = usage_context or _capture_usage_context()
+    run_id = context.run_id
     if run_id is None:
         return
-    run_kind = _run_kind_var.get()
+    run_kind = context.run_kind
     key = (run_kind, run_id)
     bucket = _run_token_usage.setdefault(key, {})
     entry = bucket.setdefault(
@@ -351,14 +418,17 @@ def _record_usage(
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
+    if provider:
+        entry["provider"] = provider
+    entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
+    entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
+    entry["requests"] = entry.get("requests", 0) + requests
+    if copilot_quota:
+        entry["copilot_quota"] = copilot_quota
     _persist_bucket_to_db(run_id, bucket, run_kind)
-    emit_fn = _emit_fn_var.get()
+    emit_fn = context.emit_fn
     if emit_fn:
         try:
-            total_in = sum(v["input"] for v in bucket.values())
-            total_out = sum(v["output"] for v in bucket.values())
-            total_cache_read = sum(v.get("cache_read", 0) for v in bucket.values())
-            total_cache_write = sum(v.get("cache_write", 0) for v in bucket.values())
             emit_fn(
                 {
                     "type": "token_usage_update",
@@ -367,13 +437,9 @@ def _record_usage(
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
-                    "totals": {
-                        "total_input": total_in,
-                        "total_output": total_out,
-                        "total_cache_read": total_cache_read,
-                        "total_cache_write": total_cache_write,
-                        "by_model": {m: dict(v) for m, v in bucket.items()},
-                    },
+                    "ai_credits": ai_credits,
+                    "premium_requests": premium_requests,
+                    "totals": _usage_totals(bucket),
                 }
             )
         except Exception:
@@ -407,13 +473,7 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
     bucket = _run_token_usage.get(key)
     if bucket is None:
         bucket = _load_bucket_from_db(run_id, run_kind)
-    return {
-        "total_input": sum(v["input"] for v in bucket.values()),
-        "total_output": sum(v["output"] for v in bucket.values()),
-        "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
-        "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
-        "by_model": {m: dict(v) for m, v in bucket.items()},
-    }
+    return _usage_totals(bucket)
 
 
 def set_llm_proxy(url: str | None) -> None:
@@ -534,6 +594,17 @@ def _strip_thinking_blocks(raw: str) -> str:
         text = re.sub(
             rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE
         )
+        # Handle unclosed reasoning tags (e.g. <think> without matching </think>)
+        if re.search(rf"<{tag}\b[^>]*>", text, flags=re.IGNORECASE):
+            # If an explicit final output marker exists after the tag, strip up to the marker
+            m_marker = re.search(
+                r"(?is)(?:final\s+(?:output|answer|json)|output|result)\s*:?\s*",
+                text,
+            )
+            if m_marker:
+                text = text[m_marker.end() :]
+            else:
+                text = re.sub(rf"<{tag}\b[^>]*>", "", text, flags=re.IGNORECASE)
 
     # Some local/OpenRouter reasoning models emit pseudo-markup blocks without a
     # closing tag when they are interrupted near the final JSON.
@@ -548,9 +619,11 @@ def _extract_json(raw: str, expect: type = list) -> Any:
 
     Handles:
     - <think>...</think> reasoning blocks (Gemma, QwQ, DeepSeek-R1, etc.)
+    - Unclosed <think> blocks
     - Markdown code fences (```json ... ```)
     - Preamble / explanation text before the JSON
     - Trailing prose after the closing bracket
+    - Multiple top-level JSON blocks (prefers the last valid container)
     """
     if not raw:
         raise ValueError("empty response")
@@ -565,51 +638,66 @@ def _extract_json(raw: str, expect: type = list) -> Any:
     except json.JSONDecodeError:
         pass
 
-    # Find the first balanced JSON container matching `expect` that parses.
     open_ch = "[" if expect is list else "{"
     close_ch = "]" if expect is list else "}"
-    starts = [i for i, ch in enumerate(text) if ch == open_ch]
-    if not starts:
-        # Stripped text has no JSON delimiters — the model may have embedded the answer
-        # inside a thinking block.  Try searching the un-stripped original text so we can
-        # still extract JSON that appears within <think>...</think> tags.
-        raw_no_fence = (
-            re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
-        )
-        alt_starts = [i for i, ch in enumerate(raw_no_fence) if ch == open_ch]
-        if alt_starts:
-            text = raw_no_fence
-            starts = alt_starts
-        else:
-            raise ValueError(f"no '{open_ch}' found in LLM response")
 
-    for start in starts:
-        depth = 0
-        in_str = False
-        escape = False
-        for i, ch in enumerate(text[start:], start):
-            if escape:
-                escape = False
+    def _find_valid_containers(src_text: str) -> list[Any]:
+        candidates: list[Any] = []
+        idx = 0
+        n = len(src_text)
+        while idx < n:
+            if src_text[idx] != open_ch:
+                idx += 1
                 continue
-            if ch == "\\" and in_str:
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
+            depth = 0
+            in_str = False
+            escape = False
+            parsed_end = None
+            for i in range(idx, n):
+                ch = src_text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\" and in_str:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(src_text[idx : i + 1])
+                            candidates.append(val)
+                            parsed_end = i
+                        except json.JSONDecodeError:
+                            pass
                         break
+            if parsed_end is not None:
+                idx = parsed_end + 1
+            else:
+                idx += 1
+        return candidates
 
-    raise ValueError("could not extract balanced JSON from LLM response")
+    valid_containers = _find_valid_containers(text)
+    if valid_containers:
+        # Prefer the last valid top-level JSON container (the final answer block)
+        return valid_containers[-1]
+
+    # Stripped text has no valid JSON delimiters — try un-stripped original text
+    raw_no_fence = (
+        re.sub(r"```(?:json|python)?\s*", "", raw).strip().rstrip("`").strip()
+    )
+    raw_containers = _find_valid_containers(raw_no_fence)
+    if raw_containers:
+        return raw_containers[-1]
+
+    raise ValueError(f"no valid '{open_ch}' container found in LLM response")
 
 
 def _extract_action_json(raw: str) -> dict:
@@ -842,6 +930,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     limiter = get_limiter_for_config(config)
     if limiter is None:
+        if config.provider == "github_copilot":
+            return await _github_copilot(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
             return await _anthropic(config, prompt, screenshot_b64)
         if config.provider == "google":
@@ -875,7 +965,9 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     )
 
     try:
-        if config.provider == "anthropic":
+        if config.provider == "github_copilot":
+            resp = await _github_copilot(config, prompt, screenshot_b64)
+        elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
         elif config.provider == "google":
             resp = await _google(config, prompt, screenshot_b64)
@@ -925,7 +1017,21 @@ async def stream_chat_completion(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
     """Stream a chat completion from the configured LLM provider in real-time."""
-    if config.provider == "anthropic":
+    if config.provider == "github_copilot":
+        # Copilot's full response still travels through the same provider adapter.
+        # Yielding it as one chunk preserves this public generator contract.
+        combined = "\n\n".join(
+            [
+                system_message,
+                *[
+                    f"[{str(message.get('role') or 'user').upper()}]\n"
+                    f"{message.get('content') or ''}"
+                    for message in messages
+                ],
+            ]
+        )
+        yield await _github_copilot(config, combined, None)
+    elif config.provider == "anthropic":
         import anthropic as _ant
 
         client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
@@ -1358,6 +1464,47 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
     )
     _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
+
+
+async def _github_copilot(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    """Call GitHub Copilot through its official SDK and user entitlement."""
+    from aespa.services import copilot_provider
+
+    return await copilot_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _copilot_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _copilot_usage_callback() -> Any:
+    """Bind Copilot's background SDK events to the calling AESPA run."""
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="github_copilot",
+            **details,
+        )
+
+    return record
 
 
 async def _openai_compat(
@@ -2921,11 +3068,84 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
 TOOL_RESULT_CHAR_LIMIT = 8_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+
+
+def compact_agentic_messages(
+    messages: list[dict],
+    *,
+    max_context_chars: int,
+    recent_messages: int = 32,
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Compact completed tool exchanges while preserving protocol-valid pairs.
+
+    The first user brief is retained. Older assistant/tool-result pairs become a
+    short mechanical journal, and a recent suffix remains verbatim. Raw secrets
+    and full response bodies are deliberately excluded from the journal.
+    """
+    before_chars = len(json.dumps(messages, default=str))
+    if max_context_chars <= 0 or before_chars <= max_context_chars or len(messages) < 8:
+        return messages, None
+
+    suffix_start = max(1, len(messages) - max(8, recent_messages))
+    while (
+        suffix_start < len(messages)
+        and messages[suffix_start].get("role") != "assistant"
+    ):
+        suffix_start += 1
+    if suffix_start >= len(messages) - 1:
+        return messages, None
+
+    removed = messages[1:suffix_start]
+    journal_lines: list[str] = []
+    for message in removed:
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_input = (
+                    block.get("input") if isinstance(block.get("input"), dict) else {}
+                )
+                details = [str(block.get("name") or "tool")]
+                for key in ("method", "url", "owasp_category", "test_class", "title"):
+                    value = tool_input.get(key)
+                    if value not in (None, ""):
+                        details.append(f"{key}={str(value)[:240]}")
+                journal_lines.append("- " + " ".join(details))
+            elif block.get("type") == "tool_result":
+                result = str(block.get("content") or "").replace("\n", " ").strip()
+                if result:
+                    journal_lines.append(f"  result: {result[:360]}")
+
+    journal = (
+        f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+        "Use context tools for full durable evidence.]\n"
+        + "\n".join(journal_lines[-80:])
+    )[:16_000]
+    first = dict(messages[0])
+    first_content = first.get("content")
+    if isinstance(first_content, list):
+        first["content"] = list(first_content) + [{"type": "text", "text": journal}]
+    else:
+        first["content"] = f"{first_content or ''}\n\n{journal}"
+    compacted = [first, *messages[suffix_start:]]
+    after_chars = len(json.dumps(compacted, default=str))
+    return compacted, {
+        "before_chars": before_chars,
+        "after_chars": after_chars,
+        "removed_messages": len(removed),
+        "remaining_messages": len(compacted),
+    }
+
+
 # All providers that support native tool use and therefore run the continuous
 # agentic session.  Non-Anthropic providers use the OpenAI function-calling
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "github_copilot",
         "anthropic",
         "azure_foundry_anthropic",
         "bedrock",
@@ -3077,6 +3297,17 @@ async def _call_with_tools_impl(
     Anthropic-format so the growing messages list stays consistent).
     """
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "github_copilot":
+        from aespa.services import copilot_provider
+
+        return await copilot_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _copilot_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     # ── Anthropic (direct) ────────────────────────────────────────────────────
     if config.provider == "anthropic":
         import anthropic as _ant
@@ -3459,7 +3690,7 @@ async def _call_with_tools_impl(
         )
         # Force a tool call unless disabled; if the model rejects forced tool
         # choice, _create_response retries once without it.
-        if getattr(config, "force_tool_choice", True):
+        if getattr(config, "force_tool_choice", False):
             r_kwargs["tool_choice"] = "required"
         resp = await _create_response(client, r_kwargs)
 
@@ -3612,7 +3843,7 @@ async def _call_with_tools_impl(
         call_kwargs["tools"] = oai_tools
         model_lower = (config.model or "").lower()
         # Check if user explicitly disabled forcing tool choice, or if the model is a known reasoning model
-        if not getattr(config, "force_tool_choice", True):
+        if not getattr(config, "force_tool_choice", False):
             pass
         elif (
             "r1" in model_lower
@@ -3805,6 +4036,10 @@ async def thinking_agentic_loop(
     tools: list[dict] | None = None,
     before_tool_execution=None,
     after_tool_rejection=None,
+    execution_monitor_enabled: bool = True,
+    max_consecutive_text_turns: int = 3,
+    max_context_chars: int = 0,
+    on_context_compaction=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -3831,7 +4066,7 @@ async def thinking_agentic_loop(
 
     Returns the summary string from the final ``done`` call (empty string otherwise).
     """
-    if before_tool_execution:
+    if before_tool_execution and execution_monitor_enabled:
         from aespa.services.execution_monitor import add_strategy_justification_to_tools
 
         tools = add_strategy_justification_to_tools(
@@ -3937,6 +4172,34 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                     break
+
+            messages, compaction = compact_agentic_messages(
+                messages,
+                max_context_chars=max_context_chars,
+            )
+            if compaction:
+                if on_context_compaction:
+                    try:
+                        on_context_compaction(compaction)
+                    except Exception:
+                        pass
+                if emit_fn:
+                    try:
+                        emit_fn(
+                            {
+                                "type": "scanner_phase",
+                                "phase": "context_compaction",
+                                "status": "complete",
+                                "message": (
+                                    "Compacted older model context from "
+                                    f"{compaction['before_chars']:,} to "
+                                    f"{compaction['after_chars']:,} characters."
+                                ),
+                                "data": compaction,
+                            }
+                        )
+                    except Exception:
+                        pass
 
             if emit_fn:
                 try:
@@ -4132,7 +4395,10 @@ async def thinking_agentic_loop(
                 if text_blocks:
                     final_summary = (text_blocks[-1].get("text") or "")[:500]
                 consecutive_text_only_turns += 1
-                if consecutive_text_only_turns >= 3:
+                if (
+                    max_consecutive_text_turns > 0
+                    and consecutive_text_only_turns >= max_consecutive_text_turns
+                ):
                     log.warning(
                         "thinking_agentic_loop: model returned %d consecutive text-only turns; ending assessment.",
                         consecutive_text_only_turns,
@@ -4146,7 +4412,7 @@ async def thinking_agentic_loop(
                                     "status": "error",
                                     "message": (
                                         f"Step {tool_call_count + 1}: scan loop terminated "
-                                        "after 3 consecutive responses without a tool call; "
+                                        f"after {max_consecutive_text_turns} consecutive responses without a tool call; "
                                         "the model did not call done."
                                     ),
                                     "data": {
@@ -4304,7 +4570,11 @@ async def thinking_agentic_loop(
                             "thinking_agentic_loop: after_tool_result failed: %s", exc
                         )
 
-                limit = 30000 if tool_name == "context_tool" else TOOL_RESULT_CHAR_LIMIT
+                limit = (
+                    CONTEXT_TOOL_RESULT_CHAR_LIMIT
+                    if tool_name == "context_tool"
+                    else TOOL_RESULT_CHAR_LIMIT
+                )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = (
@@ -4333,6 +4603,13 @@ async def thinking_agentic_loop(
                 break
 
     finally:
+        if config.provider == "github_copilot":
+            try:
+                from aespa.services import copilot_provider
+
+                await copilot_provider.close_conversation(messages)
+            except Exception:
+                log.debug("Failed to close Copilot conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised
         # by task.cancel() — so the conversation state is always recoverable.
         if on_checkpoint and len(messages) > 1:

@@ -281,6 +281,9 @@ def _crawl_archive(session: Session, run: TestRun) -> dict:
                     "extra_headers_json": record.extra_headers_json,
                     "session_metadata": record.session_metadata,
                     "token_hint": record.token_hint,
+                    "lifecycle_state": record.lifecycle_state,
+                    "validation_url": record.validation_url,
+                    "last_status": record.last_status,
                     "is_active": record.is_active,
                 }
                 for record in session.exec(
@@ -366,6 +369,10 @@ def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
         cookie_names=sorted(str(k) for k in cookies.keys()),
         header_names=sorted(str(k) for k in headers.keys()),
         token_hint=record.token_hint,
+        lifecycle_state=record.lifecycle_state,
+        validation_url=record.validation_url,
+        last_status=record.last_status,
+        last_validated_at=record.last_validated_at,
         session_metadata=metadata,
         is_active=record.is_active,
         created_at=record.created_at,
@@ -1205,6 +1212,9 @@ async def import_test_run_crawl(
                     extra_headers_json=item.get("extra_headers_json") or "{}",
                     session_metadata=item.get("session_metadata") or "{}",
                     token_hint=item.get("token_hint"),
+                    lifecycle_state=item.get("lifecycle_state") or "candidate",
+                    validation_url=item.get("validation_url"),
+                    last_status=item.get("last_status"),
                     is_active=bool(item.get("is_active", True)),
                 )
             )

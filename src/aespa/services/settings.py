@@ -85,6 +85,7 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         name=provider.name,
         api_format=provider.api_format,
         base_url=provider.base_url,
+        username=provider.username,
         project_id=provider.project_id,
         models=_provider_models(provider),
         has_api_key=bool(provider.api_key and provider.api_key.strip()),
@@ -104,6 +105,7 @@ def _profile_with_provider(session: Session, cfg: LLMConfig) -> LLMConfig:
     set_committed_value(cfg, "provider", provider.api_format)
     set_committed_value(cfg, "api_key", provider.api_key)
     set_committed_value(cfg, "base_url", provider.base_url)
+    set_committed_value(cfg, "username", provider.username)
     set_committed_value(cfg, "project_id", provider.project_id)
     return cfg
 
@@ -124,6 +126,7 @@ def llm_profile_out_model(session: Session, cfg: LLMConfig) -> LLMConfigOut:
         has_api_key=bool(resolved.api_key and resolved.api_key.strip()),
         api_key=None,
         base_url=resolved.base_url,
+        username=resolved.username,
         project_id=resolved.project_id,
         model=resolved.model,
         max_tokens=resolved.max_tokens,
@@ -274,6 +277,10 @@ def _apply_llm_provider(
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = payload.base_url
+    username = (payload.username or "").strip()
+    provider.username = (
+        username or None if payload.api_format == "github_copilot" else None
+    )
     provider.project_id = payload.project_id
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm
@@ -475,6 +482,8 @@ def _apply_llm_config(
     cfg.provider = provider.api_format
     cfg.api_key = provider.api_key
     cfg.base_url = provider.base_url
+    cfg.username = provider.username
+    cfg.project_id = provider.project_id
     cfg.model = payload.model
     cfg.max_tokens = payload.max_tokens
     cfg.temperature = payload.temperature
@@ -532,6 +541,11 @@ def _json_dumps(value) -> str:
 
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
+        execution_monitor_enabled=cfg.execution_monitor_enabled,
+        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 3),
+        enforce_full_coverage_obligations=getattr(
+            cfg, "enforce_full_coverage_obligations", True
+        ),
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
         thinking_max_steps=cfg.thinking_max_steps,
@@ -563,6 +577,9 @@ def upsert_scanner_policy(
     if cfg is None:
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
+    cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
+    cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
     cfg.thinking_max_steps = payload.thinking_max_steps
@@ -781,9 +798,17 @@ def get_global_http_header_config(session: Session) -> GlobalHttpHeaderConfigOut
         return GlobalHttpHeaderConfigOut(
             **GlobalHttpHeaderConfigIn().model_dump(), updated_at=_utcnow()
         )
+    try:
+        parsed_headers = json.loads(cfg.headers_json or "[]")
+        headers = parsed_headers if isinstance(parsed_headers, list) else []
+    except (TypeError, json.JSONDecodeError):
+        headers = []
+    # Databases created before multi-header support have values only in these
+    # legacy fields. Return that value until the user saves the new table.
+    if not headers and cfg.header_name and cfg.header_value:
+        headers = [{"header_name": cfg.header_name, "header_value": cfg.header_value}]
     return GlobalHttpHeaderConfigOut(
-        header_name=cfg.header_name,
-        header_value=cfg.header_value,
+        headers=headers,
         updated_at=cfg.updated_at,
     )
 
@@ -794,8 +819,14 @@ def upsert_global_http_header_config(
     cfg = session.get(GlobalHttpHeaderConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = GlobalHttpHeaderConfig(id=_SINGLETON_ID)
-    cfg.header_name = payload.header_name
-    cfg.header_value = payload.header_value
+    cfg.headers_json = json.dumps(
+        [header.model_dump() for header in payload.headers], separators=(",", ":")
+    )
+    # Keep the old columns in sync with the first header for a graceful rollback
+    # to an earlier AESPA version.
+    first_header = payload.headers[0] if payload.headers else None
+    cfg.header_name = first_header.header_name if first_header else None
+    cfg.header_value = first_header.header_value if first_header else None
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()
@@ -903,6 +934,7 @@ def export_llm_config(
             name=p.name,
             api_format=p.api_format,
             base_url=p.base_url,
+            username=p.username,
             project_id=p.project_id,
             models=_provider_models(p),
             has_api_key=bool(p.api_key and p.api_key.strip()),
@@ -989,6 +1021,10 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         provider.name = item.name
         provider.api_format = item.api_format
         provider.base_url = item.base_url
+        username = (item.username or "").strip()
+        provider.username = (
+            username or None if item.api_format == "github_copilot" else None
+        )
         provider.project_id = item.project_id
         if item.api_key is not None:
             key_str = item.api_key.strip()

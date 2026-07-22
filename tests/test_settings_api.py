@@ -15,6 +15,7 @@ def test_get_default_models(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert "github_copilot" in data
     assert "openai" in data
     assert "openai_compatible" in data
     assert "openrouter" in data
@@ -24,6 +25,19 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
+    assert data["github_copilot"] == [
+        "auto",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "claude-sonnet-5",
+        "claude-opus-4.8",
+    ]
+    assert data["openai"][:3] == [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+    ]
     assert data["bedrock"][:2] == [
         "global.anthropic.claude-opus-4-8",
         "global.anthropic.claude-sonnet-4-6",
@@ -80,6 +94,42 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
     r = client.get("/api/settings/cloudflare-access")
     assert r.status_code == 200
     assert r.json()["audience"] is None
+
+
+def test_global_http_headers_round_trip(client: TestClient):
+    initial = client.get("/api/settings/global-http-header")
+    assert initial.status_code == 200
+    assert initial.json()["headers"] == []
+
+    payload = {
+        "headers": [
+            {"header_name": " X-Debug-Token ", "header_value": " secret "},
+            {"header_name": "X-Scan-Mode", "header_value": "active"},
+        ]
+    }
+    updated = client.put("/api/settings/global-http-header", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["headers"] == [
+        {"header_name": "X-Debug-Token", "header_value": "secret"},
+        {"header_name": "X-Scan-Mode", "header_value": "active"},
+    ]
+    assert (
+        client.get("/api/settings/global-http-header").json()["headers"]
+        == updated.json()["headers"]
+    )
+
+
+def test_global_http_headers_reject_duplicate_names(client: TestClient):
+    response = client.put(
+        "/api/settings/global-http-header",
+        json={
+            "headers": [
+                {"header_name": "X-Trace", "header_value": "one"},
+                {"header_name": "x-trace", "header_value": "two"},
+            ]
+        },
+    )
+    assert response.status_code == 422
 
     r = client.put("/api/settings/cloudflare-access", json={"audience": "  abc123  "})
     assert r.status_code == 200
@@ -183,6 +233,29 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+
+
+def test_create_github_copilot_provider_without_token(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Copilot",
+        api_format="github_copilot",
+        base_url=None,
+        username="copilot-user",
+        models=["auto"],
+        api_key=None,
+    )
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "github_copilot"
+    assert provider["username"] == "copilot-user"
+    assert provider["models"] == ["auto"]
+    assert provider["has_api_key"] is False
+
+    profile_r = _make_profile(client, provider["id"], model="auto")
+    assert profile_r.status_code == 200
+    assert profile_r.json()["provider"] == "github_copilot"
+    assert profile_r.json()["username"] == "copilot-user"
 
 
 def test_bedrock_mantle_project_id_round_trips(client: TestClient):
@@ -432,6 +505,9 @@ def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
     data = r.json()
+    assert data["execution_monitor_enabled"] is False
+    assert data["max_consecutive_text_turns"] == 3
+    assert data["enforce_full_coverage_obligations"] is True
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -446,6 +522,9 @@ def test_upsert_scanner_policy(client: TestClient):
     payload.update(
         {
             "scan_mode": "aggressive",
+            "execution_monitor_enabled": True,
+            "max_consecutive_text_turns": 0,
+            "enforce_full_coverage_obligations": False,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
             "request_timeout_s": 12.5,
@@ -456,6 +535,9 @@ def test_upsert_scanner_policy(client: TestClient):
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 200
     data = r.json()
+    assert data["execution_monitor_enabled"] is True
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
@@ -546,20 +628,20 @@ def test_import_llm_config_rejects_duplicate_names(client: TestClient):
 def test_llm_profile_force_tool_choice_round_trip(client: TestClient):
     provider = _make_provider(client).json()
 
-    # Verify defaults to True
-    profile = _make_profile(client, provider["id"], name="Profile With Force").json()
-    assert profile["force_tool_choice"] is True
+    # Verify defaults to False
+    profile = _make_profile(client, provider["id"], name="Profile Default").json()
+    assert profile["force_tool_choice"] is False
 
-    # Disable it explicitly
-    profile_disabled = _make_profile(
-        client, provider["id"], name="Profile Without Force", force_tool_choice=False
+    # Enable it explicitly
+    profile_enabled = _make_profile(
+        client, provider["id"], name="Profile With Force", force_tool_choice=True
     ).json()
-    assert profile_disabled["force_tool_choice"] is False
+    assert profile_enabled["force_tool_choice"] is True
 
     # Get active config to verify it resolves correctly
-    client.post(f"/api/settings/llm/model-configs/{profile_disabled['id']}/activate")
+    client.post(f"/api/settings/llm/model-configs/{profile_enabled['id']}/activate")
     active = client.get("/api/settings/llm").json()
-    assert active["force_tool_choice"] is False
+    assert active["force_tool_choice"] is True
 
 
 def test_export_import_write_only_keys(client: TestClient):

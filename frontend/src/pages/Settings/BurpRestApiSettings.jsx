@@ -188,6 +188,7 @@ export function BurpRestApiSettings() {
 }
 export const API_FORMAT_LABELS = {
   anthropic: "Anthropic API",
+  github_copilot: "GitHub Copilot subscription",
   openai: "OpenAI API",
   openai_compatible: "OpenAI-compatible API",
   openrouter: "OpenRouter",
@@ -203,6 +204,7 @@ export const DEFAULT_PROVIDER_FORM = {
   name: "",
   api_format: "anthropic",
   base_url: "",
+  username: "",
   project_id: "",
   models: "",
   api_key: "",
@@ -217,10 +219,11 @@ export const DEFAULT_LLM_FORM = {
   temperature: 0.2,
   use_temperature: true,
   use_vision: false,
-  force_tool_choice: true
+  force_tool_choice: false
 };
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",
+  github_copilot: "Not required",
   openai: "https://api.openai.com/v1",
   openai_compatible: "http://localhost:1234/v1",
   openrouter: "https://openrouter.ai/api/v1",
@@ -235,6 +238,7 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS = {
 // Actual runtime defaults used by the backend when base_url is blank
 export const PROVIDER_DEFAULT_BASE_URLS = {
   anthropic: "https://api.anthropic.com",
+  github_copilot: "Copilot SDK (selected default account)",
   openai: "https://api.openai.com/v1",
   openai_compatible: null,
   // no sensible default — must be set
@@ -250,7 +254,8 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
 };
 export const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
-  openai: "gpt-5.5\ngpt-5.4\ngpt-4.1",
+  github_copilot: "auto\ngpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\nclaude-sonnet-5\nclaude-opus-4.8",
+  openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
   openrouter: "openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   google: "gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",

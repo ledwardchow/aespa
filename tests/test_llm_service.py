@@ -9,6 +9,52 @@ from aespa.models import LLMConfig
 from aespa.services import llm
 
 
+def test_agentic_context_compaction_preserves_recent_tool_pairs():
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(50):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"call-{index}",
+                        "name": "http_request",
+                        "input": {
+                            "method": "GET",
+                            "url": f"https://target.local/api/items/{index}",
+                            "secret": "must-not-enter-journal",
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"call-{index}",
+                        "content": "Status: 200 " + ("x" * 1500),
+                    }
+                ],
+            }
+        )
+
+    compacted, stats = llm.compact_agentic_messages(
+        messages, max_context_chars=30_000, recent_messages=12
+    )
+
+    assert stats is not None
+    assert stats["after_chars"] < stats["before_chars"]
+    assert compacted[0]["role"] == "user"
+    assert "CONTEXT JOURNAL" in str(compacted[0]["content"])
+    assert "must-not-enter-journal" not in str(compacted[0]["content"])
+    assert compacted[1]["role"] == "assistant"
+    assert compacted[-1]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this
@@ -781,6 +827,28 @@ The final answer is {"context": "Real JSON", "suggested_links": []}.
     data = llm._extract_json(raw, expect=dict)
 
     assert data["context"] == "Real JSON"
+
+
+def test_extract_json_handles_unclosed_think_tag_and_template_example():
+    raw = """<think>
+Let me analyze the original finding and rewrite it.
+Looking at the template:
+{
+  "owasp_category": "A03",
+  "title": "Short, report-ready title",
+  "description": "What is vulnerable and where."
+}
+Let me write the real report-ready version.
+Final output:{
+  "owasp_category": "A05",
+  "title": "Permissive CORS policy reflects arbitrary Origin header",
+  "description": "The API at http://192.168.3.101/ applies a permissive CORS policy."
+}"""
+
+    data = llm._extract_json(raw, expect=dict)
+
+    assert data["owasp_category"] == "A05"
+    assert data["title"] == "Permissive CORS policy reflects arbitrary Origin header"
 
 
 def test_page_analysis_parses_compact_function_label():
@@ -2726,6 +2794,7 @@ def test_call_with_tools_retries_without_tool_choice_on_error(monkeypatch):
         model="deepseek-v4-pro-custom",
         max_tokens=2048,
         temperature=0.0,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw_content = asyncio.run(
@@ -2780,6 +2849,7 @@ def test_call_with_tools_bedrock_mantle_uses_responses_api(monkeypatch):
         model="openai.gpt-5.5",
         max_tokens=256,
         temperature=0.2,
+        force_tool_choice=True,
     )
 
     blocks, stop_reason, raw = asyncio.run(
@@ -3073,6 +3143,34 @@ def test_token_usage_tracking_for_sast_and_api():
 
     assert web_usage["total_input"] == 200
     assert web_usage["total_output"] == 80
+
+
+def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
+    run_id = 888889
+    events = []
+    llm.set_run_context(run_id, emit_fn=events.append, run_kind="api")
+    callback = llm._copilot_usage_callback()
+    llm.clear_run_context()
+
+    callback(
+        "gpt-5.6-terra",
+        1_200,
+        300,
+        800,
+        0,
+        ai_credits=1.25,
+        premium_requests=0,
+        requests=1,
+        copilot_quota={"remaining_percentage": 74, "reset_at": None},
+    )
+
+    usage = llm.get_run_token_usage(run_id, run_kind="api")
+    assert usage["total_input"] == 1_200
+    assert usage["total_cache_read"] == 800
+    assert usage["total_ai_credits"] == 1.25
+    assert usage["total_requests"] == 1
+    assert usage["copilot_quota"]["remaining_percentage"] == 74
+    assert events[-1]["totals"] == usage
 
 
 def test_google_usage_treats_none_counters_as_zero(monkeypatch):

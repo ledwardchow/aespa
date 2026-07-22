@@ -4,7 +4,7 @@ import { isDynamicScanActive } from "./_helpers";
 import { useEventStream } from "../../hooks/useEventStream";
 
 export function useWebRunEvents(options) {
-  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts } = options;
+  const { runId, setGraph, setCrawlUsername, setRun, setCrawlStopRequested, setAgents, upsertAgent, setThinkingStatus, setThinkingStopReq, setActivityLog, setSitePlanData, setFindings, setValidateStatus, setValidateBusy, setTokenUsage, setScopeHosts, setGuidedLoginPending, setGuidedLoginErrors, setEntraPrompts, setCheckpointStatus } = options;
 
   // SSE: receive incremental graph + status updates — no graph polling needed.
   useEventStream(`/api/test-runs/${runId}/events`, {
@@ -101,7 +101,12 @@ export function useWebRunEvents(options) {
         });
       } else if (evt.type === "thinking_scan_update") {
         setThinkingStatus(evt);
-        if (evt.status && !isDynamicScanActive(evt.status)) setThinkingStopReq(false);
+        if (evt.status && !isDynamicScanActive(evt.status)) {
+          setThinkingStopReq(false);
+          if (setCheckpointStatus) {
+            api.getCheckpointStatus(runId).then(setCheckpointStatus).catch(() => {});
+          }
+        }
       } else if (evt.type === "scanner_phase") {
         setActivityLog(prev => {
           const ts = new Date().toLocaleTimeString("en-US", {

@@ -807,8 +807,13 @@
 .surface-coverage-row { display:grid; grid-template-columns:42px minmax(180px,1fr) minmax(100px,2fr) 90px 60px; gap:8px; align-items:center; font-size:11px; }
 .surface-coverage-name { color:var(--text-2); }
 .surface-coverage-count { color:var(--text-2); text-align:right; white-space:nowrap; }
-.surface-progress { height:6px; border-radius:4px; background:var(--panel-2); overflow:hidden; }
-.surface-progress > span { display:block; height:100%; background:#5b8def; border-radius:4px; }
+.surface-progress { height:6px; border-radius:4px; background:var(--panel-2); overflow:hidden; display:flex; gap:0; }
+.surface-progress > span { display:inline-block; height:100%; transition:width .3s ease; }
+.surface-progress-segment.status-not_started { background:var(--coverage-not-started-bright); }
+.surface-progress-segment.status-in_progress { background:var(--coverage-in-progress-bright); }
+.surface-progress-segment.status-covered { background:var(--coverage-covered-bright); }
+.surface-progress-segment.status-finding { background:var(--coverage-finding-bright); }
+.surface-progress-segment.status-skipped { background:var(--coverage-skipped-bright); }
 .surface-filters { display:flex; gap:8px; }
 .surface-filters input { flex:1; min-width:180px; }
 .surface-filters select { min-width:150px; }
