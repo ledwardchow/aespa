@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { ValidatorSettings } from "./ValidatorSettings";
-import { ScannerPolicySettings } from "./ScannerPolicySettings";
+import { GlobalPolicySettings, ScannerPolicySettings } from "./ScannerPolicySettings";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings";
 import { ReportingSettings } from "./ReportingSettings";
 
 
 export function ScanPolicyPage() {
-  const [tab, setTab] = useState("scanner");
+  const [tab, setTab] = useState("global");
   return <>
     <div className="topbar"><div className="topbar-title">Agent Settings</div></div>
     <div className="content" style={{
@@ -19,7 +19,8 @@ export function ScanPolicyPage() {
       minHeight: 0
     }}>
       <div className="tab-bar">
-        <button className={"tab-btn" + (tab === "scanner" ? " active" : "")} onClick={() => setTab("scanner")}>Scanner</button>
+        <button className={"tab-btn" + (tab === "global" ? " active" : "")} onClick={() => setTab("global")}>Global</button>
+        <button className={"tab-btn" + (tab === "scanner" ? " active" : "")} onClick={() => setTab("scanner")}>Test Lead</button>
         <button className={"tab-btn" + (tab === "specialists" ? " active" : "")} onClick={() => setTab("specialists")}>Specialist Agents</button>
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
         <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
@@ -32,6 +33,7 @@ export function ScanPolicyPage() {
         paddingTop: 16,
         paddingBottom: 28
       }}>
+        {tab === "global" && <GlobalPolicySettings />}
         {tab === "scanner" && <ScannerPolicySettings />}
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}

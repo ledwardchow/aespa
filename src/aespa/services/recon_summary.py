@@ -77,6 +77,14 @@ def build_recon_summary(
         cells = list(
             s.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id))
         )
+        traffic_entries = list(
+            s.exec(
+                select(TrafficEntry)
+                .where(TrafficEntry.test_run_id == run_id)
+                .where(TrafficEntry.api_test_run_id.is_(None))
+                .order_by(TrafficEntry.created_at.desc())
+            )
+        )
 
         credentials: list[Credential] = []
         if run is not None:
@@ -86,7 +94,13 @@ def build_recon_summary(
         credential_map = {credential.id: credential for credential in credentials}
 
         page_access, access_profiles = _build_page_access(pages, views, credential_map)
-        routes = _build_routes(pages, intel_items, page_access, credential_map)
+        routes = _build_routes(
+            pages,
+            intel_items,
+            traffic_entries,
+            page_access,
+            credential_map,
+        )
         coverage = _build_coverage(cells, pages, routes)
         signals = _build_signals(pages, intel_items)
         technologies = _detect_technologies(s, run_id, pages, intel_items)
@@ -203,6 +217,7 @@ def _build_page_access(
 def _build_routes(
     pages: list[CrawledPage],
     intel_items: list[TargetIntelItem],
+    traffic_entries: list[TrafficEntry],
     page_access: dict[str, dict],
     credential_map: dict[int | None, Credential],
 ) -> list[dict]:
@@ -211,9 +226,10 @@ def _build_routes(
     def add_route(
         destination: str,
         *,
-        method: str = "GET",
+        method: str | None = None,
         kind: str,
         source: str,
+        method_authority: str = "declared",
         parameter: str | None = None,
         confidence: float = 1.0,
         source_url: str | None = None,
@@ -228,7 +244,8 @@ def _build_routes(
             {
                 "canonical_url": canonical,
                 "example_urls": [],
-                "methods": set(),
+                "declared_methods": set(),
+                "navigation_methods": set(),
                 "parameters": set(),
                 "kinds": set(),
                 "sources": set(),
@@ -238,7 +255,13 @@ def _build_routes(
         )
         if destination not in route["example_urls"] and len(route["example_urls"]) < 5:
             route["example_urls"].append(destination)
-        route["methods"].add((method or "GET").upper())
+        if method:
+            bucket = (
+                "navigation_methods"
+                if method_authority == "navigation"
+                else "declared_methods"
+            )
+            route[bucket].add(str(method).upper())
         if parameter and not _looks_like_route(parameter):
             route["parameters"].add(parameter)
         route["kinds"].add(kind)
@@ -252,6 +275,8 @@ def _build_routes(
             page.url,
             kind=page.state_kind or "page",
             source="crawl",
+            method="GET",
+            method_authority="navigation",
             confidence=1.0,
         )
 
@@ -268,7 +293,7 @@ def _build_routes(
         for provenance_url in provenance_urls:
             add_route(
                 destination,
-                method=item.method or "GET",
+                method=item.method or None,
                 kind=item.kind,
                 source=item.source,
                 parameter=item.key if item.kind == "input" else None,
@@ -281,7 +306,7 @@ def _build_routes(
                 if parameter:
                     add_route(
                         destination,
-                        method=item.method or "GET",
+                        method=item.method or None,
                         kind="form",
                         source=item.source,
                         parameter=str(parameter),
@@ -289,8 +314,43 @@ def _build_routes(
                         source_url=metadata.get("page_url"),
                     )
 
+    observed_by_operation: dict[str, dict[str, Counter]] = defaultdict(
+        lambda: defaultdict(Counter)
+    )
+    traffic_sources_by_operation: dict[str, set[str]] = defaultdict(set)
+    for entry in traffic_entries:
+        if not entry.url or _STATIC_ASSET_RE.search(entry.url):
+            continue
+        operation = _canonical_operation_url(entry.url)
+        method = str(entry.method or "").upper()
+        if not operation or not method:
+            continue
+        observed_by_operation[operation][method][int(entry.status or 0)] += 1
+        traffic_sources_by_operation[operation].add(entry.source or "traffic")
+
     rows: list[dict] = []
     for canonical, route in grouped.items():
+        operation = _canonical_operation_url(canonical)
+        method_observations = observed_by_operation.get(operation, {})
+        rejected_methods = sorted(
+            method
+            for method, statuses in method_observations.items()
+            if statuses and set(statuses).issubset({405})
+        )
+        supported_observed_methods = {
+            method
+            for method, statuses in method_observations.items()
+            if any(status != 405 for status in statuses)
+        }
+        if supported_observed_methods:
+            methods = supported_observed_methods
+        elif route["declared_methods"]:
+            methods = set(route["declared_methods"])
+        else:
+            methods = set(route["navigation_methods"])
+        methods.difference_update(rejected_methods)
+        if method_observations:
+            route["sources"].add("traffic")
         access_sources = {canonical}
         access_sources.update(_canonical_url(url) for url in route["source_urls"])
         observations = [
@@ -343,7 +403,18 @@ def _build_routes(
             {
                 "canonical_url": canonical,
                 "example_urls": route["example_urls"],
-                "methods": sorted(route["methods"]),
+                "methods": sorted(methods),
+                "rejected_methods": rejected_methods,
+                "method_evidence": {
+                    method: {
+                        "statuses": {
+                            str(status): count
+                            for status, count in sorted(statuses.items())
+                        },
+                        "sources": sorted(traffic_sources_by_operation[operation]),
+                    }
+                    for method, statuses in sorted(method_observations.items())
+                },
                 "parameters": sorted(route["parameters"]),
                 "kinds": sorted(route["kinds"]),
                 "sources": sorted(route["sources"]),
@@ -703,6 +774,20 @@ def _canonical_url(url: str) -> str:
             fragment,
         )
     )
+
+
+def _canonical_operation_url(url: str) -> str:
+    """Return a route key suitable for correlating traffic with route evidence.
+
+    Query values describe individual probes, not different HTTP operations. SPA
+    fragments remain because they distinguish browser states that have no network
+    path of their own.
+    """
+    canonical = _canonical_url(url)
+    if not canonical:
+        return ""
+    parts = urlsplit(canonical)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", parts.fragment))
 
 
 def _looks_like_route(value: str | None) -> bool:

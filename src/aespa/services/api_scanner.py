@@ -324,8 +324,8 @@ def _make_post_probe_fn(api_run_id: int):
     return _post_probe
 
 
-def mark_all_cells_covered(api_run_id: int) -> None:
-    """At scan completion, promote ``in_progress`` cells to ``covered``.
+def mark_in_progress_to_covered(api_run_id: int) -> None:
+    """At scan completion (track mode), promote ``in_progress`` cells to ``covered``.
 
     Only ``in_progress`` cells are promoted — these are endpoints the scanner
     actually sent requests to but raised no finding for.  ``not_started`` cells
@@ -348,6 +348,9 @@ def mark_all_cells_covered(api_run_id: int) -> None:
     log.info(
         "mark_in_progress_to_covered: api_run_id=%s promoted=%d", api_run_id, len(cells)
     )
+
+
+mark_all_cells_covered = mark_in_progress_to_covered
 
 
 # ── Enforce coverage mode (Slice 8) ───────────────────────────────────────────
@@ -1187,11 +1190,9 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     )
     llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
 
-    global_http_header: dict[str, str] = {}
-    if global_header_cfg.header_name and global_header_cfg.header_value:
-        global_http_header = {
-            global_header_cfg.header_name: global_header_cfg.header_value
-        }
+    global_http_header = {
+        header.header_name: header.header_value for header in global_header_cfg.headers
+    }
 
     _scanner_proxy_var.set(scanner_proxy_url)
     _scanner_global_header_var.set(global_http_header)
@@ -1380,8 +1381,11 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
     # Mark run completed.
     with Session(get_engine()) as s:
         r = s.get(ApiTestRun, api_run_id)
-        if r is not None and r.status == "scanning":
+        if r is not None and r.status in ("scanning", "running"):
             r.status = "completed"
+            r.phase = "finished"
+            r.outcome = "complete"
+            r.terminal_reason = "coverage_complete"
             r.completed_at = datetime.now(_UTC)
             r.updated_at = datetime.now(_UTC)
             s.add(r)

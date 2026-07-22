@@ -6,7 +6,25 @@ const STATUS_COLOR = { neutral: "var(--muted)", pending: "var(--muted)", running
 export function WebRunHeader({ run, siteName, profiles, headerStatus, canStart, canStop, canStartScan, canStopScan, canResume, canImportCrawl, crawlStopping, scanStopping, coverageMode, onCoverageMode, onStart, onStop, onStartScan, onStopScan, onResume, onExportCrawl, onImportCrawl, aliceRunning, onStopAlice }) {
   const profile = profiles.find(item => item.id === run?.llm_profile_id);
   return <PageHeader titleStyle={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }} title={<>
-    <div className="row" style={{ alignItems: "center", gap: 0 }}><Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb><Sep />{run ? run.name : "…"}{run && <span className={'run-status-badge' + (["running", "stopping"].includes(headerStatus.key) ? " running" : "")} style={{ color: STATUS_COLOR[headerStatus.key] || "var(--muted)" }}>● {headerStatus.label}</span>}</div>
+    <div className="row" style={{ alignItems: "center", gap: 0 }}>
+      <Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb>
+      <Sep />{run ? run.name : "…"}
+      {run && (
+        <span className={'run-status-badge' + (["running", "stopping"].includes(headerStatus.key) ? " running" : "")} style={{ color: STATUS_COLOR[headerStatus.key] || "var(--muted)" }}>
+          ● {headerStatus.label}
+        </span>
+      )}
+      {run?.phase && (
+        <span className="run-status-badge" style={{ marginLeft: 6, opacity: 0.85 }}>
+          phase: {run.phase}
+        </span>
+      )}
+      {run?.terminal_reason && (
+        <span className="run-status-badge" style={{ marginLeft: 6, color: run.outcome === "complete" ? "var(--ok)" : "var(--warn)" }}>
+          reason: {run.terminal_reason.replace(/_/g, " ")}
+        </span>
+      )}
+    </div>
     {run?.llm_profile_id && profiles.length > 0 && <div style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>Profile: {profile?.name || '#' + run.llm_profile_id}</div>}
   </>} actions={<>
     {canStart && <button className="btn sm" onClick={onStart}><IconPlay /> Start crawl</button>}
