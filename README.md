@@ -175,7 +175,7 @@ Site Map:
 A.L.I.C.E chat:  
 ![Screenshot](docs/images/alice.png)
 
-Dynamic scan in progress:  
+Agents view: 
 ![Screenshot](docs/images/agentstatus.png)
 
 Attack Surface  
