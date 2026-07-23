@@ -336,8 +336,8 @@ class ScannerPolicy(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     execution_monitor_enabled: bool = Field(default=False)
-    max_consecutive_text_turns: int = Field(default=3)
-    enforce_full_coverage_obligations: bool = Field(default=True)
+    max_consecutive_text_turns: int = Field(default=0)
+    enforce_full_coverage_obligations: bool = Field(default=False)
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)

@@ -244,6 +244,8 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | Field | Default | Description |
 |---|---|---|
 | `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
+| `max_consecutive_text_turns` | `0` | Stop after this many text-only Test Lead turns; `0` allows unlimited turns |
+| `enforce_full_coverage_obligations` | `false` | Require every coverage obligation to be resolved before the Test Lead can finish |
 | `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
 | `max_probes_per_page` | `50` | Cap on probe attempts per crawled page |
 | `thinking_max_steps` | `120` | Legacy compatibility setting; the active Test Lead loop is deliberately uncapped and does not read this value |

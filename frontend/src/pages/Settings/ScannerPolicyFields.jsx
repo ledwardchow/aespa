@@ -24,7 +24,7 @@ export function ScannerPolicyFields({
       <input type="number" disabled={disabled} min="0" max="50" value={form.max_consecutive_text_turns} onChange={e => upd({
         max_consecutive_text_turns: e.target.value
       })} />
-      <div className="field-hint">Maximum turns the model can return text reasoning without making a tool call before terminating (0 = unlimited). Default: 3.</div>
+      <div className="field-hint">Maximum turns the model can return text reasoning without making a tool call before terminating (0 = unlimited). Default: unlimited.</div>
     </div>
   </>;
 }
