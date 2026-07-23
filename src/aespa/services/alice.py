@@ -1470,10 +1470,13 @@ async def run_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider == "github_copilot":
-            from aespa.services import copilot_provider
+        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+            if llm_cfg.provider == "factory_droid":
+                from aespa.services import droid_provider as provider_adapter
+            else:
+                from aespa.services import copilot_provider as provider_adapter
 
-            await copilot_provider.close_conversation(messages)
+            await provider_adapter.close_conversation(messages)
         # Always unregister the workprogram finding hook, even on early exit
         # or exception — mirrors scanner._do_thinking_scan cleanup.
         try:
@@ -2491,10 +2494,13 @@ async def run_api_alice_turn_stream(
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': err_msg})}\n\n"
         accumulated_message += err_msg
     finally:
-        if llm_cfg.provider == "github_copilot":
-            from aespa.services import copilot_provider
+        if llm_cfg.provider in ("factory_droid", "github_copilot"):
+            if llm_cfg.provider == "factory_droid":
+                from aespa.services import droid_provider as provider_adapter
+            else:
+                from aespa.services import copilot_provider as provider_adapter
 
-            await copilot_provider.close_conversation(messages)
+            await provider_adapter.close_conversation(messages)
 
     yield f"data: {json.dumps({'type': 'done', 'thought': accumulated_thought.strip(), 'message': accumulated_message.strip()})}\n\n"
     llm_svc.clear_run_context()

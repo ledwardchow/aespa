@@ -328,6 +328,7 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                     "cache_read",
                     "cache_write",
                     "ai_credits",
+                    "factory_credits",
                     "premium_requests",
                     "requests",
                 ):
@@ -377,6 +378,9 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
         "total_cache_write": sum(v.get("cache_write", 0) for v in bucket.values()),
         "total_ai_credits": sum(v.get("ai_credits", 0) for v in bucket.values()),
+        "total_factory_credits": sum(
+            v.get("factory_credits", 0) for v in bucket.values()
+        ),
         "total_premium_requests": sum(
             v.get("premium_requests", 0) for v in bucket.values()
         ),
@@ -396,6 +400,7 @@ def _record_usage(
     usage_context: _UsageContext | None = None,
     provider: str | None = None,
     ai_credits: float = 0,
+    factory_credits: float = 0,
     premium_requests: float = 0,
     requests: int = 0,
     copilot_quota: dict[str, Any] | None = None,
@@ -421,6 +426,9 @@ def _record_usage(
     if provider:
         entry["provider"] = provider
     entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
+    entry["factory_credits"] = (
+        entry.get("factory_credits", 0) + factory_credits
+    )
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
     if copilot_quota:
@@ -438,6 +446,7 @@ def _record_usage(
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
                     "ai_credits": ai_credits,
+                    "factory_credits": factory_credits,
                     "premium_requests": premium_requests,
                     "totals": _usage_totals(bucket),
                 }
@@ -934,6 +943,8 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
 async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
     limiter = get_limiter_for_config(config)
     if limiter is None:
+        if config.provider == "factory_droid":
+            return await _factory_droid(config, prompt, screenshot_b64)
         if config.provider == "github_copilot":
             return await _github_copilot(config, prompt, screenshot_b64)
         if config.provider == "anthropic":
@@ -969,7 +980,9 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
     )
 
     try:
-        if config.provider == "github_copilot":
+        if config.provider == "factory_droid":
+            resp = await _factory_droid(config, prompt, screenshot_b64)
+        elif config.provider == "github_copilot":
             resp = await _github_copilot(config, prompt, screenshot_b64)
         elif config.provider == "anthropic":
             resp = await _anthropic(config, prompt, screenshot_b64)
@@ -1021,7 +1034,7 @@ async def stream_chat_completion(
     messages: list[dict],
 ) -> AsyncGenerator[str, None]:
     """Stream a chat completion from the configured LLM provider in real-time."""
-    if config.provider == "github_copilot":
+    if config.provider in ("factory_droid", "github_copilot"):
         # Copilot's full response still travels through the same provider adapter.
         # Yielding it as one chunk preserves this public generator contract.
         combined = "\n\n".join(
@@ -1034,7 +1047,10 @@ async def stream_chat_completion(
                 ],
             ]
         )
-        yield await _github_copilot(config, combined, None)
+        if config.provider == "factory_droid":
+            yield await _factory_droid(config, combined, None)
+        else:
+            yield await _github_copilot(config, combined, None)
     elif config.provider == "anthropic":
         import anthropic as _ant
 
@@ -1483,6 +1499,46 @@ async def _github_copilot(
         _copilot_usage_callback(),
         _llm_proxy_var.get(),
     )
+
+
+async def _factory_droid(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    """Call Factory through the installed Droid CLI and its signed-in account."""
+    from aespa.services import droid_provider
+
+    return await droid_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _droid_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _droid_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        **details: Any,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="factory_droid",
+            **details,
+        )
+
+    return record
 
 
 def _copilot_usage_callback() -> Any:
@@ -3149,6 +3205,7 @@ def compact_agentic_messages(
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "factory_droid",
         "github_copilot",
         "anthropic",
         "azure_foundry_anthropic",
@@ -3301,6 +3358,17 @@ async def _call_with_tools_impl(
     Anthropic-format so the growing messages list stays consistent).
     """
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "factory_droid":
+        from aespa.services import droid_provider
+
+        return await droid_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _droid_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     if config.provider == "github_copilot":
         from aespa.services import copilot_provider
 
@@ -4607,13 +4675,18 @@ async def thinking_agentic_loop(
                 break
 
     finally:
-        if config.provider == "github_copilot":
+        if config.provider in ("factory_droid", "github_copilot"):
             try:
-                from aespa.services import copilot_provider
+                if config.provider == "factory_droid":
+                    from aespa.services import droid_provider
 
-                await copilot_provider.close_conversation(messages)
+                    await droid_provider.close_conversation(messages)
+                else:
+                    from aespa.services import copilot_provider
+
+                    await copilot_provider.close_conversation(messages)
             except Exception:
-                log.debug("Failed to close Copilot conversation", exc_info=True)
+                log.debug("Failed to close provider conversation", exc_info=True)
         # Save a final checkpoint on any exit — including CancelledError raised
         # by task.cancel() — so the conversation state is always recoverable.
         if on_checkpoint and len(messages) > 1:

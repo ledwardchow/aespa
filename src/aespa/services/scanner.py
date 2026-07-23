@@ -1891,17 +1891,34 @@ def _run_thinking_context_tool(
         }
         if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
             try:
-                replay_steps = json.loads(page["replay_steps_json"])
+                replay_data = json.loads(page["replay_steps_json"])
             except (TypeError, ValueError, json.JSONDecodeError):
-                replay_steps = []
+                replay_data = []
+            if isinstance(replay_data, dict):
+                replay_root_url = str(replay_data.get("root_url") or page["url"])
+                replay_steps = replay_data.get("steps") or []
+            else:
+                replay_root_url = page["url"]
+                replay_steps = replay_data
             if replay_steps:
                 detail["browser_replay"] = {
-                    "url": page["url"],
-                    "steps": [{"op": "goto", "url": page["url"]}]
+                    "url": replay_root_url,
+                    "steps": [{"op": "goto", "url": replay_root_url}]
                     + [
-                        {"op": "click", "selector": step["selector"]}
+                        {
+                            key: value
+                            for key, value in {
+                                "op": step.get("kind") or "click",
+                                "selector": step.get("selector"),
+                                "testid": step.get("testid"),
+                                "role": step.get("role"),
+                                "name": step.get("name"),
+                                "value": step.get("value"),
+                            }.items()
+                            if value not in (None, "")
+                        }
                         for step in replay_steps
-                        if isinstance(step, dict) and step.get("selector")
+                        if isinstance(step, dict)
                     ],
                 }
         if "title" in include_set:
@@ -10746,6 +10763,17 @@ async def _run_thinking_browser_action(
     pw_page.on("response", _cap_response)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _step_locator(step: dict):
+        if step.get("selector"):
+            return pw_page.locator(step["selector"]).first
+        if step.get("testid"):
+            return pw_page.get_by_test_id(step["testid"]).first
+        if step.get("role") and step.get("name"):
+            return pw_page.get_by_role(
+                step["role"], name=step["name"], exact=True
+            ).first
+        return None
+
     try:
         for raw_step in steps[:20]:
             if not isinstance(raw_step, dict):
@@ -10765,27 +10793,41 @@ async def _run_thinking_browser_action(
                         except Exception:
                             last_headers = {}
                 elif op in {"fill", "type"}:
-                    selector = raw_step.get("selector")
+                    locator = _step_locator(raw_step)
+                    selector = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
                     value = str(raw_step.get("value") or "")
-                    if not selector:
-                        action_log.append(f"{op} skipped: missing selector")
+                    if locator is None:
+                        action_log.append(f"{op} skipped: missing locator")
                         continue
                     action_log.append(
                         f"{op} {selector}={_compact_log_value(value, 120)}"
                     )
-                    loc = pw_page.locator(selector).first
-                    await loc.wait_for(state="visible", timeout=5_000)
+                    await locator.wait_for(state="visible", timeout=5_000)
                     if op == "fill":
-                        await loc.fill(value, timeout=5_000)
+                        await locator.fill(value, timeout=5_000)
                     else:
-                        await loc.type(value, delay=20, timeout=5_000)
-                elif op == "click":
-                    selector = raw_step.get("selector")
-                    if not selector:
-                        action_log.append("click skipped: missing selector")
+                        await locator.type(value, delay=20, timeout=5_000)
+                elif op in {"click", "check", "uncheck", "select_option"}:
+                    locator = _step_locator(raw_step)
+                    target = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
+                    if locator is None:
+                        action_log.append(f"{op} skipped: missing locator")
                         continue
-                    action_log.append(f"click {selector}")
-                    await pw_page.locator(selector).first.click(timeout=5_000)
+                    action_log.append(f"{op} {target}")
+                    if op == "select_option":
+                        await locator.select_option(
+                            value=raw_step.get("value"), timeout=5_000
+                        )
+                    else:
+                        await getattr(locator, op)(timeout=5_000)
                 elif op == "press":
                     selector = raw_step.get("selector")
                     key = raw_step.get("key") or "Enter"

@@ -449,13 +449,918 @@ def test_interactive_controls_include_replayable_non_navigation_links():
     assert 'a[href="#"]' in page.script
     assert controls == [
         {
+            "kind": "click",
             "role": "link",
             "name": "Open account",
+            "value": None,
+            "field_name": None,
             "testid": None,
             "element_id": None,
             "selector": "",
+            "inside_form": False,
+            "button_type": None,
+            "form_method": None,
+            "form_action": None,
         }
     ]
+
+
+class _WorkflowControlsPage:
+    async def evaluate(self, script):  # noqa: ARG002
+        return [
+            {
+                "tag": "label",
+                "role": "radio",
+                "name": "Yes",
+                "testid": None,
+                "id": None,
+                "label_for": "sauce-yes",
+                "input_type": "radio",
+                "field_name": "extra_sauce",
+                "value": "yes",
+                "inside_form": True,
+                "button_type": None,
+            },
+            {
+                "tag": "select",
+                "role": "combobox",
+                "name": "Size",
+                "testid": None,
+                "id": "size",
+                "field_name": "size",
+                "value": "small",
+                "inside_form": True,
+                "options": [
+                    {"name": "Small", "value": "small", "selected": True},
+                    {"name": "Large", "value": "large", "selected": False},
+                ],
+            },
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "Next",
+                "testid": "next-step",
+                "id": None,
+                "input_type": "",
+                "inside_form": True,
+                "button_type": "submit",
+                "form_method": "POST",
+                "form_action": "https://target.local/order",
+            },
+            {
+                "tag": "button",
+                "role": "button",
+                "name": "Buy now",
+                "testid": None,
+                "id": None,
+                "input_type": "",
+                "inside_form": True,
+                "button_type": "submit",
+            },
+        ]
+
+
+def test_interactive_controls_include_safe_form_choices_and_next_button():
+    controls = asyncio.run(crawler._interactive_controls(_WorkflowControlsPage()))
+
+    assert [(control["kind"], control["name"]) for control in controls] == [
+        ("click", "Yes"),
+        ("select_option", "Size"),
+        ("click", "Next"),
+    ]
+    assert controls[0]["selector"] == 'label[for="sauce-yes"]'
+    assert controls[1]["value"] == "large"
+    assert controls[2]["inside_form"] is True
+    assert all(control["name"] != "Buy now" for control in controls)
+
+
+def test_interactive_state_identity_ignores_credential_and_record_values():
+    raw_zoe = {
+        "title": "Account",
+        "headings": ["My Dashboard"],
+        "dialogs": [],
+        "forms": [],
+        "controls": [
+            {
+                "role": "button",
+                "name": "Get a Quote",
+                "selected": "",
+                "checked": "",
+                "disabled": False,
+            }
+        ],
+        "links": [
+            {"href": "https://target.local/account", "text": "Dashboard"},
+            {"href": "https://target.local/policies/348", "text": "MOT-2026-000002"},
+        ],
+    }
+    raw_amelia = {
+        **raw_zoe,
+        "links": [
+            {"href": "https://target.local/account", "text": "Dashboard"},
+            {"href": "https://target.local/policies/921", "text": "MOT-2026-000091"},
+        ],
+    }
+    zoe_text = "\n".join(
+        [
+            "FACE",
+            "INSURANCE",
+            "Dashboard",
+            "Profile",
+            "Claims",
+            "zoe.williams@example.com",
+            "Log out",
+            "My Dashboard",
+            "Welcome back, zoe.williams@example.com!",
+            "Active Policies (1)",
+            "Toyota Corolla QLD321ZW",
+        ]
+    )
+    amelia_text = zoe_text.replace(
+        "zoe.williams@example.com", "amelia.chen@example.com"
+    ).replace("Toyota Corolla QLD321ZW", "Honda Civic CFX21A")
+
+    assert crawler._interactive_state_identity(
+        raw_zoe, "https://target.local/account", zoe_text
+    ) == crawler._interactive_state_identity(
+        raw_amelia, "https://target.local/account", amelia_text
+    )
+
+
+def test_interactive_state_identity_keeps_distinct_form_schemas():
+    common = {
+        "title": "Get a Quote",
+        "headings": ["Get a Quote"],
+        "dialogs": [],
+        "controls": [],
+        "links": [],
+    }
+    motor = {
+        **common,
+        "forms": [
+            [
+                {"field": "vehicle_registration", "value": "", "checked": False},
+                {"field": "vehicle_make", "value": "", "checked": False},
+            ]
+        ],
+    }
+    home = {
+        **common,
+        "forms": [
+            [
+                {"field": "property_address", "value": "", "checked": False},
+                {"field": "property_type", "value": "", "checked": False},
+            ]
+        ],
+    }
+
+    assert crawler._interactive_state_identity(
+        motor, "https://target.local/account", "Get a Quote"
+    ) != crawler._interactive_state_identity(
+        home, "https://target.local/account", "Get a Quote"
+    )
+
+
+def test_interactive_state_identity_ignores_selected_form_values():
+    common = {
+        "title": "Get a Quote",
+        "headings": ["Get a Quote"],
+        "dialogs": [],
+        "formSections": ["Vehicle"],
+        "links": [],
+    }
+    comprehensive = {
+        **common,
+        "forms": [
+            [
+                {
+                    "field": "coverType",
+                    "kind": "select-one",
+                    "value": "COMPREHENSIVE",
+                    "checked": False,
+                }
+            ]
+        ],
+        "controls": [
+            {
+                "role": "combobox",
+                "name": "Cover Type",
+                "selected": "COMPREHENSIVE",
+                "checked": "",
+                "disabled": False,
+            }
+        ],
+    }
+    third_party = {
+        **common,
+        "forms": [
+            [
+                {
+                    "field": "coverType",
+                    "kind": "select-one",
+                    "value": "THIRD_PARTY",
+                    "checked": False,
+                }
+            ]
+        ],
+        "controls": [
+            {
+                "role": "combobox",
+                "name": "Cover Type",
+                "selected": "THIRD_PARTY",
+                "checked": "",
+                "disabled": True,
+            }
+        ],
+    }
+
+    assert crawler._interactive_state_identity(
+        comprehensive,
+        "https://target.local/account",
+        "Cover Type Comprehensive",
+    ) == crawler._interactive_state_identity(
+        third_party,
+        "https://target.local/account",
+        "Cover Type Third Party",
+    )
+
+
+def test_interactive_form_surface_requires_new_sections_or_fields():
+    original = {
+        "form_sections": ["vehicle"],
+        "forms": [[("cover type", "select-one")]],
+    }
+    value_only = {
+        "form_sections": ["vehicle"],
+        "forms": [[("cover type", "select-one")]],
+    }
+    revealed_field = {
+        "form_sections": ["vehicle"],
+        "forms": [
+            [
+                ("cover type", "select-one"),
+                ("agreed value", "number"),
+            ]
+        ],
+    }
+    revealed_section = {
+        "form_sections": ["vehicle", "driver details"],
+        "forms": [[("cover type", "select-one")]],
+    }
+
+    assert crawler._interactive_form_surface_grew(original, value_only) is False
+    assert crawler._interactive_form_surface_grew(original, revealed_field) is True
+    assert crawler._interactive_form_surface_grew(original, revealed_section) is True
+
+
+def test_short_loading_shell_is_a_transient_interactive_state():
+    assert (
+        crawler._looks_like_transient_interactive_text(
+            "Dashboard Profile Claims Log out Loading…"
+        )
+        is True
+    )
+    assert (
+        crawler._looks_like_transient_interactive_text(
+            "Loading preferences lets administrators control the loading strategy." * 8
+        )
+        is False
+    )
+
+
+class _MutationRoute:
+    class _Request:
+        method = "POST"
+        url = "https://target.local/orders/draft?csrf=secret"
+
+    request = _Request()
+
+    async def abort(self, reason):  # noqa: ARG002
+        return None
+
+    async def continue_(self):
+        raise AssertionError("A POST workflow request must not continue")
+
+
+class _MutationLocator:
+    def __init__(self, page):
+        self.page = page
+
+    async def count(self):
+        return 1
+
+    async def evaluate(self, script, actionable):  # noqa: ARG002
+        return True
+
+    async def click(self, timeout):  # noqa: ARG002
+        self.page.state = "clicked"
+        await self.page.route_handler(_MutationRoute())
+
+
+class _MutationPage:
+    def __init__(self):
+        self.url = "https://target.local/product"
+        self.state = "initial"
+        self.route_handler = None
+
+    async def evaluate(self, script):  # noqa: ARG002
+        return {"url": self.url, "state": self.state}
+
+    async def route(self, pattern, handler):  # noqa: ARG002
+        self.route_handler = handler
+
+    async def unroute(self, pattern, handler):  # noqa: ARG002
+        assert handler is self.route_handler
+
+    def locator(self, selector):  # noqa: ARG002
+        return _MutationLocator(self)
+
+    async def wait_for_timeout(self, milliseconds):  # noqa: ARG002
+        return None
+
+    async def wait_for_load_state(self, state, timeout):  # noqa: ARG002
+        return None
+
+
+def test_interactive_action_blocks_and_redacts_mutating_request():
+    result = asyncio.run(
+        crawler._perform_interactive_action(
+            _MutationPage(),
+            {
+                "kind": "click",
+                "name": "Next",
+                "selector": "#next",
+            },
+        )
+    )
+
+    assert result == {
+        "ok": False,
+        "changed": True,
+        "blocked_requests": [
+            {"method": "POST", "url": "https://target.local/orders/draft"}
+        ],
+    }
+
+
+class _WorkflowExplorePage:
+    def __init__(self):
+        self.url = "https://target.local/product"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = url
+
+
+def test_interactive_workflow_returns_link_revealed_by_form_choice(monkeypatch):
+    page = _WorkflowExplorePage()
+    yes_action = {
+        "kind": "check",
+        "role": "radio",
+        "name": "Yes",
+        "selector": "#sauce-yes",
+    }
+
+    async def fake_controls(page):  # noqa: ARG001
+        return [yes_action]
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    snapshot_calls = 0
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if kwargs.get("capture_screenshot") is False:
+            return {
+                "key": "spa:product:baseline",
+                "label": "Product",
+                "title": "Product",
+                "text": "Extra sauce?",
+                "screenshot_b64": None,
+                "links": [],
+            }
+        return {
+            "key": "spa:product:yes",
+            "label": "Choose extras",
+            "title": "Product",
+            "text": "Extra sauce: Yes\nNext",
+            "screenshot_b64": None,
+            "links": [{"href": "https://target.local/product/step-2", "text": "Next"}],
+        }
+
+    async def fake_analyse(*args, **kwargs):  # noqa: ARG001
+        return ("workflow", [], {})
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+    monkeypatch.setattr(crawler, "_save_page_placeholder", lambda *args: 42)
+    monkeypatch.setattr(crawler, "_save_link", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *args: None)
+    monkeypatch.setattr(crawler.events_svc, "emit", lambda *args: None)
+    monkeypatch.setattr(crawler.llm_svc, "analyse_page", fake_analyse)
+
+    shared = crawler._CrawlShared({}, {}, 1)
+    discoveries = asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=3,
+            shared=shared,
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert discoveries[0] == {
+        "url": "https://target.local/product/step-2",
+        "source_page_id": 42,
+        "link_text": "Next",
+        "action_kind": "navigate",
+        "action_data": {"replay_steps": [yes_action]},
+    }
+    assert shared.pages_done == 2
+
+
+def test_interactive_workflow_maps_noop_back_to_canonical_url_node(monkeypatch):
+    page = _WorkflowExplorePage()
+    dashboard_action = {
+        "kind": "click",
+        "role": "link",
+        "name": "Dashboard",
+        "selector": "#dashboard",
+    }
+    control_calls = 0
+    saved_links = []
+
+    async def fake_controls(page):  # noqa: ARG001
+        nonlocal control_calls
+        control_calls += 1
+        return [dashboard_action]
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        return {
+            "key": "spa:product:dashboard",
+            "label": "Dashboard",
+            "title": "Dashboard",
+            "text": "Dashboard",
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        crawler,
+        "_save_page_placeholder",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("A no-op state must not create a page")
+        ),
+    )
+    monkeypatch.setattr(
+        crawler,
+        "_save_link",
+        lambda *args, **kwargs: saved_links.append((args, kwargs)),
+    )
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *args: None)
+
+    discoveries = asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=0,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert discoveries == []
+    assert saved_links == []
+    assert control_calls == 1
+
+
+def test_interactive_workflow_caps_replay_attempts(monkeypatch):
+    page = _WorkflowExplorePage()
+    action = {
+        "kind": "click",
+        "role": "button",
+        "name": "Show more",
+        "selector": "#more",
+    }
+    replayed = []
+
+    async def fake_controls(page):  # noqa: ARG001
+        return [action]
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        replayed.append(steps)
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        if kwargs.get("capture_screenshot") is False:
+            return {
+                "key": "spa:product:baseline",
+                "identity": {},
+                "label": "Product",
+                "title": "Product",
+                "text": "Product",
+                "screenshot_b64": None,
+                "links": [],
+            }
+        return {
+            "key": f"spa:product:{len(replayed)}",
+            "identity": {},
+            "label": "Product",
+            "title": "Product",
+            "text": "Product",
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    async def fake_analyse(*args, **kwargs):  # noqa: ARG001
+        return ("workflow", [], {})
+
+    monkeypatch.setattr(crawler, "_INTERACTIVE_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+    monkeypatch.setattr(crawler, "_save_page_placeholder", lambda *args: 42)
+    monkeypatch.setattr(crawler, "_save_link", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *args: None)
+    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler.events_svc, "emit", lambda *args: None)
+    monkeypatch.setattr(crawler.llm_svc, "analyse_page", fake_analyse)
+
+    asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=0,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert replayed == [[action], [action, action]]
+
+
+class _SelectionOnlyWorkflowPage(_WorkflowExplorePage):
+    def __init__(self):
+        super().__init__()
+        self.view = "quote"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = url
+        self.view = "quote"
+
+
+def test_selection_only_state_is_reused_but_enabled_next_is_explored(monkeypatch):
+    page = _SelectionOnlyWorkflowPage()
+    select_action = {
+        "kind": "select_option",
+        "role": "combobox",
+        "name": "Cover Type",
+        "option_name": "Comprehensive",
+        "value": "COMPREHENSIVE",
+        "field_name": "coverType",
+        "selector": '[name="coverType"]',
+    }
+    next_action = {
+        "kind": "click",
+        "role": "button",
+        "name": "Next",
+        "selector": "#next",
+    }
+    created = []
+    replayed = []
+
+    async def fake_controls(page):
+        if page.view == "quote":
+            return [select_action]
+        if page.view == "selected":
+            return [
+                {
+                    **select_action,
+                    "option_name": "Third Party",
+                    "value": "THIRD_PARTY",
+                },
+                next_action,
+            ]
+        return []
+
+    async def fake_replay(page, steps):
+        replayed.append(steps)
+        if steps[-1]["kind"] == "select_option":
+            page.view = "selected"
+        else:
+            page.view = "next"
+            page.url = "https://target.local/product/step-2"
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        identity = {
+            "form_sections": ["vehicle"],
+            "forms": [[("cover type", "select-one")]],
+        }
+        return {
+            "key": f"spa:product:{page.view}",
+            "identity": identity,
+            "label": "Get a Quote",
+            "title": "Get a Quote",
+            "text": "Cover Type",
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        crawler,
+        "_save_page_placeholder",
+        lambda *args: created.append(args) or 42,
+    )
+    monkeypatch.setattr(crawler, "_save_link", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *args: None)
+
+    discoveries = asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=0,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert created == []
+    assert replayed == [[select_action], [select_action, next_action]]
+    assert discoveries == [
+        {
+            "url": "https://target.local/product/step-2",
+            "source_page_id": 1,
+            "link_text": "Next",
+            "action_kind": "click",
+            "action_data": {
+                "replay_steps": [select_action, next_action],
+            },
+        }
+    ]
+
+
+class _DelayedBootstrapPage:
+    def __init__(self):
+        self.url = "https://target.local/account"
+        self.root_ready = True
+        self.view = "dashboard"
+
+    async def goto(self, url, **kwargs):  # noqa: ARG002
+        self.url = url
+        self.root_ready = False
+        self.view = "dashboard"
+
+    async def wait_for_load_state(self, state, timeout):  # noqa: ARG002
+        if state == "networkidle":
+            self.root_ready = True
+
+
+def test_interactive_replay_waits_for_spa_bootstrap(monkeypatch):
+    page = _DelayedBootstrapPage()
+    profile_action = {
+        "kind": "click",
+        "role": "link",
+        "name": "Profile",
+        "selector": "#profile",
+    }
+    created = []
+
+    async def fake_controls(page):
+        return [profile_action] if page.view == "dashboard" else []
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        assert page.root_ready is True
+        page.view = "profile"
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        key = f"spa:account:{page.view}"
+        return {
+            "key": key,
+            "label": page.view.title(),
+            "title": page.view.title(),
+            "text": page.view.title(),
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    async def fake_analyse(*args, **kwargs):  # noqa: ARG001
+        return ("workflow", [], {})
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        crawler,
+        "_save_page_placeholder",
+        lambda *args: created.append(args) or 42,
+    )
+    monkeypatch.setattr(crawler, "_save_link", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_update_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *args: None)
+    monkeypatch.setattr(crawler.events_svc, "emit", lambda *args: None)
+    monkeypatch.setattr(crawler.llm_svc, "analyse_page", fake_analyse)
+
+    asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=0,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert created == [(7, "https://target.local/account", 1)]
+
+
+def test_interactive_workflow_detects_javascript_url_navigation(monkeypatch):
+    page = _WorkflowExplorePage()
+    next_action = {
+        "kind": "click",
+        "role": "button",
+        "name": "Next",
+        "selector": "#next",
+    }
+
+    calls = 0
+
+    async def fake_controls(page):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return [next_action] if calls == 1 else []
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        page.url = "https://target.local/product/step-2"
+        return {"ok": True, "changed": True, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        return {
+            "key": "spa:product:baseline",
+            "label": "Product",
+            "title": "Product",
+            "text": "Product",
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+
+    discoveries = asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=3,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert discoveries == [
+        {
+            "url": "https://target.local/product/step-2",
+            "source_page_id": 1,
+            "link_text": "Next",
+            "action_kind": "click",
+            "action_data": {"replay_steps": [next_action]},
+        }
+    ]
+
+
+class _PopupPage:
+    def __init__(self):
+        self.url = "https://target.local/product/help"
+        self.closed = False
+
+    async def wait_for_load_state(self, state, timeout):  # noqa: ARG002
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+def test_interactive_workflow_detects_same_origin_popup(monkeypatch):
+    page = _WorkflowExplorePage()
+    page.context = type("_Context", (), {"pages": [page]})()
+    help_action = {
+        "kind": "click",
+        "role": "button",
+        "name": "Help",
+        "selector": "#help",
+    }
+    popup = _PopupPage()
+    calls = 0
+
+    async def fake_controls(page):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return [help_action] if calls == 1 else []
+
+    async def fake_replay(page, steps):  # noqa: ARG001
+        page.context.pages.append(popup)
+        return {"ok": True, "changed": False, "blocked_requests": []}
+
+    async def fake_snapshot(page, **kwargs):  # noqa: ARG001
+        return {
+            "key": "spa:product:baseline",
+            "label": "Product",
+            "title": "Product",
+            "text": "Product",
+            "screenshot_b64": None,
+            "links": [],
+        }
+
+    monkeypatch.setattr(crawler, "_interactive_controls", fake_controls)
+    monkeypatch.setattr(crawler, "_replay_interactive_steps", fake_replay)
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", fake_snapshot)
+
+    discoveries = asyncio.run(
+        crawler._explore_interactive_states(
+            run_id=7,
+            page=page,
+            root_url=page.url,
+            root_page_id=1,
+            root_depth=1,
+            shared=crawler._CrawlShared({}, {}, 1),
+            max_pages=10,
+            credential_id=None,
+            username=None,
+            llm_cfg=object(),
+            base_netloc="target.local",
+        )
+    )
+
+    assert discoveries == [
+        {
+            "url": "https://target.local/product/help",
+            "source_page_id": 1,
+            "link_text": "Help",
+            "action_kind": "popup",
+            "action_data": {"replay_steps": [help_action]},
+        }
+    ]
+    assert popup.closed is True
 
 
 def test_crawl_seed_urls_preserve_same_scope_authenticated_landing():
@@ -1212,9 +2117,17 @@ class _EntraPage:
 
     def is_selector_visible(self, selector):
         if self.state == "email":
-            return "email" in selector or "loginfmt" in selector or "idSIButton9" in selector
+            return (
+                "email" in selector
+                or "loginfmt" in selector
+                or "idSIButton9" in selector
+            )
         if self.state == "password":
-            return "password" in selector or "passwd" in selector or "idSIButton9" in selector
+            return (
+                "password" in selector
+                or "passwd" in selector
+                or "idSIButton9" in selector
+            )
         if self.state == "stay_signed_in":
             return "idSIButton9" in selector or "Yes" in selector
         return False
@@ -1249,9 +2162,7 @@ def test_authenticate_entra_id_completes_and_persists_session(monkeypatch):
         captured["run_id"] = run_id
         captured.update(kwargs)
 
-    monkeypatch.setattr(
-        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
-    )
+    monkeypatch.setattr("aespa.services.scanner_sessions.upsert_session", _fake_upsert)
     monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
 
     page = _EntraPage()
@@ -1337,9 +2248,7 @@ def test_authenticate_entra_id_uses_totp_seed_for_other_app_code(monkeypatch):
         captured["run_id"] = run_id
         captured.update(kwargs)
 
-    monkeypatch.setattr(
-        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
-    )
+    monkeypatch.setattr("aespa.services.scanner_sessions.upsert_session", _fake_upsert)
     monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
 
     page = _EntraTotpPageWithLocator()
@@ -1364,7 +2273,9 @@ def test_authenticate_entra_id_uses_totp_seed_for_other_app_code(monkeypatch):
 def test_entra_notification_prompt_event_contains_number(monkeypatch):
     captured = []
     monkeypatch.setattr(
-        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: captured.append((run_id, event)),
     )
     monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: None)
 
@@ -1388,9 +2299,13 @@ def test_entra_notification_prompt_event_allows_pending_approval(monkeypatch):
     captured = []
     logs = []
     monkeypatch.setattr(
-        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: captured.append((run_id, event)),
     )
-    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(
+        crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args)
+    )
 
     crawler._emit_entra_notification_prompt(12, 34, "alice@example.com", None)
 
@@ -1413,9 +2328,13 @@ def test_entra_authenticator_status_event_reports_success_and_timeout(monkeypatc
     captured = []
     logs = []
     monkeypatch.setattr(
-        crawler.events_svc, "emit", lambda run_id, event: captured.append((run_id, event))
+        crawler.events_svc,
+        "emit",
+        lambda run_id, event: captured.append((run_id, event)),
     )
-    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(
+        crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args)
+    )
 
     crawler._emit_entra_authenticator_status(
         12, 34, "alice@example.com", "success", "42"
@@ -1436,7 +2355,10 @@ def test_entra_authenticator_status_event_reports_success_and_timeout(monkeypatc
         },
     )
     assert captured[1][1]["status"] == "timeout"
-    assert "Timed out waiting for Entra Authenticator approval" in captured[1][1]["message"]
+    assert (
+        "Timed out waiting for Entra Authenticator approval"
+        in captured[1][1]["message"]
+    )
     assert [entry[2] for entry in logs] == ["complete", "error"]
 
 
@@ -1463,7 +2385,10 @@ def test_entra_sso_provider_detection_keeps_azure_ad_choice():
 def test_entra_detects_retryable_authenticator_failure():
     text = "Your sign in request was denied. Select Try again to send another request."
     assert crawler._entra_text_has_retryable_authenticator_failure(text) is True
-    assert crawler._entra_page_kind(text, "https://login.microsoftonline.com/common/SAS") == "authenticator_retry"
+    assert (
+        crawler._entra_page_kind(text, "https://login.microsoftonline.com/common/SAS")
+        == "authenticator_retry"
+    )
 
 
 class _EntraNotificationPage(_EntraPage):
@@ -1479,7 +2404,9 @@ class _EntraNotificationPage(_EntraPage):
 
     def is_selector_visible(self, selector):
         if self.state == "notification_choice":
-            return "Approve a request" in selector or "Microsoft Authenticator" in selector
+            return (
+                "Approve a request" in selector or "Microsoft Authenticator" in selector
+            )
         if self.state == "number_prompt":
             return False
         return super().is_selector_visible(selector)
@@ -1610,7 +2537,9 @@ def test_authenticate_entra_retry_does_not_immediately_reprompt_failure(monkeypa
         "emit",
         lambda run_id, event: emitted.append((run_id, event)),
     )
-    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(
+        crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args)
+    )
     monkeypatch.setattr(
         "aespa.services.scanner_sessions.upsert_session",
         lambda *args, **kwargs: None,
@@ -1678,7 +2607,9 @@ class _EntraCloudflareLocator(_EntraLocator):
         self.page.clicks.append(self.selector)
         if self.page.state == "sso_choice":
             self.page.state = "email"
-            self.page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            self.page.url = (
+                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            )
             return
         await super().click()
 
@@ -1690,7 +2621,9 @@ class _EntraCloudflarePageWithLocator(_EntraCloudflarePage):
 
 def test_authenticate_entra_id_clicks_upstream_sso_provider(monkeypatch):
     logs = []
-    monkeypatch.setattr(crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args))
+    monkeypatch.setattr(
+        crawler, "_crawl_log", lambda *args, **kwargs: logs.append(args)
+    )
     monkeypatch.setattr(crawler.events_svc, "emit", lambda *args, **kwargs: None)
 
     captured = {}
@@ -1699,9 +2632,7 @@ def test_authenticate_entra_id_clicks_upstream_sso_provider(monkeypatch):
         captured["run_id"] = run_id
         captured.update(kwargs)
 
-    monkeypatch.setattr(
-        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
-    )
+    monkeypatch.setattr("aespa.services.scanner_sessions.upsert_session", _fake_upsert)
 
     page = _EntraCloudflarePageWithLocator()
     asyncio.run(
@@ -1712,7 +2643,9 @@ def test_authenticate_entra_id_clicks_upstream_sso_provider(monkeypatch):
 
     assert any("Azure AD" in selector for selector in page.clicks)
     assert page.url == "https://target.local/dashboard"
-    assert any("Selected upstream Microsoft/Entra SSO provider" in args[3] for args in logs)
+    assert any(
+        "Selected upstream Microsoft/Entra SSO provider" in args[3] for args in logs
+    )
     assert captured["metadata"]["completed"] is True
 
 
@@ -1752,9 +2685,7 @@ def test_authenticate_entra_id_accepts_target_app_with_sso_text(monkeypatch):
         captured["run_id"] = run_id
         captured.update(kwargs)
 
-    monkeypatch.setattr(
-        "aespa.services.scanner_sessions.upsert_session", _fake_upsert
-    )
+    monkeypatch.setattr("aespa.services.scanner_sessions.upsert_session", _fake_upsert)
 
     page = _EntraPostLoginSsoTextPage()
     asyncio.run(

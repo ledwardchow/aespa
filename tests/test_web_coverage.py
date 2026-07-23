@@ -585,6 +585,36 @@ def test_matrix_returns_persisted_status(db_engine, db_session, run):
     assert matrix["pages"][0]["cells"]["A01"]["status"] == "covered"
 
 
+def test_matrix_keeps_interactive_states_separate_from_url_rows(
+    db_engine, db_session, run
+):
+    _make_page(db_session, run, "http://example.com/account", ["A01"])
+    profile = _make_page(db_session, run, "http://example.com/account", ["A01"])
+    profile.state_kind = "interactive"
+    profile.state_key = "spa:account:profile"
+    profile.state_label = "Profile"
+    preferences = _make_page(db_session, run, "http://example.com/account", ["A01"])
+    preferences.state_kind = "interactive"
+    preferences.state_key = "spa:account:preferences"
+    preferences.state_label = "Preferences"
+    db_session.add(profile)
+    db_session.add(preferences)
+    db_session.commit()
+
+    seed_web_workprogram(run.id)
+    matrix = get_web_coverage_matrix(run.id)
+
+    assert [
+        (page["state_kind"], page["state_label"], page["url"])
+        for page in matrix["pages"]
+    ] == [
+        ("url", "", "http://example.com/account"),
+        ("interactive", "Preferences", "http://example.com/account"),
+        ("interactive", "Profile", "http://example.com/account"),
+    ]
+    assert all(len(page["page_ids"]) == 1 for page in matrix["pages"])
+
+
 # ── 14. get_web_coverage_matrix returns coverage_mode from run ───────────────
 
 

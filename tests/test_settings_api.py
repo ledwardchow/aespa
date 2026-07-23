@@ -15,6 +15,7 @@ def test_get_default_models(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert "factory_droid" in data
     assert "github_copilot" in data
     assert "openai" in data
     assert "openai_compatible" in data
@@ -33,6 +34,7 @@ def test_get_default_models(client: TestClient):
         "claude-sonnet-5",
         "claude-opus-4.8",
     ]
+    assert isinstance(data["factory_droid"], list)
     assert data["openai"][:3] == [
         "gpt-5.6-luna",
         "gpt-5.6-terra",
@@ -166,6 +168,27 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/settings/llm/model-configs", json=payload)
+
+
+def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
+    response = _make_provider(
+        client,
+        name="Factory",
+        api_format="factory_droid",
+        base_url="https://should-not-be-stored.example",
+        models=["gpt-5.6-luna"],
+        api_key="should-not-be-stored",
+        project_id="should-not-be-stored",
+        username="should-not-be-stored",
+    )
+
+    assert response.status_code == 200
+    provider = response.json()
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+    assert provider["project_id"] is None
+    assert provider["username"] is None
+    assert provider["models"] == ["gpt-5.6-luna"]
 
 
 def test_create_provider_and_profile(client: TestClient):

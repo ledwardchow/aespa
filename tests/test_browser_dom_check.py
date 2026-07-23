@@ -27,11 +27,18 @@ class _Locator:
     async def inner_text(self, timeout=None):  # noqa: ARG002
         return self._text
 
+    async def wait_for(self, **_kwargs):
+        return None
+
+    async def select_option(self, *, value, timeout=None):  # noqa: ARG002
+        self.selected = value
+
 
 class _Page:
     url = "https://target.local/dashboard"
 
     def __init__(self):
+        self.cover_type = _Locator()
         self._locators = {
             "#result": _Locator(attributes={"data-aespa-xss": "canary-123"}),
             "body": _Locator(text="Dashboard"),
@@ -39,6 +46,11 @@ class _Page:
 
     def locator(self, selector):
         return self._locators.get(selector, _Locator(count=0))
+
+    def get_by_role(self, role, *, name, exact):  # noqa: ARG002
+        if role == "combobox" and name == "Cover type":
+            return self.cover_type
+        return _Locator(count=0)
 
     def on(self, *_args):
         return None
@@ -101,3 +113,27 @@ def test_dom_check_reports_missing_selector_as_failure():
     )
 
     assert result["action_log"][0].startswith("dom_check FAIL #missing")
+
+
+def test_browser_replay_selects_option_by_accessible_role():
+    page = _Page()
+
+    result = asyncio.run(
+        _run_thinking_browser_action(
+            page,
+            {
+                "steps": [
+                    {
+                        "op": "select_option",
+                        "role": "combobox",
+                        "name": "Cover type",
+                        "value": "comprehensive",
+                    }
+                ]
+            },
+            "https://target.local",
+        )
+    )
+
+    assert page.cover_type.selected == "comprehensive"
+    assert result["action_log"] == ["select_option combobox:Cover type"]

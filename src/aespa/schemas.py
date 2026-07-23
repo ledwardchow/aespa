@@ -418,6 +418,7 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "factory_droid",
     "github_copilot",
     "openai",
     "openai_compatible",
@@ -432,6 +433,7 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "factory_droid": [],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",
