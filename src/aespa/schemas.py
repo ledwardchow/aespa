@@ -607,8 +607,8 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
-    max_consecutive_text_turns: int = Field(default=3, ge=0, le=50)
-    enforce_full_coverage_obligations: bool = True
+    max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
+    enforce_full_coverage_obligations: bool = False
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)

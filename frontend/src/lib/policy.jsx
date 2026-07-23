@@ -12,8 +12,8 @@ export const csv = (value, transform=(x)=>x) => String(value||"")
   .split(",").map(x=>transform(x.trim())).filter(Boolean);
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled:false,
-  max_consecutive_text_turns:3,
-  enforce_full_coverage_obligations:true,
+  max_consecutive_text_turns:0,
+  enforce_full_coverage_obligations:false,
   scan_mode:"aggressive",
   max_probes_per_page:50,
   thinking_max_steps:120,

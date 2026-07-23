@@ -506,8 +506,8 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
-    assert data["max_consecutive_text_turns"] == 3
-    assert data["enforce_full_coverage_obligations"] is True
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50

@@ -387,13 +387,13 @@ def _migrate(engine: Engine) -> None:
         engine,
         "scanner_policy",
         "max_consecutive_text_turns",
-        "INTEGER NOT NULL DEFAULT 3",
+        "INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(
         engine,
         "scanner_policy",
         "enforce_full_coverage_obligations",
-        "BOOLEAN NOT NULL DEFAULT 1",
+        "BOOLEAN NOT NULL DEFAULT 0",
     )
     _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"
