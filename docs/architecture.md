@@ -202,7 +202,7 @@ Defines API connections, optional project identifiers, and rate limits for LLM b
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
@@ -446,6 +446,40 @@ start_crawl(run_id)
 The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
 **`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
+
+Interactive mode also explores bounded, replayable browser workflows. It can
+select radio buttons, checkboxes, and select options, then follow controls that
+reveal more content or navigate with JavaScript. Each action is replayed from
+the page's original URL. A changed URL is returned to the normal crawl queue,
+while a changed page at the same URL is stored as an interactive state.
+Newly revealed links are also returned to the URL crawler.
+
+Interactive actions use a separate four-step budget per URL, so reaching the
+normal URL-depth limit does not prevent a workflow on that page from being
+explored. The crawler blocks non-GET requests caused by these discovery clicks
+and records the blocked step in the activity log. This allows client-side and
+GET-based navigation without submitting purchases, transfers, or other
+state-changing workflows.
+
+Each URL's first stable render is also registered as its baseline interactive
+state. Later clicks that return to that same function reuse the URL node instead
+of creating another page. State identity is based on headings, controls, form
+fields, form sections, and normalized route structure. Selected values,
+checked states, and disabled states do not change a page's identity. User emails, record
+numbers, and object IDs do not create separate nodes; their different text and
+screenshots remain available in the per-credential views. Snapshots are read
+atomically, must be stable across two samples, and short loading placeholders
+are not saved.
+
+When a form choice changes the surrounding text or enables a button, the
+crawler continues exploring from that choice without adding another page to the
+site map. The choice only creates a new interactive page when it reveals a new
+form section or field.
+
+Before replaying an interaction recipe, the crawler reloads its root URL and
+waits for the SPA's network activity and stable baseline render. This prevents
+late authentication/bootstrap code from replacing a view immediately after the
+crawler clicks it.
 
 ### LLM involvement
 
@@ -771,6 +805,7 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 
 | Provider | SDK used |
 |---|---|
+| `factory_droid` | Official Factory Droid SDK, using the account signed in through Droid CLI |
 | `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
@@ -784,6 +819,10 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
+
+Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
+
+Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
 
 Structured outputs such as probe lists, finding objects, and page analysis are requested as JSON or produced through tool calls. AESPA does not parse free-form model text with regular expressions.
 
@@ -963,7 +1002,7 @@ The web UI is a **single-page application** served from `src/aespa/web/`. It com
 
 ### Telemetry rendering (`TokenUsageBar`)
 
-Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. For GitHub Copilot it leads with AI credits or legacy premium requests, model-call counts, and available allowance information, with token/cache details in the expanded view. The data is persisted in `token_usage_json`.
+Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` component. For API-key providers it renders per-model input, output, and prompt-cache tokens. Factory Droid adds Droid credits and model-call counts while retaining token/cache details. GitHub Copilot adds AI credits or legacy premium requests, model-call counts, and available allowance information. The data is persisted in `token_usage_json`.
 
 ### WebSocket event types (emitted by `services/events.py`)
 

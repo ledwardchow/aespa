@@ -4,12 +4,13 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "aespa"
-version = "0.6.20260723.4"
+version = "0.6.20260723.14"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "boto3" },
     { name = "cryptography" },
+    { name = "droid-sdk" },
     { name = "fastapi" },
     { name = "github-copilot-sdk" },
     { name = "google-genai" },
@@ -37,6 +38,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.97.0" },
     { name = "boto3", specifier = ">=1.42.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
+    { name = "droid-sdk", specifier = ">=0.1.2" },
     { name = "fastapi", specifier = ">=0.136.1" },
     { name = "github-copilot-sdk", specifier = ">=1.0.7" },
     { name = "google-genai", specifier = ">=1.74.0" },
@@ -397,6 +399,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e0/4d/f332313098c1de1b2d2ff91cf2674415cc7cddab2ca1b01ae29774bd5fdf/docstring_parser-0.18.0.tar.gz", hash = "sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015", size = 29341, upload-time = "2026-04-14T04:09:19.867Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/5f/ed01f9a3cdffbd5a008556fc7b2a08ddb1cc6ace7effa7340604b1d16699/docstring_parser-0.18.0-py3-none-any.whl", hash = "sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b", size = 22484, upload-time = "2026-04-14T04:09:18.638Z" },
+]
+
+[[package]]
+name = "droid-sdk"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/41/1cdcee6bce4a0d4ade86cb881a2ff465365440684b9a5e2d591013d2b030/droid_sdk-0.1.2.tar.gz", hash = "sha256:3b4a54f9d1393c8eee19c18e0caf6eb7629537287534d67c40869abe9b71694c", size = 188009, upload-time = "2026-03-25T23:44:47.846Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d9/7f/a299a4a63fe650a9cd20ebf15f99f6d2996bdd215b9432a1113224dba066/droid_sdk-0.1.2-py3-none-any.whl", hash = "sha256:db45ac852e1ae5b634f53939ac9af5bd3a6fd7acf4c03b9baeb12d8ddf00f4d6", size = 60743, upload-time = "2026-03-25T23:44:46.449Z" },
 ]
 
 [[package]]

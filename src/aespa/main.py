@@ -26,6 +26,7 @@ from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings
 from aespa.db import get_session, init_db
 from aespa.services import copilot_provider as copilot_provider_svc
+from aespa.services import droid_provider as droid_provider_svc
 from aespa.services import validator as validator_svc
 from aespa.services.settings import get_cloudflare_access_config
 
@@ -38,6 +39,7 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
         yield
     finally:
         await copilot_provider_svc.close_clients()
+        await droid_provider_svc.close_clients()
 
 
 _JWKS_CACHE: dict[str, tuple[dict, float]] = {}
