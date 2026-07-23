@@ -1638,13 +1638,33 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         (c.page_id, c.owasp_category): c for c in cells
     }
 
-    # Group pages by normalized URL pattern
+    # Match the site map: URL pages share a route row, while interactive SPA
+    # views retain their distinct state identity even when they share a URL.
     groups: dict[str, dict] = defaultdict(
-        lambda: {"page_ids": [], "pages": [], "cells": {}}
+        lambda: {
+            "page_ids": [],
+            "pages": [],
+            "cells": {},
+            "url": "",
+            "state_kind": "url",
+            "state_label": "",
+        }
     )
     for page in sorted(pages.values(), key=lambda p: p.url):
         pattern = _normalize_url(page.url)
-        g = groups[pattern]
+        is_interactive = page.state_kind == "interactive" and bool(page.state_key)
+        group_key = (
+            f"interactive:{page.state_key}" if is_interactive else f"url:{pattern}"
+        )
+        g = groups[group_key]
+        if not g["url"]:
+            g["url"] = pattern
+            g["state_kind"] = page.state_kind or "url"
+            g["state_label"] = (
+                page.state_label or page.title or "Interactive view"
+                if is_interactive
+                else ""
+            )
         g["page_ids"].append(page.id)
         g["pages"].append(page)
         for cat in OWASP_WEB_CATEGORIES:
@@ -1716,7 +1736,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
     coverage_columns = _web_coverage_columns()
     page_rows: list[dict] = []
 
-    for pattern, g in sorted(groups.items()):
+    for g in sorted(groups.values(), key=lambda group: (group["url"], group["state_label"])):
         if not g["cells"]:
             continue
         for cell in g["cells"].values():
@@ -1756,8 +1776,10 @@ def get_web_coverage_matrix(run_id: int) -> dict:
             {
                 "page_id": rep.id,
                 "page_ids": g["page_ids"],
-                "url": pattern,
+                "url": g["url"],
                 "title": rep.title or "",
+                "state_kind": g["state_kind"],
+                "state_label": g["state_label"],
                 "req_auth": rep.req_auth,
                 "cells": g["cells"],
             }

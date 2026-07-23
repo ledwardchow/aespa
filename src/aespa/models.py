@@ -250,6 +250,7 @@ class ApiEndpointTest(SQLModel, table=True):
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
+    factory_droid = "factory_droid"
     github_copilot = "github_copilot"
     openai = "openai"
     openai_compatible = "openai_compatible"
@@ -511,7 +512,7 @@ class TestRun(SQLModel, table=True):
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=500)
     # ``url`` preserves the legacy link-following crawler. ``interactive`` also
-    # records safe, reproducible client-side browser states (tabs, dialogs, etc.).
+    # records safe, reproducible browser states and conditional workflows.
     crawler_mode: str = Field(
         default="url",
         sa_column=Column(String, nullable=False, server_default=text("'url'")),

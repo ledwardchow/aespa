@@ -188,6 +188,7 @@ export function BurpRestApiSettings() {
 }
 export const API_FORMAT_LABELS = {
   anthropic: "Anthropic API",
+  factory_droid: "Factory Droid subscription",
   github_copilot: "GitHub Copilot subscription",
   openai: "OpenAI API",
   openai_compatible: "OpenAI-compatible API",
@@ -223,6 +224,7 @@ export const DEFAULT_LLM_FORM = {
 };
 export const PROVIDER_BASE_URL_PLACEHOLDERS = {
   anthropic: "https://api.anthropic.com",
+  factory_droid: "Not required",
   github_copilot: "Not required",
   openai: "https://api.openai.com/v1",
   openai_compatible: "http://localhost:1234/v1",
@@ -238,6 +240,7 @@ export const PROVIDER_BASE_URL_PLACEHOLDERS = {
 // Actual runtime defaults used by the backend when base_url is blank
 export const PROVIDER_DEFAULT_BASE_URLS = {
   anthropic: "https://api.anthropic.com",
+  factory_droid: "Droid CLI (signed-in account)",
   github_copilot: "Copilot SDK (selected default account)",
   openai: "https://api.openai.com/v1",
   openai_compatible: null,
@@ -254,6 +257,7 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
 };
 export const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
+  factory_droid: "Models are loaded from the signed-in Droid CLI",
   github_copilot: "auto\ngpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\nclaude-sonnet-5\nclaude-opus-4.8",
   openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",

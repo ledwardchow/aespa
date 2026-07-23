@@ -16,12 +16,17 @@ export function fmtCredits(n) {
 
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
-  const hasCopilot = tokenUsage && (
-    tokenUsage.total_requests > 0 ||
+  const providers = new Set(Object.values(tokenUsage?.by_model || {}).map(v => v.provider));
+  const hasCopilot = providers.has("github_copilot");
+  const hasDroid = providers.has("factory_droid");
+  const hasProviderUsage = hasCopilot || hasDroid;
+  const hasBilledUsage = tokenUsage && (
     tokenUsage.total_ai_credits > 0 ||
+    tokenUsage.total_factory_credits > 0 ||
     tokenUsage.total_premium_requests > 0
   );
-  const hasUsage = hasTokens || hasCopilot;
+  const hasUsage = hasTokens || hasProviderUsage;
+  const usageLabel = hasDroid && !hasCopilot ? "Droid usage" : hasCopilot && !hasDroid ? "Copilot usage" : "LLM usage";
   const quota = tokenUsage?.copilot_quota;
 
   return (
@@ -33,31 +38,37 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
       >
         {hasUsage ? (
           <>
-            <span className="token-bar-label">{hasCopilot ? "Copilot usage" : "Tokens"}</span>
+            <span className="token-bar-label">{hasProviderUsage ? usageLabel : "Tokens"}</span>
+            {tokenUsage.total_factory_credits > 0 ? (
+              <span className="token-bar-in" title="Factory Droid credits used by this run">
+                {fmtTok(tokenUsage.total_factory_credits)} Droid credits
+              </span>
+            ) : null}
             {tokenUsage.total_ai_credits > 0 ? (
               <span className="token-bar-in" title="GitHub AI credits used by this run">
+                {tokenUsage.total_factory_credits > 0 ? <span className="token-bar-sep">·</span> : null}
                 {fmtCredits(tokenUsage.total_ai_credits)} AI credits
               </span>
             ) : null}
             {tokenUsage.total_premium_requests > 0 ? (
               <>
-                {tokenUsage.total_ai_credits > 0 ? <span className="token-bar-sep">·</span> : null}
+                {tokenUsage.total_factory_credits > 0 || tokenUsage.total_ai_credits > 0 ? <span className="token-bar-sep">·</span> : null}
                 <span className="token-bar-in" title="Legacy Copilot premium requests used by this run">
                   {fmtCredits(tokenUsage.total_premium_requests)} premium requests
                 </span>
               </>
             ) : null}
-            {hasCopilot ? (
+            {hasProviderUsage ? (
               <>
-                {tokenUsage.total_ai_credits > 0 || tokenUsage.total_premium_requests > 0 ? <span className="token-bar-sep">·</span> : null}
-                <span className="token-bar-out" title="Copilot model calls made by this run">
+                {hasBilledUsage ? <span className="token-bar-sep">·</span> : null}
+                <span className="token-bar-out" title="Model calls made by this run">
                   {fmtTok(tokenUsage.total_requests)} calls
                 </span>
               </>
             ) : null}
             {hasTokens ? (
               <>
-                {hasCopilot ? <span className="token-bar-sep">·</span> : null}
+                {hasProviderUsage ? <span className="token-bar-sep">·</span> : null}
                 <span className="token-bar-in" title="Input tokens">
                   ↑{fmtTok(tokenUsage.total_input)} in
                 </span>
@@ -106,6 +117,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
           {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => (
             <div key={model} className="token-breakdown-row">
               <span className="token-model-name">{model}</span>
+              {v.factory_credits > 0 ? <span className="token-in">{fmtTok(v.factory_credits)} Droid credits</span> : null}
               {v.ai_credits > 0 ? <span className="token-in">{fmtCredits(v.ai_credits)} credits</span> : null}
               {v.premium_requests > 0 ? <span className="token-in">{fmtCredits(v.premium_requests)} premium</span> : null}
               {v.requests > 0 ? <span className="token-out">{fmtTok(v.requests)} calls</span> : null}

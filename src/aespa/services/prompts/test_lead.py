@@ -918,8 +918,9 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|press|wait|snapshot|dom_check, ...}. "
-                        "fill: selector+value. click: selector. press: selector+key. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|dom_check, ...}. "
+                        "Controls accept selector, testid, or role+name locators. "
+                        "fill: locator+value. select_option: locator+value. press: selector+key. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
                         "and equals; it safely asserts rendered DOM without arbitrary JS."
                     ),
@@ -1513,7 +1514,9 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, press, wait, snapshot, dom_check.
+- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, wait, snapshot, dom_check.
+- Controls accept a CSS selector, testid, or role plus exact accessible name.
+- For select_option, include the option value.
 - For press, include selector and key (for example "Enter").
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
 - For dom_check, include a CSS selector and equals. Optionally include attribute;
