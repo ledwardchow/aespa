@@ -5643,8 +5643,8 @@ async def _do_thinking_scan(run_id: int) -> None:
         enforce_coverage=bool(
             coverage_mode == "enforce"
             and (
-                scanner_policy is None
-                or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+                scanner_policy is not None
+                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             )
         ),
     )
@@ -7271,8 +7271,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     _enforce_full_coverage = bool(
         coverage_mode == "enforce"
         and (
-            scanner_policy is None
-            or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+            scanner_policy is not None
+            and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
         )
     )
     if _enforce_full_coverage and not stopped:
@@ -7630,8 +7630,8 @@ async def _do_agentic_thinking_loop(
             not is_api_run
             and coverage_mode == "enforce"
             and (
-                scanner_policy is None
-                or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+                scanner_policy is not None
+                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             )
         )
         allowed, feedback, log_message = completion_policy.check_done(
@@ -9416,17 +9416,17 @@ async def _do_agentic_thinking_loop(
         scanner_policy and getattr(scanner_policy, "execution_monitor_enabled", False)
     )
     max_text_turns = int(
-        getattr(scanner_policy, "max_consecutive_text_turns", 3)
+        getattr(scanner_policy, "max_consecutive_text_turns", 0)
         if scanner_policy
-        else 3
+        else 0
     )
     enforce_coverage = bool(
         not is_api_run
         and coverage_mode == "enforce"
         and (
-            getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+            getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             if scanner_policy
-            else True
+            else False
         )
     )
 

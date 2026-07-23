@@ -542,9 +542,9 @@ def _json_dumps(value) -> str:
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
-        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 3),
+        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 0),
         enforce_full_coverage_obligations=getattr(
-            cfg, "enforce_full_coverage_obligations", True
+            cfg, "enforce_full_coverage_obligations", False
         ),
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
