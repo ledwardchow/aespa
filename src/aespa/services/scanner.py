@@ -116,6 +116,7 @@ def _persist_execution_snapshot(
             "follow_redirects",
             "allow_subdomains",
             "execution_monitor_enabled",
+            "disable_deterministic_checks",
             "max_consecutive_text_turns",
             "enforce_full_coverage_obligations",
         )
@@ -5535,7 +5536,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             },
         )
 
-    if not resuming:
+    if not resuming and not scanner_policy.disable_deterministic_checks:
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
@@ -5890,7 +5891,10 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id, session_vault
         )
         _active_sessions[run_id] = deterministic_sessions
-        if run_id not in _thinking_stop_requested:
+        if (
+            run_id not in _thinking_stop_requested
+            and not scanner_policy.disable_deterministic_checks
+        ):
             await _run_deterministic_site_modules(
                 run_id=run_id,
                 base_url=base_url,
@@ -7070,13 +7074,15 @@ async def _do_thinking_scan(run_id: int) -> None:
     if all_results:
         _thinking_scan_status[run_id] = "analysing"
         _emit_thinking_status(run_id)
-        deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
-            run_id=run_id,
-            base_url=base_url,
-            pages_snapshot=pages_snapshot,
-            first_page_id=first_page_id,
-            results=all_results,
-        )
+        deterministic_saved = 0
+        if not scanner_policy.disable_deterministic_checks:
+            deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
+                run_id=run_id,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+                results=all_results,
+            )
         total_batches = len(llm_svc._chunk_probe_results(all_results))
         events_svc.emit(
             run_id,

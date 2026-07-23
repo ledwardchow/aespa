@@ -6,6 +6,13 @@ export function ScannerPolicyFields({
   return <>
     <div className="form-section-title">Agent</div>
     <label className="toggle-row">
+      <input type="checkbox" disabled={disabled} checked={form.disable_deterministic_checks} onChange={e => upd({
+        disable_deterministic_checks: e.target.checked
+      })} />
+      <span>Disable all deterministic checks</span>
+    </label>
+    <div className="subtle" style={{ marginBottom: "10px" }}>Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks. The Test Lead will continue with LLM-driven testing.</div>
+    <label className="toggle-row">
       <input type="checkbox" disabled={disabled} checked={form.execution_monitor_enabled} onChange={e => upd({
         execution_monitor_enabled: e.target.checked
       })} />
