@@ -151,6 +151,35 @@ def test_reporting_handoff_replaces_test_lead_decision_status(monkeypatch):
     ]
 
 
+def test_session_exercised_log_uses_session_validator_label(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        scanner.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+
+    scanner._emit_session_validator_log(
+        42, "Session anonymous exercised: status 200."
+    )
+
+    assert emitted == [
+        (
+            42,
+            {
+                "type": "scanner_phase",
+                "phase": "session_validator",
+                "status": "complete",
+                "message": (
+                    "Session Validator — Session anonymous exercised: status 200."
+                ),
+                "data": {"emitter": "Session Validator"},
+                "_persist": True,
+            },
+        )
+    ]
+
+
 def test_scan_complete_is_emitted_as_the_terminal_phase(monkeypatch):
     emitted = []
     monkeypatch.setattr(

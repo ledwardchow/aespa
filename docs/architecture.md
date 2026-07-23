@@ -591,7 +591,7 @@ contract state are stored in scan checkpoints.
 Persisted activity entries use explicit emitter tags: `Execution Monitor` records every
 Mentor trigger, hard block, and contract rejection; `Mentor Guidance` records the full
 diagnosis, structured alternate vectors, and tactical next step; invalid-session
-evictions are tagged `Session Validator`; and completion challenges are tagged
+checks and evictions are tagged `Session Validator`; completion challenges are tagged
 `Test Lead Completion Gate` rather than the generic `Completion_Policy`.
 
 `done` is mediated by a bounded policy rather than an open-ended completeness gate.

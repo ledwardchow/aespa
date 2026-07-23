@@ -5039,6 +5039,23 @@ def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> 
     )
 
 
+def _emit_session_validator_log(
+    run_id: int, message: str, *, status: str = "complete"
+) -> None:
+    """Record routine session validation separately from completion decisions."""
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "session_validator",
+            "status": status,
+            "message": f"Session Validator — {message}",
+            "data": {"emitter": "Session Validator"},
+            "_persist": True,
+        },
+    )
+
+
 def _emit_scan_complete(run_id: int, finding_count: int) -> None:
     """Emit the terminal scan events only after every finalisation phase ends."""
     events_svc.emit(
@@ -7593,23 +7610,14 @@ async def _do_agentic_thinking_loop(
             invalid = status in (401, 419, 440)
             if invalid:
                 _emit_session_validator_log(
-                    f"Session {label} invalid and evicted: status {status}."
+                    run_id,
+                    f"Session {label} invalid and evicted: status {status}.",
+                    status="warning",
                 )
             elif status:
-                _emit_completion_log(f"Session {label} exercised: status {status}.")
-
-    def _emit_session_validator_log(message: str) -> None:
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "session_validator",
-                "status": "warning",
-                "message": f"Session Validator — {message}",
-                "data": {"emitter": "Session Validator"},
-                "_persist": True,
-            },
-        )
+                _emit_session_validator_log(
+                    run_id, f"Session {label} exercised: status {status}."
+                )
 
     def _emit_completion_log(message: str, *, status: str = "complete") -> None:
         events_svc.emit(
