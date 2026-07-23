@@ -76,6 +76,58 @@ def test_create_site_with_auth_and_credentials(client):
     assert len(data["credentials"]) == 2
     assert data["credentials"][0]["username"] == "admin"
     assert data["credentials"][0]["label"] == "admin"
+    assert data["credentials"][0]["login_fields"] == [
+        {
+            "key": "username",
+            "label": "Username",
+            "value": "admin",
+            "sensitive": False,
+            "selector": None,
+        },
+        {
+            "key": "password",
+            "label": "Password",
+            "value": "admin123",
+            "sensitive": True,
+            "selector": None,
+        },
+    ]
+
+
+def test_create_site_with_named_login_fields(client):
+    r = make_site(
+        client,
+        name="Policy Portal",
+        requires_auth=True,
+        login_url="https://policy.local/login",
+        credentials=[
+            {
+                "label": "Test policyholder",
+                "login_fields": [
+                    {
+                        "key": "policy_number",
+                        "label": "Policy Number",
+                        "value": "ABC123456",
+                        "sensitive": False,
+                    },
+                    {
+                        "key": "postcode",
+                        "label": "Postcode",
+                        "value": "2000",
+                        "sensitive": True,
+                        "selector": "#postcode",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert r.status_code == 201
+    credential = r.json()["credentials"][0]
+    assert credential["username"] == "ABC123456"
+    assert credential["password"] == "2000"
+    assert credential["login_fields"][0]["label"] == "Policy Number"
+    assert credential["login_fields"][1]["selector"] == "#postcode"
 
 
 def test_create_site_supports_credential_specific_login_urls(client):

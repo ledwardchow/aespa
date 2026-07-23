@@ -49,6 +49,23 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _credential_values(payload: CredentialIn) -> dict:
+    """Map either credential shape onto the additive database representation."""
+    return {
+        "username": payload.username or "",
+        "password": payload.password or "",
+        "login_fields_json": (
+            json.dumps([field.model_dump() for field in payload.login_fields])
+            if payload.login_fields
+            else None
+        ),
+        "label": payload.label,
+        "login_url": str(payload.login_url) if payload.login_url else None,
+        "auth_mode": payload.auth_mode,
+        "totp_seed": payload.totp_seed,
+    }
+
+
 def list_sites(session: Session) -> list[Site]:
     return list(session.exec(select(Site).order_by(Site.name)).all())
 
@@ -90,14 +107,7 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
     )
     for cred in payload.credentials:
         site.credentials.append(
-            Credential(
-                username=cred.username,
-                password=cred.password,
-                label=cred.label,
-                login_url=str(cred.login_url) if cred.login_url else None,
-                auth_mode=cred.auth_mode,
-                totp_seed=cred.totp_seed,
-            )
+            Credential(**_credential_values(cred))
         )
 
     session.add(site)
@@ -124,14 +134,7 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     session.flush()
     for cred in payload.credentials:
         site.credentials.append(
-            Credential(
-                username=cred.username,
-                password=cred.password,
-                label=cred.label,
-                login_url=str(cred.login_url) if cred.login_url else None,
-                auth_mode=cred.auth_mode,
-                totp_seed=cred.totp_seed,
-            )
+            Credential(**_credential_values(cred))
         )
 
     session.add(site)
@@ -178,15 +181,7 @@ def add_credential(session: Session, site_id: int, payload: CredentialIn) -> Cre
         raise SiteServiceError(
             "Credential login_url is required when the site has no default login_url"
         )
-    cred = Credential(
-        site_id=site.id,
-        username=payload.username,
-        password=payload.password,
-        label=payload.label,
-        login_url=str(payload.login_url) if payload.login_url else None,
-        auth_mode=payload.auth_mode,
-        totp_seed=payload.totp_seed,
-    )
+    cred = Credential(site_id=site.id, **_credential_values(payload))
     site.updated_at = _utcnow()
     session.add(cred)
     session.add(site)

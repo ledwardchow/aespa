@@ -852,7 +852,7 @@ async def decide_login_action(
     *,
     url: str,
     observation: str,
-    username_hint: str,
+    credential_fields: list[dict],
     history: list[str],
     screenshot_b64: Optional[str] = None,
 ) -> dict:
@@ -860,14 +860,18 @@ async def decide_login_action(
 
     Returns ``{"action", "selector", "text", "value", "reason"}`` where
     ``action`` is one of fill/click/press/done/give_up. Used by the crawler's
-    LLM-driven login fallback. The model returns ``{{username}}`` / ``{{password}}``
-    placeholders rather than real secrets — the crawler substitutes them locally.
+    LLM-driven login fallback. The model returns configured placeholder tokens
+    rather than real values — the crawler substitutes them locally.
     On any parse failure this returns a ``give_up`` action so the caller stops
     cleanly rather than raising.
     """
     history_text = "\n".join(f"- {h}" for h in history[-12:]) or "(none yet)"
+    fields_text = "\n".join(
+        f"- {field['label']}: {{{{credential.{field['key']}}}}}"
+        for field in credential_fields
+    )
     prompt = LOGIN_ACTION_PROMPT.format(
-        username_hint=username_hint or "(see credential)",
+        credential_fields=fields_text or "(none configured)",
         url=url,
         observation=observation[:6000],
         history=history_text,

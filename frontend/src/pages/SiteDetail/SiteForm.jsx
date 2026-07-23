@@ -4,6 +4,29 @@ import { nav } from "../../lib/router";
 import { PageHeader, Crumb, Sep } from "../../components/PageHeader";
 import { IconPlus } from "../../components/Icons";
 
+const defaultLoginFields = () => [{
+  key: "username",
+  label: "Username",
+  value: "",
+  sensitive: false,
+  selector: ""
+}, {
+  key: "password",
+  label: "Password",
+  value: "",
+  sensitive: true,
+  selector: ""
+}];
+
+const fieldKey = (label, index, used) => {
+  const stem = (label || `field_${index + 1}`).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/^[^a-z]+/, "") || `field_${index + 1}`;
+  let key = stem;
+  let suffix = 2;
+  while (used.has(key)) key = `${stem}_${suffix++}`;
+  used.add(key);
+  return key;
+};
+
 export function SiteForm({
   siteId
 }) {
@@ -35,6 +58,10 @@ export function SiteForm({
           credentials: d.credentials.map(c => ({
             username: c.username,
             password: c.password,
+            login_fields: (c.login_fields?.length ? c.login_fields : defaultLoginFields()).map(field => ({
+              ...field,
+              selector: field.selector || ""
+            })),
             label: c.label || "",
             login_url: c.login_url || "",
             auth_mode: c.auth_mode || "auto",
@@ -65,6 +92,7 @@ export function SiteForm({
     credentials: [...form.credentials, {
       username: "",
       password: "",
+      login_fields: defaultLoginFields(),
       label: "",
       login_url: "",
       auth_mode: "auto",
@@ -86,9 +114,16 @@ export function SiteForm({
       notes: form.notes.trim() || null,
       scan_guidance: form.scan_guidance.trim() || null,
       credentials: form.requires_auth ? form.credentials.map(c => {
+        const usedKeys = new Set();
+        const loginFields = c.login_fields.map((field, index) => ({
+          key: fieldKey(field.label, index, usedKeys),
+          label: field.label.trim(),
+          value: field.value,
+          sensitive: Boolean(field.sensitive),
+          selector: field.selector?.trim() || null
+        }));
         const base = {
-          username: c.username,
-          password: c.password,
+          login_fields: loginFields,
           label: c.label || null,
           login_url: c.login_url?.trim() || null,
           auth_mode: c.auth_mode || "auto"
@@ -152,21 +187,53 @@ export function SiteForm({
             })} /></div>
             <fieldset><legend>Credentials</legend>
               {form.credentials.length === 0 && <div className="subtle">No credentials yet.</div>}
-              {form.credentials.map((c, i) => {
+            {form.credentials.map((c, i) => {
+
+              const updateLoginField = (fieldIndex, changes) => updC(i, {
+                login_fields: c.login_fields.map((field, index) => index === fieldIndex ? {
+                  ...field,
+                  ...changes
+                } : field)
+              });
+              const addLoginField = () => updC(i, {
+                login_fields: [...c.login_fields, {
+                  key: `field_${c.login_fields.length + 1}`,
+                  label: "",
+                  value: "",
+                  sensitive: false,
+                  selector: ""
+                }]
+              });
+              const removeLoginField = fieldIndex => updC(i, {
+                login_fields: c.login_fields.filter((_, index) => index !== fieldIndex)
+              });
 
               return <div className="cred-row" key={i}>
-                  <div className="field"><label>Username</label><input type="text" required value={c.username} onChange={e => updC(i, {
-                    username: e.target.value
-                  })} /></div>
-                  <div className="field"><label>Password</label><input type="text" required value={c.password} onChange={e => updC(i, {
-                    password: e.target.value
+                  <div className="field"><label>Account label <span className="field-optional">(optional)</span></label><input type="text" value={c.label} placeholder="e.g. Test policyholder" onChange={e => updC(i, {
+                    label: e.target.value
                   })} /></div>
                   <div className="field credential-login-field"><label>Login URL <span className="field-optional">(optional override)</span></label><input type="url" value={c.login_url || ""} placeholder={form.login_url ? `Uses default: ${form.login_url}` : "Required if no default login URL"} onChange={e => updC(i, {
                     login_url: e.target.value
                   })} /></div>
-                  <div className="field"><label>Label</label><input type="text" value={c.label} placeholder="admin" onChange={e => updC(i, {
-                    label: e.target.value
-                  })} /></div>
+                  <div className="login-fields-editor">
+                    <div className="login-fields-heading">Login fields</div>
+                    {c.login_fields.map((field, fieldIndex) => <div className="login-field-row" key={fieldIndex}>
+                      <div className="field"><label>Field name</label><input type="text" required value={field.label} placeholder="e.g. Policy Number" onChange={e => updateLoginField(fieldIndex, {
+                        label: e.target.value
+                      })} /></div>
+                      <div className="field"><label>Value</label><input type={field.sensitive ? "password" : "text"} required value={field.value} onChange={e => updateLoginField(fieldIndex, {
+                        value: e.target.value
+                      })} /></div>
+                      <label className="login-field-sensitive"><input type="checkbox" checked={Boolean(field.sensitive)} onChange={e => updateLoginField(fieldIndex, {
+                        sensitive: e.target.checked
+                      })} /> Sensitive</label>
+                      <div className="field"><label>CSS selector <span className="field-optional">(optional)</span></label><input type="text" value={field.selector || ""} placeholder="#policy-number" onChange={e => updateLoginField(fieldIndex, {
+                        selector: e.target.value
+                      })} /></div>
+                      <button type="button" className="btn ghost sm" disabled={c.login_fields.length === 1} onClick={() => removeLoginField(fieldIndex)}>Remove field</button>
+                    </div>)}
+                    <button type="button" className="btn secondary sm" onClick={addLoginField}><IconPlus /> Add login field</button>
+                  </div>
                   <div className="field"><label>Auth Mode</label>
                     <select value={c.auth_mode || "auto"} onChange={e => updC(i, {
                     auth_mode: e.target.value

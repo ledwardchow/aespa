@@ -48,6 +48,10 @@ class Credential(SQLModel, table=True):
     site_id: int = Field(foreign_key="site.id", index=True)
     username: str
     password: str  # plaintext — local pentesting tool
+    # Optional JSON list of named login fields.  ``NULL`` means this is a legacy
+    # username/password credential; the API presents those two columns as fields
+    # without rewriting existing rows.
+    login_fields_json: Optional[str] = Field(default=None)
     label: Optional[str] = Field(default=None)
     login_url: Optional[str] = Field(default=None)
     # ── Advanced auth fields ──────────────────────────────────────────────────
