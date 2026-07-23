@@ -17,6 +17,7 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"  # existing single-page Playwright form fill
     totp = "totp"  # auto + TOTP 2FA code from stored seed
+    email_otp = "email_otp"  # auto + OTP read from a test mailbox page
     entra_id = "entra_id"  # Microsoft Entra ID multi-page browser flow
     guided = "guided"  # open headed browser, user logs in manually
 
@@ -59,6 +60,7 @@ class Credential(SQLModel, table=True):
     totp_seed: Optional[str] = Field(
         default=None
     )  # base32 TOTP secret (write-only; not returned by API)
+    test_mailbox_url: Optional[str] = Field(default=None)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
