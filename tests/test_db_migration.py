@@ -166,6 +166,7 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
 
         assert "login_url" in columns
         assert "login_fields_json" in columns
+        assert "test_mailbox_url" in columns
         assert preserved == ("legacy-user", "legacy-pass", None)
     finally:
         SQLModel.metadata.drop_all(engine)

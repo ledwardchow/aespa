@@ -499,6 +499,8 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
   attributes, or an optional CSS selector. Older credentials with only the
   `username` and `password` columns are automatically presented as Username and
   Password fields. TOTP additionally fills a 2FA code from the stored seed.
+- **`email_otp`** — runs the same deterministic form login, then polls the
+  credential's test mailbox URL and fills the newest email verification code.
 - **`entra_id`** — `_authenticate_entra_id` follows Microsoft Entra's multi-page
   browser flow. It handles account pickers, username/password pages, consent,
   stay-signed-in prompts, Authenticator notification approval, and TOTP code
@@ -509,6 +511,10 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
 - **`guided`** — `_authenticate_guided` opens a headed browser so the user logs
   in by hand; cookies/storage are captured and injected into the headless crawl
   contexts.
+
+Browser sessions retain Playwright cookie domain/path attributes and web storage
+is keyed by its original origin. External IdP and mailbox hosts are used only
+during authentication; they are not added to attack scope.
 
 Entra and guided modes use the run-scoped interactive-auth coordinator. A
 credential's first successful interactive login is cached so concurrent crawl

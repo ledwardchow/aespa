@@ -1762,6 +1762,141 @@ class _SmartCred:
     auth_mode = "auto"
 
 
+def test_extract_email_otp_prefers_code_context():
+    assert (
+        crawler._extract_email_otp(
+            "Message 99381234: Your verification code is 482913. It expires soon."
+        )
+        == "482913"
+    )
+    assert crawler._extract_email_otp("Use 730144 as your one-time code.") == "730144"
+
+
+def test_scoped_browser_cookies_preserve_cookie_hosts():
+    cookies = crawler._scoped_browser_cookies(
+        [
+            {
+                "name": "session",
+                "value": "app",
+                "domain": "app.example.test",
+                "path": "/",
+                "secure": True,
+                "sameSite": "Lax",
+                "expires": -1,
+            },
+            {
+                "name": "session",
+                "value": "idp",
+                "domain": ".idp.example.test",
+                "path": "/auth",
+            },
+        ]
+    )
+
+    assert cookies == [
+        {
+            "name": "session",
+            "value": "app",
+            "domain": "app.example.test",
+            "path": "/",
+            "secure": True,
+            "sameSite": "Lax",
+        },
+        {
+            "name": "session",
+            "value": "idp",
+            "domain": ".idp.example.test",
+            "path": "/auth",
+        },
+    ]
+
+
+def test_capture_scoped_browser_storage_uses_playwright_origins():
+    class _Context:
+        pages = []
+
+        async def storage_state(self):
+            return {
+                "origins": [
+                    {
+                        "origin": "https://app.example.test",
+                        "localStorage": [{"name": "token", "value": "app-token"}],
+                    },
+                    {
+                        "origin": "https://idp.example.test",
+                        "localStorage": [{"name": "flow", "value": "complete"}],
+                    },
+                ]
+            }
+
+    storage = asyncio.run(crawler._capture_scoped_browser_storage(_Context()))
+
+    assert storage == {
+        "https://app.example.test": {
+            "local": {"token": "app-token"},
+            "session": {},
+        },
+        "https://idp.example.test": {
+            "local": {"flow": "complete"},
+            "session": {},
+        },
+    }
+
+
+def test_restore_scoped_browser_storage_installs_executed_init_script():
+    class _Context:
+        script = ""
+
+        async def add_init_script(self, script):
+            self.script = script
+
+    class _Page:
+        url = "https://app.example.test/dashboard"
+
+        async def evaluate(self, *args):
+            return None
+
+    context = _Context()
+    asyncio.run(
+        crawler._restore_scoped_browser_storage(
+            context,
+            _Page(),
+            {
+                "https://idp.example.test": {
+                    "local": {"flow": "complete"},
+                    "session": {},
+                }
+            },
+        )
+    )
+
+    assert context.script.lstrip().startswith("(() =>")
+    assert context.script.rstrip().endswith("})()")
+
+
+def test_authenticate_dispatches_email_otp(monkeypatch):
+    called = []
+
+    class _Cred(_SmartCred):
+        auth_mode = "email_otp"
+        test_mailbox_url = "https://mail.test/inbox/alice"
+
+    async def _auto(*args, **kwargs):  # noqa: ARG001
+        called.append("auto")
+
+    async def _email_otp(*args, **kwargs):  # noqa: ARG001
+        called.append("email_otp")
+
+    monkeypatch.setattr(crawler, "_authenticate_auto", _auto)
+    monkeypatch.setattr(crawler, "_fill_email_otp_if_prompted", _email_otp)
+
+    asyncio.run(
+        crawler._authenticate(_SmartLoginPage(), "https://target.local/login", _Cred())
+    )
+
+    assert called == ["auto", "email_otp"]
+
+
 class _SmartLoginLocator:
     def __init__(self, page, selector):
         self._page = page

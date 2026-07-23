@@ -130,6 +130,47 @@ def test_create_site_with_named_login_fields(client):
     assert credential["login_fields"][1]["selector"] == "#postcode"
 
 
+def test_create_site_with_email_otp_mailbox(client):
+    mailbox_url = "https://mail.test/inbox/alice"
+    response = make_site(
+        client,
+        name="Email OTP",
+        requires_auth=True,
+        login_url="https://app.local/login",
+        credentials=[
+            {
+                "username": "alice",
+                "password": "secret",
+                "auth_mode": "email_otp",
+                "test_mailbox_url": mailbox_url,
+            }
+        ],
+    )
+
+    assert response.status_code == 201
+    credential = response.json()["credentials"][0]
+    assert credential["auth_mode"] == "email_otp"
+    assert credential["test_mailbox_url"] == mailbox_url
+
+
+def test_create_site_rejects_email_otp_without_mailbox(client):
+    response = make_site(
+        client,
+        name="Email OTP",
+        requires_auth=True,
+        login_url="https://app.local/login",
+        credentials=[
+            {
+                "username": "alice",
+                "password": "secret",
+                "auth_mode": "email_otp",
+            }
+        ],
+    )
+
+    assert response.status_code == 422
+
+
 def test_create_site_supports_credential_specific_login_urls(client):
     r = make_site(
         client,

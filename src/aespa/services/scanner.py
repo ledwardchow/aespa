@@ -5755,12 +5755,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _primary_vault_session.get("cookies")
                 or _authorization_header(_primary_vault_session.get("extra_headers"))
             ):
+                from aespa.services.crawler import _restore_scoped_browser_storage
+
                 log.info(
                     "Dynamic scan: reusing vault session '%s' for %s (skipping auth bootstrap)",
                     _primary_vault_session.get("label", "?"),
                     creds[0].username,
                 )
-                cookie_list = [
+                cookie_list = (_primary_vault_session.get("metadata") or {}).get(
+                    "browser_cookies"
+                ) or [
                     {"name": k, "value": v, "url": base_url}
                     for k, v in _primary_vault_session["cookies"].items()
                 ]
@@ -5772,6 +5776,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                             _primary_vault_session["extra_headers"]
                         )
                     )
+                await _restore_scoped_browser_storage(
+                    browser_ctx,
+                    pw_page,
+                    (_primary_vault_session.get("metadata") or {}).get(
+                        "storage_by_origin"
+                    )
+                    or {},
+                )
                 try:
                     await pw_page.reload(wait_until="domcontentloaded", timeout=12_000)
                 except Exception:
@@ -5788,6 +5800,12 @@ async def _do_thinking_scan(run_id: int) -> None:
 
         raw_cookies = await browser_ctx.cookies()
         cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
+        from aespa.services.crawler import (
+            _capture_scoped_browser_storage,
+            _scoped_browser_cookies,
+        )
+
+        storage_by_origin = await _capture_scoped_browser_storage(browser_ctx, pw_page)
         # Primary browser-session cookies, used to restore default browser steps
         # after an isolated anonymous/other-user step in the JSON fallback loop.
         _primary_browser_cookies = list(raw_cookies)
@@ -5837,6 +5855,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             and creds
             and (cookie_jar or _authorization_header(extra_headers))
         ):
+            browser_metadata = {
+                "login_url": _login_url_for_credential(login_url, creds[0]),
+                "storage_key": auth_storage_key,
+                "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                "storage_by_origin": storage_by_origin,
+            }
             configured_primary = {
                 "label": "configured_primary",
                 "kind": _session_kind(cookie_jar, extra_headers),
@@ -5846,6 +5870,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "source": "configured credential auth bootstrap",
                 "extra_headers": extra_headers,
                 "cookies": cookie_jar,
+                "metadata": browser_metadata,
             }
             session_vault["configured_primary"] = configured_primary
             _record_session(
@@ -5854,10 +5879,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 session_data=configured_primary,
                 source="dynamic_scan_auth_bootstrap",
                 credential_id=creds[0].id,
-                metadata={
-                    "login_url": _login_url_for_credential(login_url, creds[0]),
-                    "storage_key": auth_storage_key,
-                },
+                metadata=browser_metadata,
             )
 
         # ── Detect client-controlled authorization cookies ─────────────────────
@@ -6253,7 +6275,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                         with contextlib.suppress(Exception):
                             await browser_ctx.clear_cookies()
                         if selected_session is not None:
-                            cookie_list = [
+                            cookie_list = (selected_session.get("metadata") or {}).get(
+                                "browser_cookies"
+                            ) or [
                                 {"name": k, "value": v, "url": url}
                                 for k, v in (
                                     selected_session.get("cookies") or {}
@@ -7510,12 +7534,19 @@ async def _do_agentic_thinking_loop(
             },
         )
         try:
-            from aespa.services.crawler import _authenticate
+            from aespa.services.crawler import (
+                _authenticate,
+                _capture_scoped_browser_storage,
+                _scoped_browser_cookies,
+            )
 
             _cred_login_url = _login_url_for_credential(login_url, creds[0])
             await _authenticate(pw_page, _cred_login_url, creds[0], run_id)
             raw_cookies = await browser_ctx.cookies()
             new_cookies = {c["name"]: c["value"] for c in raw_cookies}
+            storage_by_origin = await _capture_scoped_browser_storage(
+                browser_ctx, pw_page
+            )
             # Refresh the httpx client's cookie jar in-place
             for name, value in new_cookies.items():
                 hx.cookies.set(name, value)
@@ -7527,6 +7558,11 @@ async def _do_agentic_thinking_loop(
                 session_vault["configured_primary"] = {
                     **prev,
                     "cookies": new_cookies,
+                    "metadata": {
+                        "login_url": _cred_login_url,
+                        "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                        "storage_by_origin": storage_by_origin,
+                    },
                 }
                 _record_session(
                     run_id,
@@ -7534,7 +7570,7 @@ async def _do_agentic_thinking_loop(
                     session_data=session_vault["configured_primary"],
                     source="dynamic_scan_reauth",
                     credential_id=creds[0].id,
-                    metadata={"login_url": _cred_login_url},
+                    metadata=session_vault["configured_primary"]["metadata"],
                     run_kind="api" if is_api_run else "web",
                 )
             events_svc.emit(
