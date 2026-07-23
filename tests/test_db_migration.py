@@ -141,6 +141,13 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
                 SELECT id, site_id, username, password, label FROM credential_old
             """)
             )
+            conn.execute(
+                text(
+                    "INSERT INTO credential "
+                    "(id, site_id, username, password, label) "
+                    "VALUES (987, 1, 'legacy-user', 'legacy-pass', 'Legacy')"
+                )
+            )
             conn.execute(text("DROP TABLE credential_old"))
             conn.commit()
 
@@ -150,8 +157,16 @@ def test_migrate_keeps_ensure_column_separate_and_adds_credential_login_url():
             columns = {
                 row[1] for row in conn.execute(text("PRAGMA table_info(credential)"))
             }
+            preserved = conn.execute(
+                text(
+                    "SELECT username, password, login_fields_json "
+                    "FROM credential ORDER BY id LIMIT 1"
+                )
+            ).first()
 
         assert "login_url" in columns
+        assert "login_fields_json" in columns
+        assert preserved == ("legacy-user", "legacy-pass", None)
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

@@ -460,9 +460,11 @@ Scope enforcement prevents crawling outside the target domain (configurable via 
 `_authenticate` dispatches per `Credential.auth_mode`:
 
 - **`auto`** / **`totp`** — `_authenticate_auto` does a fast deterministic form
-  fill (hardcoded field/submit selectors, plus `_reveal_login_form` to pop a
-  modal login from a small list of trigger selectors). TOTP additionally fills a
-  2FA code from the stored seed.
+  fill. Credentials can contain any number of named login fields, such as
+  Policy Number and Postcode. AESPA matches them using labels and input
+  attributes, or an optional CSS selector. Older credentials with only the
+  `username` and `password` columns are automatically presented as Username and
+  Password fields. TOTP additionally fills a 2FA code from the stored seed.
 - **`entra_id`** — `_authenticate_entra_id` follows Microsoft Entra's multi-page
   browser flow. It handles account pickers, username/password pages, consent,
   stay-signed-in prompts, Authenticator notification approval, and TOTP code
@@ -490,9 +492,9 @@ controls; a screenshot too when the profile has `use_vision`) and runs a bounded
 agentic loop (≤6 steps) calling `llm.decide_login_action` for one action at a time
 (fill/click/press/done/give_up), re-checking for success after each. This handles
 modal/no-route logins, non-standard field labels, and multi-step flows that the
-selector heuristics miss. Credentials are kept out of the LLM: the model returns
-`{{username}}`/`{{password}}` placeholders and the crawler substitutes the real
-values locally, so secrets are never sent to the provider or logged.
+selector heuristics miss. Credential values are kept out of this LLM call: the
+model returns named placeholders such as `{{credential.policy_number}}` and the
+crawler substitutes the real values locally.
 
 ---
 

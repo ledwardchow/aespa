@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from aespa.services import crawler
 
@@ -981,6 +982,39 @@ def test_authenticate_smart_completes_login_and_substitutes_credentials(monkeypa
     for payload in seen_payloads:
         blob = repr(payload)
         assert "s3cr3t-pw" not in blob
+
+
+def test_custom_login_field_substitution_stays_local():
+    class _CustomCred:
+        username = "ABC123456"
+        password = "2000"
+        login_fields_json = json.dumps(
+            [
+                {
+                    "key": "policy_number",
+                    "label": "Policy Number",
+                    "value": "ABC123456",
+                    "sensitive": False,
+                },
+                {
+                    "key": "postcode",
+                    "label": "Postcode",
+                    "value": "2000",
+                    "sensitive": True,
+                },
+            ]
+        )
+
+    value = asyncio.run(
+        crawler._apply_login_substitutions("{{credential.postcode}}", _CustomCred())
+    )
+
+    assert value == "2000"
+    fields = crawler._credential_login_fields(_CustomCred())
+    assert [(field["key"], field["label"]) for field in fields] == [
+        ("policy_number", "Policy Number"),
+        ("postcode", "Postcode"),
+    ]
 
 
 def test_crawl_log_emits_scanner_phase_event(monkeypatch):
