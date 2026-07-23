@@ -1294,11 +1294,14 @@ async def _do_api_thinking_scan(api_run_id: int) -> None:
         },
     )
 
-    # ── TLS/SSL posture (deterministic, always-on for HTTPS APIs) ─────────────
+    # ── TLS/SSL posture (deterministic for HTTPS APIs) ────────────────────────
     # Records at most one consolidated finding summarising every transport-security
     # weakness. For APIs the accurate OWASP category is API8 (Security
     # Misconfiguration), which explicitly covers weak/missing TLS.
-    if api_run_id not in _stop_requested:
+    if (
+        api_run_id not in _stop_requested
+        and not scanner_policy.disable_deterministic_checks
+    ):
         from aespa.services.scanner import (
             _run_tls_posture_module,
             _save_deterministic_findings,

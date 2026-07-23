@@ -12,6 +12,7 @@ export const csv = (value, transform=(x)=>x) => String(value||"")
   .split(",").map(x=>transform(x.trim())).filter(Boolean);
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled:false,
+  disable_deterministic_checks:false,
   max_consecutive_text_turns:0,
   enforce_full_coverage_obligations:false,
   scan_mode:"aggressive",
@@ -38,6 +39,7 @@ export const policyToForm = (p) => {
   return {
     ...f,
     execution_monitor_enabled:p.execution_monitor_enabled ?? false,
+    disable_deterministic_checks:p.disable_deterministic_checks ?? false,
     max_consecutive_text_turns:p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
     enforce_full_coverage_obligations:p.enforce_full_coverage_obligations ?? f.enforce_full_coverage_obligations,
     scan_mode:p.scan_mode || f.scan_mode,
@@ -60,6 +62,7 @@ export const policyToForm = (p) => {
 };
 export const policyPayload = (form) => ({
   execution_monitor_enabled:!!form.execution_monitor_enabled,
+  disable_deterministic_checks:!!form.disable_deterministic_checks,
   max_consecutive_text_turns:Number(form.max_consecutive_text_turns),
   enforce_full_coverage_obligations:!!form.enforce_full_coverage_obligations,
   scan_mode:form.scan_mode,

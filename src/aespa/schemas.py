@@ -607,6 +607,7 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
+    disable_deterministic_checks: bool = False
     max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
     enforce_full_coverage_obligations: bool = False
     scan_mode: ScanModeLiteral = "aggressive"
