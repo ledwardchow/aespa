@@ -3521,6 +3521,19 @@ async def _page_requires_login(page, login_url: str) -> bool:  # noqa: ARG001
             return True
     except Exception:
         pass
+    # Passwordless and identifier-based forms often contain only text inputs.
+    # Treat a visible form on the configured login URL as a login wall without
+    # assuming that any input has type=password.
+    try:
+        if _same_url_without_fragment(page.url, login_url):
+            visible_inputs = page.locator("form input:visible")
+            submit_controls = page.locator(
+                "form button[type='submit']:visible, form input[type='submit']:visible"
+            )
+            if await visible_inputs.count() > 0 and await submit_controls.count() > 0:
+                return True
+    except Exception:
+        pass
     try:
         text = await page.evaluate("() => document.body.innerText")
     except Exception:
@@ -5352,60 +5365,70 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
             log.warning("  _authenticate: no <input> visible at %s", login_url)
         await page.wait_for_timeout(300)
 
-        # Fill username
-        username_filled = False
-        for sel in [
-            "input[autocomplete='username']",
-            "input[autocomplete='email']",
-            "input[type='email']",
-            "input[name*='user' i]",
-            "input[name*='email' i]",
-            "input[id*='user' i]",
-            "input[id*='email' i]",
-            "input[type='text']",
-        ]:
-            try:
-                loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    await loc.fill(credential.username)
-                    username_filled = True
-                    break
-            except Exception:
-                pass
-
-        if not username_filled:
-            log.warning("  _authenticate: could not find username field")
-            return
-
-        # Reveal password field if hidden
-        pass_loc = page.locator("input[type='password']").first
-        if not (
-            await pass_loc.count() > 0
-            and await _locator_is_exposed(pass_loc, actionable=True)
-        ):
+        if getattr(credential, "login_fields_json", None):
+            configured = _credential_login_fields(credential)
+            filled = await _fill_configured_login_fields(page, configured)
+            if filled < len(configured):
+                log.warning(
+                    "  _authenticate: filled %d of %d configured login fields",
+                    filled,
+                    len(configured),
+                )
+        else:
+            # Preserve the established username/password path for every existing
+            # credential row. No existing data is rewritten by the migration.
+            username_filled = False
             for sel in [
-                "button:has-text('Next')",
-                "button:has-text('Continue')",
-                "button[type='submit']",
+                "input[autocomplete='username']",
+                "input[autocomplete='email']",
+                "input[type='email']",
+                "input[name*='user' i]",
+                "input[name*='email' i]",
+                "input[id*='user' i]",
+                "input[id*='email' i]",
+                "input[type='text']",
             ]:
                 try:
                     loc = page.locator(sel).first
                     if await loc.count() > 0 and await loc.is_visible():
-                        await loc.click()
-                        await page.wait_for_timeout(800)
+                        await loc.fill(credential.username)
+                        username_filled = True
                         break
                 except Exception:
                     pass
 
-        # Fill password
-        try:
+            if not username_filled:
+                log.warning("  _authenticate: could not find username field")
+                return
+
+            # Reveal password field if hidden.
             pass_loc = page.locator("input[type='password']").first
-            if await pass_loc.count() > 0 and await _locator_is_exposed(
-                pass_loc, actionable=True
+            if not (
+                await pass_loc.count() > 0
+                and await _locator_is_exposed(pass_loc, actionable=True)
             ):
-                await pass_loc.fill(credential.password)
-        except Exception:
-            pass
+                for sel in [
+                    "button:has-text('Next')",
+                    "button:has-text('Continue')",
+                    "button[type='submit']",
+                ]:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.count() > 0 and await loc.is_visible():
+                            await loc.click()
+                            await page.wait_for_timeout(800)
+                            break
+                    except Exception:
+                        pass
+
+            try:
+                pass_loc = page.locator("input[type='password']").first
+                if await pass_loc.count() > 0 and await _locator_is_exposed(
+                    pass_loc, actionable=True
+                ):
+                    await pass_loc.fill(credential.password)
+            except Exception:
+                pass
 
         # Submit
         submitted = False
@@ -5466,6 +5489,94 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
 # flows that the hardcoded selector lists cannot.
 
 _SMART_LOGIN_MAX_STEPS = 6
+
+
+def _credential_login_fields(credential) -> list[dict]:
+    """Return named login fields, synthesising them for untouched legacy rows."""
+    raw = getattr(credential, "login_fields_json", None)
+    try:
+        fields = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        fields = []
+    if isinstance(fields, list) and fields:
+        return [field for field in fields if isinstance(field, dict)]
+    return [
+        {
+            "key": "username",
+            "label": "Username",
+            "value": getattr(credential, "username", "") or "",
+            "sensitive": False,
+        },
+        {
+            "key": "password",
+            "label": "Password",
+            "value": getattr(credential, "password", "") or "",
+            "sensitive": True,
+        },
+    ]
+
+
+def _normalise_login_hint(value: str) -> str:
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+async def _find_configured_login_input(page, field: dict, used: set[int]):
+    selector = str(field.get("selector") or "").strip()
+    label = str(field.get("label") or field.get("key") or "").strip()
+    if selector:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc, -1
+        except Exception:
+            pass
+    for factory in (
+        lambda: page.get_by_label(label, exact=False).first,
+        lambda: page.get_by_placeholder(label, exact=False).first,
+    ):
+        try:
+            loc = factory()
+            if await loc.count() > 0 and await loc.is_visible():
+                return loc, -1
+        except Exception:
+            pass
+
+    wanted = {
+        _normalise_login_hint(label),
+        _normalise_login_hint(str(field.get("key") or "")),
+    } - {""}
+    try:
+        inputs = page.locator("input:visible")
+        for index in range(await inputs.count()):
+            if index in used:
+                continue
+            loc = inputs.nth(index)
+            hints = {
+                _normalise_login_hint(await loc.get_attribute(attr) or "")
+                for attr in ("name", "id", "placeholder", "aria-label", "autocomplete")
+            } - {""}
+            if any(a == b or a in b or b in a for a in wanted for b in hints):
+                return loc, index
+    except Exception:
+        pass
+    return None, -1
+
+
+async def _fill_configured_login_fields(page, fields: list[dict]) -> int:
+    used: set[int] = set()
+    filled = 0
+    for field in fields:
+        loc, index = await _find_configured_login_input(page, field, used)
+        if loc is None:
+            continue
+        try:
+            await loc.fill(str(field.get("value") or ""))
+            filled += 1
+            if index >= 0:
+                used.add(index)
+        except Exception:
+            pass
+    return filled
 
 
 async def _build_login_observation(page) -> str:
@@ -5529,7 +5640,13 @@ async def _build_login_observation(page) -> str:
 
 
 async def _apply_login_substitutions(value: str, credential) -> str:
-    """Replace {{username}}/{{password}} tokens with the real credential locally."""
+    """Replace configured placeholder tokens with values locally."""
+    for field in _credential_login_fields(credential):
+        key = str(field.get("key") or "")
+        value = value.replace(
+            "{{credential." + key + "}}", str(field.get("value") or "")
+        )
+    # Accept the former tokens for saved checkpoints and older mocked actions.
     value = value.replace("{{username}}", credential.username or "")
     value = value.replace("{{password}}", credential.password or "")
     return value
@@ -5614,7 +5731,10 @@ async def _authenticate_smart(
                 llm_cfg,
                 url=page.url,
                 observation=observation,
-                username_hint=credential.username,
+                credential_fields=[
+                    {"key": field["key"], "label": field["label"]}
+                    for field in _credential_login_fields(credential)
+                ],
                 history=history,
                 screenshot_b64=screenshot_b64,
             )
@@ -5666,12 +5786,14 @@ async def _authenticate_smart(
                     )
                     await target.fill(value)
                     # Record which credential token was used, never the value.
-                    token = (
-                        "username"
-                        if "{{username}}" in (action.get("value") or "")
-                        else "password"
-                        if "{{password}}" in (action.get("value") or "")
-                        else "text"
+                    raw_value = action.get("value") or ""
+                    token = next(
+                        (
+                            field["key"]
+                            for field in _credential_login_fields(credential)
+                            if "{{credential." + field["key"] + "}}" in raw_value
+                        ),
+                        "credential" if "{{" in raw_value else "text",
                     )
                     history.append(f"filled {token} field ({reason})")
         except Exception as exc:
