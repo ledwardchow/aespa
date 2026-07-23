@@ -50,6 +50,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
             follow_redirects=True,
             allow_subdomains=True,
             execution_monitor_enabled=False,
+            disable_deterministic_checks=True,
             max_consecutive_text_turns=3,
             enforce_full_coverage_obligations=True,
         ),
@@ -63,6 +64,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
     snapshot = json.loads(snapshot_raw)
     assert snapshot["model"]["model"] == "minimax/m3"
     assert snapshot["coverage_mode"] == "enforce"
+    assert snapshot["policy"]["disable_deterministic_checks"] is True
     assert len(snapshot["crawl_sha256"]) == 64
     assert "must-not-be-persisted" not in snapshot_raw
 

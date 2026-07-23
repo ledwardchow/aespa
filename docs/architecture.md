@@ -244,6 +244,7 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | Field | Default | Description |
 |---|---|---|
 | `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
+| `disable_deterministic_checks` | `false` | Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks |
 | `max_consecutive_text_turns` | `0` | Stop after this many text-only Test Lead turns; `0` allows unlimited turns |
 | `enforce_full_coverage_obligations` | `false` | Require every coverage obligation to be resolved before the Test Lead can finish |
 | `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
@@ -508,7 +509,7 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Run JS sink analysis (_analyse_js_sinks) — fetches each
+       2. Unless deterministic checks are disabled, run JS sink analysis (_analyse_js_sinks) — fetches each
           discovered JS file (TargetIntelItem kind=script), regex-scans
           for unsanitized innerHTML/outerHTML/document.write sinks,
           saves TargetIntelItem(kind=xss_sink) and info-severity findings
@@ -519,18 +520,19 @@ start_thinking_scan(run_id)
        5. Build a compact LLM brief from actionable routes and coverage gaps
        6. Detect auth cookies for boundary checks
        7. Restore checkpoint if this is a resumed scan
-       8. _run_deterministic_site_modules(...) — LLM-free probes
+       8. Unless deterministic checks are disabled, _run_deterministic_site_modules(...) — LLM-free probes
           (TLS/SSL posture, auth matrix, IDOR matrix)
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
 
-**TLS/SSL posture (always-on, deterministic).** For any `https://` target,
-`_run_deterministic_site_modules` first runs `_run_tls_posture_module` — an
+**TLS/SSL posture (deterministic).** Unless deterministic checks are disabled, any
+`https://` target runs `_run_tls_posture_module` first through
+`_run_deterministic_site_modules` — an
 sslscan-like probe (`services/tls_scan.py`, pure stdlib `ssl` + `cryptography`)
 that enumerates accepted protocol versions (TLS 1.0–1.3; SSLv2/SSLv3 report as
 `not-testable`), weak / non-forward-secret cipher acceptance, and leaf-certificate
 weaknesses (expiry, key size, signature algorithm, SANs, self-signed, hostname
-match). It runs on **every** HTTPS scan (including `passive` mode, since the
+match). When enabled, it runs on every HTTPS scan (including `passive` mode, since the
 handshake is non-intrusive) and records **at most one** consolidated
 `A02 · TLS/SSL configuration weaknesses` finding summarising every issue; overall
 severity is the worst per-issue tier (`_tls_worst_cvss`). Dedup by title +

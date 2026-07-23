@@ -506,6 +506,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
+    assert data["disable_deterministic_checks"] is False
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
@@ -523,6 +524,7 @@ def test_upsert_scanner_policy(client: TestClient):
         {
             "scan_mode": "aggressive",
             "execution_monitor_enabled": True,
+            "disable_deterministic_checks": True,
             "max_consecutive_text_turns": 0,
             "enforce_full_coverage_obligations": False,
             "max_probes_per_page": 25,
@@ -536,6 +538,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is True
+    assert data["disable_deterministic_checks"] is True
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"

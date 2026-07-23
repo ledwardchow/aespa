@@ -386,6 +386,12 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(
         engine,
         "scanner_policy",
+        "disable_deterministic_checks",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        engine,
+        "scanner_policy",
         "max_consecutive_text_turns",
         "INTEGER NOT NULL DEFAULT 0",
     )

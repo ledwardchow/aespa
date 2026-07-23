@@ -542,6 +542,9 @@ def _json_dumps(value) -> str:
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
+        disable_deterministic_checks=getattr(
+            cfg, "disable_deterministic_checks", False
+        ),
         max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 0),
         enforce_full_coverage_obligations=getattr(
             cfg, "enforce_full_coverage_obligations", False
@@ -578,6 +581,7 @@ def upsert_scanner_policy(
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
     cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    cfg.disable_deterministic_checks = payload.disable_deterministic_checks
     cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
     cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
     cfg.scan_mode = payload.scan_mode
