@@ -65,7 +65,8 @@ export function SiteForm({
             label: c.label || "",
             login_url: c.login_url || "",
             auth_mode: c.auth_mode || "auto",
-            totp_seed: ""
+            totp_seed: "",
+            test_mailbox_url: c.test_mailbox_url || ""
           }))
         });
       } catch (e) {
@@ -96,7 +97,8 @@ export function SiteForm({
       label: "",
       login_url: "",
       auth_mode: "auto",
-      totp_seed: ""
+      totp_seed: "",
+      test_mailbox_url: ""
     }]
   });
   const rmC = i => upd({
@@ -129,6 +131,7 @@ export function SiteForm({
           auth_mode: c.auth_mode || "auto"
         };
         if (c.totp_seed?.trim()) base.totp_seed = c.totp_seed.trim();
+        if (c.test_mailbox_url?.trim()) base.test_mailbox_url = c.test_mailbox_url.trim();
         return base;
       }) : []
     };
@@ -240,12 +243,17 @@ export function SiteForm({
                   })}>
                       <option value="auto">auto — single-page form fill</option>
                       <option value="totp">totp — form fill + TOTP 2FA</option>
+                      <option value="email_otp">email OTP — form fill + test mailbox code</option>
                       <option value="entra_id">entra id — Microsoft multi-page login</option>
                       <option value="guided">guided — interactive browser login</option>
                     </select></div>
                   {["totp", "entra_id"].includes(c.auth_mode || "auto") && <div className="field"><label>TOTP Seed <span className="field-optional">{(c.auth_mode || "auto") === "entra_id" ? "(optional, for Entra \"other app\" code mode)" : "(base32 secret from authenticator app)"}</span></label>
                       <input type="text" value={c.totp_seed || ""} placeholder="JBSWY3DPEHPK3PXP…" onChange={e => updC(i, {
                     totp_seed: e.target.value
+                  })} /></div>}
+                  {(c.auth_mode || "auto") === "email_otp" && <div className="field"><label>Test mailbox URL</label>
+                      <input type="url" required value={c.test_mailbox_url || ""} placeholder="https://mail.example.test/inbox/test-user" onChange={e => updC(i, {
+                    test_mailbox_url: e.target.value
                   })} /></div>}
                   {(c.auth_mode || "auto") === "guided" && <div className="field"><div style={{
                     background: "var(--surface-2,#2a2a2a)",

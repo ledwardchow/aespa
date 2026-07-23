@@ -36,6 +36,7 @@ class CredentialIn(BaseModel):
     # Advanced auth
     auth_mode: str = "auto"
     totp_seed: str | None = None  # base32 TOTP secret; stored write-only
+    test_mailbox_url: HttpUrl | None = None
 
     @model_validator(mode="after")
     def _check_login_values(self) -> "CredentialIn":
@@ -51,6 +52,10 @@ class CredentialIn(BaseModel):
             )
         elif not self.username or not self.password:
             raise ValueError("provide username/password or at least one login field")
+        if self.auth_mode == "email_otp" and self.test_mailbox_url is None:
+            raise ValueError(
+                "test_mailbox_url is required for email_otp authentication"
+            )
         return self
 
 
@@ -64,6 +69,7 @@ class CredentialOut(BaseModel):
     label: str | None = None
     login_url: str | None = None
     auth_mode: str = "auto"
+    test_mailbox_url: str | None = None
     # totp_seed is intentionally excluded (write-only)
 
     @model_validator(mode="before")
@@ -79,6 +85,7 @@ class CredentialOut(BaseModel):
                 "label": value.label,
                 "login_url": value.login_url,
                 "auth_mode": value.auth_mode,
+                "test_mailbox_url": value.test_mailbox_url,
                 "login_fields_json": getattr(value, "login_fields_json", None),
             }
         raw = data.pop("login_fields_json", None)

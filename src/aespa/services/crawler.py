@@ -3423,6 +3423,7 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
     try:
         raw_cookies = await page.context.cookies()
         cookies = {c["name"]: c["value"] for c in raw_cookies}
+        storage_by_origin = await _capture_scoped_browser_storage(page.context, page)
         token = None
         for key in (
             "access_token",
@@ -3456,6 +3457,10 @@ async def _persist_recon_session(run_id: int, cred, page) -> None:
             credential_id=cred.id,
             source="reconcile_login",
             cookies=cookies,
+            metadata={
+                "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                "storage_by_origin": storage_by_origin,
+            },
             extra_headers={"Authorization": f"Bearer {token}"} if token else None,
         )
     except Exception as exc:
@@ -4539,6 +4544,112 @@ async def _fill_totp_if_prompted(page, credential) -> None:
     log.info("  _fill_totp: TOTP code filled and submitted for %s", credential.username)
 
 
+def _extract_email_otp(text: str) -> str | None:
+    compact = " ".join((text or "").split())
+    for pattern in [
+        r"(?:one[- ]time|verification|security|login|otp)\s+code\D{0,40}(\d{4,8})\b",
+        r"\b(\d{4,8})\D{0,40}(?:one[- ]time|verification|security|login|otp)\s+code",
+        r"\bOTP\D{0,20}(\d{4,8})\b",
+    ]:
+        match = re.search(pattern, compact, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    match = re.search(r"\b(\d{6})\b", compact)
+    return match.group(1) if match else None
+
+
+async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
+    await mailbox_page.goto(mailbox_url, wait_until="domcontentloaded", timeout=15_000)
+    try:
+        text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        text = ""
+    code = _extract_email_otp(text)
+    if code:
+        return code
+
+    parsed = urlparse(mailbox_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        links = await mailbox_page.locator("a[href]").evaluate_all(
+            "(els) => els.map(a => a.href)"
+        )
+    except Exception:
+        links = []
+    candidates = [
+        href
+        for href in links
+        if isinstance(href, str)
+        and href.startswith(origin)
+        and re.search(r"(?:mail|message|inbox)", href, re.IGNORECASE)
+    ][:10]
+    for href in candidates:
+        try:
+            await mailbox_page.goto(href, wait_until="domcontentloaded", timeout=10_000)
+            text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+        except Exception:
+            continue
+        code = _extract_email_otp(text)
+        if code:
+            return code
+    return None
+
+
+async def _fill_email_otp_if_prompted(page, credential) -> None:
+    mailbox_url = (getattr(credential, "test_mailbox_url", None) or "").strip()
+    if not mailbox_url:
+        log.warning("  _fill_email_otp: no test mailbox URL configured")
+        return
+    for _ in range(20):
+        if await _detect_mfa_prompt(page):
+            break
+        await page.wait_for_timeout(500)
+    else:
+        log.warning(
+            "  _fill_email_otp: no OTP prompt appeared for %s", credential.username
+        )
+        return
+
+    mailbox_page = await page.context.new_page()
+    try:
+        deadline = asyncio.get_running_loop().time() + 90
+        while asyncio.get_running_loop().time() < deadline:
+            code = await _mailbox_page_otp(mailbox_page, mailbox_url)
+            if code:
+                for selector in [
+                    "input[autocomplete='one-time-code']",
+                    "input[name*='otp' i]",
+                    "input[id*='otp' i]",
+                    "input[name*='code' i]",
+                    "input[id*='code' i]",
+                    "input[name*='mfa' i]",
+                    "input[id*='mfa' i]",
+                ]:
+                    loc = await _visible_locator(page, selector)
+                    if loc is not None:
+                        await loc.fill(code)
+                        await _click_first_visible(
+                            page,
+                            [
+                                "button[type='submit']",
+                                "input[type='submit']",
+                                "button:has-text('Verify')",
+                                "button:has-text('Submit')",
+                                "button:has-text('Next')",
+                            ],
+                        )
+                        log.info(
+                            "  _fill_email_otp: mailbox code filled for %s",
+                            credential.username,
+                        )
+                        return
+                return
+            await asyncio.sleep(2)
+    finally:
+        await mailbox_page.close()
+    log.warning("  _fill_email_otp: timed out waiting for %s", credential.username)
+
+
 _BEARER_STORAGE_KEYS = [
     "access_token",
     "accessToken",
@@ -4600,6 +4711,89 @@ def _infer_bearer_header_from_storage(
 
 def _cookie_dict(cookies: list[dict]) -> dict[str, str]:
     return {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
+
+
+def _scoped_browser_cookies(cookies: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for cookie in cookies:
+        if not cookie.get("name") or "value" not in cookie:
+            continue
+        scoped = {"name": cookie["name"], "value": cookie["value"]}
+        if cookie.get("domain"):
+            scoped["domain"] = cookie["domain"]
+            scoped["path"] = cookie.get("path") or "/"
+        elif cookie.get("url"):
+            scoped["url"] = cookie["url"]
+        else:
+            continue
+        for key in ("httpOnly", "secure"):
+            if key in cookie:
+                scoped[key] = cookie[key]
+        if cookie.get("sameSite") in {"Strict", "Lax", "None"}:
+            scoped["sameSite"] = cookie["sameSite"]
+        expires = cookie.get("expires")
+        if isinstance(expires, (int, float)) and expires > 0:
+            scoped["expires"] = expires
+        result.append(scoped)
+    return result
+
+
+async def _capture_scoped_browser_storage(
+    context, fallback_page=None
+) -> dict[str, dict[str, dict]]:
+    storage: dict[str, dict[str, dict]] = {}
+    if hasattr(context, "storage_state"):
+        try:
+            state = await context.storage_state()
+        except Exception:
+            state = {}
+        for origin_state in state.get("origins") or []:
+            origin = origin_state.get("origin")
+            if not origin:
+                continue
+            storage[origin] = {
+                "local": {
+                    item["name"]: item["value"]
+                    for item in origin_state.get("localStorage") or []
+                    if item.get("name") is not None and item.get("value") is not None
+                },
+                "session": {},
+            }
+    pages = getattr(context, "pages", None) or (
+        [fallback_page] if fallback_page else []
+    )
+    for current_page in pages:
+        parsed = urlparse(current_page.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        local, session = await _capture_browser_storage(current_page)
+        current = storage.setdefault(origin, {"local": {}, "session": {}})
+        current["local"].update(local)
+        current["session"].update(session)
+    return storage
+
+
+async def _restore_scoped_browser_storage(
+    context, page, storage_by_origin: dict
+) -> None:
+    if not storage_by_origin:
+        return
+    payload = json.dumps(storage_by_origin).replace("</", "<\\/")
+    if hasattr(context, "add_init_script"):
+        await context.add_init_script(
+            f"""(() => {{
+                const state = {payload}[location.origin];
+                if (!state) return;
+                for (const [k, v] of Object.entries(state.local || {{}})) localStorage.setItem(k, v);
+                for (const [k, v] of Object.entries(state.session || {{}})) sessionStorage.setItem(k, v);
+            }})()"""
+        )
+    parsed = urlparse(page.url)
+    current = storage_by_origin.get(f"{parsed.scheme}://{parsed.netloc}", {})
+    await _restore_browser_storage(
+        page, current.get("local") or {}, current.get("session") or {}
+    )
 
 
 async def _restore_browser_storage(
@@ -5394,15 +5588,18 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
         cookies = await page.context.cookies()
     except Exception:
         pass
-    local_storage, session_storage = await _capture_browser_storage(page)
+    storage_by_origin = await _capture_scoped_browser_storage(page.context, page)
+    origin = f"{urlparse(page.url).scheme}://{urlparse(page.url).netloc}"
+    local_storage = storage_by_origin.get(origin, {}).get("local") or {}
+    session_storage = storage_by_origin.get(origin, {}).get("session") or {}
     _infer_bearer_header_from_storage(local_storage, session_storage, captured_headers)
 
     if completed:
         _guided_session_cache[(run_id, credential.id)] = {
             "cookies": _cookie_dict(cookies),
+            "browser_cookies": _scoped_browser_cookies(cookies),
             "headers": captured_headers,
-            "local_storage": local_storage,
-            "session_storage": session_storage,
+            "storage_by_origin": storage_by_origin,
             "provider": "entra_id",
             "landing_url": page.url,
             "completed": True,
@@ -5425,6 +5622,10 @@ async def _authenticate_entra_id(page, login_url: str, credential, run_id: int) 
                     "login_url": login_url,
                     "landing_url": page.url,
                     "completed": True,
+                    "browser_cookies": _guided_session_cache[(run_id, credential.id)][
+                        "browser_cookies"
+                    ],
+                    "storage_by_origin": storage_by_origin,
                 },
             )
         except Exception as exc:
@@ -5568,6 +5769,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
 
         captured_cookies: list = []
         captured_headers: dict[str, str] = {}
+        captured_storage_by_origin: dict[str, dict[str, dict]] = {}
 
         from playwright.async_api import async_playwright
 
@@ -5615,29 +5817,13 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                     credential.username,
                 )
 
-                # Capture ALL localStorage and sessionStorage from every open page
-                # in the context (not just known key names) so SPAs that store tokens
-                # under arbitrary keys are handled correctly.
-                captured_local_storage: dict[str, str] = {}
-                captured_session_storage: dict[str, str] = {}
-                try:
-                    captured_local_storage = (
-                        await guided_page.evaluate(
-                            "() => Object.fromEntries(Object.entries(localStorage))"
-                        )
-                        or {}
-                    )
-                except Exception:
-                    pass
-                try:
-                    captured_session_storage = (
-                        await guided_page.evaluate(
-                            "() => Object.fromEntries(Object.entries(sessionStorage))"
-                        )
-                        or {}
-                    )
-                except Exception:
-                    pass
+                captured_storage_by_origin = await _capture_scoped_browser_storage(ctx)
+                landing = urlparse(guided_page.url)
+                landing_storage = captured_storage_by_origin.get(
+                    f"{landing.scheme}://{landing.netloc}", {}
+                )
+                captured_local_storage = landing_storage.get("local") or {}
+                captured_session_storage = landing_storage.get("session") or {}
                 log.info(
                     "  _authenticate_guided: captured %d localStorage + %d sessionStorage "
                     "entries for %s",
@@ -5694,28 +5880,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         # We always write to the cache so subsequent _authenticate calls for this
         # credential don't open another window (even if capture failed).
         #
-        # Normalisation is critical: Playwright's ctx.cookies() returns fields that
-        # add_cookies rejects — leading-dot domains (".localhost"), expires=-1 for
-        # session cookies, and sameSite values outside {"Strict","Lax","None"}.
-        # Using "url" instead of "domain"+"path" is the most reliable injection form.
-        injectable = []
-        _valid_samesite = {"Strict", "Lax", "None"}
-        for c in captured_cookies:
-            if not isinstance(c, dict) or not c.get("name") or "value" not in c:
-                continue
-            entry: dict = {"name": c["name"], "value": c["value"], "url": login_url}
-            # Optional fields — only include when they are valid
-            if c.get("httpOnly"):
-                entry["httpOnly"] = True
-            if c.get("secure"):
-                entry["secure"] = True
-            ss = c.get("sameSite")
-            if ss in _valid_samesite:
-                entry["sameSite"] = ss
-            exp = c.get("expires")
-            if exp is not None and isinstance(exp, (int, float)) and exp > 0:
-                entry["expires"] = int(exp)
-            injectable.append(entry)
+        injectable = _scoped_browser_cookies(captured_cookies)
         log.info(
             "  _authenticate_guided: built %d injectable cookie(s) from %d captured for %s",
             len(injectable),
@@ -5781,45 +5946,14 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                     "  _authenticate_guided: could not set extra headers: %s", exc
                 )
 
-        # Reload so the headless context picks up the injected cookies,
-        # then restore localStorage and sessionStorage from the headed session.
+        await _restore_scoped_browser_storage(
+            page.context, page, captured_storage_by_origin
+        )
         try:
             await page.reload(wait_until="domcontentloaded", timeout=12_000)
             await page.wait_for_load_state("networkidle", timeout=8_000)
         except Exception:
             pass
-        if captured_local_storage:
-            try:
-                await page.evaluate(
-                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                    "localStorage.setItem(k, v); }",
-                    captured_local_storage,
-                )
-                log.info(
-                    "  _authenticate_guided: restored %d localStorage entries for %s",
-                    len(captured_local_storage),
-                    credential.username,
-                )
-            except Exception as exc:
-                log.warning(
-                    "  _authenticate_guided: localStorage restore failed: %s", exc
-                )
-        if captured_session_storage:
-            try:
-                await page.evaluate(
-                    "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                    "sessionStorage.setItem(k, v); }",
-                    captured_session_storage,
-                )
-                log.info(
-                    "  _authenticate_guided: restored %d sessionStorage entries for %s",
-                    len(captured_session_storage),
-                    credential.username,
-                )
-            except Exception as exc:
-                log.warning(
-                    "  _authenticate_guided: sessionStorage restore failed: %s", exc
-                )
 
         events_svc.emit(
             run_id,
@@ -5832,15 +5966,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         )
         # Cache the captured session so reconcile and the dynamic scan can reuse it without a second window
         _guided_session_cache[(run_id, credential.id)] = {
-            "cookies": {
-                c["name"]: c["value"]
-                for c in captured_cookies
-                if "name" in c and "value" in c
-            },
+            "cookies": _cookie_dict(captured_cookies),
+            "browser_cookies": injectable,
             "headers": captured_headers,
-            "injectable": injectable,
-            "local_storage": captured_local_storage,
-            "session_storage": captured_session_storage,
+            "storage_by_origin": captured_storage_by_origin,
         }
         # Persist to session vault DB so the dynamic scan phase can load it via load_session_vault()
         try:
@@ -5856,6 +5985,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 source="guided_login",
                 cookies=_guided_session_cache[(run_id, credential.id)]["cookies"],
                 extra_headers=captured_headers or None,
+                metadata={
+                    "browser_cookies": injectable,
+                    "storage_by_origin": captured_storage_by_origin,
+                },
             )
         except Exception as _vs_exc:
             log.warning(
@@ -5896,13 +6029,12 @@ async def _authenticate(
                 credential.username,
                 credential.id,
             )
-            # Re-build from the flat cookies dict using url-based format (most reliable)
             cookies_dict = cached.get("cookies") or {}
-            if cookies_dict:
-                cookie_list = [
-                    {"name": k, "value": v, "url": login_url}
-                    for k, v in cookies_dict.items()
-                ]
+            cookie_list = cached.get("browser_cookies") or [
+                {"name": k, "value": v, "url": login_url}
+                for k, v in cookies_dict.items()
+            ]
+            if cookie_list:
                 try:
                     await page.context.add_cookies(cookie_list)
                     log.info(
@@ -5926,36 +6058,21 @@ async def _authenticate(
                 await page.wait_for_load_state("networkidle", timeout=8_000)
             except Exception:
                 pass
-            # Restore localStorage and sessionStorage
-            if cached.get("local_storage"):
-                try:
-                    await page.evaluate(
-                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                        "localStorage.setItem(k, v); }",
-                        cached["local_storage"],
-                    )
-                except Exception as exc:
-                    log.warning("  _authenticate: localStorage restore failed: %s", exc)
-            if cached.get("session_storage"):
-                try:
-                    await page.evaluate(
-                        "(entries) => { for (const [k,v] of Object.entries(entries)) "
-                        "sessionStorage.setItem(k, v); }",
-                        cached["session_storage"],
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "  _authenticate: sessionStorage restore failed: %s", exc
-                    )
+            await _restore_scoped_browser_storage(
+                page.context, page, cached.get("storage_by_origin") or {}
+            )
             return
 
     username = getattr(credential, "username", "?")
-    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.entra_id):
+    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp, AuthMode.entra_id):
         _crawl_log(run_id, "auth", "start", f"Authenticating as {username}…")
 
     if mode == AuthMode.totp:
         await _authenticate_auto(page, login_url, credential)
         await _fill_totp_if_prompted(page, credential)
+    elif mode == AuthMode.email_otp:
+        await _authenticate_auto(page, login_url, credential)
+        await _fill_email_otp_if_prompted(page, credential)
     elif mode == AuthMode.entra_id:
         await _authenticate_entra_id(page, login_url, credential, run_id)
         return
@@ -5976,7 +6093,7 @@ async def _authenticate(
             await _authenticate_smart(page, login_url, credential, run_id, llm_cfg)
 
     # Report the auth outcome to the Activity Log.
-    if mode in (AuthMode.auto, AuthMode.totp):
+    if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
         try:
             blocked = await _page_requires_login(page, login_url)
         except Exception:

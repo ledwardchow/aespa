@@ -63,6 +63,9 @@ def _credential_values(payload: CredentialIn) -> dict:
         "login_url": str(payload.login_url) if payload.login_url else None,
         "auth_mode": payload.auth_mode,
         "totp_seed": payload.totp_seed,
+        "test_mailbox_url": (
+            str(payload.test_mailbox_url) if payload.test_mailbox_url else None
+        ),
     }
 
 
@@ -106,9 +109,7 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         scan_guidance=payload.scan_guidance,
     )
     for cred in payload.credentials:
-        site.credentials.append(
-            Credential(**_credential_values(cred))
-        )
+        site.credentials.append(Credential(**_credential_values(cred)))
 
     session.add(site)
     session.commit()
@@ -133,9 +134,7 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.credentials.clear()
     session.flush()
     for cred in payload.credentials:
-        site.credentials.append(
-            Credential(**_credential_values(cred))
-        )
+        site.credentials.append(Credential(**_credential_values(cred)))
 
     session.add(site)
     session.commit()
