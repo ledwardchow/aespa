@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { truncUrl, fmtDate } from "../lib/utilities";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
@@ -23,6 +23,52 @@ export function ActiveJobsPage() {
   const [jobs, setJobs] = useState(null);
   const [error, setError] = useState(null);
   const [stopping, setStopping] = useState({}); // keyed by `${job_type}-${run_id}`
+  const [sortField, setSortField] = useState("started_at");
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedJobs = useMemo(() => {
+    if (!jobs) return [];
+    return [...jobs].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "site_name") {
+        valA = a.site_name || a.collection_name || "";
+        valB = b.site_name || b.collection_name || "";
+      } else if (sortField === "pages_done") {
+        valA = a.pages_done || 0;
+        valB = b.pages_done || 0;
+      } else if (sortField === "findings_count") {
+        valA = a.findings_count || 0;
+        valB = b.findings_count || 0;
+      } else if (sortField === "started_at") {
+        valA = (a.started_at || a.created_at) ? new Date(a.started_at || a.created_at).getTime() : 0;
+        valB = (b.started_at || b.created_at) ? new Date(b.started_at || b.created_at).getTime() : 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [jobs, sortField, sortDir]);
 
   const load = useCallback(async () => {
     try {
@@ -112,8 +158,19 @@ export function ActiveJobsPage() {
               width: "14%"
             }} />
             </colgroup>
-            <thead><tr><th>Run</th><th>Site</th><th>Job</th><th>Status</th><th>Progress</th><th>Findings</th><th>Started</th><th></th></tr></thead>
-            <tbody>{jobs.map(j => {
+            <thead>
+              <tr>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("run_name")}>Run {sortArrow("run_name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("site_name")}>Target {sortArrow("site_name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("job_type")}>Job {sortArrow("job_type")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("pages_done")}>Progress {sortArrow("pages_done")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("findings_count")}>Findings {sortArrow("findings_count")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("started_at")}>Started {sortArrow("started_at")}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>{sortedJobs.map(j => {
               const key = `${j.job_type}-${j.run_id}`;
               const isStopping = !!stopping[key];
               return <tr key={key}>
