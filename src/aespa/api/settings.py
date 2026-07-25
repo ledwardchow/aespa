@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Request, Response
 from sqlmodel import Session
 
@@ -33,6 +35,8 @@ from aespa.schemas import (
 )
 from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import settings as settings_service
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -184,9 +188,17 @@ def delete_llm_provider(
 
 
 @router.get("/llm/models")
-def default_models() -> dict[str, list[str]]:
+async def default_models() -> dict[str, list[str]]:
     """Return well-known model names for each provider (for UI dropdowns)."""
-    return PROVIDER_DEFAULT_MODELS
+    models = {name: list(values) for name, values in PROVIDER_DEFAULT_MODELS.items()}
+    try:
+        from aespa.services import droid_provider
+
+        models["factory_droid"] = await droid_provider.discover_models()
+    except Exception as exc:
+        log.warning("Factory Droid model discovery unavailable: %s", exc)
+        models["factory_droid"] = []
+    return models
 
 
 @router.get("/llm/export", response_model=LLMConfigExport)

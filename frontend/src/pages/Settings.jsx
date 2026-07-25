@@ -126,8 +126,11 @@ export function providerToForm(provider) {
   };
 }
 export function providerPayload(form) {
+  const usesCliCredentials = form.api_format === "factory_droid";
   let apiKeyPayload = null;
-  if (form.clear_api_key) {
+  if (usesCliCredentials) {
+    apiKeyPayload = "";
+  } else if (form.clear_api_key) {
     apiKeyPayload = "";
   } else if (form.api_key.trim()) {
     apiKeyPayload = form.api_key.trim();
@@ -138,7 +141,7 @@ export function providerPayload(form) {
   return {
     name: form.name.trim(),
     api_format: form.api_format,
-    base_url: form.base_url.trim() || null,
+    base_url: usesCliCredentials ? null : form.base_url.trim() || null,
     username: form.api_format === "github_copilot" ? form.username.trim() || null : null,
     project_id: form.api_format === "bedrock_mantle" ? form.project_id.trim() || null : null,
     models: modelText.split(/\r?\n|,/).map(m => m.trim()).filter(Boolean),

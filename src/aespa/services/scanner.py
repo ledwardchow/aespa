@@ -116,6 +116,7 @@ def _persist_execution_snapshot(
             "follow_redirects",
             "allow_subdomains",
             "execution_monitor_enabled",
+            "disable_deterministic_checks",
             "max_consecutive_text_turns",
             "enforce_full_coverage_obligations",
         )
@@ -1890,17 +1891,34 @@ def _run_thinking_context_tool(
         }
         if page.get("replay_steps_json") and page.get("replay_steps_json") != "[]":
             try:
-                replay_steps = json.loads(page["replay_steps_json"])
+                replay_data = json.loads(page["replay_steps_json"])
             except (TypeError, ValueError, json.JSONDecodeError):
-                replay_steps = []
+                replay_data = []
+            if isinstance(replay_data, dict):
+                replay_root_url = str(replay_data.get("root_url") or page["url"])
+                replay_steps = replay_data.get("steps") or []
+            else:
+                replay_root_url = page["url"]
+                replay_steps = replay_data
             if replay_steps:
                 detail["browser_replay"] = {
-                    "url": page["url"],
-                    "steps": [{"op": "goto", "url": page["url"]}]
+                    "url": replay_root_url,
+                    "steps": [{"op": "goto", "url": replay_root_url}]
                     + [
-                        {"op": "click", "selector": step["selector"]}
+                        {
+                            key: value
+                            for key, value in {
+                                "op": step.get("kind") or "click",
+                                "selector": step.get("selector"),
+                                "testid": step.get("testid"),
+                                "role": step.get("role"),
+                                "name": step.get("name"),
+                                "value": step.get("value"),
+                            }.items()
+                            if value not in (None, "")
+                        }
                         for step in replay_steps
-                        if isinstance(step, dict) and step.get("selector")
+                        if isinstance(step, dict)
                     ],
                 }
         if "title" in include_set:
@@ -5038,6 +5056,23 @@ def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> 
     )
 
 
+def _emit_session_validator_log(
+    run_id: int, message: str, *, status: str = "complete"
+) -> None:
+    """Record routine session validation separately from completion decisions."""
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "session_validator",
+            "status": status,
+            "message": f"Session Validator — {message}",
+            "data": {"emitter": "Session Validator"},
+            "_persist": True,
+        },
+    )
+
+
 def _emit_scan_complete(run_id: int, finding_count: int) -> None:
     """Emit the terminal scan events only after every finalisation phase ends."""
     events_svc.emit(
@@ -5535,7 +5570,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             },
         )
 
-    if not resuming:
+    if not resuming and not scanner_policy.disable_deterministic_checks:
         # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
         # loop starts. The thinking-scan agent can then find them via target_inventory
         # without re-fetching and re-parsing JS source itself.
@@ -5643,8 +5678,8 @@ async def _do_thinking_scan(run_id: int) -> None:
         enforce_coverage=bool(
             coverage_mode == "enforce"
             and (
-                scanner_policy is None
-                or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+                scanner_policy is not None
+                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             )
         ),
     )
@@ -5720,12 +5755,16 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _primary_vault_session.get("cookies")
                 or _authorization_header(_primary_vault_session.get("extra_headers"))
             ):
+                from aespa.services.crawler import _restore_scoped_browser_storage
+
                 log.info(
                     "Dynamic scan: reusing vault session '%s' for %s (skipping auth bootstrap)",
                     _primary_vault_session.get("label", "?"),
                     creds[0].username,
                 )
-                cookie_list = [
+                cookie_list = (_primary_vault_session.get("metadata") or {}).get(
+                    "browser_cookies"
+                ) or [
                     {"name": k, "value": v, "url": base_url}
                     for k, v in _primary_vault_session["cookies"].items()
                 ]
@@ -5737,6 +5776,14 @@ async def _do_thinking_scan(run_id: int) -> None:
                             _primary_vault_session["extra_headers"]
                         )
                     )
+                await _restore_scoped_browser_storage(
+                    browser_ctx,
+                    pw_page,
+                    (_primary_vault_session.get("metadata") or {}).get(
+                        "storage_by_origin"
+                    )
+                    or {},
+                )
                 try:
                     await pw_page.reload(wait_until="domcontentloaded", timeout=12_000)
                 except Exception:
@@ -5753,6 +5800,12 @@ async def _do_thinking_scan(run_id: int) -> None:
 
         raw_cookies = await browser_ctx.cookies()
         cookie_jar = {c["name"]: c["value"] for c in raw_cookies}
+        from aespa.services.crawler import (
+            _capture_scoped_browser_storage,
+            _scoped_browser_cookies,
+        )
+
+        storage_by_origin = await _capture_scoped_browser_storage(browser_ctx, pw_page)
         # Primary browser-session cookies, used to restore default browser steps
         # after an isolated anonymous/other-user step in the JSON fallback loop.
         _primary_browser_cookies = list(raw_cookies)
@@ -5802,6 +5855,12 @@ async def _do_thinking_scan(run_id: int) -> None:
             and creds
             and (cookie_jar or _authorization_header(extra_headers))
         ):
+            browser_metadata = {
+                "login_url": _login_url_for_credential(login_url, creds[0]),
+                "storage_key": auth_storage_key,
+                "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                "storage_by_origin": storage_by_origin,
+            }
             configured_primary = {
                 "label": "configured_primary",
                 "kind": _session_kind(cookie_jar, extra_headers),
@@ -5811,6 +5870,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 "source": "configured credential auth bootstrap",
                 "extra_headers": extra_headers,
                 "cookies": cookie_jar,
+                "metadata": browser_metadata,
             }
             session_vault["configured_primary"] = configured_primary
             _record_session(
@@ -5819,10 +5879,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 session_data=configured_primary,
                 source="dynamic_scan_auth_bootstrap",
                 credential_id=creds[0].id,
-                metadata={
-                    "login_url": _login_url_for_credential(login_url, creds[0]),
-                    "storage_key": auth_storage_key,
-                },
+                metadata=browser_metadata,
             )
 
         # ── Detect client-controlled authorization cookies ─────────────────────
@@ -5890,7 +5947,10 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id, session_vault
         )
         _active_sessions[run_id] = deterministic_sessions
-        if run_id not in _thinking_stop_requested:
+        if (
+            run_id not in _thinking_stop_requested
+            and not scanner_policy.disable_deterministic_checks
+        ):
             await _run_deterministic_site_modules(
                 run_id=run_id,
                 base_url=base_url,
@@ -6215,7 +6275,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                         with contextlib.suppress(Exception):
                             await browser_ctx.clear_cookies()
                         if selected_session is not None:
-                            cookie_list = [
+                            cookie_list = (selected_session.get("metadata") or {}).get(
+                                "browser_cookies"
+                            ) or [
                                 {"name": k, "value": v, "url": url}
                                 for k, v in (
                                     selected_session.get("cookies") or {}
@@ -7070,13 +7132,15 @@ async def _do_thinking_scan(run_id: int) -> None:
     if all_results:
         _thinking_scan_status[run_id] = "analysing"
         _emit_thinking_status(run_id)
-        deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
-            run_id=run_id,
-            base_url=base_url,
-            pages_snapshot=pages_snapshot,
-            first_page_id=first_page_id,
-            results=all_results,
-        )
+        deterministic_saved = 0
+        if not scanner_policy.disable_deterministic_checks:
+            deterministic_saved = _run_deterministic_analysis_for_dynamic_results(
+                run_id=run_id,
+                base_url=base_url,
+                pages_snapshot=pages_snapshot,
+                first_page_id=first_page_id,
+                results=all_results,
+            )
         total_batches = len(llm_svc._chunk_probe_results(all_results))
         events_svc.emit(
             run_id,
@@ -7271,8 +7335,8 @@ async def _do_thinking_scan(run_id: int) -> None:
     _enforce_full_coverage = bool(
         coverage_mode == "enforce"
         and (
-            scanner_policy is None
-            or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+            scanner_policy is not None
+            and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
         )
     )
     if _enforce_full_coverage and not stopped:
@@ -7470,12 +7534,19 @@ async def _do_agentic_thinking_loop(
             },
         )
         try:
-            from aespa.services.crawler import _authenticate
+            from aespa.services.crawler import (
+                _authenticate,
+                _capture_scoped_browser_storage,
+                _scoped_browser_cookies,
+            )
 
             _cred_login_url = _login_url_for_credential(login_url, creds[0])
             await _authenticate(pw_page, _cred_login_url, creds[0], run_id)
             raw_cookies = await browser_ctx.cookies()
             new_cookies = {c["name"]: c["value"] for c in raw_cookies}
+            storage_by_origin = await _capture_scoped_browser_storage(
+                browser_ctx, pw_page
+            )
             # Refresh the httpx client's cookie jar in-place
             for name, value in new_cookies.items():
                 hx.cookies.set(name, value)
@@ -7487,6 +7558,11 @@ async def _do_agentic_thinking_loop(
                 session_vault["configured_primary"] = {
                     **prev,
                     "cookies": new_cookies,
+                    "metadata": {
+                        "login_url": _cred_login_url,
+                        "browser_cookies": _scoped_browser_cookies(raw_cookies),
+                        "storage_by_origin": storage_by_origin,
+                    },
                 }
                 _record_session(
                     run_id,
@@ -7494,7 +7570,7 @@ async def _do_agentic_thinking_loop(
                     session_data=session_vault["configured_primary"],
                     source="dynamic_scan_reauth",
                     credential_id=creds[0].id,
-                    metadata={"login_url": _cred_login_url},
+                    metadata=session_vault["configured_primary"]["metadata"],
                     run_kind="api" if is_api_run else "web",
                 )
             events_svc.emit(
@@ -7587,23 +7663,14 @@ async def _do_agentic_thinking_loop(
             invalid = status in (401, 419, 440)
             if invalid:
                 _emit_session_validator_log(
-                    f"Session {label} invalid and evicted: status {status}."
+                    run_id,
+                    f"Session {label} invalid and evicted: status {status}.",
+                    status="warning",
                 )
             elif status:
-                _emit_completion_log(f"Session {label} exercised: status {status}.")
-
-    def _emit_session_validator_log(message: str) -> None:
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "session_validator",
-                "status": "warning",
-                "message": f"Session Validator — {message}",
-                "data": {"emitter": "Session Validator"},
-                "_persist": True,
-            },
-        )
+                _emit_session_validator_log(
+                    run_id, f"Session {label} exercised: status {status}."
+                )
 
     def _emit_completion_log(message: str, *, status: str = "complete") -> None:
         events_svc.emit(
@@ -7630,8 +7697,8 @@ async def _do_agentic_thinking_loop(
             not is_api_run
             and coverage_mode == "enforce"
             and (
-                scanner_policy is None
-                or getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+                scanner_policy is not None
+                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             )
         )
         allowed, feedback, log_message = completion_policy.check_done(
@@ -9416,17 +9483,17 @@ async def _do_agentic_thinking_loop(
         scanner_policy and getattr(scanner_policy, "execution_monitor_enabled", False)
     )
     max_text_turns = int(
-        getattr(scanner_policy, "max_consecutive_text_turns", 3)
+        getattr(scanner_policy, "max_consecutive_text_turns", 0)
         if scanner_policy
-        else 3
+        else 0
     )
     enforce_coverage = bool(
         not is_api_run
         and coverage_mode == "enforce"
         and (
-            getattr(scanner_policy, "enforce_full_coverage_obligations", True)
+            getattr(scanner_policy, "enforce_full_coverage_obligations", False)
             if scanner_policy
-            else True
+            else False
         )
     )
 
@@ -10732,6 +10799,17 @@ async def _run_thinking_browser_action(
     pw_page.on("response", _cap_response)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _step_locator(step: dict):
+        if step.get("selector"):
+            return pw_page.locator(step["selector"]).first
+        if step.get("testid"):
+            return pw_page.get_by_test_id(step["testid"]).first
+        if step.get("role") and step.get("name"):
+            return pw_page.get_by_role(
+                step["role"], name=step["name"], exact=True
+            ).first
+        return None
+
     try:
         for raw_step in steps[:20]:
             if not isinstance(raw_step, dict):
@@ -10751,27 +10829,41 @@ async def _run_thinking_browser_action(
                         except Exception:
                             last_headers = {}
                 elif op in {"fill", "type"}:
-                    selector = raw_step.get("selector")
+                    locator = _step_locator(raw_step)
+                    selector = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
                     value = str(raw_step.get("value") or "")
-                    if not selector:
-                        action_log.append(f"{op} skipped: missing selector")
+                    if locator is None:
+                        action_log.append(f"{op} skipped: missing locator")
                         continue
                     action_log.append(
                         f"{op} {selector}={_compact_log_value(value, 120)}"
                     )
-                    loc = pw_page.locator(selector).first
-                    await loc.wait_for(state="visible", timeout=5_000)
+                    await locator.wait_for(state="visible", timeout=5_000)
                     if op == "fill":
-                        await loc.fill(value, timeout=5_000)
+                        await locator.fill(value, timeout=5_000)
                     else:
-                        await loc.type(value, delay=20, timeout=5_000)
-                elif op == "click":
-                    selector = raw_step.get("selector")
-                    if not selector:
-                        action_log.append("click skipped: missing selector")
+                        await locator.type(value, delay=20, timeout=5_000)
+                elif op in {"click", "check", "uncheck", "select_option"}:
+                    locator = _step_locator(raw_step)
+                    target = (
+                        raw_step.get("selector")
+                        or raw_step.get("testid")
+                        or f"{raw_step.get('role')}:{raw_step.get('name')}"
+                    )
+                    if locator is None:
+                        action_log.append(f"{op} skipped: missing locator")
                         continue
-                    action_log.append(f"click {selector}")
-                    await pw_page.locator(selector).first.click(timeout=5_000)
+                    action_log.append(f"{op} {target}")
+                    if op == "select_option":
+                        await locator.select_option(
+                            value=raw_step.get("value"), timeout=5_000
+                        )
+                    else:
+                        await getattr(locator, op)(timeout=5_000)
                 elif op == "press":
                     selector = raw_step.get("selector")
                     key = raw_step.get("key") or "Enter"

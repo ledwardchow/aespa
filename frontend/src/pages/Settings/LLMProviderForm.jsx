@@ -22,6 +22,16 @@ export function LLMProviderForm({
       ...p
     }));
   };
+  const onFormatChange = async api_format => {
+    upd({ api_format });
+    if (api_format !== "factory_droid" || form.models.trim()) return;
+    try {
+      const defaults = await api.getDefaultModels();
+      upd({ api_format, models: (defaults.factory_droid || []).join("\n") });
+    } catch (e) {
+      setError(e.message);
+    }
+  };
   const onSubmit = async e => {
     e.preventDefault();
     setError(null);
@@ -48,10 +58,9 @@ export function LLMProviderForm({
         })} /></div>
       <div className="field">
         <label>API format</label>
-        <select className="select" value={form.api_format} onChange={e => upd({
-          api_format: e.target.value
-        })}>
+        <select className="select" value={form.api_format} onChange={e => onFormatChange(e.target.value)}>
           <option value="anthropic">Anthropic API</option>
+          <option value="factory_droid">Factory Droid subscription</option>
           <option value="github_copilot">GitHub Copilot subscription</option>
           <option value="openai">OpenAI API</option>
           <option value="openai_compatible">OpenAI-compatible API</option>
@@ -64,14 +73,15 @@ export function LLMProviderForm({
           <option value="azure_foundry_anthropic">Azure AI Foundry (Anthropic API)</option>
         </select>
       </div>
-      <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
+      {form.api_format !== "factory_droid" && <div className="field"><label>Base URL <span className="field-optional">(optional)</span></label>
         <input type="url" value={form.base_url} placeholder={PROVIDER_BASE_URL_PLACEHOLDERS[form.api_format] || ""} onChange={e => upd({
           base_url: e.target.value
         })} />
         {form.api_format === "bedrock" && <div className="field-hint">Leave blank to use the default boto3 Bedrock endpoint for AWS_REGION / AWS_DEFAULT_REGION.</div>}
         {form.api_format === "github_copilot" && <div className="field-hint">No base URL is needed. AESPA uses the official GitHub Copilot SDK.</div>}
         {form.api_format === "bedrock_mantle" && <div className="field-hint">Best left blank — AESPA picks the endpoint per model (the <code>/openai/v1</code> path for <code>openai.gpt-5.x</code>, <code>/v1</code> for <code>gpt-oss</code>) and defaults to the us-east-2 region (or BEDROCK_MANTLE_REGION / AWS_REGION). Set only to point at another region's host, e.g. https://bedrock-mantle.us-west-2.api.aws.</div>}
-      </div>
+      </div>}
+      {form.api_format === "factory_droid" && <div className="field-hint">Uses the account signed in through Droid CLI. AESPA does not read or store Factory credentials.</div>}
       {form.api_format === "bedrock_mantle" && <div className="field"><label>Project ID <span className="field-optional">(optional)</span></label>
         <input type="text" value={form.project_id} placeholder="proj_5d5ykleja6cwpirysbb7" onChange={e => upd({
           project_id: e.target.value
@@ -91,7 +101,7 @@ export function LLMProviderForm({
         })}></textarea>
         <div className="field-hint">Enter one model per line, or separate models with commas. Leave blank to use the models shown in the placeholder.</div>
       </div>
-      <div className="field">
+      {form.api_format !== "factory_droid" && <div className="field">
         <label>{form.api_format === "github_copilot" ? "GitHub token" : "API Key"} <span className="field-optional">(optional)</span></label>
         <div className="row" style={{ gap: "8px" }}>
           <input
@@ -129,7 +139,7 @@ export function LLMProviderForm({
         {form.api_format === "bedrock" && <div className="field-hint">When blank, Aespa uses boto3 credentials from AWS_PROFILE, environment variables, SSO, or the instance/task role.</div>}
         {form.api_format === "bedrock_mantle" && <div className="field-hint">With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role — the same fallback as the Bedrock Runtime provider.</div>}
         {form.api_format === "github_copilot" && <div className="field-hint">Leave blank to use the Copilot username above, or Copilot CLI's selected default account when no username is set. An explicit token takes precedence. For headless use, enter a GitHub user token whose account has Copilot access or set COPILOT_GITHUB_TOKEN.</div>}
-      </div>
+      </div>}
       <div className="divider" />
       <div className="form-section-title">Rate Limits <span className="field-optional">(optional)</span></div>
       <div className="field-hint" style={{

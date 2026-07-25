@@ -17,6 +17,7 @@ def _utcnow() -> datetime:
 class AuthMode(str, Enum):
     auto = "auto"  # existing single-page Playwright form fill
     totp = "totp"  # auto + TOTP 2FA code from stored seed
+    email_otp = "email_otp"  # auto + OTP read from a test mailbox page
     entra_id = "entra_id"  # Microsoft Entra ID multi-page browser flow
     guided = "guided"  # open headed browser, user logs in manually
 
@@ -48,6 +49,10 @@ class Credential(SQLModel, table=True):
     site_id: int = Field(foreign_key="site.id", index=True)
     username: str
     password: str  # plaintext — local pentesting tool
+    # Optional JSON list of named login fields.  ``NULL`` means this is a legacy
+    # username/password credential; the API presents those two columns as fields
+    # without rewriting existing rows.
+    login_fields_json: Optional[str] = Field(default=None)
     label: Optional[str] = Field(default=None)
     login_url: Optional[str] = Field(default=None)
     # ── Advanced auth fields ──────────────────────────────────────────────────
@@ -55,6 +60,7 @@ class Credential(SQLModel, table=True):
     totp_seed: Optional[str] = Field(
         default=None
     )  # base32 TOTP secret (write-only; not returned by API)
+    test_mailbox_url: Optional[str] = Field(default=None)
 
     site: Optional[Site] = Relationship(back_populates="credentials")
 
@@ -246,6 +252,7 @@ class ApiEndpointTest(SQLModel, table=True):
 
 class LLMProviderAPI(str, Enum):
     anthropic = "anthropic"
+    factory_droid = "factory_droid"
     github_copilot = "github_copilot"
     openai = "openai"
     openai_compatible = "openai_compatible"
@@ -336,8 +343,9 @@ class ScannerPolicy(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     execution_monitor_enabled: bool = Field(default=False)
-    max_consecutive_text_turns: int = Field(default=3)
-    enforce_full_coverage_obligations: bool = Field(default=True)
+    disable_deterministic_checks: bool = Field(default=False)
+    max_consecutive_text_turns: int = Field(default=0)
+    enforce_full_coverage_obligations: bool = Field(default=False)
     scan_mode: str = Field(default="aggressive")
     max_probes_per_page: int = Field(default=50)
     thinking_max_steps: int = Field(default=120)
@@ -506,7 +514,7 @@ class TestRun(SQLModel, table=True):
     max_depth: int = Field(default=3)
     max_pages: int = Field(default=500)
     # ``url`` preserves the legacy link-following crawler. ``interactive`` also
-    # records safe, reproducible client-side browser states (tabs, dialogs, etc.).
+    # records safe, reproducible browser states and conditional workflows.
     crawler_mode: str = Field(
         default="url",
         sa_column=Column(String, nullable=False, server_default=text("'url'")),

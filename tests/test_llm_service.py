@@ -3173,6 +3173,27 @@ def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
     assert events[-1]["totals"] == usage
 
 
+def test_droid_usage_callback_records_factory_credits():
+    run_id = 888890
+    llm.set_run_context(run_id, emit_fn=None, run_kind="web")
+    callback = llm._droid_usage_callback()
+    llm.clear_run_context()
+
+    callback(
+        "claude-sonnet-4-6",
+        100,
+        20,
+        30,
+        10,
+        factory_credits=434,
+        requests=1,
+    )
+
+    usage = llm.get_run_token_usage(run_id)
+    assert usage["total_factory_credits"] == 434
+    assert usage["by_model"]["claude-sonnet-4-6"]["provider"] == "factory_droid"
+
+
 def test_google_usage_treats_none_counters_as_zero(monkeypatch):
     recorded = []
     monkeypatch.setattr(

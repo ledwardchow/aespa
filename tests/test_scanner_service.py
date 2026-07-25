@@ -50,6 +50,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
             follow_redirects=True,
             allow_subdomains=True,
             execution_monitor_enabled=False,
+            disable_deterministic_checks=True,
             max_consecutive_text_turns=3,
             enforce_full_coverage_obligations=True,
         ),
@@ -63,6 +64,7 @@ def test_execution_snapshot_records_reproducible_config_without_secrets(monkeypa
     snapshot = json.loads(snapshot_raw)
     assert snapshot["model"]["model"] == "minimax/m3"
     assert snapshot["coverage_mode"] == "enforce"
+    assert snapshot["policy"]["disable_deterministic_checks"] is True
     assert len(snapshot["crawl_sha256"]) == 64
     assert "must-not-be-persisted" not in snapshot_raw
 
@@ -143,6 +145,35 @@ def test_reporting_handoff_replaces_test_lead_decision_status(monkeypatch):
                 "status": "active",
                 "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
                 "outcome": "Reporting is analysing 12 probe result(s) across 3 LLM turn(s).",
+                "_persist": True,
+            },
+        )
+    ]
+
+
+def test_session_exercised_log_uses_session_validator_label(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        scanner.events_svc,
+        "emit",
+        lambda run_id, event: emitted.append((run_id, event)),
+    )
+
+    scanner._emit_session_validator_log(
+        42, "Session anonymous exercised: status 200."
+    )
+
+    assert emitted == [
+        (
+            42,
+            {
+                "type": "scanner_phase",
+                "phase": "session_validator",
+                "status": "complete",
+                "message": (
+                    "Session Validator — Session anonymous exercised: status 200."
+                ),
+                "data": {"emitter": "Session Validator"},
                 "_persist": True,
             },
         )

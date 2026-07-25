@@ -194,8 +194,8 @@ export function SiteDetail({
             <div className="site-credentials-list">
               {site.credentials.map(c => <div key={c.id} className="site-credential-row">
                   <div>
-                    <div className="site-credential-name">{c.label || c.username}</div>
-                    {c.label && <div className="site-credential-user">{c.username}</div>}
+                    <div className="site-credential-name">{c.label || (c.login_fields?.[0]?.key === "username" ? c.username : "Test account")}</div>
+                    <div className="site-credential-user">{(c.login_fields || []).map(field => field.label).join(" + ") || "Username + Password"}</div>
                   </div>
                   <div className="site-credential-login mono">
                     {c.login_url || site.login_url || "No login URL"}

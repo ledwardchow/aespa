@@ -15,6 +15,7 @@ def test_get_default_models(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert "factory_droid" in data
     assert "github_copilot" in data
     assert "openai" in data
     assert "openai_compatible" in data
@@ -33,6 +34,7 @@ def test_get_default_models(client: TestClient):
         "claude-sonnet-5",
         "claude-opus-4.8",
     ]
+    assert isinstance(data["factory_droid"], list)
     assert data["openai"][:3] == [
         "gpt-5.6-luna",
         "gpt-5.6-terra",
@@ -166,6 +168,27 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/settings/llm/model-configs", json=payload)
+
+
+def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
+    response = _make_provider(
+        client,
+        name="Factory",
+        api_format="factory_droid",
+        base_url="https://should-not-be-stored.example",
+        models=["gpt-5.6-luna"],
+        api_key="should-not-be-stored",
+        project_id="should-not-be-stored",
+        username="should-not-be-stored",
+    )
+
+    assert response.status_code == 200
+    provider = response.json()
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+    assert provider["project_id"] is None
+    assert provider["username"] is None
+    assert provider["models"] == ["gpt-5.6-luna"]
 
 
 def test_create_provider_and_profile(client: TestClient):
@@ -506,8 +529,9 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
-    assert data["max_consecutive_text_turns"] == 3
-    assert data["enforce_full_coverage_obligations"] is True
+    assert data["disable_deterministic_checks"] is False
+    assert data["max_consecutive_text_turns"] == 0
+    assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
@@ -523,6 +547,7 @@ def test_upsert_scanner_policy(client: TestClient):
         {
             "scan_mode": "aggressive",
             "execution_monitor_enabled": True,
+            "disable_deterministic_checks": True,
             "max_consecutive_text_turns": 0,
             "enforce_full_coverage_obligations": False,
             "max_probes_per_page": 25,
@@ -536,6 +561,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is True
+    assert data["disable_deterministic_checks"] is True
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
     assert data["scan_mode"] == "aggressive"
