@@ -230,11 +230,14 @@ export function WebRunWorkProgramTab({
                   <td style={{
                 padding: "4px 8px"
               }}>
+                    {pg.state_kind === "interactive" && pg.state_label && <div style={{
+                  fontWeight: 600
+                }}>{pg.state_label}</div>}
                     <div className="mono" style={{
                   fontSize: 11,
                   wordBreak: "break-all"
                 }} title={pg.url}>{pg.url}</div>
-                    {pg.title && <div style={{
+                    {pg.title && pg.title !== pg.state_label && <div style={{
                   fontSize: 10,
                   color: "var(--muted)"
                 }}>{pg.title}</div>}

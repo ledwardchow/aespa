@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Literal, Optional
@@ -14,16 +15,48 @@ from pydantic import (
 )
 
 
+class LoginField(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=100)
+    value: str = Field(min_length=1)
+    sensitive: bool = False
+    selector: str | None = None
+
+
 class CredentialIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    username: str | None = None
+    password: str | None = None
+    login_fields: list[LoginField] = Field(default_factory=list)
     label: str | None = None
     login_url: HttpUrl | None = None
     # Advanced auth
     auth_mode: str = "auto"
     totp_seed: str | None = None  # base32 TOTP secret; stored write-only
+    test_mailbox_url: HttpUrl | None = None
+
+    @model_validator(mode="after")
+    def _check_login_values(self) -> "CredentialIn":
+        if self.login_fields:
+            keys = [field.key for field in self.login_fields]
+            if len(keys) != len(set(keys)):
+                raise ValueError("login field keys must be unique")
+            # Keep the old required columns populated for compatibility with
+            # older code and exports. They are not used to label custom fields.
+            self.username = self.login_fields[0].value
+            self.password = (
+                self.login_fields[1].value if len(self.login_fields) > 1 else ""
+            )
+        elif not self.username or not self.password:
+            raise ValueError("provide username/password or at least one login field")
+        if self.auth_mode == "email_otp" and self.test_mailbox_url is None:
+            raise ValueError(
+                "test_mailbox_url is required for email_otp authentication"
+            )
+        return self
 
 
 class CredentialOut(BaseModel):
@@ -32,10 +65,51 @@ class CredentialOut(BaseModel):
     id: int
     username: str
     password: str
+    login_fields: list[LoginField] = Field(default_factory=list)
     label: str | None = None
     login_url: str | None = None
     auth_mode: str = "auto"
+    test_mailbox_url: str | None = None
     # totp_seed is intentionally excluded (write-only)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _load_login_fields(cls, value):
+        if isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = {
+                "id": value.id,
+                "username": value.username,
+                "password": value.password,
+                "label": value.label,
+                "login_url": value.login_url,
+                "auth_mode": value.auth_mode,
+                "test_mailbox_url": value.test_mailbox_url,
+                "login_fields_json": getattr(value, "login_fields_json", None),
+            }
+        raw = data.pop("login_fields_json", None)
+        try:
+            fields = data.get("login_fields") or (json.loads(raw) if raw else [])
+        except (TypeError, ValueError):
+            fields = []
+        if not fields:
+            fields = [
+                {
+                    "key": "username",
+                    "label": "Username",
+                    "value": data.get("username") or "",
+                    "sensitive": False,
+                },
+                {
+                    "key": "password",
+                    "label": "Password",
+                    "value": data.get("password") or "",
+                    "sensitive": True,
+                },
+            ]
+        data["login_fields"] = fields
+        return data
 
 
 class SiteBase(BaseModel):
@@ -351,6 +425,7 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "factory_droid",
     "github_copilot",
     "openai",
     "openai_compatible",
@@ -365,6 +440,7 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "factory_droid": [],
     "github_copilot": [
         "auto",
         "gpt-5.6-luna",
@@ -607,8 +683,9 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
-    max_consecutive_text_turns: int = Field(default=3, ge=0, le=50)
-    enforce_full_coverage_obligations: bool = True
+    disable_deterministic_checks: bool = False
+    max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
+    enforce_full_coverage_obligations: bool = False
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)

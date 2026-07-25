@@ -959,6 +959,52 @@ def test_thinking_context_tools_filter_routes_and_history():
     assert history_result["matches"][0]["response_status"] == 200
 
 
+def test_page_detail_preserves_interactive_replay_recipe_and_legacy_rows():
+    action = {
+        "kind": "select_option",
+        "role": "combobox",
+        "name": "Cover type",
+        "value": "comprehensive",
+    }
+    page = {
+        "id": 2,
+        "url": "https://target.local/quote/step-2",
+        "state_kind": "interactive",
+        "replay_steps_json": json.dumps(
+            {"root_url": "https://target.local/quote", "steps": [action]}
+        ),
+    }
+
+    detail = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2},
+        pages_snapshot=[page],
+        findings_snapshot=[],
+        history=[],
+    )
+    legacy = scanner._run_thinking_context_tool(
+        "page_detail",
+        {"page_id": 2},
+        pages_snapshot=[{**page, "replay_steps_json": json.dumps([action])}],
+        findings_snapshot=[],
+        history=[],
+    )
+
+    assert detail["browser_replay"] == {
+        "url": "https://target.local/quote",
+        "steps": [
+            {"op": "goto", "url": "https://target.local/quote"},
+            {
+                "op": "select_option",
+                "role": "combobox",
+                "name": "Cover type",
+                "value": "comprehensive",
+            },
+        ],
+    }
+    assert legacy["browser_replay"]["url"] == page["url"]
+
+
 def test_thinking_context_tools_compare_mutate_and_extract():
     history = [
         {
