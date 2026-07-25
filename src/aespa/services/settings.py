@@ -273,15 +273,21 @@ def _apply_llm_provider(
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_key is not None:
+    if payload.api_format == "factory_droid":
+        provider.api_key = None
+    elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
-    provider.base_url = payload.base_url
+    provider.base_url = (
+        None if payload.api_format == "factory_droid" else payload.base_url
+    )
     username = (payload.username or "").strip()
     provider.username = (
         username or None if payload.api_format == "github_copilot" else None
     )
-    provider.project_id = payload.project_id
+    provider.project_id = (
+        None if payload.api_format == "factory_droid" else payload.project_id
+    )
     provider.models_json = _json_dumps(payload.models)
     provider.max_tpm = payload.max_tpm
     provider.max_rpm = payload.max_rpm
@@ -542,9 +548,12 @@ def _json_dumps(value) -> str:
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
-        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 3),
+        disable_deterministic_checks=getattr(
+            cfg, "disable_deterministic_checks", False
+        ),
+        max_consecutive_text_turns=getattr(cfg, "max_consecutive_text_turns", 0),
         enforce_full_coverage_obligations=getattr(
-            cfg, "enforce_full_coverage_obligations", True
+            cfg, "enforce_full_coverage_obligations", False
         ),
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
@@ -578,6 +587,7 @@ def upsert_scanner_policy(
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
     cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    cfg.disable_deterministic_checks = payload.disable_deterministic_checks
     cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
     cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
     cfg.scan_mode = payload.scan_mode

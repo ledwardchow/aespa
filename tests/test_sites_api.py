@@ -76,6 +76,99 @@ def test_create_site_with_auth_and_credentials(client):
     assert len(data["credentials"]) == 2
     assert data["credentials"][0]["username"] == "admin"
     assert data["credentials"][0]["label"] == "admin"
+    assert data["credentials"][0]["login_fields"] == [
+        {
+            "key": "username",
+            "label": "Username",
+            "value": "admin",
+            "sensitive": False,
+            "selector": None,
+        },
+        {
+            "key": "password",
+            "label": "Password",
+            "value": "admin123",
+            "sensitive": True,
+            "selector": None,
+        },
+    ]
+
+
+def test_create_site_with_named_login_fields(client):
+    r = make_site(
+        client,
+        name="Policy Portal",
+        requires_auth=True,
+        login_url="https://policy.local/login",
+        credentials=[
+            {
+                "label": "Test policyholder",
+                "login_fields": [
+                    {
+                        "key": "policy_number",
+                        "label": "Policy Number",
+                        "value": "ABC123456",
+                        "sensitive": False,
+                    },
+                    {
+                        "key": "postcode",
+                        "label": "Postcode",
+                        "value": "2000",
+                        "sensitive": True,
+                        "selector": "#postcode",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert r.status_code == 201
+    credential = r.json()["credentials"][0]
+    assert credential["username"] == "ABC123456"
+    assert credential["password"] == "2000"
+    assert credential["login_fields"][0]["label"] == "Policy Number"
+    assert credential["login_fields"][1]["selector"] == "#postcode"
+
+
+def test_create_site_with_email_otp_mailbox(client):
+    mailbox_url = "https://mail.test/inbox/alice"
+    response = make_site(
+        client,
+        name="Email OTP",
+        requires_auth=True,
+        login_url="https://app.local/login",
+        credentials=[
+            {
+                "username": "alice",
+                "password": "secret",
+                "auth_mode": "email_otp",
+                "test_mailbox_url": mailbox_url,
+            }
+        ],
+    )
+
+    assert response.status_code == 201
+    credential = response.json()["credentials"][0]
+    assert credential["auth_mode"] == "email_otp"
+    assert credential["test_mailbox_url"] == mailbox_url
+
+
+def test_create_site_rejects_email_otp_without_mailbox(client):
+    response = make_site(
+        client,
+        name="Email OTP",
+        requires_auth=True,
+        login_url="https://app.local/login",
+        credentials=[
+            {
+                "username": "alice",
+                "password": "secret",
+                "auth_mode": "email_otp",
+            }
+        ],
+    )
+
+    assert response.status_code == 422
 
 
 def test_create_site_supports_credential_specific_login_urls(client):

@@ -284,6 +284,8 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "credential", "login_url", "TEXT")
     _ensure_column(engine, "credential", "auth_mode", "TEXT NOT NULL DEFAULT 'auto'")
     _ensure_column(engine, "credential", "totp_seed", "TEXT")
+    _ensure_column(engine, "credential", "test_mailbox_url", "TEXT")
+    _ensure_column(engine, "credential", "login_fields_json", "TEXT")
     _ensure_column(engine, "crawled_page", "error_message", "TEXT")
     _ensure_column(engine, "crawled_page", "in_scope", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(
@@ -386,14 +388,20 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(
         engine,
         "scanner_policy",
+        "disable_deterministic_checks",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        engine,
+        "scanner_policy",
         "max_consecutive_text_turns",
-        "INTEGER NOT NULL DEFAULT 3",
+        "INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(
         engine,
         "scanner_policy",
         "enforce_full_coverage_obligations",
-        "BOOLEAN NOT NULL DEFAULT 1",
+        "BOOLEAN NOT NULL DEFAULT 0",
     )
     _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"
