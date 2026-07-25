@@ -777,6 +777,19 @@ legend {
   border-bottom: 1px solid var(--border);
 }
 
+.settings-list-head > div.sortable {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s ease;
+}
+
+.settings-list-head > div.sortable:hover {
+  color: var(--fg);
+}
+
 .settings-list-row {
   min-height: 52px;
   padding-top: 10px;

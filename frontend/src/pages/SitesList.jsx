@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { nav } from "../lib/router";
 import { api } from "../lib/api";
 import { IconPlus } from "../components/Icons";
@@ -10,7 +10,10 @@ export function SitesList() {
   const [sites, setSites] = useState(null);
   const [error, setError] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [sortField, setSortField] = useState("name");
+  const [sortDir, setSortDir] = useState("asc");
   const importRef = useRef(null);
+
   const load = useCallback(async () => {
     try {
       setSites(await api.listSites());
@@ -18,9 +21,49 @@ export function SitesList() {
       setError(e.message);
     }
   }, []);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedSites = useMemo(() => {
+    if (!sites) return [];
+    return [...sites].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "requires_auth") {
+        valA = a.requires_auth ? 1 : 0;
+        valB = b.requires_auth ? 1 : 0;
+      } else if (sortField === "credential_count") {
+        valA = a.credential_count || 0;
+        valB = b.credential_count || 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [sites, sortField, sortDir]);
+
   const onDelete = async s => {
     if (!confirm(`Delete "${s.name}"? This also removes all test runs and credentials.`)) return;
     try {
@@ -30,9 +73,11 @@ export function SitesList() {
       setError(e.message);
     }
   };
+
   const onExport = s => {
     window.location.href = `/api/sites/${s.id}/export`;
   };
+
   const onImportFile = async e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -49,6 +94,7 @@ export function SitesList() {
       setImporting(false);
     }
   };
+
   return <>
     <div className="topbar">
       <div className="topbar-title">Sites</div>
@@ -84,8 +130,16 @@ export function SitesList() {
               width: "20%"
             }} />
             </colgroup>
-            <thead><tr><th>Name</th><th>Base URL</th><th>Auth</th><th>Credentials</th><th></th></tr></thead>
-            <tbody>{sites.map(s => <tr key={s.id}>
+            <thead>
+              <tr>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("base_url")}>Base URL {sortArrow("base_url")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("requires_auth")}>Auth {sortArrow("requires_auth")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("credential_count")}>Credentials {sortArrow("credential_count")}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>{sortedSites.map(s => <tr key={s.id}>
                 <td><a href={`#/sites/${s.id}`} style={{
                   fontWeight: 600
                 }}>{s.name}</a></td>
