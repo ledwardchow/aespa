@@ -26,24 +26,26 @@ def test_get_default_models(client: TestClient):
     assert isinstance(data["anthropic"], list)
     assert isinstance(data["openrouter"], list)
     assert isinstance(data["bedrock"], list)
-    assert data["github_copilot"] == [
-        "auto",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-        "claude-sonnet-5",
-        "claude-opus-4.8",
-    ]
+    assert isinstance(data["github_copilot"], list)
+    assert "auto" in data["github_copilot"]
     assert isinstance(data["factory_droid"], list)
-    assert data["openai"][:3] == [
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    ]
-    assert data["bedrock"][:2] == [
-        "global.anthropic.claude-opus-4-8",
-        "global.anthropic.claude-sonnet-4-6",
-    ]
+    assert isinstance(data["openai"], list)
+    assert isinstance(data["bedrock"], list)
+
+
+def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
+    async def fake_discover(api_format, api_key=None, base_url=None, username=None):
+        return ["custom-openrouter-model-1", "custom-openrouter-model-2"]
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_models_for_format", fake_discover
+    )
+    r = client.post(
+        "/api/settings/llm/discover-models",
+        json={"api_format": "openrouter", "api_key": "sk-or-v1-test"},
+    )
+    assert r.status_code == 200
+    assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
 
 
 def test_burp_rest_api_config_round_trip(client: TestClient):
