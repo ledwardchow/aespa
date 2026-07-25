@@ -258,10 +258,10 @@ export const PROVIDER_DEFAULT_BASE_URLS = {
 export const PROVIDER_MODEL_PLACEHOLDERS = {
   anthropic: "claude-opus-4-8\nclaude-sonnet-4-5",
   factory_droid: "Models are loaded from the signed-in Droid CLI",
-  github_copilot: "auto\ngpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\nclaude-sonnet-5\nclaude-opus-4.8",
+  github_copilot: "auto\nModels are loaded from GitHub Copilot API",
   openai: "gpt-5.6-luna\ngpt-5.6-terra\ngpt-5.6-sol\ngpt-5.5\ngpt-5.4\ngpt-4.1",
   openai_compatible: "llama-3.1-8b-instruct\nqwen2.5-coder",
-  openrouter: "openrouter/owl-alpha\nnvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  openrouter: "Models are loaded from OpenRouter API",
   google: "gemini-2.5-pro-preview-05-06\ngemini-2.5-flash-preview-04-17",
   bedrock: "global.anthropic.claude-opus-4-8\nglobal.anthropic.claude-sonnet-4-6",
   bedrock_mantle: "openai.gpt-5.5\nopenai.gpt-oss-120b",
