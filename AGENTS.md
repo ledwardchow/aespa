@@ -57,6 +57,11 @@ Frontend refactoring notes:
 - Runtime config is env-only via `pydantic-settings`, prefix `AESPA_` (see `config.py`): `AESPA_DATABASE_URL`, `AESPA_HOST`, `AESPA_PORT`. Copy `.env.example` to `.env`.
 - LLM provider config is not in env. It lives in the DB and is edited through the UI. `LLMProviderConfig` holds reusable connections, keys, and rate limits; `LLMConfig` is a runtime profile selecting a provider and model.
 - Supported LLM provider formats include anthropic, openai, openai_compatible, openrouter, google, bedrock, azure_openai, and azure_foundry. The multi-provider client lives in `services/llm.py`.
+- Provider model discovery: Endpoint `GET /api/llm/models` dynamically discovers models for SDK-backed providers (e.g. `factory_droid`, `github_copilot`) via provider clients (`droid_provider.discover_models()`, `copilot_provider.discover_models()`) while preserving `PROVIDER_DEFAULT_MODELS` as fallback choices.
+
+## Sandbox Execution Notes
+
+- When inspecting Python virtual environments or installed packages under sandbox mode, `uv run` may attempt network fetches and `python` binaries managed by `pyenv` may trigger `dyld` file sandbox blocks on `~/.pyenv/versions/`. Prefer inspecting `.venv` package source files directly via `view_file`, `grep_search`, or lightweight string/JSON scripts (e.g. Node/Python tools without `pyenv` dynamic library linkage) before requesting sandbox bypass.
 
 ## Architecture
 
