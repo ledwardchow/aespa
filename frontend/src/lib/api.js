@@ -103,6 +103,7 @@ export const api = {
   exportLLMConfig:  ()            => req("/api/settings/llm/export"),
   importLLMConfig:  (b)           => req("/api/settings/llm/import", { method:"POST", body:b }),
   getDefaultModels: ()            => req("/api/settings/llm/models"),
+  discoverModels:   (b)           => req("/api/settings/llm/discover-models", { method:"POST", body:b }),
   getScannerPolicy: ()            => req("/api/settings/scanner-policy"),
   upsertScannerPolicy: (b)        => req("/api/settings/scanner-policy", { method:"PUT", body:b }),
   getBurpRestApiConfig: ()        => req("/api/settings/burp-rest-api"),

@@ -218,6 +218,23 @@ async def close_clients() -> None:
             shutil.rmtree(entry.base_directory, ignore_errors=True)
 
 
+async def discover_models(proxy_url: str | None = None) -> list[str]:
+    """Return model IDs available through the GitHub Copilot SDK."""
+    config = LLMConfig(provider="github_copilot", model="auto")
+    client = await _get_client(config, proxy_url)
+    models = await client.list_models()
+    discovered = [
+        getattr(model, "id", None) or getattr(model, "name", "")
+        for model in models
+        if getattr(model, "id", None) or getattr(model, "name", None)
+    ]
+    discovered = [m for m in discovered if m]
+    if "auto" not in discovered:
+        discovered.insert(0, "auto")
+    return discovered
+
+
+
 def _system_message(content: str) -> dict[str, Any]:
     """Keep Copilot safety policy while replacing code-agent-specific guidance."""
     remove = {"action": "remove"}

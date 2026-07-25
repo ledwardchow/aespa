@@ -432,3 +432,21 @@ def test_plain_completion_uses_no_tools_and_supports_image(monkeypatch):
         }
     ]
     assert session.disconnected is True
+
+
+def test_discover_models(monkeypatch):
+    class _Model:
+        def __init__(self, model_id):
+            self.id = model_id
+
+    class _FakeDiscoverClient:
+        async def list_models(self):
+            return [_Model("gpt-4o"), _Model("claude-3-7-sonnet")]
+
+    async def fake_get_client(config, proxy_url):
+        return _FakeDiscoverClient()
+
+    monkeypatch.setattr(copilot_provider, "_get_client", fake_get_client)
+    models = asyncio.run(copilot_provider.discover_models())
+    assert models == ["auto", "gpt-4o", "claude-3-7-sonnet"]
+

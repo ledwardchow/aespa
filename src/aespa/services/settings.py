@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request
@@ -228,6 +229,53 @@ def list_llm_providers(session: Session) -> list[LLMProviderConfigOut]:
         select(LLMProviderConfig).order_by(LLMProviderConfig.updated_at.desc())
     ).all()
     return [_provider_out(provider) for provider in providers]
+
+
+async def discover_models_for_format(
+    api_format: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    username: str | None = None,
+) -> list[str]:
+    if api_format == "factory_droid":
+        from aespa.services import droid_provider
+
+        return await droid_provider.discover_models()
+    elif api_format == "github_copilot":
+        from aespa.services import copilot_provider
+
+        return await copilot_provider.discover_models()
+    elif api_format == "openrouter":
+        from aespa.services import openrouter_provider
+
+        key = api_key or os.getenv("OPENROUTER_API_KEY")
+        return await openrouter_provider.discover_models(api_key=key, base_url=base_url)
+    elif api_format == "openai":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        return await model_discovery.discover_openai_models(api_key=key, base_url=base_url)
+    elif api_format == "openai_compatible":
+        from aespa.services import model_discovery
+
+        url = base_url or "http://localhost:1234/v1"
+        return await model_discovery.discover_openai_models(api_key=api_key, base_url=url)
+    elif api_format == "anthropic":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        return await model_discovery.discover_anthropic_models(api_key=key, base_url=base_url)
+    elif api_format == "google":
+        from aespa.services import model_discovery
+
+        key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        return await model_discovery.discover_google_models(api_key=key, base_url=base_url)
+    elif api_format == "bedrock":
+        from aespa.services import model_discovery
+
+        return await model_discovery.discover_bedrock_models(region_name=base_url)
+    return []
+
 
 
 def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:

@@ -570,7 +570,7 @@ class LLMProviderConfigIn(BaseModel):
                 cleaned.append(model)
                 seen.add(key)
         if not cleaned:
-            raise ValueError("at least one model name is required")
+            raise ValueError("models must contain at least one non-empty model string")
         return cleaned
 
     @field_validator("base_url")
@@ -597,8 +597,16 @@ class LLMProviderConfigOut(BaseModel):
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
-    max_rpm: int | None = None
     updated_at: datetime
+
+
+class LLMModelDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    api_format: str
+    api_key: str | None = None
+    base_url: str | None = None
+    username: str | None = None
 
 
 class LLMConfigIn(BaseModel):

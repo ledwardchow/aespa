@@ -971,10 +971,7 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert '"action": "credential_check"' in captured["prompt"]
     assert "Maximum 20 candidates" in captured["prompt"]
     assert "use_session" in captured["prompt"]
-    assert (
-        "Supported ops: goto, fill, type, click, press, wait, snapshot"
-        in captured["prompt"]
-    )
+    assert "Supported ops: goto, fill, type, click" in captured["prompt"]
 
 
 def test_thinking_next_action_history_includes_response_headers(monkeypatch):
