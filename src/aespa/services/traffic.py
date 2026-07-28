@@ -39,6 +39,46 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_playwright_post_data(request) -> Optional[str]:
+    """Best-effort extraction of Playwright request body.
+
+    Some Playwright requests carry binary/compressed payloads where
+    ``request.post_data`` raises UnicodeDecodeError. This helper never raises.
+    """
+    try:
+        post_data = request.post_data
+        if isinstance(post_data, str):
+            return post_data
+        if isinstance(post_data, (bytes, bytearray)):
+            return bytes(post_data).decode(errors="replace")
+    except UnicodeDecodeError:
+        try:
+            post_data_bytes = request.post_data_buffer
+            if isinstance(post_data_bytes, (bytes, bytearray)) and post_data_bytes:
+                return f"[binary, {len(post_data_bytes)} bytes]"
+        except Exception:
+            return "[binary request body]"
+        return "[binary request body]"
+    except Exception:
+        pass
+
+    try:
+        pd_json = request.post_data_json
+        if pd_json is not None:
+            return json.dumps(pd_json)
+    except Exception:
+        pass
+
+    try:
+        post_data_bytes = request.post_data_buffer
+        if isinstance(post_data_bytes, (bytes, bytearray)) and post_data_bytes:
+            return bytes(post_data_bytes).decode(errors="replace")
+    except Exception:
+        pass
+
+    return None
+
+
 # ── Low-level writer ──────────────────────────────────────────────────────────
 
 # Sentinel test_run_id used when writing API-scan traffic (no real TestRun row).
@@ -387,14 +427,7 @@ def setup_playwright_logging(
         # explicitly set, which is why callers were seeing just the host header.
         rid = id(request)
         _pending[rid] = time.monotonic()
-        post_data = request.post_data
-        if post_data is None:
-            try:
-                pd_json = request.post_data_json
-                if pd_json is not None:
-                    post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+        post_data = _safe_playwright_post_data(request)
         _req_data[rid] = {
             "method": request.method,
             "post_data": post_data,
@@ -424,14 +457,7 @@ def setup_playwright_logging(
         # Prefer the body captured at request time; fall back to response.request.
         post_data = req_data.get("post_data")
         if post_data is None:
-            try:
-                post_data = response.request.post_data
-                if post_data is None:
-                    pd_json = response.request.post_data_json
-                    if pd_json is not None:
-                        post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+            post_data = _safe_playwright_post_data(response.request)
 
         # Use response.body() (raw bytes) — more reliable than response.text().
         # text() can fail if encoding detection breaks or the body is already consumed;
@@ -493,14 +519,7 @@ def setup_playwright_logging(
 
         post_data = req_data.get("post_data")
         if post_data is None:
-            try:
-                post_data = request.post_data
-                if post_data is None:
-                    pd_json = request.post_data_json
-                    if pd_json is not None:
-                        post_data = json.dumps(pd_json)
-            except Exception:
-                pass
+            post_data = _safe_playwright_post_data(request)
 
         error_text = request.failure or "Request failed"
 

@@ -572,6 +572,9 @@ class TestRun(SQLModel, table=True):
     waf_provider: Optional[str] = Field(default=None)
     waf_confidence: Optional[str] = Field(default=None)  # "high" | "medium"
     waf_evidence: Optional[str] = Field(default=None)
+    # When set, the crawl runs as this single credential only (no anon phase,
+    # no other credentials).  NULL = crawl all phases (default behaviour).
+    crawl_credential_id: Optional[int] = Field(default=None, foreign_key="credential.id")
 
 
 class CrawledPage(SQLModel, table=True):

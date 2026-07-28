@@ -42,6 +42,7 @@ from aespa.schemas import (
     ScannerSessionUpdate,
     ScannerSessionValidationResult,
     ScopeUpdate,
+    StartCrawlBody,
     TargetIntelItemOut,
     TargetIntelSummary,
     TestRunCreate,
@@ -917,6 +918,7 @@ def update_test_run(
 @router.post("/api/test-runs/{run_id}/start", response_model=TestRunSummary)
 async def start_test_run(
     run_id: int,
+    body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     run = _get_run_or_404(session, run_id)
@@ -937,6 +939,19 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    if body and body.crawl_credential_id is not None:
+        from aespa.models import Credential
+
+        cred = session.get(Credential, body.crawl_credential_id)
+        if cred is None or cred.site_id != run.site_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found or does not belong to this site",
+            )
+        run.crawl_credential_id = body.crawl_credential_id
+    else:
+        # Reset to "all credentials" if no specific user was requested.
+        run.crawl_credential_id = None
     # Clear stale per_user_progress synchronously so the response (and the
     # first poll) never contains data from a previous crawl.
     run.per_user_progress = None
@@ -949,6 +964,7 @@ async def start_test_run(
 @router.post("/api/test-runs/{run_id}/restart", response_model=TestRunSummary)
 async def restart_test_run(
     run_id: int,
+    body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     """Wipe all crawled pages/links for this run and start a fresh crawl."""
@@ -960,6 +976,18 @@ async def restart_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    if body and body.crawl_credential_id is not None:
+        from aespa.models import Credential
+
+        cred = session.get(Credential, body.crawl_credential_id)
+        if cred is None or cred.site_id != run.site_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found or does not belong to this site",
+            )
+        run.crawl_credential_id = body.crawl_credential_id
+    else:
+        run.crawl_credential_id = None
     _clear_crawl_state(session, run)
     session.commit()
     session.refresh(run)

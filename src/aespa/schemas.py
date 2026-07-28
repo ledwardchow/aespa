@@ -1045,6 +1045,16 @@ class TestRunUpdate(BaseModel):
     llm_profile_id: int | None = None
 
 
+class StartCrawlBody(BaseModel):
+    """Optional body for POST /api/test-runs/{run_id}/start and /restart.
+
+    When ``crawl_credential_id`` is supplied the crawl is restricted to that
+    single credential only (no anonymous phase, no other credentials).
+    """
+
+    crawl_credential_id: int | None = None
+
+
 class CredentialSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1087,6 +1097,7 @@ class TestRunSummary(BaseModel):
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
+    crawl_credential_id: int | None = None
 
     @field_validator("per_user_progress", mode="before")
     @classmethod
