@@ -397,6 +397,7 @@ export function TestRunDetail({
   const [thinkingStatus, setThinkingStatus] = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [coverageMode, setCoverageMode] = useState("track");
+  const [crawlCredentialId, setCrawlCredentialId] = useState(null);
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
   const [trafficTotal, setTrafficTotal] = useState(0);
@@ -610,7 +611,8 @@ export function TestRunDetail({
   const onStart = async () => {
     try {
       setCrawlStopRequested(false);
-      const r = await api.startRun(runId);
+      const body = crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : undefined;
+      const r = await api.startRun(runId, body);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
       // shown — fresh entries arrive via crawl_progress SSE events.
@@ -772,7 +774,7 @@ export function TestRunDetail({
       />
 
       {activeTab === "sitemap" && run && <>
-        <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} />
+        <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
         {activeTab === "sitemap" && run && <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />}
         <WebRunCrawlProgress run={run} /></>}
 
