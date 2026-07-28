@@ -923,6 +923,16 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "url": {"type": "string"},
                 "use_session": {"type": "string"},
+                "headers": {
+                    "type": "object",
+                    "description": (
+                        "Optional custom request headers applied to every navigation "
+                        "in this call (e.g. X-Forwarded-For to satisfy operator "
+                        "WAF/rate-limit bypass guidance). Use this whenever operator "
+                        "guidance or a 403/429 response calls for a specific header — "
+                        "the browser tool sends none of these by default."
+                    ),
+                },
                 "steps": {
                     "type": "array",
                     "items": {"type": "object"},
