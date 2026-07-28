@@ -839,6 +839,9 @@
 .surface-signal-type { border-radius:4px; background:rgba(91,141,239,.18); color:#93c5fd; padding:2px 6px; font-size:9px; font-weight:700; text-transform:uppercase; }
 .surface-signal-evidence { color:var(--text-2); font-size:11px; line-height:1.4; }
 .surface-callout { border-left:3px solid #f59e0b; background:rgba(245,158,11,.08); border-radius:4px; padding:8px 10px; color:var(--text-2); font-size:11px; }
+.surface-callout-warning { border-left-color:#ef4444; background:rgba(239,68,68,.1); margin-bottom:10px; }
+.surface-callout-warning strong { color:#fca5a5; }
+.surface-chip-waf { border-color:#ef4444; background:rgba(239,68,68,.14); color:#fca5a5; font-weight:700; }
 @media (max-width:900px) { .surface-summary-grid { grid-template-columns:repeat(2,1fr); } .surface-signal-grid { grid-template-columns:1fr; } .surface-coverage-row { grid-template-columns:42px 1fr 80px; } .surface-coverage-row .surface-progress,.surface-coverage-row .subtle { display:none; } }
 .scope-hosts-panel {
   padding: 10px 14px;
