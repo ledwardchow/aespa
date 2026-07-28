@@ -1129,6 +1129,7 @@ def _migrate(engine: Engine) -> None:
     _ensure_column(engine, "test_run", "waf_provider", "TEXT")
     _ensure_column(engine, "test_run", "waf_confidence", "TEXT")
     _ensure_column(engine, "test_run", "waf_evidence", "TEXT")
+    _ensure_column(engine, "test_run", "crawl_credential_id", "INTEGER")
     _ensure_column(engine, "api_test_run", "waf_provider", "TEXT")
     _ensure_column(engine, "api_test_run", "waf_confidence", "TEXT")
     _ensure_column(engine, "api_test_run", "waf_evidence", "TEXT")

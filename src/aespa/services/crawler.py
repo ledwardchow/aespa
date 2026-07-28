@@ -374,6 +374,26 @@ async def _do_crawl_inner(run_id: int) -> None:
 
     phases = ([None] + list(creds)) if (requires_auth and creds) else [None]
 
+    # If the run was created with a specific credential pinned, restrict to
+    # exactly that one credential — no anonymous phase, no other credentials.
+    crawl_credential_id = getattr(run, "crawl_credential_id", None)
+    if crawl_credential_id is not None and requires_auth:
+        pinned = [c for c in creds if getattr(c, "id", None) == crawl_credential_id]
+        if pinned:
+            phases = pinned
+            _crawl_log(
+                run_id,
+                "crawl",
+                "start",
+                f"Single-user crawl — running as '{pinned[0].username}' only",
+            )
+        else:
+            log.warning(
+                "crawl_credential_id=%s not found in site credentials; "
+                "falling back to all phases",
+                crawl_credential_id,
+            )
+
     tasks = [
         asyncio.create_task(
             _crawl_as_credential(
