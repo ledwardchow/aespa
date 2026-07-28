@@ -20,6 +20,20 @@ from aespa.db import get_engine
 BODY_LIMIT = 8192  # 8 KB per body stored
 SKIP_RESOURCE_TYPES = {"image", "font", "media"}  # noisy, rarely useful
 
+# In-memory cache of WAF detections, keyed by (run_kind, run_id), so the
+# agentic scan loop can check "is this run behind a WAF?" on every tool call
+# without a DB round-trip. Populated as a side effect of _write() below;
+# the DB columns (TestRun/ApiTestRun.waf_*) are the durable copy used by the
+# UI and across process restarts.
+_waf_cache: dict[tuple[str, int], dict] = {}
+
+
+def get_cached_waf(run_id: int, *, api_run_id: Optional[int] = None) -> Optional[dict]:
+    """Return the cached WAF detection for a run, if any (see ``_waf_cache``)."""
+    if api_run_id is not None:
+        return _waf_cache.get(("api", api_run_id))
+    return _waf_cache.get(("web", run_id))
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -65,6 +79,52 @@ def _write(
         )
         s.add(entry)
         s.commit()
+
+    _maybe_record_waf(run_id, api_run_id, response_headers, response_body)
+
+
+def _maybe_record_waf(
+    run_id: int,
+    api_run_id: Optional[int],
+    response_headers: dict,
+    response_body: Optional[str],
+) -> None:
+    """Passively fingerprint a WAF/bot-manager from this response and persist
+    the first (highest-confidence) detection for the run, both to the in-memory
+    cache (fast path for the scan loop) and to the run row (durable, for the
+    Attack Surface UI). Idempotent and best-effort — never raises.
+    """
+    from aespa.services.waf_detect import detect_waf
+
+    try:
+        detection = detect_waf(response_headers, response_body)
+        if detection is None:
+            return
+
+        cache_key = ("api", api_run_id) if api_run_id is not None else ("web", run_id)
+        cached = _waf_cache.get(cache_key)
+        if cached and cached.get("provider") == detection["provider"]:
+            return  # already known; avoid a DB write on every matching request
+        _waf_cache[cache_key] = detection
+
+        from aespa.models import ApiTestRun, TestRun
+
+        with Session(get_engine()) as s:
+            run = (
+                s.get(ApiTestRun, api_run_id)
+                if api_run_id is not None
+                else s.get(TestRun, run_id)
+            )
+            if run is None or run.waf_provider == detection["provider"]:
+                return
+            run.waf_provider = detection["provider"]
+            run.waf_confidence = detection["confidence"]
+            run.waf_evidence = detection["evidence"][:500]
+            s.add(run)
+            s.commit()
+    except Exception:
+        # Passive fingerprinting must never break traffic logging.
+        pass
 
 
 # ── Query ─────────────────────────────────────────────────────────────────────

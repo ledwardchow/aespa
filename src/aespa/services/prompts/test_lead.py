@@ -814,6 +814,15 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "at the end of the scan. Use context_tool with tool=lead_list to see all leads and "
     "their current statuses.\n"
     "- remove_finding: delete a finding by ID if written in error or duplicate.\n"
+    "- reauthenticate: if the primary authenticated session appears expired, evicted, or "
+    "soft-blocked (e.g. a route that used to return 2xx now returns 401/403/419/440 with the "
+    "same session, or a browser step lands back on a login page), call reauthenticate instead "
+    "of trying to work out or re-drive the login form yourself with browser fill/click/snapshot "
+    "steps. It re-runs this site's actual configured login flow — including automatic TOTP "
+    "code generation or email-mailbox OTP retrieval when the credential is configured that "
+    "way — which a hand-driven browser sequence cannot replicate. Only after reauthenticate "
+    "reports its attempts exhausted should you fall back to skip_coverage(disposition=blocked) "
+    "for the affected obligations.\n"
     "- done: call ONLY when every input-taking route in site_map has been probed, all high-priority applicable Work Program areas have meaningful evidence, imported leads are resolved, and no specialist is still running. Writing a finding is a milestone, not an exit — resume probing the next untested surface immediately after write_finding returns. An agent_dispatch is an asynchronous handoff — keep probing other routes yourself in parallel. A high step count is NOT a done condition.\n"
     "- Confirmed findings are CLOSED — do not re-probe them.\n"
     "- If a URL returns an empty body or errors 3+ times, stop probing it and switch "
@@ -1176,6 +1185,38 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "reauthenticate",
+        "description": (
+            "Re-run the site's configured login flow to obtain a fresh 'configured_primary' "
+            "session, instead of manually driving the login form yourself with browser "
+            "fill/click/snapshot steps. Use this the moment the primary session looks expired, "
+            "evicted, or blocked — e.g. a route that previously returned 2xx now returns "
+            "401/403/419/440 with the same session, or a browser step lands back on a login "
+            "page. The configured credential's real login flow is used, including automatic "
+            "TOTP code generation or email-mailbox OTP retrieval when that is how this site's "
+            "credential is set up — capabilities a hand-driven browser sequence cannot "
+            "reproduce. Do NOT attempt to re-create the login form yourself with browser "
+            "steps; call this tool instead. If it reports exhausted attempts, stop retrying "
+            "logins and use skip_coverage with disposition=blocked for the affected "
+            "obligations, citing the eviction evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Concrete evidence that the session is expired/evicted, e.g. "
+                        "'GET /profile returned 403 with configured_primary after "
+                        "previously returning 200'."
+                    ),
+                },
+                "note": {"type": "string"},
+            },
+            "required": ["reason"],
         },
     },
     {

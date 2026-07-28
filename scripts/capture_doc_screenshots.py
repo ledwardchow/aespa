@@ -62,6 +62,31 @@ def get_top_runs(db_path: str):
     return web_run_id, site_id, api_run_id, collection_id
 
 
+async def wait_for_ready(page, timeout_ms: int = 15000, settle_ms: int = 300):
+    """Wait until the SPA has visually finished loading before a screenshot.
+
+    Fixed `asyncio.sleep()` calls are unreliable: page load time varies with
+    run size, SSE/WebSocket catch-up, and chart rendering, so a screenshot can
+    be captured mid-render (e.g. still showing the "Loading…" placeholder).
+    This waits for network activity to settle, then for every visible
+    "Loading…" placeholder used across the app (see e.g. SiteDetail.jsx,
+    ApiTestRunDetail.jsx) to disappear, then a short settle delay for any
+    CSS transitions/chart animations to finish.
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass  # long-lived SSE/WebSocket connections can prevent "networkidle"
+
+    loading_placeholder = page.locator('div.subtle:has-text("Loading…")')
+    try:
+        await loading_placeholder.first.wait_for(state="hidden", timeout=timeout_ms)
+    except Exception:
+        pass  # no loading placeholder was shown, or it never resolved in time
+
+    await asyncio.sleep(settle_ms / 1000)
+
+
 async def capture_screenshots(
     base_url: str,
     out_dir: str,
@@ -84,72 +109,72 @@ async def capture_screenshots(
         # 1. Sites list
         print(" -> sites.png")
         await page.goto(f"{base_url}/#/")
-        await asyncio.sleep(1.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "sites.png"))
 
         # 2. Site creation form
         print(" -> sitesetup.png")
         await page.goto(f"{base_url}/#/sites/new")
-        await asyncio.sleep(1.0)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "sitesetup.png"))
 
         # 3. Site detail (runs selector)
         print(" -> testruns.png")
         await page.goto(f"{base_url}/#/sites/{site_id}")
-        await asyncio.sleep(1.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "testruns.png"))
 
         # 4. New run form
         print(" -> editrun.png")
         await page.goto(f"{base_url}/#/sites/{site_id}/runs/new")
-        await asyncio.sleep(1.0)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "editrun.png"))
 
         # Web Run tab navigation
         web_run_url = f"{base_url}/#/runs/{web_run_id}"
         await page.goto(web_run_url)
-        await asyncio.sleep(2.0)
+        await wait_for_ready(page)
 
         # 5. Status / runlanding / agentstatus (with ALICE minimized)
         print(" -> agentstatus.png & runlanding.png")
         await page.click('button.tab-btn:has-text("Status")')
-        await asyncio.sleep(1.0)
+        await wait_for_ready(page)
         alice_role = page.locator('.agent-row:has-text("A.L.I.C.E") .agent-role-name')
         if await alice_role.count() > 0:
             await alice_role.first.click()
-            await asyncio.sleep(1.0)
+            await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "agentstatus.png"))
         await page.screenshot(path=os.path.join(out_dir, "runlanding.png"))
 
         # 6. Site Map
         print(" -> sitemap.png")
         await page.click('button.tab-btn:has-text("Site Map")')
-        await asyncio.sleep(3.0)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "sitemap.png"))
 
         # 7. Attack Surface & Coverage
         print(" -> attacksurface.png")
         await page.click('button.tab-btn:has-text("Attack Surface")')
-        await asyncio.sleep(2.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "attacksurface.png"))
 
         # 8. Web Findings
         print(" -> findings.png & webfindings.png")
         await page.click('button.tab-btn:has-text("Findings")')
-        await asyncio.sleep(2.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "findings.png"))
         await page.screenshot(path=os.path.join(out_dir, "webfindings.png"))
 
         # 9. Traffic Log
         print(" -> trafficlog.png")
         await page.click('button.tab-btn:has-text("Traffic Log")')
-        await asyncio.sleep(2.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "trafficlog.png"))
 
         # 10. SAST Leads
         print(" -> sastleads.png")
         await page.click('button.tab-btn:has-text("SAST Leads")')
-        await asyncio.sleep(2.0)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "sastleads.png"))
 
         # 11. ALICE expanded screen
@@ -172,38 +197,38 @@ async def capture_screenshots(
                 await page.mouse.down()
                 await page.mouse.move(sx, sy + 260)
                 await page.mouse.up()
-                await asyncio.sleep(1.0)
+                await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "alice.png"))
 
         # API Section
         # 12. APIs list
         print(" -> apis.png & apisetup.png")
         await page.goto(f"{base_url}/#/apis")
-        await asyncio.sleep(1.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "apis.png"))
         await page.screenshot(path=os.path.join(out_dir, "apisetup.png"))
 
         # 13. API Collection Detail
         print(" -> apispecparsed.png")
         await page.goto(f"{base_url}/#/apis/{collection_id}")
-        await asyncio.sleep(2.0)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "apispecparsed.png"))
 
         # API Run Detail
         print(f" -> API Run #{api_run_id} tabs...")
         await page.goto(f"{base_url}/#/api-runs/{api_run_id}")
-        await asyncio.sleep(2.0)
+        await wait_for_ready(page)
 
         # 14. API Findings
         print(" -> apifindings.png")
         await page.click('button.tab-btn:has-text("Findings")')
-        await asyncio.sleep(2.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "apifindings.png"))
 
         # 15. API OWASP Coverage Matrix
         print(" -> apiworkprogram.png")
         await page.click('button.tab-btn:has-text("OWASP Coverage")')
-        await asyncio.sleep(2.5)
+        await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "apiworkprogram.png"))
 
         await browser.close()

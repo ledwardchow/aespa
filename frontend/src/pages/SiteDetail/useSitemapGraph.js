@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
-import { truncUrl } from "../../lib/utilities";
+import { getSitemapGravity, truncUrl } from "../../lib/utilities";
 import { scopeColor, userColor } from "./_helpers";
 
 // Owns the imperative D3 lifecycle while TestRunDetail keeps the selected-node
@@ -16,6 +16,16 @@ export function useSitemapGraph({
   const svgRef = useRef(null);
   const simulationRef = useRef(null);
   const previousStructureKeyRef = useRef("");
+  const [gravity, setGravity] = useState(getSitemapGravity);
+
+  // Debug settings writes the slider value to the same localStorage key from
+  // another tab/window; pick it up live rather than requiring a remount.
+  useEffect(() => {
+    const onStorage = () => setGravity(getSitemapGravity());
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   const nodeColor = useCallback(node => {
     if (graphView === "user") return userColor(node, credentials);
     return scopeColor(node);
@@ -49,7 +59,7 @@ export function useSitemapGraph({
 
     svg.append("defs").append("marker").attr("id", "arrow").attr("viewBox", "0 -4 8 8").attr("refX", 18).attr("refY", 0).attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto").append("path").attr("d", "M0,-4L8,0L0,4").attr("fill", "var(--border-2)");
     const link = graphGroup.append("g").selectAll("line").data(links).join("line").attr("stroke", "var(--border-2)").attr("stroke-width", 1.5).attr("marker-end", "url(#arrow)");
-    const simulation = d3.forceSimulation(nodes).force("link", d3.forceLink(links).id(node => node.id).distance(110).strength(0.8)).force("charge", d3.forceManyBody().strength(-350)).force("center", d3.forceCenter(width / 2, height / 2)).force("x", d3.forceX(width / 2).strength(0.06)).force("y", d3.forceY(height / 2).strength(0.06)).force("collision", d3.forceCollide(22));
+    const simulation = d3.forceSimulation(nodes).force("link", d3.forceLink(links).id(node => node.id).distance(110).strength(0.8)).force("charge", d3.forceManyBody().strength(-350)).force("center", d3.forceCenter(width / 2, height / 2)).force("x", d3.forceX(width / 2).strength(gravity)).force("y", d3.forceY(height / 2).strength(gravity)).force("collision", d3.forceCollide(22));
     const node = graphGroup.append("g").selectAll("g").data(nodes).join("g").attr("cursor", "pointer").call(d3.drag().on("start", (event, draggedNode) => {
       if (!event.active) simulation.alphaTarget(0.3).restart();
       draggedNode.fx = draggedNode.x;
@@ -90,7 +100,19 @@ export function useSitemapGraph({
     });
     simulationRef.current = simulation;
     return () => simulation.stop();
+    // Note: `gravity` is intentionally excluded here — changes to it are applied
+    // live to the existing simulation by the effect below, not by rebuilding the graph.
   }, [activeTab, graph, graphView, nodeColor, onSelectNode]);
+
+  // Retune the centering force in place when the gravity setting changes so
+  // dragging the debug slider doesn't reset node positions/zoom.
+  useEffect(() => {
+    const simulation = simulationRef.current;
+    if (!simulation) return;
+    simulation.force("x")?.strength(gravity);
+    simulation.force("y")?.strength(gravity);
+    simulation.alpha(0.3).restart();
+  }, [gravity]);
 
   useEffect(() => {
     if (!svgRef.current || !graph) return;
