@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../lib/api";
 import { IconCheck } from "../../components/Icons";
+import { DEFAULT_SITEMAP_GRAVITY, getSitemapGravity, setSitemapGravity } from "../../lib/utilities";
 
 
 export function DebugPage({
@@ -26,6 +27,7 @@ export function DebugPage({
   const [cfSaving, setCfSaving] = useState(false);
   const [cfSaved, setCfSaved] = useState(false);
   const [cfError, setCfError] = useState(null);
+  const [sitemapGravity, setSitemapGravityState] = useState(getSitemapGravity);
   useEffect(() => {
     (async () => {
       try {
@@ -246,6 +248,45 @@ export function DebugPage({
         {repSaved && <div className="save-confirm" style={{
           marginTop: 8
         }}><IconCheck /> Saved</div>}
+      </div>
+
+      <div className="card" style={{
+        marginTop: 16
+      }}>
+        <div className="form-section-title">Sitemap Graph</div>
+        <div className="field-hint" style={{
+          marginBottom: 12
+        }}>
+          Controls how strongly nodes in the sitemap graph (Sites → run → Sitemap tab) are
+          pulled toward the center. Lower values let the layout spread out more; higher
+          values pull it in tighter. Default is {DEFAULT_SITEMAP_GRAVITY}.
+        </div>
+        <div className="form-row">
+          <label className="form-label">Gravity ({sitemapGravity.toFixed(2)})</label>
+          <input
+            type="range"
+            min={0}
+            max={0.2}
+            step={0.01}
+            value={sitemapGravity}
+            onChange={e => {
+              const value = parseFloat(e.target.value);
+              setSitemapGravityState(value);
+              setSitemapGravity(value);
+            }}
+          />
+        </div>
+        <button
+          className="btn ghost sm"
+          type="button"
+          style={{ marginTop: 8 }}
+          onClick={() => {
+            setSitemapGravityState(DEFAULT_SITEMAP_GRAVITY);
+            setSitemapGravity(DEFAULT_SITEMAP_GRAVITY);
+          }}
+        >
+          Reset to default
+        </button>
       </div>
 
       <div className="card" style={{

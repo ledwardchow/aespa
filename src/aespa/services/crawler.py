@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
@@ -620,6 +621,28 @@ async def _crawl_as_credential(
             auth_check_snapshot = await _capture_auth_check_snapshot(
                 page, credential_login_url
             )
+            # Guided and Entra ID logins persist their own session to the vault
+            # at the point of success. auto/totp/email_otp credentials didn't —
+            # they only got persisted as a side effect of the cross-user
+            # reconcile pass, which is skipped entirely for single-credential
+            # sites (`len(creds) < 2`). That left the Sessions tab empty and
+            # the validator with no alternate-user session for the common case
+            # of a single scanned account. Persist here so every successful
+            # login is recorded regardless of credential count.
+            mode = getattr(cred, "auth_mode", None) or AuthMode.auto
+            try:
+                mode = AuthMode(mode)
+            except ValueError:
+                mode = AuthMode.auto
+            if mode in (AuthMode.auto, AuthMode.totp, AuthMode.email_otp):
+                try:
+                    still_on_login = await _page_requires_login(
+                        page, credential_login_url
+                    )
+                except Exception:
+                    still_on_login = False
+                if not still_on_login:
+                    await _persist_recon_session(run_id, cred, page)
 
         observed_api_calls.clear()
 
@@ -759,6 +782,10 @@ async def _crawl_as_credential(
                 )
             except Exception:
                 pass
+            # Static chrome can satisfy the check above before the real
+            # (often XHR-fetched) content has painted — settle further so we
+            # don't snapshot/index a page while it's still showing a spinner.
+            await _wait_for_content_settle(page)
             title = await page.title()
             try:
                 text = await page.evaluate("() => document.body.innerText")
@@ -1086,9 +1113,13 @@ _INTERACTIVE_ACTION_LIMIT = 20
 _INTERACTIVE_MAX_STEPS = 4
 _INTERACTIVE_MAX_STATES = 25
 _INTERACTIVE_MAX_SELECT_OPTIONS = 5
-# ponytail: 100 safe replay attempts per root; make this policy-configurable only
-# if real targets need a higher ceiling.
-_INTERACTIVE_MAX_ATTEMPTS = 100
+# Each "attempt" is a full page reload + replay of prior steps, so this cap
+# bounds the worst case (a page with many controls) directly in wall-clock
+# time. 100 was far too high in practice — combined with per-attempt network
+# waits it could burn 5-10+ minutes exploring a single page. Paired with the
+# wall-clock budget below as a second safety net.
+_INTERACTIVE_MAX_ATTEMPTS = 40
+_INTERACTIVE_MAX_SECONDS = 90.0
 _INTERACTIVE_DANGER_RE = re.compile(
     r"\b(?:delete|remove|destroy|logout|log\s*out|sign\s*out|purchase|pay|checkout|"
     r"transfer|send\s+money|revoke|cancel\s+subscription)\b",
@@ -1585,7 +1616,12 @@ async def _perform_interactive_action(page, step: dict) -> dict:
         else:
             await locator.click(timeout=4_000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=1_500)
+            # Best-effort settle only — many apps under test never go fully
+            # idle (SSE streams, analytics/chat polling), so a long timeout
+            # here is pure wasted time on every single replayed step, not a
+            # correctness gate. _settle_interactive_action() below does the
+            # real "has the DOM stopped changing" check.
+            await page.wait_for_load_state("networkidle", timeout=500)
         except Exception:
             pass
         changed = await _settle_interactive_action(page, before_signature)
@@ -1610,6 +1646,54 @@ async def _perform_interactive_action(page, step: dict) -> dict:
                 await page.unroute("**/*", _safe_route)
             except Exception:
                 pass
+
+
+async def _wait_for_content_settle(page, *, max_wait_ms: int = 3000) -> None:
+    """Wait past initial async paint before a snapshot is taken.
+
+    Static chrome (header/footer, nav links) often satisfies a naive
+    "has text or a link" check the instant a page mounts, even though the
+    real content is still behind a spinner/skeleton loader fetched via XHR
+    (e.g. a payment-lookup result page). Poll a lightweight signature —
+    visible text length, count of visible busy/spinner markers, and total
+    DOM node count — until it stops changing and no busy markers remain, so
+    we snapshot (and continue crawling from) the settled page. Capped at
+    ``max_wait_ms`` so pages with perpetual animations don't stall the crawl.
+    """
+    poll_ms = 150
+    stable_needed = 2  # ~300ms of no change once busy markers have cleared
+    previous: list | None = None
+    stable_count = 0
+    elapsed = 0
+    while elapsed < max_wait_ms:
+        try:
+            signature = await page.evaluate(
+                """() => {
+                  const busySelectors = '[aria-busy="true"], [class*="spinner" i],'
+                    + ' [class*="skeleton" i], [class*="loading" i]';
+                  let busyVisible = 0;
+                  document.querySelectorAll(busySelectors).forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) busyVisible += 1;
+                  });
+                  const text = document.body ? document.body.innerText : '';
+                  return [text.length, busyVisible, document.querySelectorAll('*').length];
+                }"""
+            )
+        except Exception:
+            return
+        if previous is not None and signature == previous and signature[1] == 0:
+            stable_count += 1
+            if stable_count >= stable_needed:
+                return
+        else:
+            stable_count = 0
+        previous = signature
+        try:
+            await page.wait_for_timeout(poll_ms)
+        except Exception:
+            return
+        elapsed += poll_ms
 
 
 async def _replay_interactive_steps(page, steps: list[dict]) -> dict:
@@ -1777,6 +1861,7 @@ async def _explore_interactive_states(
     discoveries: list[dict] = []
     states_created = 0
     replay_attempts = 0
+    exploration_deadline = time.monotonic() + _INTERACTIVE_MAX_SECONDS
     while pending and run_id not in _stop_requested:
         steps, parent_id, interaction_depth, parent_identity = pending.popleft()
         expand_form_choices = True
@@ -1790,6 +1875,16 @@ async def _explore_interactive_states(
                     page_url=root_url,
                 )
                 break
+            if time.monotonic() >= exploration_deadline:
+                _crawl_log(
+                    run_id,
+                    "crawl_workflow",
+                    "info",
+                    f"Stopped interactive exploration after {_INTERACTIVE_MAX_SECONDS:.0f}s "
+                    "time budget (page has many candidate controls)",
+                    page_url=root_url,
+                )
+                break
             replay_attempts += 1
             try:
                 await page.goto(root_url, wait_until="domcontentloaded", timeout=15_000)
@@ -1798,9 +1893,12 @@ async def _explore_interactive_states(
             # A document-ready SPA may still be running its authenticated
             # bootstrap. Replaying controls before that finishes lets the later
             # bootstrap overwrite the requested view (for example, Profile
-            # briefly opens and is then replaced by Dashboard).
+            # briefly opens and is then replaced by Dashboard). This is a
+            # best-effort settle only — apps with SSE/polling/analytics never
+            # go network-idle, so a long timeout here just burns wall-clock
+            # time on every one of up to _INTERACTIVE_MAX_ATTEMPTS reloads.
             try:
-                await page.wait_for_load_state("networkidle", timeout=3_000)
+                await page.wait_for_load_state("networkidle", timeout=600)
             except Exception:
                 pass
             replay_root = await _interactive_state_snapshot(
@@ -3710,7 +3808,7 @@ async def _direct_load_accessible(
     if await _page_requires_login(page, login_url):
         return False, "", "", None
 
-    await page.wait_for_timeout(800)
+    await _wait_for_content_settle(page)
     try:
         title = await page.title()
     except Exception:
@@ -4233,8 +4331,17 @@ async def _goto_with_auth_recovery(
         try:
             # networkidle is unreliable on apps with polling/analytics/websockets
             # (never goes idle → full timeout burned). Keep it short — it's a
-            # best-effort settle, not a correctness gate.
-            await page.wait_for_load_state("networkidle", timeout=3_000)
+            # best-effort settle, not a correctness gate. This runs on every
+            # single page navigation in the crawl, so a long timeout here
+            # multiplies directly into total crawl duration.
+            await page.wait_for_load_state("networkidle", timeout=600)
+        except Exception:
+            pass
+        try:
+            # A blocking modal (welcome tour, consent wall, upsell) can appear
+            # on any navigation, not just right after login — clear it so the
+            # crawler can keep reading/clicking the underlying page.
+            await _dismiss_blocking_modal(page)
         except Exception:
             pass
         if not requires_auth or credential is None or not login_url:
@@ -4370,7 +4477,7 @@ async def _auth_check_still_authenticated(
             snapshot["url"], wait_until="domcontentloaded", timeout=15_000
         )
         try:
-            await check_page.wait_for_load_state("networkidle", timeout=5_000)
+            await check_page.wait_for_load_state("networkidle", timeout=2_000)
         except Exception:
             pass
         if _response_suggests_session_dropped(response) or await _page_requires_login(
@@ -4446,6 +4553,84 @@ def _meaningful_text_tokens(text: str) -> set[str]:
 # ── Authentication ────────────────────────────────────────────────────────────
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+_MODAL_CONTAINER_SELECTOR = "[role='dialog'], [aria-modal='true']"
+
+# Close controls tried inside a detected dialog/overlay first, then as a
+# page-wide fallback for non-semantic "big popup" interstitials (welcome
+# tours, consent walls, post-login upsells) that block the whole screen.
+_MODAL_CLOSE_SELECTORS = [
+    "button[aria-label*='close' i]",
+    "[aria-label*='close' i]",
+    "[class*='close' i]",
+    "[data-dismiss='modal']",
+    "[data-testid*='close' i]",
+    "button:has-text('×')",
+    "button:has-text('✕')",
+    "button:has-text('Close')",
+    "button:has-text('Got it')",
+    "button:has-text('No thanks')",
+    "button:has-text('Skip')",
+    "button:has-text('Maybe later')",
+    "button:has-text('Dismiss')",
+    "button:has-text('Not now')",
+]
+
+
+async def _dismiss_blocking_modal(page, max_attempts: int = 3) -> bool:
+    """Best-effort close of a full-screen modal/overlay that blocks the page.
+
+    Some apps show a "click X to close" interstitial (welcome tour, consent
+    wall, post-login upsell) that isn't a login form but still prevents the
+    crawler from clicking/reading anything underneath it. Try to detect a
+    visible ``role=dialog``/``aria-modal`` container (or another element with
+    a modal/overlay-ish class) and click a close control inside it, falling
+    back to a page-wide close-button search. Returns True if a modal was
+    dismissed at least once.
+    """
+    dismissed_any = False
+    for _ in range(max_attempts):
+        container = None
+        try:
+            root = page.locator(_MODAL_CONTAINER_SELECTOR)
+            count = await root.count()
+            for idx in range(min(count, 5)):
+                loc = root.nth(idx)
+                if await loc.is_visible():
+                    container = loc
+                    break
+        except Exception:
+            container = None
+
+        if container is None:
+            try:
+                loc = page.locator("[class*='modal' i], [class*='overlay' i]").first
+                if await loc.count() > 0 and await loc.is_visible():
+                    container = loc
+            except Exception:
+                container = None
+
+        if container is None:
+            break
+
+        closed = False
+        for sel in _MODAL_CLOSE_SELECTORS:
+            try:
+                close_loc = container.locator(sel).first
+                if await close_loc.count() > 0 and await close_loc.is_visible():
+                    await close_loc.click(timeout=3_000)
+                    closed = True
+                    break
+            except Exception:
+                continue
+        if not closed:
+            closed = await _click_first_visible(page, _MODAL_CLOSE_SELECTORS)
+        if not closed:
+            break
+        dismissed_any = True
+        await page.wait_for_timeout(400)
+    return dismissed_any
 
 
 async def _detect_mfa_prompt(page) -> bool:
@@ -4537,7 +4722,7 @@ async def _fill_totp_if_prompted(page, credential) -> None:
             pass
 
     try:
-        await page.wait_for_load_state("networkidle", timeout=12_000)
+        await page.wait_for_load_state("networkidle", timeout=4_000)
     except Exception:
         pass
     await page.wait_for_timeout(1000)
@@ -4558,6 +4743,46 @@ def _extract_email_otp(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _collect_json_strings(obj, out: list[str]) -> None:
+    """Recursively collect every string leaf from a parsed JSON structure."""
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _collect_json_strings(value, out)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            _collect_json_strings(item, out)
+
+
+def _extract_email_otp_from_script_blob(raw_text: str) -> str | None:
+    """Extract an OTP from a hydration/state ``<script>`` JSON blob.
+
+    The raw ``textContent`` of a ``<script type="application/json">`` element
+    is JSON source, not rendered text: HTML inside string values is encoded
+    as literal ``\\u003c``/``\\u003e`` escapes glued directly to surrounding
+    characters with no word boundary, so running ``_extract_email_otp``
+    against it directly can silently fail to match anything (including the
+    ``\\d{6}`` fallback). Parse the JSON, decode each string leaf (which
+    resolves the escapes and unescapes normally), strip any HTML tags, and
+    run extraction against the readable result.
+    """
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        return None
+    strings: list[str] = []
+    _collect_json_strings(parsed, strings)
+    for value in strings:
+        if len(value) < 4:
+            continue
+        readable = re.sub(r"<[^>]+>", " ", value)
+        code = _extract_email_otp(readable)
+        if code:
+            return code
+    return None
+
+
 async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
     await mailbox_page.goto(mailbox_url, wait_until="domcontentloaded", timeout=15_000)
     try:
@@ -4567,6 +4792,25 @@ async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
     code = _extract_email_otp(text)
     if code:
         return code
+
+    # Some inbox UIs (e.g. mailsac) only show sender/subject/date in the
+    # visible list and render the message body via client-side JS after a
+    # click, but ship the full message content (subject + body HTML) inline
+    # in a hydration/state <script type="application/json"> blob. The blob's
+    # textContent is raw JSON source (HTML entities appear as literal
+    # "\u003c"/"\u003e" escapes glued to surrounding text with no word
+    # boundary), so it must be parsed and decoded before extraction — plain
+    # regex against the raw text can silently match nothing at all.
+    try:
+        script_texts = await mailbox_page.locator(
+            "script[type='application/json'], script#__NEXT_DATA__"
+        ).evaluate_all("(els) => els.map(el => el.textContent || '')")
+    except Exception:
+        script_texts = []
+    for script_text in script_texts:
+        code = _extract_email_otp_from_script_blob(script_text)
+        if code:
+            return code
 
     parsed = urlparse(mailbox_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -4592,7 +4836,29 @@ async def _mailbox_page_otp(mailbox_page, mailbox_url: str) -> str | None:
         code = _extract_email_otp(text)
         if code:
             return code
+
+    # Fallback for inbox UIs with no anchor-based navigation at all (mailsac's
+    # message rows are plain <tr> elements driven by onClick handlers, not
+    # <a href> links) — click the first message row/list item to open it and
+    # re-scan the now-rendered detail view.
+    try:
+        row = await _visible_locator(
+            mailbox_page,
+            "table tbody tr, [role='row'], li[class*='message' i], "
+            "li[class*='mail' i], [class*='message-item' i], [class*='mail-item' i]",
+        )
+        if row is not None:
+            await row.click(timeout=3_000)
+            await mailbox_page.wait_for_timeout(800)
+            text = await mailbox_page.locator("body").inner_text(timeout=5_000)
+            code = _extract_email_otp(text)
+            if code:
+                return code
+    except Exception:
+        pass
+
     return None
+
 
 
 async def _fill_email_otp_if_prompted(page, credential) -> None:
@@ -4638,9 +4904,32 @@ async def _fill_email_otp_if_prompted(page, credential) -> None:
                                 "button:has-text('Next')",
                             ],
                         )
+                        # Submitting the code kicks off a redirect (often a
+                        # cross-domain SSO handoff back to the app) that hasn't
+                        # happened yet the instant the click resolves. Returning
+                        # immediately here made the caller capture page.url and
+                        # declare "logged in" mid-flight — on an intermediate SSO
+                        # page rather than the final authenticated app page — so
+                        # the crawl's seed URL was wrong and it never actually
+                        # entered the authenticated site. Give the redirect a
+                        # chance to land, and keep waiting a little longer while
+                        # the OTP field is still visible (wrong/stale code, or a
+                        # slow multi-hop SSO redirect).
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=6_000
+                            )
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(1000)
+                        for _ in range(10):
+                            if not await _detect_mfa_prompt(page):
+                                break
+                            await page.wait_for_timeout(1000)
                         log.info(
-                            "  _fill_email_otp: mailbox code filled for %s",
+                            "  _fill_email_otp: mailbox code filled for %s (page.url=%s)",
                             credential.username,
+                            page.url,
                         )
                         return
                 return
@@ -4648,6 +4937,29 @@ async def _fill_email_otp_if_prompted(page, credential) -> None:
     finally:
         await mailbox_page.close()
     log.warning("  _fill_email_otp: timed out waiting for %s", credential.username)
+
+
+async def _resolve_mfa_prompt_if_present(page, credential) -> bool:
+    """If an MFA/OTP field is visible, resolve it and report whether it did.
+
+    Used by the LLM-driven login fallback (``_authenticate_smart``), which
+    otherwise only checks "is the login form gone" for success — a check that
+    is blind to an unresolved MFA/OTP prompt (no password field, no denial
+    text) and would declare victory while the user is still stuck on a
+    "enter verification code" screen.
+    """
+    try:
+        if not await _detect_mfa_prompt(page):
+            return False
+    except Exception:
+        return False
+    if (getattr(credential, "totp_seed", None) or "").strip():
+        await _fill_totp_if_prompted(page, credential)
+        return True
+    if (getattr(credential, "test_mailbox_url", None) or "").strip():
+        await _fill_email_otp_if_prompted(page, credential)
+        return True
+    return False
 
 
 _BEARER_STORAGE_KEYS = [
@@ -5951,7 +6263,7 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
         )
         try:
             await page.reload(wait_until="domcontentloaded", timeout=12_000)
-            await page.wait_for_load_state("networkidle", timeout=8_000)
+            await page.wait_for_load_state("networkidle", timeout=3_000)
         except Exception:
             pass
 
@@ -6055,7 +6367,7 @@ async def _authenticate(
                     )
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=12_000)
-                await page.wait_for_load_state("networkidle", timeout=8_000)
+                await page.wait_for_load_state("networkidle", timeout=3_000)
             except Exception:
                 pass
             await _restore_scoped_browser_storage(
@@ -6081,6 +6393,15 @@ async def _authenticate(
         return
     else:
         await _authenticate_auto(page, login_url, credential)
+
+    # Some apps show a full-screen "welcome"/consent/upsell interstitial right
+    # after login that isn't a login form but blocks every subsequent click,
+    # so the crawler stalls after a "successful" login. Close it if present.
+    try:
+        if await _dismiss_blocking_modal(page):
+            log.info("  _authenticate: dismissed a post-login blocking modal for %s", username)
+    except Exception as exc:
+        log.warning("  _authenticate: modal dismissal failed for %s: %s", username, exc)
 
     # Smart fallback: if the deterministic heuristic failed to clear the login
     # form, let the LLM figure the login out (modal/no-route, odd fields, multi-step).
@@ -6255,7 +6576,7 @@ async def _authenticate_auto(page, login_url: str, credential) -> None:
             log.warning("  _authenticate: could not find submit button")
 
         try:
-            await page.wait_for_load_state("networkidle", timeout=12_000)
+            await page.wait_for_load_state("networkidle", timeout=4_000)
         except Exception:
             pass
         await page.wait_for_timeout(1500)
@@ -6606,14 +6927,24 @@ async def _authenticate_smart(
         except Exception:
             pass
 
-        # Success check: login form gone.
+        # Success check: login form gone. `_page_requires_login` only detects
+        # password walls/denial text — it has no idea an MFA/OTP prompt is
+        # still sitting there unfilled, so a page like "enter verification
+        # code" (no password field, no denial text) reads as "logged in"
+        # here even though nothing has actually verified the user yet. Give
+        # the deterministic OTP/TOTP fillers a chance before trusting that.
         try:
             if not await _page_requires_login(page, login_url):
-                log.info(
-                    "  _authenticate_smart: success — login form gone. page.url=%s",
-                    page.url,
-                )
-                return
+                if await _resolve_mfa_prompt_if_present(page, credential):
+                    history.append("resolved an MFA/OTP prompt after login form cleared")
+                if not await _page_requires_login(
+                    page, login_url
+                ) and not await _detect_mfa_prompt(page):
+                    log.info(
+                        "  _authenticate_smart: success — login form gone. page.url=%s",
+                        page.url,
+                    )
+                    return
         except Exception:
             pass
 

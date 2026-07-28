@@ -944,6 +944,8 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
         return "Credential check"
     if tool_name == "register_account":
         return "Register account"
+    if tool_name == "reauthenticate":
+        return "Re-authenticate via configured login flow"
     if tool_name == "done":
         return "Completing assessment"
     if tool_name == "browser":
@@ -5791,6 +5793,7 @@ async def _do_thinking_scan(run_id: int) -> None:
             "username": c.username,
             "password": c.password,
             "login_url": _login_url_for_credential(login_url, c),
+            "auth_mode": str(getattr(c, "auth_mode", None) or "auto"),
         }
         for c in creds
     ]
@@ -5848,11 +5851,19 @@ async def _do_thinking_scan(run_id: int) -> None:
 
         _primary_vault_session = None
         if requires_auth and creds:
-            # Check if the crawl phase already captured a guided session for this credential.
-            # If so, inject it directly rather than opening another browser window.
-            _primary_vault_session = session_vault.get(
-                f"guided_{creds[0].id}"
-            ) or session_vault.get("configured_primary")
+            # Check if the crawl phase already captured a session for this credential.
+            # If so, inject it directly rather than opening another browser window (and,
+            # for auto/totp/email_otp modes, re-running an OTP/mailbox round-trip that has
+            # already succeeded once). guided_/entra_ are captured on guided logins;
+            # recon_ is captured by the crawler for auto/totp/email_otp credentials
+            # (see crawler.py::_persist_recon_session); configured_primary is a leftover
+            # from a prior scan bootstrap or re-auth on this same run.
+            _primary_vault_session = (
+                session_vault.get(f"guided_{creds[0].id}")
+                or session_vault.get(f"entra_{creds[0].id}")
+                or session_vault.get(f"recon_{creds[0].id}")
+                or session_vault.get("configured_primary")
+            )
             if _primary_vault_session and (
                 _primary_vault_session.get("cookies")
                 or _authorization_header(_primary_vault_session.get("extra_headers"))
@@ -5898,6 +5909,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                     _login_url_for_credential(login_url, creds[0]),
                     creds[0],
                     run_id,
+                    llm_cfg=llm_cfg,
                 )
 
         raw_cookies = await browser_ctx.cookies()
@@ -7586,6 +7598,14 @@ async def _do_agentic_thinking_loop(
     _reauth_count = [0]  # total re-auth attempts this scan
     _REAUTH_THRESHOLD = 5
     _REAUTH_MAX = 2
+    # Soft-block detection: a WAF/bot-mitigation product (e.g. Akamai) can start
+    # 403-ing a *previously working* primary session without ever emitting a
+    # 401/419/440. Track whether the primary session has proven itself with a
+    # 2xx, and if a run of 403s follows that proof, treat it as an eviction too —
+    # otherwise the Test Lead is left trying to hand-drive the login form itself.
+    _primary_had_success = [False]
+    _consecutive_primary_forbidden = [0]
+    _SOFT_BLOCK_THRESHOLD = 3
 
     def _active_scope_check(url: str) -> str | None:
         if scope_check_fn is not None:
@@ -7608,6 +7628,7 @@ async def _do_agentic_thinking_loop(
             return False
         _reauth_count[0] += 1
         _consecutive_auth_failures[0] = 0
+        _consecutive_primary_forbidden[0] = 0
         log.info(
             "Dynamic scan: session expiry detected — re-authenticating (attempt %d/%d)",
             _reauth_count[0],
@@ -7632,7 +7653,9 @@ async def _do_agentic_thinking_loop(
             )
 
             _cred_login_url = _login_url_for_credential(login_url, creds[0])
-            await _authenticate(pw_page, _cred_login_url, creds[0], run_id)
+            await _authenticate(
+                pw_page, _cred_login_url, creds[0], run_id, llm_cfg=llm_cfg
+            )
             raw_cookies = await browser_ctx.cookies()
             new_cookies = {c["name"]: c["value"] for c in raw_cookies}
             storage_by_origin = await _capture_scoped_browser_storage(
@@ -7802,14 +7825,32 @@ async def _do_agentic_thinking_loop(
         return allowed, feedback
 
     # ── Build the initial user message ────────────────────────────────────────
+    _AUTH_MODE_NOTES = {
+        "totp": " (login flow generates a fresh TOTP code automatically)",
+        "email_otp": " (login flow retrieves the OTP from the configured test mailbox automatically)",
+        "entra_id": " (multi-page Microsoft Entra ID browser flow)",
+        "guided": " (session captured once from a manual guided login)",
+    }
     creds_text = ""
     if creds_for_llm:
         c_lines = [
-            f"  - username={c['username']}  password={c['password']}"
+            "  - username="
+            + str(c["username"])
+            + "  password="
+            + str(c["password"])
             + (f"  login_url={c['login_url']}" if c.get("login_url") else "")
+            + _AUTH_MODE_NOTES.get(c.get("auth_mode") or "", "")
             for c in creds_for_llm
         ]
-        creds_text = "Test credentials:\n" + "\n".join(c_lines)
+        creds_text = (
+            "Test credentials:\n"
+            + "\n".join(c_lines)
+            + "\n  If the primary session ever looks expired or blocked, call the "
+            "reauthenticate tool to re-run this exact login flow — do not try to "
+            "reproduce the login form yourself with browser fill/click steps; a "
+            "hand-driven browser sequence cannot retrieve a TOTP/email-OTP code the "
+            "way the configured login flow can."
+        )
 
     sessions_text = ""
     if session_vault:
@@ -7820,10 +7861,10 @@ async def _do_agentic_thinking_loop(
             for label, sd in session_vault.items()
         ]
         sessions_text = (
-            "Reusable authenticated sessions — use these labels instead of re-authenticating:\n"
-            + "\n".join(s_lines)
+            "Reusable authenticated sessions — use these labels for cross-user/session "
+            "testing. If 'configured_primary' itself appears expired or evicted, call "
+            "reauthenticate instead of re-deriving it by hand:\n" + "\n".join(s_lines)
         )
-
     guidance_text = (
         "Operator guidance — follow these instructions:\n" + guidance
         if guidance
@@ -8347,6 +8388,19 @@ async def _do_agentic_thinking_loop(
                     await _try_reauth()
             elif not use_session_label:
                 _consecutive_auth_failures[0] = 0
+            # Soft-block detection: a WAF/bot-mitigation product can flag a
+            # previously-working primary session and 403 it indefinitely without
+            # ever surfacing a 401/419/440. If the primary session has proven
+            # itself with a 2xx before, treat a run of 403s as an eviction too.
+            if not use_session_label:
+                if 200 <= resp_status < 300:
+                    _primary_had_success[0] = True
+                    _consecutive_primary_forbidden[0] = 0
+                elif resp_status == 403 and _primary_had_success[0]:
+                    _consecutive_primary_forbidden[0] += 1
+                    if _consecutive_primary_forbidden[0] >= _SOFT_BLOCK_THRESHOLD:
+                        await _try_reauth()
+                        _consecutive_primary_forbidden[0] = 0
             events_svc.emit(
                 run_id,
                 {
@@ -8888,6 +8942,77 @@ async def _do_agentic_thinking_loop(
                 )
             return f"Registration attempted. Status: {ra_resp_status}\nBody: {ra_resp_body[:500]}"
 
+        # ── reauthenticate ───────────────────────────────────────────────────
+        if tool_name == "reauthenticate":
+            _reauth_reason = str(tool_input.get("reason") or "").strip()
+            if not creds:
+                return (
+                    "reauthenticate: this run has no configured credential — there is no "
+                    "login flow to re-run. Continue testing the anonymous-accessible surface."
+                )
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "running",
+                    "message": (
+                        f"Step {step}: reauthenticate — {_reauth_reason or 'session appears expired'}"
+                    ),
+                    "data": {"step": step, "note": note},
+                },
+            )
+            _reauth_attempts_before = _reauth_count[0]
+            _reauth_ok = await _try_reauth()
+            history.append(
+                {
+                    "step": step,
+                    "note": note,
+                    "method": "REAUTHENTICATE",
+                    "url": _login_url_for_credential(login_url, creds[0]),
+                    "request_headers": {},
+                    "request_body": {"reason": _reauth_reason},
+                    "response_status": 200 if _reauth_ok else 0,
+                    "response_headers": {},
+                    "response_body": "succeeded" if _reauth_ok else "failed",
+                }
+            )
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "thinking_step",
+                    "status": "complete",
+                    "message": (
+                        f"Step {step}: reauthenticate \u2192 "
+                        + ("succeeded" if _reauth_ok else "failed")
+                    ),
+                    "data": {"step": step, "note": note},
+                },
+            )
+            if _reauth_ok:
+                return (
+                    "reauthenticate: succeeded — the login flow (including any configured "
+                    "TOTP/email-OTP step) ran again and produced a fresh 'configured_primary' "
+                    "session. Continue using the default session (omit use_session) or set "
+                    "use_session='configured_primary' explicitly."
+                )
+            if _reauth_attempts_before >= _REAUTH_MAX:
+                return (
+                    "reauthenticate: re-authentication attempts are exhausted for this scan "
+                    "(the login flow ran but could not restore a working session — this "
+                    "usually means a WAF/bot-protection block rather than an expired session). "
+                    "Do not attempt the login form yourself with browser fill/click steps. "
+                    "Use skip_coverage with disposition=blocked for the affected obligations, "
+                    "citing this eviction as evidence, and continue testing reachable surface."
+                )
+            return (
+                "reauthenticate: the login flow ran but did not produce a valid session. "
+                "Check the auth log for the failure reason. Do not attempt the login form "
+                "yourself with manual browser steps — this tool already runs the real, "
+                "configured login flow (including TOTP/email-OTP when applicable)."
+            )
+
         # ── agent_dispatch ────────────────────────────────────────────────────
         if tool_name == "agent_dispatch":
             dispatched_id = _schedule_specialist_agent(
@@ -9329,6 +9454,16 @@ async def _do_agentic_thinking_loop(
                 await _try_reauth()
         elif not hr_use_session:
             _consecutive_auth_failures[0] = 0
+        # Soft-block detection: see matching comment in the BROWSER handler above.
+        if not hr_use_session:
+            if 200 <= hr_resp_status < 300:
+                _primary_had_success[0] = True
+                _consecutive_primary_forbidden[0] = 0
+            elif hr_resp_status == 403 and _primary_had_success[0]:
+                _consecutive_primary_forbidden[0] += 1
+                if _consecutive_primary_forbidden[0] >= _SOFT_BLOCK_THRESHOLD:
+                    await _try_reauth()
+                    _consecutive_primary_forbidden[0] = 0
         events_svc.emit(
             run_id,
             {
