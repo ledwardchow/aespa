@@ -1123,6 +1123,16 @@ def _migrate(engine: Engine) -> None:
         )
         conn.commit()
 
+    # Passive WAF/bot-manager fingerprint (services/waf_detect.py), surfaced on
+    # the Attack Surface tab and used to route http_request through the browser
+    # context once a WAF is detected for the run.
+    _ensure_column(engine, "test_run", "waf_provider", "TEXT")
+    _ensure_column(engine, "test_run", "waf_confidence", "TEXT")
+    _ensure_column(engine, "test_run", "waf_evidence", "TEXT")
+    _ensure_column(engine, "api_test_run", "waf_provider", "TEXT")
+    _ensure_column(engine, "api_test_run", "waf_confidence", "TEXT")
+    _ensure_column(engine, "api_test_run", "waf_evidence", "TEXT")
+
     # Orphan-extraction sweep last: it queries SastRun via the ORM, so it must
     # run only after every SastRun column above has been added — otherwise the
     # first post-upgrade startup raises "no such column" and silently skips.

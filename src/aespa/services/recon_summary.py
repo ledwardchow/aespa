@@ -104,6 +104,21 @@ def build_recon_summary(
         coverage = _build_coverage(cells, pages, routes)
         signals = _build_signals(pages, intel_items)
         technologies = _detect_technologies(s, run_id, pages, intel_items)
+        waf = _build_waf_summary(run)
+        if waf is not None:
+            # Surface the WAF alongside the other detected technologies too, so
+            # it shows up in the "Observed Technologies" chip list without the
+            # frontend needing a second code path — ``category`` lets it style
+            # the chip as a warning distinctly from frameworks/libraries.
+            technologies = [
+                {
+                    "name": f"{waf['provider']} (WAF)",
+                    "source": "response fingerprint",
+                    "category": "waf",
+                    "confidence": waf["confidence"],
+                },
+                *technologies,
+            ]
 
         access_counts = Counter(route["access"]["classification"] for route in routes)
         summary = {
@@ -144,6 +159,7 @@ def build_recon_summary(
                 "items": signals[:100],
             },
             "technologies": technologies,
+            "waf": waf,
         }
         if persist and run is not None:
             run.recon_summary = json.dumps(summary)
@@ -680,6 +696,20 @@ def _build_signals(
             item["url"],
         ),
     )
+
+
+def _build_waf_summary(run: TestRun | None) -> dict | None:
+    """Structured WAF/bot-manager detection for direct consumers (UI badge,
+    scan-loop routing decisions). ``None`` means no WAF has been fingerprinted
+    yet for this run — see ``services/waf_detect.py`` for how detection works.
+    """
+    if run is None or not run.waf_provider:
+        return None
+    return {
+        "provider": run.waf_provider,
+        "confidence": run.waf_confidence or "medium",
+        "evidence": run.waf_evidence or "",
+    }
 
 
 def _detect_technologies(

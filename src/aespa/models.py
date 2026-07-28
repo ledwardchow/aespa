@@ -221,6 +221,10 @@ class ApiTestRun(SQLModel, table=True):
     sast_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    # Passive WAF/bot-manager fingerprint — see TestRun.waf_provider.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)
+    waf_evidence: Optional[str] = Field(default=None)
 
 
 # ── API Endpoint Test (coverage matrix cell) ──────────────────────────────────
@@ -559,6 +563,15 @@ class TestRun(SQLModel, table=True):
     terminal_reason: Optional[str] = Field(
         default=None
     )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
+    # Passive WAF/bot-manager fingerprint (see services/waf_detect.py), set the
+    # first time a response carries an identifiable marker (e.g. Akamai's
+    # bm_sz cookie or edge denial page). Surfaced on the Attack Surface tab and
+    # used by the scan loop to route http_request calls through the browser
+    # context instead of a raw httpx client, since a bare TLS client can never
+    # pass a JS-based bot challenge.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)  # "high" | "medium"
+    waf_evidence: Optional[str] = Field(default=None)
 
 
 class CrawledPage(SQLModel, table=True):

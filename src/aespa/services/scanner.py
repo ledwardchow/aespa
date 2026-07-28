@@ -365,6 +365,99 @@ def _playwright_global_headers(
     return merged
 
 
+class _BrowserRequestEcho:
+    """Minimal stand-in for ``httpx.Request`` — only ``.headers`` is read
+    downstream (for sent-header evidence), so that's all this needs."""
+
+    def __init__(self, headers: dict[str, str]):
+        self.headers = headers
+
+
+class _BrowserApiResponse:
+    """Adapts a Playwright ``APIResponse`` to the small subset of the
+    ``httpx.Response`` interface the agentic loop's http_request handling
+    reads (``.text``, ``.status_code``, ``.headers``, ``.request.headers``).
+
+    Lets ``_dispatch_http_request`` swap the transport (raw httpx vs. the
+    browser context's cookie-sharing APIRequestContext) without touching the
+    much larger block of response-handling code that follows it.
+    """
+
+    def __init__(self, status_code: int, headers: dict, text: str, sent_headers: dict):
+        self.status_code = status_code
+        self.headers = headers
+        self.text = text
+        self.request = _BrowserRequestEcho(sent_headers)
+
+
+async def _dispatch_http_request(
+    hx: httpx.AsyncClient,
+    browser_ctx,
+    run_id: int,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body,
+    *,
+    selected_session: dict | None,
+):
+    """Issue one http_request tool call, transparently routing it through the
+    browser context's APIRequestContext (``browser_ctx.request``) instead of
+    the raw httpx client whenever a WAF/bot-manager has been fingerprinted for
+    this run (see ``services/waf_detect.py``).
+
+    A bare TLS client can never satisfy a JS-based bot challenge (no sensor
+    script runs, no `_abck`/`bm_sz`-style cookie is ever minted), so once we
+    know a WAF is present, every request must go through the real browser
+    context that already holds those cookies — otherwise every http_request
+    call is a guaranteed 403 regardless of payload. See docs/architecture.md.
+
+    Only the default/primary session is eligible for browser routing:
+    ``browser_ctx`` has one shared cookie jar, so an explicit anonymous/
+    other-session request (``selected_session`` set) cannot be faithfully
+    represented through it without a second isolated context. Those requests
+    keep using httpx even under a detected WAF — they'll still 403, but that
+    result stays honest rather than silently reusing the primary session.
+    """
+    from aespa.services import traffic as traffic_svc
+
+    use_browser = selected_session is None and traffic_svc.get_cached_waf(run_id) is not None
+    if not use_browser:
+        if isinstance(body, dict):
+            headers.setdefault("Content-Type", "application/json")
+            resp = await hx.request(method, url, json=body, headers=headers)
+        elif isinstance(body, str) and body:
+            resp = await hx.request(method, url, content=body, headers=headers)
+        else:
+            resp = await hx.request(method, url, headers=headers)
+        return resp
+
+    data = None
+    if isinstance(body, dict):
+        headers.setdefault("Content-Type", "application/json")
+        data = body  # dict values are auto-serialized as JSON by Playwright
+    elif isinstance(body, str) and body:
+        data = body
+    api_resp = await browser_ctx.request.fetch(
+        url,
+        method=method,
+        headers=headers,
+        data=data,
+        max_redirects=0 if method.upper() == "HEAD" else 20,
+    )
+    text = await api_resp.text()
+    # APIRequestContext requests still flow through browser_ctx's own
+    # request/response listeners (registered via setup_playwright_logging), so
+    # no separate traffic-log write is needed here.
+    return _BrowserApiResponse(
+        status_code=api_resp.status,
+        headers=dict(api_resp.headers),
+        text=text,
+        sent_headers=dict(headers),
+    )
+
+
+
 # ── In-memory state ───────────────────────────────────────────────────────────
 
 # Populated while a scan is running so the validator can reuse pre-authenticated sessions.
@@ -1509,6 +1602,7 @@ def _build_thinking_context_from_recon_summary(
             for item in summary.get("technologies") or []
             if item.get("name")
         ]
+        waf = summary.get("waf")
         access_counts = access.get("counts") or {}
         statuses = coverage.get("statuses") or {}
         sections = [
@@ -1523,6 +1617,14 @@ def _build_thinking_context_from_recon_summary(
                 + (
                     f"\nObserved technologies: {', '.join(technologies)}"
                     if technologies
+                    else ""
+                )
+                + (
+                    f"\nWAF detected: {waf['provider']} (confidence: {waf['confidence']}). "
+                    "http_request calls are being transparently routed through the "
+                    "authenticated browser context so cookies/JS-challenge state carry "
+                    "over; you do not need to change tool usage."
+                    if waf
                     else ""
                 )
             ),
@@ -6873,39 +6975,28 @@ async def _do_thinking_scan(run_id: int) -> None:
                             headers,
                             default_session={"extra_headers": extra_headers},
                         )
+                        if isinstance(body, dict):
+                            req_body_str = json.dumps(body)[:800]
+                        elif isinstance(body, str) and body:
+                            req_body_str = body[:800]
                         # Cookies actually sent (for honest evidence below). The jar
                         # swap below makes an explicit anonymous/other-user session
                         # authoritative so it cannot inherit the primary cookies.
+                        # (No-op when routed through the browser context — see
+                        # _dispatch_http_request's selected_session handling.)
                         with _client_session_cookies(hx, selected_session):
-                            if isinstance(body, dict):
-                                merged_headers.setdefault(
-                                    "Content-Type", "application/json"
-                                )
-                                started = time.perf_counter()
-                                resp = await hx.request(
-                                    method, url, json=body, headers=merged_headers
-                                )
-                                duration_ms = int(
-                                    (time.perf_counter() - started) * 1000
-                                )
-                                req_body_str = json.dumps(body)[:800]
-                            elif isinstance(body, str) and body:
-                                started = time.perf_counter()
-                                resp = await hx.request(
-                                    method, url, content=body, headers=merged_headers
-                                )
-                                duration_ms = int(
-                                    (time.perf_counter() - started) * 1000
-                                )
-                                req_body_str = body[:800]
-                            else:
-                                started = time.perf_counter()
-                                resp = await hx.request(
-                                    method, url, headers=merged_headers
-                                )
-                                duration_ms = int(
-                                    (time.perf_counter() - started) * 1000
-                                )
+                            started = time.perf_counter()
+                            resp = await _dispatch_http_request(
+                                hx,
+                                browser_ctx,
+                                run_id,
+                                method,
+                                url,
+                                merged_headers,
+                                body,
+                                selected_session=selected_session,
+                            )
+                            duration_ms = int((time.perf_counter() - started) * 1000)
                         raw_resp_body = resp.text[:BODY_READ_LIMIT]
                         token = _extract_bearer_token_from_body(raw_resp_body)
                         if token and resp.status_code < 400:
