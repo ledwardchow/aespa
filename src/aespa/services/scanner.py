@@ -6401,12 +6401,20 @@ async def _do_thinking_scan(run_id: int) -> None:
                             cookie_list = _primary_browser_cookies
                         if cookie_list:
                             await browser_ctx.add_cookies(cookie_list)
+                        _br_call_headers_legacy = (
+                            action.get("headers")
+                            if isinstance(action.get("headers"), dict)
+                            else {}
+                        )
                         await browser_ctx.set_extra_http_headers(
-                            _playwright_global_headers(
-                                (selected_session.get("extra_headers") or {})
-                                if selected_session
-                                else {}
-                            )
+                            {
+                                **_playwright_global_headers(
+                                    (selected_session.get("extra_headers") or {})
+                                    if selected_session
+                                    else {}
+                                ),
+                                **_br_call_headers_legacy,
+                            }
                         )
                     except Exception:
                         pass
@@ -7612,6 +7620,21 @@ async def _do_agentic_thinking_loop(
             return scope_check_fn(url)
         return check_scope(url, site_id, run_id)
 
+    # A 403/429 is frequently a WAF or rate-limit block. If the operator left
+    # guidance (e.g. a header-rotation bypass), a one-shot mention at the start
+    # of the conversation is easy to lose track of dozens of steps later — so
+    # resurface it inline, every time a blocking status is observed, instead of
+    # relying on the model to recall it unprompted.
+    def _waf_guidance_reminder(status: int) -> str:
+        if status not in (403, 429) or not guidance:
+            return ""
+        return (
+            f"[POSSIBLE WAF/RATE-LIMIT BLOCK — HTTP {status}] Re-read the operator "
+            f"guidance for this site and apply it now:\n{guidance}\nIf the guidance "
+            "specifies a header (e.g. X-Forwarded-For), pass it via the `headers` "
+            "parameter on http_request, or on the `browser` tool, then retry.\n\n"
+        )
+
     # Snapshot the primary (default) browser-session cookies so anonymous or
     # other-user browser steps can be isolated and default steps restored without
     # one step's session leaking into the next. Kept fresh by _try_reauth below.
@@ -7866,7 +7889,11 @@ async def _do_agentic_thinking_loop(
             "reauthenticate instead of re-deriving it by hand:\n" + "\n".join(s_lines)
         )
     guidance_text = (
-        "Operator guidance — follow these instructions:\n" + guidance
+        "Operator guidance — follow these instructions for EVERY request for the "
+        "rest of this scan, not just the first few. If this guidance mentions a "
+        "WAF, rate limit, or bypass header, set that header via the `headers` "
+        "parameter on http_request (or the browser tool) on every request, and "
+        "re-apply/rotate it again whenever you see a 403 or 429:\n" + guidance
         if guidance
         else ""
     )
@@ -8233,12 +8260,20 @@ async def _do_agentic_thinking_loop(
                     cookie_list = _primary_browser_cookies
                 if cookie_list:
                     await browser_ctx.add_cookies(cookie_list)
+                _br_call_headers = (
+                    tool_input.get("headers")
+                    if isinstance(tool_input.get("headers"), dict)
+                    else {}
+                )
                 await browser_ctx.set_extra_http_headers(
-                    _playwright_global_headers(
-                        (selected_session.get("extra_headers") or {})
-                        if selected_session
-                        else {}
-                    )
+                    {
+                        **_playwright_global_headers(
+                            (selected_session.get("extra_headers") or {})
+                            if selected_session
+                            else {}
+                        ),
+                        **_br_call_headers,
+                    }
                 )
             except Exception:
                 pass
@@ -8423,7 +8458,9 @@ async def _do_agentic_thinking_loop(
                 else ""
             )
             return (
-                _br_eviction_note + f"Browser: {final_url}\nStatus: {resp_status}\n"
+                _br_eviction_note
+                + _waf_guidance_reminder(resp_status)
+                + f"Browser: {final_url}\nStatus: {resp_status}\n"
                 f"Action log:\n{action_log_text}\nPage content:\n{resp_body}"
             )
 
@@ -9525,6 +9562,7 @@ async def _do_agentic_thinking_loop(
             + _canary_alert
             + _eviction_note
             + _redirect_note
+            + _waf_guidance_reminder(hr_resp_status)
             + f"Method: {hr_method}\nURL: {hr_url}\nStatus: {hr_resp_status}\n"
             + (f"Duration: {hr_duration_ms}ms\n" if hr_duration_ms else "")
             + (
