@@ -124,6 +124,14 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 - The app intentionally has no auth and is localhost-only by design. Optional Cloudflare Access JWT verification in `main.py` is only for users who front it with a reverse proxy. Do not add features assuming a trusted multi-user deployment.
 - When interacting with GitHub, use the `gh` command, because the repo may be on a different account than the authenticated GitHub Copilot session.
 
+## Desktop Launchers & PyInstaller Builds
+
+When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`):
+
+1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
+2. **Framework & Dynamic Import Collection**: Any third-party package loaded via dynamic string imports, reflection, plugin systems, or ASGI/WSGI servers (e.g. `alembic`, `uvicorn`, `playwright`, `webview`) must be explicitly bundled using `--collect-all <package>` or `--collect-submodules <package>`. In desktop launcher scripts (`desktop.py`, `desktop_win.py`), avoid string-based target resolution (e.g. `"aespa.main:app"`) and pass explicit module/object references (e.g. `uvicorn.Config(app, ...)`).
+3. **Fail-Fast Thread & Port Verification**: Background server threads (`_serve()`) must trap startup exceptions into a shared variable, and port polling functions (`_wait_port()`) must re-raise thread errors immediately or raise `TimeoutError` on deadline. Never allow `_wait_port()` to return cleanly when backend startup fails, as launching webviews on dead ports causes silent white screens.
+
 ## Versioning
 
 With every conversation turn that makes non-trivial code changes or fixes a bug, update the version number in `pyproject.toml`. Do not update the version number for documentation-only changes or non-substantive edits where source code logic and dependencies were untouched.
