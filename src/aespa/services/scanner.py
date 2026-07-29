@@ -5078,7 +5078,20 @@ def get_thinking_scan_status(run_id: int) -> dict:
         findings_count = len(
             s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
         )
-    return {"status": status, "findings_count": findings_count}
+        run = s.get(TestRun, run_id)
+        run_phase = run.phase if run else None
+        run_outcome = run.outcome if run else None
+        run_terminal_reason = run.terminal_reason if run else None
+    return {
+        "status": status,
+        "findings_count": findings_count,
+        # Included so the frontend can keep the run's phase/outcome/reason badges
+        # live during the dynamic scan without a separate poll — these fields only
+        # change on the backend at the same points this status is emitted.
+        "run_phase": run_phase,
+        "run_outcome": run_outcome,
+        "run_terminal_reason": run_terminal_reason,
+    }
 
 
 DEFAULT_THINKING_MAX_STEPS = 120
@@ -7735,6 +7748,7 @@ async def _do_agentic_thinking_loop(
 
     # ── Restore state from checkpoint (resume path) ───────────────────────────
     resume_messages: list[dict] | None = None
+    resume_step_count = 0
     if resume_from:
         history.extend(resume_from.get("history") or [])
         _blocked: set[str] = resume_from.get("blocked_urls") or set()
@@ -7742,6 +7756,7 @@ async def _do_agentic_thinking_loop(
         progressive_findings_count = resume_from.get("progressive_findings_count") or 0
         _consecutive_ctx_tools[0] = resume_from.get("consecutive_context_tools") or 0
         resume_messages = resume_from.get("messages") or None
+        resume_step_count = resume_from.get("step_count") or 0
         log.info(
             "Resuming agentic loop for run_id=%s from step %s (%d history entries, %d messages in LLM context)",
             run_id,
@@ -9576,7 +9591,9 @@ async def _do_agentic_thinking_loop(
         )
 
     # ── Run the loop ──────────────────────────────────────────────────────────
-    async def _on_checkpoint_callback(messages: list[dict]) -> None:
+    async def _on_checkpoint_callback(
+        messages: list[dict], step_count_value: int = 0
+    ) -> None:
         """Persist the full loop state after each completed LLM turn."""
         context_chars = len(json.dumps(messages, default=str))
         _context_metrics["final_context_chars"] = context_chars
@@ -9589,7 +9606,7 @@ async def _do_agentic_thinking_loop(
             history=history,
             blocked_urls=_blocked,
             failed_url_counts=_failed,
-            step_count=len(messages),
+            step_count=step_count_value,
             progressive_findings_count=progressive_findings_count,
             consecutive_context_tools=_consecutive_ctx_tools[0],
             completion_state=completion_policy.to_state(),
@@ -9779,6 +9796,7 @@ async def _do_agentic_thinking_loop(
             ),
             termination_check=completion_policy.check_termination,
             resume_messages=resume_messages,
+            resume_step_count=resume_step_count,
             on_checkpoint=_on_checkpoint_callback,
             tools=tools_override,
             execution_monitor_enabled=exec_mon_enabled,

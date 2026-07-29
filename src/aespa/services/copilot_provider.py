@@ -18,6 +18,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,10 @@ class _ConversationState:
     last_message_count: int = 0
     waiting_for_prompt: bool = False
     unsubscribe: Callable[[], None] | None = None
+    # Diagnostics only — lets slow/timed-out turns be attributed to a specific
+    # session age and turn number instead of guessing from message-list size.
+    created_monotonic: float = field(default_factory=time.monotonic)
+    turn_count: int = 0
 
 
 _clients: dict[str, _ClientEntry] = {}
@@ -450,11 +455,33 @@ async def plain_completion(
         ]
     try:
         state.usage_changed.clear()
-        response = await session.send_and_wait(
-            prompt,
-            attachments=attachments,
-            timeout=COPILOT_TURN_TIMEOUT_S,
-        )
+        _t0 = time.monotonic()
+        try:
+            response = await session.send_and_wait(
+                prompt,
+                attachments=attachments,
+                timeout=COPILOT_TURN_TIMEOUT_S,
+            )
+        except TimeoutError as exc:
+            _elapsed = time.monotonic() - _t0
+            log.warning(
+                "copilot plain_completion: timed out waiting %.1fs (limit %.1fs) "
+                "for the model response — prompt_chars=%d",
+                _elapsed,
+                COPILOT_TURN_TIMEOUT_S,
+                len(prompt),
+            )
+            raise TimeoutError(
+                f"GitHub Copilot did not respond within {COPILOT_TURN_TIMEOUT_S:.0f}s "
+                f"(waited {_elapsed:.1f}s; prompt was {len(prompt)} characters)"
+            ) from exc
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > 30.0:
+            log.info(
+                "copilot plain_completion: model response took %.1fs (prompt_chars=%d)",
+                _elapsed,
+                len(prompt),
+            )
         await _wait_for_usage(state)
         if state.content_filter_triggered:
             raise RuntimeError("content_filter: GitHub Copilot refused the request")
@@ -472,18 +499,30 @@ async def completion_with_tools(
     tools: list[dict],
     usage_callback: Callable[..., None],
     proxy_url: str | None = None,
+    _retry_on_timeout: bool = True,
 ) -> tuple[list[dict], str, list[dict]]:
     """Advance one persistent Copilot conversation to its next model turn.
 
     The SDK session remains alive while AESPA executes a requested tool. On the
     next call, the matching AESPA result is delivered to the suspended SDK tool
     handler and Copilot continues in the same conversation.
+
+    ``_retry_on_timeout``: internal — a turn that times out waiting for the SDK
+    session (see ``COPILOT_TURN_TIMEOUT_S``) is far more often a stalled
+    session/backend hiccup than a genuinely un-answerable prompt (prior turns
+    on the same session typically responded in seconds). Rather than failing
+    the whole scan on one flaky turn, the stale session is discarded and the
+    turn is retried exactly once against a brand-new session, replaying the
+    full message history as the opening prompt (the same path used for a
+    checkpoint resume). Sets this to False on the retry to bound it to a
+    single attempt.
     """
     from copilot import ToolSet
     from copilot.tools import Tool, ToolResult
 
     key = id(messages)
     conversation = _conversations.get(key)
+    is_new_session = conversation is None
     if conversation is None:
         turn_state = _TurnState()
         holder: dict[str, _ConversationState] = {}
@@ -545,10 +584,28 @@ async def completion_with_tools(
         conversation.unsubscribe = session.on(on_event)
         _conversations[key] = conversation
         conversation.turn_state.usage_changed.clear()
-        await session.send(conversation_prompt(messages))
+        _prompt = conversation_prompt(messages)
+        log.info(
+            "copilot turn: opening a new SDK session (model=%s, messages=%d, "
+            "prompt_chars=%d)",
+            config.model,
+            len(messages),
+            len(_prompt),
+        )
+        await session.send(_prompt)
     else:
         conversation.turn_state.usage_changed.clear()
+        _deliver_start = time.monotonic()
         await _deliver_tool_results(conversation, messages)
+        _deliver_elapsed = time.monotonic() - _deliver_start
+        if _deliver_elapsed > 1.0:
+            log.info(
+                "copilot turn: delivering tool result(s) to the SDK took %.1fs "
+                "(turn=%d, session_age=%.1fs)",
+                _deliver_elapsed,
+                conversation.turn_count + 1,
+                time.monotonic() - conversation.created_monotonic,
+            )
         if (
             conversation.waiting_for_prompt
             and len(messages) > conversation.last_message_count
@@ -559,9 +616,62 @@ async def completion_with_tools(
                 conversation.waiting_for_prompt = False
                 conversation.last_message_count = len(messages)
 
-    event_type, data = await asyncio.wait_for(
-        conversation.event_queue.get(), timeout=COPILOT_TURN_TIMEOUT_S
-    )
+    conversation.turn_count += 1
+    _turn_no = conversation.turn_count
+    _wait_start = time.monotonic()
+    try:
+        event_type, data = await asyncio.wait_for(
+            conversation.event_queue.get(), timeout=COPILOT_TURN_TIMEOUT_S
+        )
+    except TimeoutError as exc:
+        _elapsed = time.monotonic() - _wait_start
+        _session_age = time.monotonic() - conversation.created_monotonic
+        log.warning(
+            "copilot turn: timed out waiting %.1fs (limit %.1fs) for the model "
+            "response — session_new=%s, session_age=%.1fs, turn=%d, "
+            "messages=%d, pending_tool_results=%d",
+            _elapsed,
+            COPILOT_TURN_TIMEOUT_S,
+            is_new_session,
+            _session_age,
+            _turn_no,
+            len(messages),
+            len(conversation.pending_results),
+        )
+        await _close_conversation_key(key)
+        if _retry_on_timeout:
+            log.warning(
+                "copilot turn: discarding the stalled session and retrying once "
+                "with a fresh session (turn=%d, messages=%d)",
+                _turn_no,
+                len(messages),
+            )
+            return await completion_with_tools(
+                config,
+                system_message,
+                messages,
+                tools,
+                usage_callback,
+                proxy_url,
+                _retry_on_timeout=False,
+            )
+        raise TimeoutError(
+            f"GitHub Copilot did not respond within {COPILOT_TURN_TIMEOUT_S:.0f}s "
+            f"(waited {_elapsed:.1f}s; turn {_turn_no} of a session that is "
+            f"{_session_age:.1f}s old, new_session={is_new_session}, "
+            f"{len(messages)} messages in context; retry also timed out)"
+        ) from exc
+    _wait_elapsed = time.monotonic() - _wait_start
+    if _wait_elapsed > 30.0:
+        log.info(
+            "copilot turn: model response took %.1fs (turn=%d, session_age=%.1fs, "
+            "session_new=%s, messages=%d)",
+            _wait_elapsed,
+            _turn_no,
+            time.monotonic() - conversation.created_monotonic,
+            is_new_session,
+            len(messages),
+        )
     await _wait_for_usage(conversation.turn_state)
     if event_type == "error":
         raise RuntimeError(f"GitHub Copilot session error: {data.message or data}")
@@ -616,6 +726,13 @@ async def _deliver_tool_results(
     expected = conversation.last_tool_ids.intersection(results)
     if not expected:
         return
+    _total_chars = sum(len(results[tool_id]) for tool_id in expected)
+    if _total_chars > 20_000:
+        log.info(
+            "copilot turn: delivering %d tool result(s) totalling %d chars",
+            len(expected),
+            _total_chars,
+        )
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 5.0
