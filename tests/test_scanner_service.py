@@ -159,9 +159,7 @@ def test_session_exercised_log_uses_session_validator_label(monkeypatch):
         lambda run_id, event: emitted.append((run_id, event)),
     )
 
-    scanner._emit_session_validator_log(
-        42, "Session anonymous exercised: status 200."
-    )
+    scanner._emit_session_validator_log(42, "Session anonymous exercised: status 200.")
 
     assert emitted == [
         (

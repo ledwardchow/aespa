@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit, urlunparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -1418,6 +1418,56 @@ def get_page_views(
     return [PageCredentialViewOut.model_validate(v) for v in views]
 
 
+def _infer_parent_url_candidates(url_str: str) -> list[str]:
+    candidates = []
+    parsed = urlparse(url_str)
+    if parsed.query:
+        no_query = urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                "",
+                parsed.fragment,
+            )
+        )
+        candidates.append(no_query)
+        url_str = no_query
+
+    scheme, netloc, path, params, query, fragment = urlparse(url_str)
+    if fragment and fragment.startswith("/"):
+        frag_parts = [p for p in fragment.split("/") if p]
+        while len(frag_parts) > 1:
+            frag_parts.pop()
+            parent_frag = "/" + "/".join(frag_parts)
+            candidates.append(
+                urlunparse((scheme, netloc, path, params, "", parent_frag))
+            )
+        cand_base = urlunparse((scheme, netloc, path, params, "", ""))
+        candidates.append(cand_base)
+        if cand_base.endswith("/"):
+            candidates.append(cand_base.rstrip("/"))
+    else:
+        path_parts = [p for p in path.split("/") if p]
+        while len(path_parts) > 1:
+            path_parts.pop()
+            parent_path = "/" + "/".join(path_parts)
+            cand = urlunparse((scheme, netloc, parent_path, params, "", fragment))
+            candidates.append(cand)
+            if not parent_path.endswith("/"):
+                candidates.append(cand + "/")
+
+    seen = set()
+    res = []
+    for c in candidates:
+        c_norm = c.rstrip("/") if len(c) > len(scheme + "://" + netloc) else c
+        if c != url_str and c_norm not in seen:
+            seen.add(c_norm)
+            res.append(c)
+    return res
+
+
 @router.get("/api/test-runs/{run_id}/graph", response_model=GraphData)
 def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData:
     _get_run_or_404(session, run_id)
@@ -1463,6 +1513,36 @@ def get_graph(run_id: int, session: Session = Depends(get_session)) -> GraphData
         and link.source_page_id in page_ids
         and link.target_page_id in page_ids
     ]
+
+    targeted_page_ids = {e.target for e in edges}
+    root_page_id = min((p.id for p in pages), default=None)
+    page_url_map = {p.url: p.id for p in pages}
+    page_url_map_norm = {p.url.rstrip("/"): p.id for p in pages if len(p.url) > 8}
+
+    for p in pages:
+        if p.id == root_page_id or p.id in targeted_page_ids:
+            continue
+        candidates = _infer_parent_url_candidates(p.url)
+        parent_id = None
+        for cand in candidates:
+            cand_norm = cand.rstrip("/")
+            if cand in page_url_map:
+                parent_id = page_url_map[cand]
+                break
+            elif cand_norm in page_url_map_norm:
+                parent_id = page_url_map_norm[cand_norm]
+                break
+        if parent_id and parent_id != p.id and parent_id in page_ids:
+            edges.append(
+                GraphLink(
+                    source=parent_id,
+                    target=p.id,
+                    link_text=None,
+                    action_kind="inferred",
+                )
+            )
+            targeted_page_ids.add(p.id)
+
     return GraphData(nodes=nodes, links=edges)
 
 

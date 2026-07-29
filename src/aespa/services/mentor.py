@@ -195,17 +195,13 @@ async def run_mentor_adviser(
             if vector.route_patterns:
                 constraints.append(f"routes={','.join(vector.route_patterns)}")
             if vector.owasp_categories:
-                constraints.append(
-                    f"categories={','.join(vector.owasp_categories)}"
-                )
+                constraints.append(f"categories={','.join(vector.owasp_categories)}")
             if vector.test_classes:
                 constraints.append(f"classes={','.join(vector.test_classes)}")
             if vector.parameter_names:
                 constraints.append(f"parameters={','.join(vector.parameter_names)}")
             detail = f" — {'; '.join(constraints)}" if constraints else ""
-            vector_lines.append(
-                f"{index}. {vector.title} [{vector.id}]{detail}"
-            )
+            vector_lines.append(f"{index}. {vector.title} [{vector.id}]{detail}")
         alternatives = (
             "\n".join(vector_lines)
             if vector_lines

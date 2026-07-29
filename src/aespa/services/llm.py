@@ -426,9 +426,7 @@ def _record_usage(
     if provider:
         entry["provider"] = provider
     entry["ai_credits"] = entry.get("ai_credits", 0) + ai_credits
-    entry["factory_credits"] = (
-        entry.get("factory_credits", 0) + factory_credits
-    )
+    entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
     if copilot_quota:

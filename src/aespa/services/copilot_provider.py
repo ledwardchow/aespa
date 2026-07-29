@@ -239,7 +239,6 @@ async def discover_models(proxy_url: str | None = None) -> list[str]:
     return discovered
 
 
-
 def _system_message(content: str) -> dict[str, Any]:
     """Keep Copilot safety policy while replacing code-agent-specific guidance."""
     remove = {"action": "remove"}
