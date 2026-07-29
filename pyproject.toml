@@ -1,12 +1,13 @@
 [project]
 name = "aespa"
-version = "0.6.20260729.18"
+version = "0.6.20260729.19"
 description = "AI-Enabled Security Pentesting Agent"
 authors = [
     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.14.0",
     "anthropic>=0.97.0",
     "boto3>=1.42.0",
     "fastapi>=0.136.1",

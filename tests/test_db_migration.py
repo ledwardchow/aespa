@@ -678,3 +678,33 @@ def test_ensure_scan_finding_test_run_id_nullable_decouples_api_findings():
             assert count == 2
     finally:
         engine.dispose()
+
+
+def test_alembic_migration_creates_version_table_and_stamps_legacy():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        db.run_migrations(engine)
+
+        with engine.connect() as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+
+        assert "alembic_version" in tables
+        assert "site" in tables
+        assert "test_run" in tables
+        assert version == "0044cbef2700"
+    finally:
+        engine.dispose()

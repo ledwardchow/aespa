@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from pathlib import Path
 
-from sqlalchemy import event
+from alembic.config import Config
+from sqlalchemy import event, inspect
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 from aespa.config import Settings, get_settings
+from alembic import command
 
 _engine: Engine | None = None
 
@@ -16,14 +19,6 @@ def _build_engine(settings: Settings) -> Engine:
     connect_args: dict[str, object] = {}
     is_sqlite = settings.database_url.startswith("sqlite")
     if is_sqlite:
-        # A busy scan writes to the DB frequently while the UI polls it
-        # concurrently (traffic/log/status endpoints). SQLite's default
-        # busy timeout is 5s and its default journal mode serializes
-        # writers behind readers, both of which surface as "database is
-        # locked" errors under this workload. WAL mode lets readers and
-        # a single writer proceed concurrently, and a generous
-        # busy_timeout makes any residual contention retry instead of
-        # failing immediately.
         connect_args["check_same_thread"] = False
         connect_args["timeout"] = 30
     engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
@@ -55,12 +50,39 @@ def set_engine(engine: Engine) -> None:
     _engine = engine
 
 
+def _get_alembic_config(engine: Engine) -> Config:
+    repo_root = Path(__file__).resolve().parents[2]
+    ini_path = repo_root / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("script_location", str(repo_root / "alembic"))
+    cfg.attributes["connection"] = engine
+    return cfg
+
+
+def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> None:
+    """If the DB has existing domain tables but lacks alembic_version, stamp with head."""
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        if ("site" in tables or "test_run" in tables) and "alembic_version" not in tables:
+            command.stamp(alembic_cfg, "head")
+    except Exception:
+        pass
+
+
+def run_migrations(engine: Engine | None = None) -> None:
+    if engine is None:
+        engine = get_engine()
+    alembic_cfg = _get_alembic_config(engine)
+    _stamp_legacy_db_if_needed(engine, alembic_cfg)
+    command.upgrade(alembic_cfg, "head")
+
+
 def init_db() -> None:
     # Importing models registers them with SQLModel.metadata.
     from aespa import models  # noqa: F401
 
     engine = get_engine()
-    SQLModel.metadata.create_all(engine)
     _migrate(engine)
 
 
@@ -333,7 +355,8 @@ def _cleanup_orphaned_sast_extractions() -> None:
 
 
 def _migrate(engine: Engine) -> None:
-    """Apply any missing columns that were added after the initial schema creation."""
+    """Apply Alembic migrations and runtime startup backfills."""
+    run_migrations(engine)
     _ensure_column(
         engine,
         "global_http_header_config",
