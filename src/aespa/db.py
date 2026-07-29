@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -13,9 +14,32 @@ _engine: Engine | None = None
 
 def _build_engine(settings: Settings) -> Engine:
     connect_args: dict[str, object] = {}
-    if settings.database_url.startswith("sqlite"):
+    is_sqlite = settings.database_url.startswith("sqlite")
+    if is_sqlite:
+        # A busy scan writes to the DB frequently while the UI polls it
+        # concurrently (traffic/log/status endpoints). SQLite's default
+        # busy timeout is 5s and its default journal mode serializes
+        # writers behind readers, both of which surface as "database is
+        # locked" errors under this workload. WAL mode lets readers and
+        # a single writer proceed concurrently, and a generous
+        # busy_timeout makes any residual contention retry instead of
+        # failing immediately.
         connect_args["check_same_thread"] = False
-    return create_engine(settings.database_url, echo=False, connect_args=connect_args)
+        connect_args["timeout"] = 30
+    engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
+    if is_sqlite and ":memory:" not in settings.database_url:
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def get_engine() -> Engine:
@@ -136,6 +160,66 @@ def _reset_orphaned_validating_findings(engine: Engine) -> None:
                     "WHERE validation_status='validating'"
                 )
             )
+            conn.commit()
+    except Exception:
+        pass  # never block startup on a best-effort cleanup
+
+
+def _reset_orphaned_running_runs(engine: Engine) -> None:
+    """Fail out crawl/scan runs left stuck in a "running" state.
+
+    ``TestRun.status``, ``ApiTestRun.status`` and ``SastRun.status`` are only
+    ever driven to a running value by an in-memory asyncio task (crawler,
+    thinking-scan, api-scanner, sast-scanner). A fresh process has none of
+    those tasks yet, so any run still showing "running"/"scanning" at startup
+    is an orphan from a previous process that was killed or crashed mid-run —
+    never a run that is genuinely resuming. Left alone, the UI polls the
+    stale status forever and looks like the crawl/scan restarted itself on
+    every ``uv run aespa``. Idempotent and best-effort.
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.connect() as conn:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    _text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+            }
+            note = "Interrupted by a server restart; mark as failed."
+            if "test_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE test_run "
+                        "SET status='failed', phase='finished', outcome='failed', "
+                        "    terminal_reason='interrupted', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='running'"
+                    ),
+                    {"note": note},
+                )
+            if "api_test_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE api_test_run "
+                        "SET status='failed', phase='finished', outcome='failed', "
+                        "    terminal_reason='interrupted', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='running'"
+                    ),
+                    {"note": note},
+                )
+            if "sast_run" in tables:
+                conn.execute(
+                    _text(
+                        "UPDATE sast_run "
+                        "SET status='failed', "
+                        "    error_message=:note, completed_at=CURRENT_TIMESTAMP "
+                        "WHERE status='scanning'"
+                    ),
+                    {"note": note},
+                )
             conn.commit()
     except Exception:
         pass  # never block startup on a best-effort cleanup
@@ -424,6 +508,7 @@ def _migrate(engine: Engine) -> None:
     _backfill_run_kind(engine)
     _backfill_scanner_session_account_labels(engine)
     _reset_orphaned_validating_findings(engine)
+    _reset_orphaned_running_runs(engine)
     _normalize_threshold_skipped_findings(engine)
     with engine.connect() as conn:
         conn.execute(

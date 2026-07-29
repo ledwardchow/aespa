@@ -263,7 +263,7 @@ def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
         }
         return [done], "tool_use", [done]
 
-    async def checkpoint(messages):
+    async def checkpoint(messages, step_count=0):
         checkpoints.append(messages.copy())
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
@@ -337,6 +337,53 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
         "consecutive_no_tool_responses"
     )
     assert terminal[0]["data"]["explicit_done"] is False
+
+
+def test_agentic_loop_continues_step_numbering_on_resume(monkeypatch):
+    """Resuming from a checkpoint must continue the Step N counter shown to the
+    user (and persisted back to on_checkpoint) instead of restarting at 1."""
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+    checkpoint_steps: list[int] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        done = {
+            "type": "tool_use",
+            "id": "done-1",
+            "name": "done",
+            "input": {"summary": "resumed"},
+            "text": None,
+        }
+        return [done], "tool_use", [done]
+
+    async def checkpoint(messages, step_count=0):
+        checkpoint_steps.append(step_count)
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+            on_checkpoint=checkpoint,
+            resume_messages=[{"role": "user", "content": "start"}],
+            resume_step_count=41,
+        )
+    )
+
+    deciding_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "thinking_step" and event.get("status") == "deciding"
+    ]
+    assert deciding_events[0]["data"]["step"] == 42
+    assert checkpoint_steps[-1] == 42
 
 
 def test_agentic_loop_repairs_trailing_assistant_checkpoint_on_resume(monkeypatch):

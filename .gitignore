@@ -19,3 +19,5 @@ saml.b64
 aespa.db-journal
 *.backup
 *.db-backup
+aespa.db-shm
+aespa.db-wal

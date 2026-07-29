@@ -4104,6 +4104,7 @@ async def thinking_agentic_loop(
     after_tool_result=None,
     termination_check=None,
     resume_messages: list[dict] | None = None,
+    resume_step_count: int = 0,
     on_checkpoint=None,
     tools: list[dict] | None = None,
     before_tool_execution=None,
@@ -4127,7 +4128,12 @@ async def thinking_agentic_loop(
         instead of building a fresh one from initial_user_message.  Used when
         resuming an interrupted scan.
 
-    on_checkpoint: optional async callable ``(messages: list[dict]) -> None``
+    resume_step_count: the step number the conversation had already reached
+        before the resume (e.g. from a checkpoint's persisted step_count), so
+        the loop's own step numbering continues (Step N+1, N+2, …) instead of
+        restarting at Step 1 while the LLM sees N prior turns in its context.
+
+    on_checkpoint: optional async callable ``(messages: list[dict], step_count: int) -> None``
         invoked after every completed LLM turn so the caller can persist the
         current conversation state to durable storage.
 
@@ -4192,7 +4198,7 @@ async def thinking_agentic_loop(
             }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
-    tool_call_count = 0
+    tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
 
@@ -4667,7 +4673,7 @@ async def thinking_agentic_loop(
 
             if on_checkpoint:
                 try:
-                    await on_checkpoint(messages)
+                    await on_checkpoint(messages, tool_call_count)
                 except Exception:
                     pass  # checkpoint write failures must never abort the scan
 
@@ -4691,7 +4697,7 @@ async def thinking_agentic_loop(
         # by task.cancel() — so the conversation state is always recoverable.
         if on_checkpoint and len(messages) > 1:
             try:
-                await on_checkpoint(messages)
+                await on_checkpoint(messages, tool_call_count)
             except Exception:
                 pass
 
