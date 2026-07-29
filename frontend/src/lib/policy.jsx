@@ -31,6 +31,7 @@ export const defaultPolicyForm = () => ({
   follow_redirects:true,
   allow_subdomains:true,
   require_approval_for_destructive:true,
+  strict_locator_enforcement:true,
 });
 export const policyToForm = (p) => {
   const f = defaultPolicyForm();
@@ -58,6 +59,7 @@ export const policyToForm = (p) => {
     follow_redirects:p.follow_redirects ?? true,
     allow_subdomains:p.allow_subdomains ?? true,
     require_approval_for_destructive:p.require_approval_for_destructive ?? true,
+    strict_locator_enforcement:p.strict_locator_enforcement ?? true,
   };
 };
 export const policyPayload = (form) => ({
@@ -83,4 +85,5 @@ export const policyPayload = (form) => ({
   follow_redirects:!!form.follow_redirects,
   allow_subdomains:!!form.allow_subdomains,
   require_approval_for_destructive:!!form.require_approval_for_destructive,
+  strict_locator_enforcement:!!form.strict_locator_enforcement,
 });

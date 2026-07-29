@@ -541,6 +541,7 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
+    assert data["strict_locator_enforcement"] is True
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -557,6 +558,7 @@ def test_upsert_scanner_policy(client: TestClient):
             "request_timeout_s": 12.5,
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
+            "strict_locator_enforcement": False,
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
@@ -570,6 +572,7 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
+    assert data["strict_locator_enforcement"] is False
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -593,6 +596,9 @@ def test_crawler_config_defaults_and_upsert(client: TestClient):
     initial = client.get("/api/settings/crawler-config")
     assert initial.status_code == 200
     assert initial.json()["js_endpoint_discovery_enabled"] is False
+    assert initial.json()["skip_dangerous_actions"] is True
+    assert initial.json()["suppress_form_submit_actions"] is True
+    assert initial.json()["block_non_idempotent_interactive_replay"] is True
 
     updated = client.put(
         "/api/settings/crawler-config",
@@ -600,10 +606,16 @@ def test_crawler_config_defaults_and_upsert(client: TestClient):
     )
     assert updated.status_code == 200
     assert updated.json()["js_endpoint_discovery_enabled"] is True
+    assert updated.json()["skip_dangerous_actions"] is True
+    assert updated.json()["suppress_form_submit_actions"] is True
+    assert updated.json()["block_non_idempotent_interactive_replay"] is True
 
     persisted = client.get("/api/settings/crawler-config")
     assert persisted.status_code == 200
     assert persisted.json()["js_endpoint_discovery_enabled"] is True
+    assert persisted.json()["skip_dangerous_actions"] is True
+    assert persisted.json()["suppress_form_submit_actions"] is True
+    assert persisted.json()["block_non_idempotent_interactive_replay"] is True
 
 
 def test_import_llm_config_rejects_duplicate_names(client: TestClient):

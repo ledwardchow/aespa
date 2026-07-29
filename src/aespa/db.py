@@ -488,6 +488,12 @@ def _migrate(engine: Engine) -> None:
         "BOOLEAN NOT NULL DEFAULT 0",
     )
     _ensure_column(
+        engine,
+        "scanner_policy",
+        "strict_locator_enforcement",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
         engine, "scan_checkpoint", "completion_state_json", "TEXT NOT NULL DEFAULT '{}'"
     )
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
@@ -1202,11 +1208,32 @@ def _migrate(engine: Engine) -> None:
             CREATE TABLE IF NOT EXISTS crawler_config (
                 id INTEGER PRIMARY KEY,
                 js_endpoint_discovery_enabled INTEGER NOT NULL DEFAULT 0,
+                skip_dangerous_actions INTEGER NOT NULL DEFAULT 1,
+                suppress_form_submit_actions INTEGER NOT NULL DEFAULT 1,
+                block_non_idempotent_interactive_replay INTEGER NOT NULL DEFAULT 1,
                 updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
             )
         """)
         )
         conn.commit()
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "skip_dangerous_actions",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "suppress_form_submit_actions",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        engine,
+        "crawler_config",
+        "block_non_idempotent_interactive_replay",
+        "BOOLEAN NOT NULL DEFAULT 1",
+    )
     # Cloudflare Access: optional AUD to verify on the proxy-injected JWT.
     with engine.connect() as conn:
         conn.execute(

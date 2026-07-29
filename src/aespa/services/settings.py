@@ -257,28 +257,35 @@ async def discover_models_for_format(
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("OPENAI_API_KEY")
-        return await model_discovery.discover_openai_models(api_key=key, base_url=base_url)
+        return await model_discovery.discover_openai_models(
+            api_key=key, base_url=base_url
+        )
     elif api_format == "openai_compatible":
         from aespa.services import model_discovery
 
         url = base_url or "http://localhost:1234/v1"
-        return await model_discovery.discover_openai_models(api_key=api_key, base_url=url)
+        return await model_discovery.discover_openai_models(
+            api_key=api_key, base_url=url
+        )
     elif api_format == "anthropic":
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        return await model_discovery.discover_anthropic_models(api_key=key, base_url=base_url)
+        return await model_discovery.discover_anthropic_models(
+            api_key=key, base_url=base_url
+        )
     elif api_format == "google":
         from aespa.services import model_discovery
 
         key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        return await model_discovery.discover_google_models(api_key=key, base_url=base_url)
+        return await model_discovery.discover_google_models(
+            api_key=key, base_url=base_url
+        )
     elif api_format == "bedrock":
         from aespa.services import model_discovery
 
         return await model_discovery.discover_bedrock_models(region_name=base_url)
     return []
-
 
 
 def get_llm_provider(session: Session, provider_id: int) -> LLMProviderConfig:
@@ -619,6 +626,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         follow_redirects=cfg.follow_redirects,
         allow_subdomains=cfg.allow_subdomains,
         require_approval_for_destructive=cfg.require_approval_for_destructive,
+        strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
         updated_at=cfg.updated_at,
     )
 
@@ -654,6 +662,7 @@ def upsert_scanner_policy(
     cfg.follow_redirects = payload.follow_redirects
     cfg.allow_subdomains = payload.allow_subdomains
     cfg.require_approval_for_destructive = payload.require_approval_for_destructive
+    cfg.strict_locator_enforcement = payload.strict_locator_enforcement
     cfg.updated_at = _utcnow()
 
     session.add(cfg)
@@ -671,6 +680,9 @@ def get_crawler_config(session: Session) -> CrawlerConfigOut:
         )
     return CrawlerConfigOut(
         js_endpoint_discovery_enabled=cfg.js_endpoint_discovery_enabled,
+        skip_dangerous_actions=cfg.skip_dangerous_actions,
+        suppress_form_submit_actions=cfg.suppress_form_submit_actions,
+        block_non_idempotent_interactive_replay=cfg.block_non_idempotent_interactive_replay,
         updated_at=cfg.updated_at,
     )
 
@@ -682,6 +694,11 @@ def upsert_crawler_config(
     if cfg is None:
         cfg = CrawlerConfig(id=_SINGLETON_ID)
     cfg.js_endpoint_discovery_enabled = payload.js_endpoint_discovery_enabled
+    cfg.skip_dangerous_actions = payload.skip_dangerous_actions
+    cfg.suppress_form_submit_actions = payload.suppress_form_submit_actions
+    cfg.block_non_idempotent_interactive_replay = (
+        payload.block_non_idempotent_interactive_replay
+    )
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()
