@@ -51,7 +51,12 @@ def set_engine(engine: Engine) -> None:
 
 
 def _get_alembic_config(engine: Engine) -> Config:
-    repo_root = Path(__file__).resolve().parents[2]
+    import sys
+
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        repo_root = Path(sys._MEIPASS)
+    else:
+        repo_root = Path(__file__).resolve().parents[2]
     ini_path = repo_root / "alembic.ini"
     cfg = Config(str(ini_path))
     cfg.set_main_option("script_location", str(repo_root / "alembic"))
