@@ -22,7 +22,7 @@ import { WebRunSitemapGraph } from "./SiteDetail/WebRunSitemapGraph";
 import { WebRunCrawlProgress } from "./SiteDetail/WebRunCrawlProgress";
 import { WebRunHeader } from "./SiteDetail/WebRunHeader";
 import { WebRunSastLeadsTab } from "./SiteDetail/WebRunSastLeadsTab";
-import { isDynamicScanActive, runWorkflowStatus, workflowBadge } from "./SiteDetail/_helpers";
+import { isDynamicScanActive, workflowBadge } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { TestRunForm } from "./SiteDetail/TestRunForm";
 // ── Site detail ───────────────────────────────────────────────────────────────
@@ -672,11 +672,8 @@ export function TestRunDetail({
   };
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   
-  const headerStatus = runWorkflowStatus(run, {
-    thinkingStatus: effectiveThinkingStatus,
-    crawlStopping: crawlStopRequested,
-    thinkingStopping: thinkingStopRequested
-  });
+  const crawlerActive = run?.status === "running" || crawlStopRequested;
+  const testLeadActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
   const canStart = run && !crawlStopRequested && ["pending", "stopped", "failed", "complete"].includes(run.status);
   const canImportCrawl = run?.status === "pending" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl = run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
@@ -710,7 +707,8 @@ export function TestRunDetail({
   }
   return <>
     <WebRunHeader
-      run={run} siteName={siteName} profiles={runProfiles} headerStatus={headerStatus}
+      run={run} siteName={siteName} profiles={runProfiles}
+      crawlerActive={crawlerActive} testLeadActive={testLeadActive}
       canStart={canStart} canStop={canStop} canStartScan={canStartThinking}
       canStopScan={canStopThinking} canResume={hasCheckpoint} canImportCrawl={canImportCrawl} crawlStopping={crawlStopRequested}
       scanStopping={thinkingStopRequested} coverageMode={coverageMode} onCoverageMode={setCoverageMode}
