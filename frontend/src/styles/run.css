@@ -292,6 +292,13 @@
   animation: status-pulse 1.6s ease-in-out infinite;
 }
 
+.run-agent-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
 /* Per-credential crawl progress */
 .crawl-user-progress {
   display: flex;
