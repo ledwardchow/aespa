@@ -95,16 +95,18 @@ Everything is asyncio. Crawl, scan, SAST, and ALICE jobs run as background `asyn
 
 ## Database And Migrations
 
-SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. There is no Alembic. All schema evolution is hand-rolled in `db.py::_migrate()`, run on every startup.
+SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. Schema evolution is managed via **Alembic**.
 
-Migration rules:
+Migration workflow for schema changes:
 
-- New columns are added idempotently via `_ensure_column(engine, table, column, col_def)`.
-- New tables use `CREATE TABLE IF NOT EXISTS` blocks inline in `_migrate()`.
-- Changing a constraint, such as making a column nullable, on SQLite requires a full table rebuild. Copy the `_ensure_*_nullable` helper pattern.
-- All migration steps must be idempotent and best-effort, wrapped so they never block startup.
-
-When adding a field, update the SQLModel in `models.py`, add a matching `_ensure_column(...)` line in `_migrate()`, and update `schemas.py` if it crosses the API boundary.
+1. Update the SQLModel definition in `models.py`.
+2. Generate an Alembic revision script via autogenerate:
+   ```bash
+   uv run alembic revision --autogenerate -m "describe_change"
+   ```
+3. Inspect and verify the generated script in `alembic/versions/`.
+4. Update `schemas.py` if the change crosses the API boundary.
+5. `init_db()` in `db.py` automatically runs `command.upgrade(cfg, "head")` on startup. Legacy databases lacking an `alembic_version` table are automatically stamped with the baseline revision.
 
 ## Critical Gotcha: Run-ID Collision
 
