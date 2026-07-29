@@ -26,6 +26,13 @@ export function ScannerPolicyFields({
       <span>Enforce full coverage obligations</span>
     </label>
     <div className="subtle" style={{ marginBottom: "10px" }}>Include strict task-graph completion rules in system prompt before allowing the agent to end the scan.</div>
+    <label className="toggle-row">
+      <input type="checkbox" disabled={disabled} checked={form.strict_locator_enforcement} onChange={e => upd({
+        strict_locator_enforcement: e.target.checked
+      })} />
+      <span>Strict locator enforcement</span>
+    </label>
+    <div className="subtle" style={{ marginBottom: "10px" }}>Treat browser fill/click steps with no resolvable selector, testid, or role+name as a hard failure instead of silently skipping, so the agent retries and repeated failures trip the URL circuit breaker.</div>
     <div className="field" style={{ marginTop: "8px" }}>
       <label>Max consecutive text-only turns</label>
       <input type="number" disabled={disabled} min="0" max="50" value={form.max_consecutive_text_turns} onChange={e => upd({

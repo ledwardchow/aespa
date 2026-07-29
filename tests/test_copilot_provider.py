@@ -4,6 +4,8 @@ import asyncio
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from aespa.models import LLMConfig
 from aespa.services import copilot_provider
 
@@ -406,6 +408,103 @@ def test_completion_with_tools_returns_captured_tool_call(monkeypatch):
     assert usage[0][5]["requests"] == 1
 
 
+def test_completion_with_tools_timeout_has_descriptive_message(monkeypatch):
+    """A stalled model turn must surface a message with diagnostic context —
+    not a bare, empty asyncio.TimeoutError — so it's actionable in scan_log."""
+    monkeypatch.setattr(copilot_provider, "COPILOT_TURN_TIMEOUT_S", 0.05)
+
+    class _HangingSession(_FakeSession):
+        async def send(self, prompt):
+            self.prompt = prompt
+            # Never emits an assistant/error event: simulates a stalled turn.
+            return "message-1"
+
+    class _HangingClient(_FakeClient):
+        async def create_session(self, **kwargs):
+            session = _HangingSession(kwargs, call_tool=False)
+            self.sessions.append(session)
+            return session
+
+    client = _HangingClient(call_tool=False)
+
+    async def fake_get_client(config, proxy_url):
+        return client
+
+    monkeypatch.setattr(copilot_provider, "_get_client", fake_get_client)
+    messages = [{"role": "user", "content": "Inspect the target"}]
+
+    async def exercise():
+        with pytest.raises(TimeoutError) as exc_info:
+            await copilot_provider.completion_with_tools(
+                _config(),
+                "Use one tool.",
+                messages,
+                [],
+                lambda *args, **kwargs: None,
+            )
+        return exc_info.value
+
+    exc = asyncio.run(exercise())
+    message = str(exc)
+    assert message, "the timeout error must not be an empty string"
+    assert "did not respond within" in message
+    assert "turn 1" in message
+    assert "new_session=True" in message
+
+
+def test_completion_with_tools_retries_once_after_timeout(monkeypatch):
+    """A turn that times out on a stalled session must be retried once against a
+    brand-new session instead of failing the whole scan outright."""
+    monkeypatch.setattr(copilot_provider, "COPILOT_TURN_TIMEOUT_S", 0.05)
+
+    class _HangingSession(_FakeSession):
+        async def send(self, prompt):
+            self.prompt = prompt
+            # Never emits an assistant/error event: simulates a stalled turn.
+            return "message-1"
+
+    class _FlakyClient(_FakeClient):
+        """First session hangs forever; the retry's fresh session responds."""
+
+        def __init__(self):
+            super().__init__(call_tool=False)
+
+        async def create_session(self, **kwargs):
+            if not self.sessions:
+                session = _HangingSession(kwargs, call_tool=False)
+            else:
+                session = _FakeSession(kwargs, call_tool=False)
+            self.sessions.append(session)
+            return session
+
+    client = _FlakyClient()
+
+    async def fake_get_client(config, proxy_url):
+        return client
+
+    monkeypatch.setattr(copilot_provider, "_get_client", fake_get_client)
+    messages = [{"role": "user", "content": "Inspect the target"}]
+
+    async def exercise():
+        return await copilot_provider.completion_with_tools(
+            _config(),
+            "Use one tool.",
+            messages,
+            [],
+            lambda *args, **kwargs: None,
+        )
+
+    blocks, stop_reason, _ = asyncio.run(exercise())
+
+    assert stop_reason == "end_turn"
+    assert blocks[0]["text"] == "complete"
+    # The stalled first session was aborted/disconnected, and exactly one
+    # fresh retry session was created (not an unbounded retry loop).
+    assert len(client.sessions) == 2
+    assert client.sessions[0].aborted is True
+    assert client.sessions[0].disconnected is True
+
+
 def test_plain_completion_uses_no_tools_and_supports_image(monkeypatch):
     client = _FakeClient(call_tool=False)
 
@@ -432,3 +531,20 @@ def test_plain_completion_uses_no_tools_and_supports_image(monkeypatch):
         }
     ]
     assert session.disconnected is True
+
+
+def test_discover_models(monkeypatch):
+    class _Model:
+        def __init__(self, model_id):
+            self.id = model_id
+
+    class _FakeDiscoverClient:
+        async def list_models(self):
+            return [_Model("gpt-4o"), _Model("claude-3-7-sonnet")]
+
+    async def fake_get_client(config, proxy_url):
+        return _FakeDiscoverClient()
+
+    monkeypatch.setattr(copilot_provider, "_get_client", fake_get_client)
+    models = asyncio.run(copilot_provider.discover_models())
+    assert models == ["auto", "gpt-4o", "claude-3-7-sonnet"]

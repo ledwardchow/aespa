@@ -570,7 +570,7 @@ class LLMProviderConfigIn(BaseModel):
                 cleaned.append(model)
                 seen.add(key)
         if not cleaned:
-            raise ValueError("at least one model name is required")
+            raise ValueError("models must contain at least one non-empty model string")
         return cleaned
 
     @field_validator("base_url")
@@ -597,8 +597,16 @@ class LLMProviderConfigOut(BaseModel):
     has_api_key: bool = False
     api_key: str | None = None
     max_tpm: int | None = None
-    max_rpm: int | None = None
     updated_at: datetime
+
+
+class LLMModelDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    api_format: str
+    api_key: str | None = None
+    base_url: str | None = None
+    username: str | None = None
 
 
 class LLMConfigIn(BaseModel):
@@ -705,6 +713,7 @@ class ScannerPolicyBase(BaseModel):
     follow_redirects: bool = True
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
+    strict_locator_enforcement: bool = True
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -766,6 +775,21 @@ class ScannerPolicyOut(ScannerPolicyBase):
 class RunScannerPolicyOut(ScannerPolicyBase):
     source: Literal["run_snapshot", "global_default"]
     updated_at: datetime | None = None
+
+
+class CrawlerConfigBase(BaseModel):
+    js_endpoint_discovery_enabled: bool = False
+    skip_dangerous_actions: bool = True
+    suppress_form_submit_actions: bool = True
+    block_non_idempotent_interactive_replay: bool = True
+
+
+class CrawlerConfigIn(CrawlerConfigBase):
+    pass
+
+
+class CrawlerConfigOut(CrawlerConfigBase):
+    updated_at: datetime
 
 
 class UpstreamProxyConfigBase(BaseModel):
@@ -1037,6 +1061,16 @@ class TestRunUpdate(BaseModel):
     llm_profile_id: int | None = None
 
 
+class StartCrawlBody(BaseModel):
+    """Optional body for POST /api/test-runs/{run_id}/start and /restart.
+
+    When ``crawl_credential_id`` is supplied the crawl is restricted to that
+    single credential only (no anonymous phase, no other credentials).
+    """
+
+    crawl_credential_id: int | None = None
+
+
 class CredentialSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1079,6 +1113,7 @@ class TestRunSummary(BaseModel):
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
+    crawl_credential_id: int | None = None
 
     @field_validator("per_user_progress", mode="before")
     @classmethod

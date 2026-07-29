@@ -59,6 +59,19 @@ def test_upsert_session_reuses_label_and_loads_vault(monkeypatch):
         engine.dispose()
 
 
+def test_primary_credential_label_is_username_plus_random_and_unique():
+    first = scanner_sessions.credential_label(
+        "Admin User", primary=True, existing={"anonymous"}
+    )
+    second = scanner_sessions.credential_label(
+        "Admin User", primary=True, existing={"anonymous", first}
+    )
+
+    assert first.startswith("admin_user_")
+    assert second.startswith("admin_user_")
+    assert first != second
+
+
 def test_anonymous_session_is_first_class(monkeypatch):
     engine = create_engine(
         "sqlite:///:memory:",
@@ -78,6 +91,33 @@ def test_anonymous_session_is_first_class(monkeypatch):
         assert vault["anonymous"]["cookies"] == {}
         assert vault["anonymous"]["extra_headers"] == {}
         assert vault["anonymous"]["source"] == "dynamic_scan"
+    finally:
+        SQLModel.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_record_session_probe_result_does_not_evict_anonymous(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        from aespa import models as _models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+        monkeypatch.setattr(scanner_sessions, "get_engine", lambda: engine)
+
+        anon = scanner_sessions.ensure_anonymous_session(99, source="dynamic_scan")
+        scanner_sessions.record_session_probe_result(99, "anonymous", 401)
+
+        with Session(engine) as db:
+            row = db.get(_models.ScannerSession, anon.id)
+            assert row is not None
+            assert row.kind == "anonymous"
+            assert row.is_active is True
+            assert row.lifecycle_state == "verified"
+            assert row.last_status == 401
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()

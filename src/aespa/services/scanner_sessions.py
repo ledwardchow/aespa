@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -33,10 +34,16 @@ def stable_label(raw: str, existing: set[str] | None = None) -> str:
     return label
 
 
-def credential_label(username: str | None, *, primary: bool = False) -> str:
+def credential_label(
+    username: str | None,
+    *,
+    primary: bool = False,
+    existing: set[str] | None = None,
+) -> str:
     if primary:
-        return "configured_primary"
-    return stable_label(f"configured_{username or 'user'}")
+        base = stable_label(username or "user")
+        return stable_label(f"{base}_{secrets.token_hex(3)}", existing)
+    return stable_label(f"configured_{username or 'user'}", existing)
 
 
 def _json_dump(value: dict[str, Any] | None) -> str:
@@ -224,7 +231,12 @@ def record_session_probe_result(
         record.last_validated_at = now
         if validation_url:
             record.validation_url = validation_url
-        if status in _INVALID_SESSION_STATUSES:
+        if record.kind == "anonymous":
+            # Anonymous is a deliberate no-auth probe identity, not a credential that
+            # can "expire". 401/419/440 only mean the tested endpoint requires auth.
+            record.lifecycle_state = "verified"
+            record.is_active = True
+        elif status in _INVALID_SESSION_STATUSES:
             record.lifecycle_state = "invalid"
             record.is_active = False
         elif 200 <= status < 500:

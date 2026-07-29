@@ -1736,7 +1736,9 @@ def get_web_coverage_matrix(run_id: int) -> dict:
     coverage_columns = _web_coverage_columns()
     page_rows: list[dict] = []
 
-    for g in sorted(groups.values(), key=lambda group: (group["url"], group["state_label"])):
+    for g in sorted(
+        groups.values(), key=lambda group: (group["url"], group["state_label"])
+    ):
         if not g["cells"]:
             continue
         for cell in g["cells"].values():

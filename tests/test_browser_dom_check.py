@@ -137,3 +137,52 @@ def test_browser_replay_selects_option_by_accessible_role():
 
     assert page.cover_type.selected == "comprehensive"
     assert result["action_log"] == ["select_option combobox:Cover type"]
+
+
+class _Policy:
+    def __init__(self, *, strict_locator_enforcement: bool):
+        self.strict_locator_enforcement = strict_locator_enforcement
+        self.request_timeout_s = 10.0
+
+
+def test_missing_locator_is_a_hard_failure_by_default():
+    result = asyncio.run(
+        _run_thinking_browser_action(
+            _Page(),
+            {"steps": [{"op": "click", "value": "no locator hint given"}]},
+            "https://target.local",
+        )
+    )
+
+    assert result["action_log"] == [
+        "click failed: missing locator (requires selector, testid, or role+name)"
+    ]
+    assert "failed:" in result["action_log"][0]
+
+
+def test_missing_locator_is_a_hard_failure_for_fill_with_explicit_strict_policy():
+    result = asyncio.run(
+        _run_thinking_browser_action(
+            _Page(),
+            {"steps": [{"op": "fill", "value": "hello"}]},
+            "https://target.local",
+            scanner_policy=_Policy(strict_locator_enforcement=True),
+        )
+    )
+
+    assert result["action_log"] == [
+        "fill failed: missing locator (requires selector, testid, or role+name)"
+    ]
+
+
+def test_missing_locator_falls_back_to_skip_when_strict_mode_disabled():
+    result = asyncio.run(
+        _run_thinking_browser_action(
+            _Page(),
+            {"steps": [{"op": "click", "value": "no locator hint given"}]},
+            "https://target.local",
+            scanner_policy=_Policy(strict_locator_enforcement=False),
+        )
+    )
+
+    assert result["action_log"] == ["click skipped: missing locator"]

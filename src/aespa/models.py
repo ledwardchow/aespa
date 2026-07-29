@@ -221,6 +221,10 @@ class ApiTestRun(SQLModel, table=True):
     sast_run_id: Optional[int] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    # Passive WAF/bot-manager fingerprint — see TestRun.waf_provider.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)
+    waf_evidence: Optional[str] = Field(default=None)
 
 
 # ── API Endpoint Test (coverage matrix cell) ──────────────────────────────────
@@ -361,6 +365,20 @@ class ScannerPolicy(SQLModel, table=True):
     follow_redirects: bool = Field(default=True)
     allow_subdomains: bool = Field(default=True)
     require_approval_for_destructive: bool = Field(default=True)
+    strict_locator_enforcement: bool = Field(default=True)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class CrawlerConfig(SQLModel, table=True):
+    """Singleton row (id always = 1) for crawler behavior settings."""
+
+    __tablename__ = "crawler_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    js_endpoint_discovery_enabled: bool = Field(default=False)
+    skip_dangerous_actions: bool = Field(default=True)
+    suppress_form_submit_actions: bool = Field(default=True)
+    block_non_idempotent_interactive_replay: bool = Field(default=True)
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -559,6 +577,20 @@ class TestRun(SQLModel, table=True):
     terminal_reason: Optional[str] = Field(
         default=None
     )  # coverage_complete|model_done_rejected|stagnation|non_tool_loop|provider_error|user_stop|coverage_budget_exhausted
+    # Passive WAF/bot-manager fingerprint (see services/waf_detect.py), set the
+    # first time a response carries an identifiable marker (e.g. Akamai's
+    # bm_sz cookie or edge denial page). Surfaced on the Attack Surface tab and
+    # used by the scan loop to route http_request calls through the browser
+    # context instead of a raw httpx client, since a bare TLS client can never
+    # pass a JS-based bot challenge.
+    waf_provider: Optional[str] = Field(default=None)
+    waf_confidence: Optional[str] = Field(default=None)  # "high" | "medium"
+    waf_evidence: Optional[str] = Field(default=None)
+    # When set, the crawl runs as this single credential only (no anon phase,
+    # no other credentials).  NULL = crawl all phases (default behaviour).
+    crawl_credential_id: Optional[int] = Field(
+        default=None, foreign_key="credential.id"
+    )
 
 
 class CrawledPage(SQLModel, table=True):

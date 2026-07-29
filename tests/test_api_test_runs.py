@@ -114,9 +114,7 @@ def test_validate_api_scanner_sessions_route(client, monkeypatch):
         }
 
     monkeypatch.setattr(scanner_sessions, "validate_active_sessions", validate)
-    response = client.post(
-        f"/api/api-test-runs/{run['id']}/scanner-sessions/validate"
-    )
+    response = client.post(f"/api/api-test-runs/{run['id']}/scanner-sessions/validate")
 
     assert response.status_code == 200
     assert response.json()["evicted"] == 1

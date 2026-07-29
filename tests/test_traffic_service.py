@@ -311,6 +311,73 @@ async def test_playwright_logging_skips_noisy_resource_types(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_playwright_logging_handles_binary_post_data_decode_error(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+
+    listeners = {}
+    mock_ctx = MagicMock()
+    mock_ctx.on = lambda name, handler: listeners.__setitem__(name, handler)
+    setup_playwright_logging(mock_ctx, run_id=102, username="pw_user")
+
+    class MockBinaryRequest:
+        method = "POST"
+        url = "https://target.local/upload"
+        resource_type = "xhr"
+        headers = {"Content-Type": "application/octet-stream"}
+        failure = None
+
+        @property
+        def post_data(self):
+            raise UnicodeDecodeError("utf-8", b"\x1f\x8b", 1, 2, "invalid start byte")
+
+        @property
+        def post_data_json(self):
+            return None
+
+        @property
+        def post_data_buffer(self):
+            return b"\x1f\x8b\x08\x00"
+
+        async def all_headers(self):
+            return {"Content-Type": "application/octet-stream"}
+
+    mock_req = MockBinaryRequest()
+
+    mock_resp = MagicMock()
+    mock_resp.request = mock_req
+    mock_resp.url = mock_req.url
+    mock_resp.status = 200
+    mock_resp.headers = {"content-type": "application/json"}
+
+    async def mock_body():
+        return b'{"ok":true}'
+
+    async def mock_all_headers():
+        return {"content-type": "application/json"}
+
+    mock_resp.body = mock_body
+    mock_resp.all_headers = mock_all_headers
+
+    await listeners["request"](mock_req)
+    await listeners["response"](mock_resp)
+
+    with Session(engine) as session:
+        entries = session.exec(select(TrafficEntry)).all()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.test_run_id == 102
+        assert entry.method == "POST"
+        assert entry.url == "https://target.local/upload"
+        assert entry.request_body == "[binary, 4 bytes]"
+
+
+@pytest.mark.anyio
 async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
     """ALICE/API traffic must land on api_test_run_id (not test_run_id) so it
     shows in the API traffic panel and doesn't collide with web run ids."""
@@ -341,3 +408,81 @@ async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
     # API traffic panel query (api_run_id) sees it; web query does not.
     assert len(traffic.get_traffic(0, api_run_id=7)) == 1
     assert traffic.get_traffic(7) == []
+
+
+def test_maybe_record_waf_ignores_out_of_scope_traffic(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    traffic._waf_cache.clear()
+
+    from aespa.models import Site
+
+    with Session(engine) as session:
+        site = Site(id=1, name="Target Site", base_url="https://target.local")
+        run = RunModel(id=50, site_id=site.id, name="Run #50")
+        session.add(site)
+        session.add(run)
+        session.commit()
+
+    # Out of scope CDN request returning Cloudflare header
+    traffic._write(
+        run_id=50,
+        source="playwright",
+        method="GET",
+        url="https://cdn.tailwindcss.com/3.4.17",
+        request_headers={},
+        request_body=None,
+        status=200,
+        response_headers={"server": "cloudflare"},
+        response_body=None,
+        duration_ms=50,
+    )
+
+    with Session(engine) as session:
+        run_db = session.get(RunModel, 50)
+        assert run_db.waf_provider is None
+
+
+def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    traffic._waf_cache.clear()
+
+    from aespa.models import Site
+
+    with Session(engine) as session:
+        site = Site(id=2, name="Target Site 2", base_url="https://target.local")
+        run = RunModel(id=51, site_id=site.id, name="Run #51")
+        session.add(site)
+        session.add(run)
+        session.commit()
+
+    # In scope request returning Cloudflare header
+    traffic._write(
+        run_id=51,
+        source="playwright",
+        method="GET",
+        url="https://target.local/login",
+        request_headers={},
+        request_body=None,
+        status=200,
+        response_headers={"server": "cloudflare"},
+        response_body=None,
+        duration_ms=50,
+    )
+
+    with Session(engine) as session:
+        run_db = session.get(RunModel, 51)
+        assert run_db.waf_provider == "Cloudflare"
+        assert run_db.waf_confidence == "high"
+        assert run_db.waf_evidence == "server: cloudflare"

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { api } from "../../lib/api";
 import { nav } from "../../lib/router";
 import { IconPlus } from "../../components/Icons";
@@ -9,7 +9,10 @@ export function ApiCollectionsList() {
   const [collections, setCollections] = useState(null);
   const [error, setError] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [sortField, setSortField] = useState("name");
+  const [sortDir, setSortDir] = useState("asc");
   const importRef = useRef(null);
+
   const load = useCallback(async () => {
     try {
       setCollections(await api.listApiCollections());
@@ -17,9 +20,49 @@ export function ApiCollectionsList() {
       setError(e.message);
     }
   }, []);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedCollections = useMemo(() => {
+    if (!collections) return [];
+    return [...collections].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "endpoint_count") {
+        valA = a.endpoint_count || 0;
+        valB = b.endpoint_count || 0;
+      } else if (sortField === "document_count") {
+        valA = a.document_count || 0;
+        valB = b.document_count || 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [collections, sortField, sortDir]);
+
   const onDelete = async c => {
     if (!confirm(`Delete "${c.name}"? This also removes all uploaded docs, endpoints and test runs.`)) return;
     try {
@@ -29,9 +72,11 @@ export function ApiCollectionsList() {
       setError(e.message);
     }
   };
+
   const onExport = c => {
     window.location.href = `/api/api-collections/${c.id}/export`;
   };
+
   const onImportFile = async e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -47,6 +92,7 @@ export function ApiCollectionsList() {
       setImporting(false);
     }
   };
+
   return <>
     <PageHeader title="APIs" actions={<>
         <input ref={importRef} type="file" accept=".json" style={{
@@ -79,8 +125,16 @@ export function ApiCollectionsList() {
               width: "22%"
             }} />
             </colgroup>
-            <thead><tr><th>Name</th><th>Base URL</th><th>Endpoints</th><th>Files</th><th></th></tr></thead>
-            <tbody>{collections.map(c => <tr key={c.id}>
+            <thead>
+              <tr>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("base_url")}>Base URL {sortArrow("base_url")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("endpoint_count")}>Endpoints {sortArrow("endpoint_count")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("document_count")}>Files {sortArrow("document_count")}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>{sortedCollections.map(c => <tr key={c.id}>
                 <td><a href={`#/apis/${c.id}`} style={{
                   fontWeight: 600
                 }}>{c.name}</a></td>

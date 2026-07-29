@@ -22,7 +22,7 @@ import { WebRunSitemapGraph } from "./SiteDetail/WebRunSitemapGraph";
 import { WebRunCrawlProgress } from "./SiteDetail/WebRunCrawlProgress";
 import { WebRunHeader } from "./SiteDetail/WebRunHeader";
 import { WebRunSastLeadsTab } from "./SiteDetail/WebRunSastLeadsTab";
-import { isDynamicScanActive, runWorkflowStatus, workflowBadge } from "./SiteDetail/_helpers";
+import { isDynamicScanActive, workflowBadge } from "./SiteDetail/_helpers";
 export { SiteForm } from "./SiteDetail/SiteForm";
 export { TestRunForm } from "./SiteDetail/TestRunForm";
 // ── Site detail ───────────────────────────────────────────────────────────────
@@ -37,6 +37,46 @@ export function SiteDetail({
   const [editForm, setEditForm] = useState({});
   const [editProfiles, setEditProfiles] = useState([]);
   const [editSaving, setEditSaving] = useState(false);
+  const [sortField, setSortField] = useState("created_at");
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedRuns = useMemo(() => {
+    if (!runs) return [];
+    return [...runs].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "pages_discovered") {
+        valA = a.pages_discovered || 0;
+        valB = b.pages_discovered || 0;
+      } else if (sortField === "created_at") {
+        valA = a.created_at ? new Date(a.created_at).getTime() : 0;
+        valB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [runs, sortField, sortDir]);
   const load = useCallback(async () => {
     try {
       const [s, r, p] = await Promise.all([api.getSite(siteId), api.listRuns(siteId), api.listLLMProfiles()]);
@@ -247,8 +287,16 @@ export function SiteDetail({
                 width: "21%"
               }} />
               </colgroup>
-              <thead><tr><th>Name</th><th>Status</th><th>Pages</th><th>Created</th><th></th></tr></thead>
-              <tbody>{runs.map(r => <tr key={r.id}>
+              <thead>
+                <tr>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("pages_discovered")}>Pages {sortArrow("pages_discovered")}</th>
+                  <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("created_at")}>Created {sortArrow("created_at")}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>{sortedRuns.map(r => <tr key={r.id}>
                   <td>
                     <strong>{r.name}</strong>
                     {r.llm_profile_id && <div style={{
@@ -349,6 +397,7 @@ export function TestRunDetail({
   const [thinkingStatus, setThinkingStatus] = useState(null);
   const [thinkingStopRequested, setThinkingStopReq] = useState(false);
   const [coverageMode, setCoverageMode] = useState("track");
+  const [crawlCredentialId, setCrawlCredentialId] = useState(null);
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
   const [trafficTotal, setTrafficTotal] = useState(0);
@@ -562,7 +611,8 @@ export function TestRunDetail({
   const onStart = async () => {
     try {
       setCrawlStopRequested(false);
-      const r = await api.startRun(runId);
+      const body = crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : undefined;
+      const r = await api.startRun(runId, body);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
       // shown — fresh entries arrive via crawl_progress SSE events.
@@ -622,11 +672,8 @@ export function TestRunDetail({
   };
   const effectiveThinkingStatus = thinkingStatus?.status || "idle";
   
-  const headerStatus = runWorkflowStatus(run, {
-    thinkingStatus: effectiveThinkingStatus,
-    crawlStopping: crawlStopRequested,
-    thinkingStopping: thinkingStopRequested
-  });
+  const crawlerActive = run?.status === "running" || crawlStopRequested;
+  const testLeadActive = isDynamicScanActive(effectiveThinkingStatus) || thinkingStopRequested;
   const canStart = run && !crawlStopRequested && ["pending", "stopped", "failed", "complete"].includes(run.status);
   const canImportCrawl = run?.status === "pending" && !crawlStopRequested && !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl = run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
@@ -660,7 +707,8 @@ export function TestRunDetail({
   }
   return <>
     <WebRunHeader
-      run={run} siteName={siteName} profiles={runProfiles} headerStatus={headerStatus}
+      run={run} siteName={siteName} profiles={runProfiles}
+      crawlerActive={crawlerActive} testLeadActive={testLeadActive}
       canStart={canStart} canStop={canStop} canStartScan={canStartThinking}
       canStopScan={canStopThinking} canResume={hasCheckpoint} canImportCrawl={canImportCrawl} crawlStopping={crawlStopRequested}
       scanStopping={thinkingStopRequested} coverageMode={coverageMode} onCoverageMode={setCoverageMode}
@@ -724,7 +772,7 @@ export function TestRunDetail({
       />
 
       {activeTab === "sitemap" && run && <>
-        <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} />
+        <WebRunSitemapMeta run={run} crawlUsername={crawlUsername} profiles={runProfiles} onRunUpdate={setRun} onError={setError} crawlCredentialId={crawlCredentialId} onCrawlCredentialChange={setCrawlCredentialId} />
         {activeTab === "sitemap" && run && <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />}
         <WebRunCrawlProgress run={run} /></>}
 
@@ -801,6 +849,7 @@ export function TestRunDetail({
 
       <WebRunTrafficTab
         runId={runId}
+        graph={graph}
         active={activeTab === "traffic"}
         captureActive={run?.status === "running" || isDynamicScanActive(thinkingStatus?.status) || crawlStopRequested || thinkingStopRequested}
         runStatus={run?.status}
