@@ -3,6 +3,7 @@ import { ValidatorSettings } from "./ValidatorSettings";
 import { GlobalPolicySettings, ScannerPolicySettings } from "./ScannerPolicySettings";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings";
 import { ReportingSettings } from "./ReportingSettings";
+import { CrawlerSettings } from "./CrawlerSettings";
 
 
 export function ScanPolicyPage() {
@@ -23,6 +24,7 @@ export function ScanPolicyPage() {
         <button className={"tab-btn" + (tab === "scanner" ? " active" : "")} onClick={() => setTab("scanner")}>Test Lead</button>
         <button className={"tab-btn" + (tab === "specialists" ? " active" : "")} onClick={() => setTab("specialists")}>Specialist Agents</button>
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
+        <button className={"tab-btn" + (tab === "crawler" ? " active" : "")} onClick={() => setTab("crawler")}>Crawler</button>
         <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
       </div>
       <div className="scroll-content" style={{
@@ -37,6 +39,7 @@ export function ScanPolicyPage() {
         {tab === "scanner" && <ScannerPolicySettings />}
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}
+        {tab === "crawler" && <CrawlerSettings />}
         {tab === "reporting" && <ReportingSettings />}
       </div>
     </div></>;

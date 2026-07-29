@@ -776,6 +776,18 @@ class RunScannerPolicyOut(ScannerPolicyBase):
     updated_at: datetime | None = None
 
 
+class CrawlerConfigBase(BaseModel):
+    js_endpoint_discovery_enabled: bool = False
+
+
+class CrawlerConfigIn(CrawlerConfigBase):
+    pass
+
+
+class CrawlerConfigOut(CrawlerConfigBase):
+    updated_at: datetime
+
+
 class UpstreamProxyConfigBase(BaseModel):
     proxy_url: str | None = Field(default=None, max_length=500)
     proxy_scanner: bool = False

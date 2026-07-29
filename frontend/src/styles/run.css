@@ -184,6 +184,12 @@
 .traffic-filter:focus { outline:none; border-color:var(--accent); }
 .traffic-count-label { font-size:11px; color:var(--muted); white-space:nowrap; }
 .traffic-autoscroll { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--text-2); cursor:pointer; white-space:nowrap; }
+.traffic-filter-panel { display:flex; align-items:center; gap:12px; padding:8px 14px; border-bottom:1px solid var(--border); background:var(--bg-2,var(--panel)); flex-wrap:wrap; }
+.traffic-filter-panel-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:var(--muted); }
+.traffic-filter-panel-controls { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.traffic-filter-ext { display:flex; align-items:center; gap:8px; color:var(--text-2); font-size:12px; }
+.traffic-filter-ext .traffic-filter { max-width:260px; }
+.traffic-scope-only { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-2); cursor:pointer; white-space:nowrap; }
 /* Table section: takes exactly half the panel when detail is open; full height when not */
 .traffic-table-wrap { flex:1; overflow-y:auto; overflow-x:auto; min-height:0; }
 .traffic-table { border-collapse:collapse; font-size:12px; min-width:860px; width:100%; table-layout:fixed; }

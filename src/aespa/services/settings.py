@@ -14,6 +14,7 @@ from aespa.models import (
     AdversarialValidatorConfig,
     BurpRestApiConfig,
     CloudflareAccessConfig,
+    CrawlerConfig,
     GlobalHttpHeaderConfig,
     LLMConfig,
     LLMProfile,
@@ -29,6 +30,8 @@ from aespa.schemas import (
     BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
+    CrawlerConfigIn,
+    CrawlerConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -657,6 +660,33 @@ def upsert_scanner_policy(
     session.commit()
     session.refresh(cfg)
     return _policy_from_model(cfg)
+
+
+def get_crawler_config(session: Session) -> CrawlerConfigOut:
+    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
+    if cfg is None:
+        return CrawlerConfigOut(
+            **CrawlerConfigIn().model_dump(),
+            updated_at=_utcnow(),
+        )
+    return CrawlerConfigOut(
+        js_endpoint_discovery_enabled=cfg.js_endpoint_discovery_enabled,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_crawler_config(
+    session: Session, payload: CrawlerConfigIn
+) -> CrawlerConfigOut:
+    cfg = session.get(CrawlerConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = CrawlerConfig(id=_SINGLETON_ID)
+    cfg.js_endpoint_discovery_enabled = payload.js_endpoint_discovery_enabled
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return get_crawler_config(session)
 
 
 def get_run_scanner_policy(session: Session, run: TestRun) -> RunScannerPolicyOut:

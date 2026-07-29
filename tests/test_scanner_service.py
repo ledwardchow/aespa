@@ -722,6 +722,31 @@ def test_session_request_headers_replace_primary_with_selected_identity():
     assert "primary-secret" not in str(headers)
 
 
+def test_resolve_requested_scan_session_forces_anonymous_on_missing_label():
+    use_session, selected, note = scanner._resolve_requested_scan_session(
+        {"configured_primary": {"extra_headers": {"Authorization": "******"}}},
+        "anonymous",
+    )
+
+    assert use_session == "anonymous"
+    assert selected is not None
+    assert selected.get("cookies") == {}
+    assert selected.get("extra_headers") == {}
+    assert "forced anonymous no-auth session" in (note or "")
+
+
+def test_resolve_requested_scan_session_trims_whitespace_label():
+    use_session, selected, note = scanner._resolve_requested_scan_session(
+        {"anonymous": {"kind": "anonymous", "cookies": {}, "extra_headers": {}}},
+        "  anonymous  ",
+    )
+
+    assert use_session == "anonymous"
+    assert selected is not None
+    assert selected.get("kind") == "anonymous"
+    assert note is None
+
+
 def test_sent_request_auth_summary_reports_presence_without_secret():
     summary = scanner._sent_request_auth_summary(
         {
