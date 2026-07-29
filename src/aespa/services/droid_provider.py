@@ -54,7 +54,9 @@ class _IsolatedProcessTransport:
     async def connect(self) -> None:
         executable = shutil.which("droid", path=self.env.get("PATH"))
         if not executable:
-            raise RuntimeError("Droid CLI was not found. Install and sign in to Droid first.")
+            raise RuntimeError(
+                "Droid CLI was not found. Install and sign in to Droid first."
+            )
         self.process = await asyncio.create_subprocess_exec(
             executable,
             "exec",
@@ -237,7 +239,9 @@ async def _handle_relay(
     tool_id = ""
     try:
         payload = json.loads(await reader.readline())
-        if not secrets.compare_digest(str(payload.get("token") or ""), conversation.token):
+        if not secrets.compare_digest(
+            str(payload.get("token") or ""), conversation.token
+        ):
             raise RuntimeError("Invalid Droid tool bridge token")
         params = payload.get("params") or {}
         name = str(params.get("name") or "")

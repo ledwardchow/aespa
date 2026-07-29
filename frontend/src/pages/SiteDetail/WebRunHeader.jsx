@@ -15,6 +15,9 @@ export function WebRunHeader({ run, siteName, profiles, crawlerActive, testLeadA
           <span className={`badge ${testLeadActive ? "ok" : "neutral"}`} title={`Test Lead agent is ${testLeadActive ? "active" : "inactive"}`}>
             Test Lead {testLeadActive ? "active" : "inactive"}
           </span>
+          <span className={`badge ${aliceRunning ? "ok" : "neutral"}`} title={`ALICE agent is ${aliceRunning ? "active" : "inactive"}`}>
+            ALICE {aliceRunning ? "active" : "inactive"}
+          </span>
         </span>
       )}
     </div>

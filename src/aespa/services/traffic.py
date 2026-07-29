@@ -120,12 +120,13 @@ def _write(
         s.add(entry)
         s.commit()
 
-    _maybe_record_waf(run_id, api_run_id, response_headers, response_body)
+    _maybe_record_waf(run_id, api_run_id, url, response_headers, response_body)
 
 
 def _maybe_record_waf(
     run_id: int,
     api_run_id: Optional[int],
+    url: str,
     response_headers: dict,
     response_body: Optional[str],
 ) -> None:
@@ -134,6 +135,8 @@ def _maybe_record_waf(
     cache (fast path for the scan loop) and to the run row (durable, for the
     Attack Surface UI). Idempotent and best-effort — never raises.
     """
+    from urllib.parse import urlparse
+
     from aespa.services.waf_detect import detect_waf
 
     try:
@@ -141,22 +144,53 @@ def _maybe_record_waf(
         if detection is None:
             return
 
+        req_hostname = (urlparse(url).hostname or "").lower() if url else ""
+        if not req_hostname:
+            return
+
         cache_key = ("api", api_run_id) if api_run_id is not None else ("web", run_id)
         cached = _waf_cache.get(cache_key)
         if cached and cached.get("provider") == detection["provider"]:
             return  # already known; avoid a DB write on every matching request
-        _waf_cache[cache_key] = detection
 
-        from aespa.models import ApiTestRun, TestRun
+        from aespa.models import ApiCollection, ApiTestRun, Site, TestRun
+        from aespa.services.scope import _same_root_domain
 
         with Session(get_engine()) as s:
-            run = (
-                s.get(ApiTestRun, api_run_id)
-                if api_run_id is not None
-                else s.get(TestRun, run_id)
-            )
-            if run is None or run.waf_provider == detection["provider"]:
+            if api_run_id is not None:
+                api_run = s.get(ApiTestRun, api_run_id)
+                if api_run is None:
+                    return
+                collection = (
+                    s.get(ApiCollection, api_run.collection_id)
+                    if api_run.collection_id
+                    else None
+                )
+                scope_hosts = json.loads(
+                    (collection.scope_hosts if collection else None) or "[]"
+                )
+                base_url = collection.base_url if collection else None
+                run = api_run
+            else:
+                run = s.get(TestRun, run_id)
+                if run is None:
+                    return
+                site = s.get(Site, run.site_id) if run.site_id else None
+                scope_hosts = json.loads((site.scope_hosts if site else None) or "[]")
+                base_url = site.base_url if site else None
+
+            # Enforce scope check: only attribute WAF to in-scope hostnames
+            if scope_hosts:
+                if req_hostname not in scope_hosts:
+                    return
+            elif base_url:
+                base_hostname = (urlparse(base_url).hostname or "").lower()
+                if base_hostname and not _same_root_domain(req_hostname, base_hostname):
+                    return
+
+            if run.waf_provider == detection["provider"]:
                 return
+            _waf_cache[cache_key] = detection
             run.waf_provider = detection["provider"]
             run.waf_confidence = detection["confidence"]
             run.waf_evidence = detection["evidence"][:500]

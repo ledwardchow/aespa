@@ -548,4 +548,3 @@ def test_discover_models(monkeypatch):
     monkeypatch.setattr(copilot_provider, "_get_client", fake_get_client)
     models = asyncio.run(copilot_provider.discover_models())
     assert models == ["auto", "gpt-4o", "claude-3-7-sonnet"]
-
