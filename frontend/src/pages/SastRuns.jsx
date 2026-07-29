@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { LeadsPanel } from "./ApiCollections/LeadsPanel";
 import { api } from "../lib/api";
 import { nav } from "../lib/router";
@@ -117,6 +117,9 @@ export function SastRunForm() {
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
   const [error, setError] = useState(null);
+  const [sortField, setSortField] = useState("started_at");
+  const [sortDir, setSortDir] = useState("desc");
+
   const load = useCallback(async () => {
     try {
       setRuns(await api.listAllSastRuns());
@@ -124,9 +127,51 @@ export function SastRunsListPage() {
       setError(e.message);
     }
   }, []);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const sortArrow = (field) => {
+    if (sortField !== field) return null;
+    return <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>{sortDir === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  const sortedRuns = useMemo(() => {
+    if (!runs) return [];
+    return [...runs].sort((a, b) => {
+      let valA = a[sortField];
+      let valB = b[sortField];
+
+      if (sortField === "leads_count") {
+        valA = a.leads_count || 0;
+        valB = b.leads_count || 0;
+      } else if (sortField === "linked_scan") {
+        valA = a.triggered_by_run_id ? `API #${a.triggered_by_run_id}` : (a.source_filename || "");
+        valB = b.triggered_by_run_id ? `API #${b.triggered_by_run_id}` : (b.source_filename || "");
+      } else if (sortField === "started_at") {
+        valA = a.started_at ? new Date(a.started_at).getTime() : 0;
+        valB = b.started_at ? new Date(b.started_at).getTime() : 0;
+      }
+
+      if (valA == null) valA = "";
+      if (valB == null) valB = "";
+
+      let cmp = typeof valA === "number" && typeof valB === "number"
+        ? valA - valB
+        : String(valA).localeCompare(String(valB), undefined, { sensitivity: "base", numeric: true });
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [runs, sortField, sortDir]);
 
   return <>
     <PageHeader title="SAST Scans" actions={<>
@@ -157,8 +202,17 @@ export function SastRunsListPage() {
               width: "18%"
             }} /><col />
             </colgroup>
-            <thead><tr><th>Name</th><th>Status</th><th>Leads</th><th>Linked scan</th><th>Started</th><th></th></tr></thead>
-            <tbody>{runs.map(r => <tr key={r.id}>
+            <thead>
+              <tr>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("name")}>Name {sortArrow("name")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("status")}>Status {sortArrow("status")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("leads_count")}>Leads {sortArrow("leads_count")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("linked_scan")}>Linked scan {sortArrow("linked_scan")}</th>
+                <th style={{ cursor: "pointer", userSelect: "none" }} onClick={() => toggleSort("started_at")}>Started {sortArrow("started_at")}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>{sortedRuns.map(r => <tr key={r.id}>
                 <td><a href={`#/sast-runs/${r.id}/progress`} style={{
                   fontWeight: 600
                 }}>{r.name}</a></td>

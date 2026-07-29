@@ -10,6 +10,7 @@ from aespa.models import (
     PageOwaspTest,
     Site,
     TargetIntelItem,
+    TrafficEntry,
 )
 from aespa.models import TestRun as RunModel
 from aespa.services import recon_summary as recon_summary_svc
@@ -260,6 +261,71 @@ def test_build_recon_summary_uses_endpoint_destination_not_source_asset(monkeypa
     assert not any(
         route["canonical_url"].endswith("api.js") for route in summary["routes"]
     )
+
+
+def test_observed_post_replaces_navigation_get_that_only_returns_405(monkeypatch):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run_id = run.id
+        url = "https://target.local/api/transfers/check"
+        s.add(CrawledPage(test_run_id=run_id, url=url, req_auth=True))
+        s.add(
+            TrafficEntry(
+                test_run_id=run_id,
+                source="crawler",
+                method="GET",
+                url=url,
+                status=405,
+            )
+        )
+        s.add(
+            TrafficEntry(
+                test_run_id=run_id,
+                source="playwright",
+                method="POST",
+                url=url,
+                status=200,
+            )
+        )
+        s.commit()
+
+    summary = recon_summary_svc.build_recon_summary(run_id)
+    route = next(item for item in summary["routes"] if item["canonical_url"] == url)
+    assert route["methods"] == ["POST"]
+    assert route["rejected_methods"] == ["GET"]
+    assert route["method_evidence"]["GET"]["statuses"] == {"405": 1}
+
+
+def test_unknown_endpoint_method_does_not_default_to_get(monkeypatch):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run_id = run.id
+        s.add(
+            TargetIntelItem(
+                test_run_id=run_id,
+                kind="endpoint",
+                key="/api/unknown",
+                value="https://target.local/api/unknown",
+                url="https://target.local/app.js",
+                method=None,
+                source="js_asset",
+            )
+        )
+        s.commit()
+
+    summary = recon_summary_svc.build_recon_summary(run_id)
+    route = next(
+        item
+        for item in summary["routes"]
+        if item["canonical_url"] == "https://target.local/api/unknown"
+    )
+    assert route["methods"] == []
 
 
 def test_build_recon_summary_coverage_is_live_workprogram_projection(monkeypatch):

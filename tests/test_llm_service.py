@@ -9,6 +9,52 @@ from aespa.models import LLMConfig
 from aespa.services import llm
 
 
+def test_agentic_context_compaction_preserves_recent_tool_pairs():
+    messages = [{"role": "user", "content": "initial brief"}]
+    for index in range(50):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"call-{index}",
+                        "name": "http_request",
+                        "input": {
+                            "method": "GET",
+                            "url": f"https://target.local/api/items/{index}",
+                            "secret": "must-not-enter-journal",
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"call-{index}",
+                        "content": "Status: 200 " + ("x" * 1500),
+                    }
+                ],
+            }
+        )
+
+    compacted, stats = llm.compact_agentic_messages(
+        messages, max_context_chars=30_000, recent_messages=12
+    )
+
+    assert stats is not None
+    assert stats["after_chars"] < stats["before_chars"]
+    assert compacted[0]["role"] == "user"
+    assert "CONTEXT JOURNAL" in str(compacted[0]["content"])
+    assert "must-not-enter-journal" not in str(compacted[0]["content"])
+    assert compacted[1]["role"] == "assistant"
+    assert compacted[-1]["role"] == "user"
+
+
 def test_limiter_oversized_estimate_does_not_hang():
     # A single request estimated larger than the entire per-minute budget must
     # not loop forever waiting for capacity that can never exist. Pre-fix, this
@@ -217,7 +263,7 @@ def test_agentic_loop_checkpoints_nonempty_assistant_turns(monkeypatch):
         }
         return [done], "tool_use", [done]
 
-    async def checkpoint(messages):
+    async def checkpoint(messages, step_count=0):
         checkpoints.append(messages.copy())
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
@@ -291,6 +337,53 @@ def test_agentic_loop_logs_native_stop_and_terminal_no_tool_failure(monkeypatch)
         "consecutive_no_tool_responses"
     )
     assert terminal[0]["data"]["explicit_done"] is False
+
+
+def test_agentic_loop_continues_step_numbering_on_resume(monkeypatch):
+    """Resuming from a checkpoint must continue the Step N counter shown to the
+    user (and persisted back to on_checkpoint) instead of restarting at 1."""
+    config = LLMConfig(
+        provider="bedrock",
+        model="global.anthropic.claude-opus-test",
+        max_tokens=2048,
+    )
+    emitted: list[dict] = []
+    checkpoint_steps: list[int] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        done = {
+            "type": "tool_use",
+            "id": "done-1",
+            "name": "done",
+            "input": {"summary": "resumed"},
+            "text": None,
+        }
+        return [done], "tool_use", [done]
+
+    async def checkpoint(messages, step_count=0):
+        checkpoint_steps.append(step_count)
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+    asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="unused",
+            tool_executor=lambda *args: None,
+            emit_fn=emitted.append,
+            on_checkpoint=checkpoint,
+            resume_messages=[{"role": "user", "content": "start"}],
+            resume_step_count=41,
+        )
+    )
+
+    deciding_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "thinking_step" and event.get("status") == "deciding"
+    ]
+    assert deciding_events[0]["data"]["step"] == 42
+    assert checkpoint_steps[-1] == 42
 
 
 def test_agentic_loop_repairs_trailing_assistant_checkpoint_on_resume(monkeypatch):
@@ -783,6 +876,28 @@ The final answer is {"context": "Real JSON", "suggested_links": []}.
     assert data["context"] == "Real JSON"
 
 
+def test_extract_json_handles_unclosed_think_tag_and_template_example():
+    raw = """<think>
+Let me analyze the original finding and rewrite it.
+Looking at the template:
+{
+  "owasp_category": "A03",
+  "title": "Short, report-ready title",
+  "description": "What is vulnerable and where."
+}
+Let me write the real report-ready version.
+Final output:{
+  "owasp_category": "A05",
+  "title": "Permissive CORS policy reflects arbitrary Origin header",
+  "description": "The API at http://192.168.3.101/ applies a permissive CORS policy."
+}"""
+
+    data = llm._extract_json(raw, expect=dict)
+
+    assert data["owasp_category"] == "A05"
+    assert data["title"] == "Permissive CORS policy reflects arbitrary Origin header"
+
+
 def test_page_analysis_parses_compact_function_label():
     _context, _links, categories = llm._parse(
         '{"page_label":"Register for Internet Banking today now",'
@@ -903,10 +1018,7 @@ def test_thinking_next_action_prompt_requires_investigation_context(monkeypatch)
     assert '"action": "credential_check"' in captured["prompt"]
     assert "Maximum 20 candidates" in captured["prompt"]
     assert "use_session" in captured["prompt"]
-    assert (
-        "Supported ops: goto, fill, type, click, press, wait, snapshot"
-        in captured["prompt"]
-    )
+    assert "Supported ops: goto, fill, type, click" in captured["prompt"]
 
 
 def test_thinking_next_action_history_includes_response_headers(monkeypatch):
@@ -3103,6 +3215,27 @@ def test_copilot_usage_callback_keeps_run_context_after_sdk_context_switch():
     assert usage["total_requests"] == 1
     assert usage["copilot_quota"]["remaining_percentage"] == 74
     assert events[-1]["totals"] == usage
+
+
+def test_droid_usage_callback_records_factory_credits():
+    run_id = 888890
+    llm.set_run_context(run_id, emit_fn=None, run_kind="web")
+    callback = llm._droid_usage_callback()
+    llm.clear_run_context()
+
+    callback(
+        "claude-sonnet-4-6",
+        100,
+        20,
+        30,
+        10,
+        factory_credits=434,
+        requests=1,
+    )
+
+    usage = llm.get_run_token_usage(run_id)
+    assert usage["total_factory_credits"] == 434
+    assert usage["by_model"]["claude-sonnet-4-6"]["provider"] == "factory_droid"
 
 
 def test_google_usage_treats_none_counters_as_zero(monkeypatch):

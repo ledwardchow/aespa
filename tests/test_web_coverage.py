@@ -585,6 +585,36 @@ def test_matrix_returns_persisted_status(db_engine, db_session, run):
     assert matrix["pages"][0]["cells"]["A01"]["status"] == "covered"
 
 
+def test_matrix_keeps_interactive_states_separate_from_url_rows(
+    db_engine, db_session, run
+):
+    _make_page(db_session, run, "http://example.com/account", ["A01"])
+    profile = _make_page(db_session, run, "http://example.com/account", ["A01"])
+    profile.state_kind = "interactive"
+    profile.state_key = "spa:account:profile"
+    profile.state_label = "Profile"
+    preferences = _make_page(db_session, run, "http://example.com/account", ["A01"])
+    preferences.state_kind = "interactive"
+    preferences.state_key = "spa:account:preferences"
+    preferences.state_label = "Preferences"
+    db_session.add(profile)
+    db_session.add(preferences)
+    db_session.commit()
+
+    seed_web_workprogram(run.id)
+    matrix = get_web_coverage_matrix(run.id)
+
+    assert [
+        (page["state_kind"], page["state_label"], page["url"])
+        for page in matrix["pages"]
+    ] == [
+        ("url", "", "http://example.com/account"),
+        ("interactive", "Preferences", "http://example.com/account"),
+        ("interactive", "Profile", "http://example.com/account"),
+    ]
+    assert all(len(page["page_ids"]) == 1 for page in matrix["pages"])
+
+
 # ── 14. get_web_coverage_matrix returns coverage_mode from run ───────────────
 
 
@@ -654,12 +684,11 @@ def test_enforce_loop_does_not_disguise_budget_exhaustion_as_skipped(
     async def _prober(page_obj, category, current_status):
         return ("covered", None)
 
-    with pytest.raises(RuntimeError, match="unresolved"):
-        asyncio.run(
-            _enforce_web_coverage_loop(
-                run.id, _prober, max_attempts=1, time_budget_s=999
-            )
-        )
+    stats = asyncio.run(
+        _enforce_web_coverage_loop(run.id, _prober, max_attempts=1, time_budget_s=999)
+    )
+    assert stats["budget_exhausted"] is True
+    assert stats["remaining"] == 1
 
     matrix = get_web_coverage_matrix(run.id)
     assert matrix["totals"]["covered"] == 1
@@ -680,6 +709,25 @@ def test_default_enforce_prober_rejects_applicable_untested_cell(
 
     assert status == "untested"
     assert "applicable but not tested" in reason
+
+
+def test_enforce_loop_leaves_untested_applicable_cell_unresolved(
+    db_engine, db_session, run
+):
+    _make_page(db_session, run, "http://example.com/admin", ["A01"])
+    seed_web_workprogram(run.id)
+
+    async def _prober(page_obj, category, current_status):
+        return ("untested", "applicable but not exercised")
+
+    stats = asyncio.run(_enforce_web_coverage_loop(run.id, _prober))
+
+    assert stats["untested"] == 1
+    assert stats["budget_exhausted"] is True
+    assert stats["remaining"] == 1
+    matrix = get_web_coverage_matrix(run.id)
+    assert matrix["totals"]["not_started"] == 1
+    assert matrix["totals"]["skipped"] == 0
 
 
 def test_skip_coverage_requires_real_blocker_evidence(db_engine, db_session, run):
