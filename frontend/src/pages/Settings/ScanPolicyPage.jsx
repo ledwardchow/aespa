@@ -21,10 +21,10 @@ export function ScanPolicyPage() {
     }}>
       <div className="tab-bar">
         <button className={"tab-btn" + (tab === "global" ? " active" : "")} onClick={() => setTab("global")}>Global</button>
+        <button className={"tab-btn" + (tab === "crawler" ? " active" : "")} onClick={() => setTab("crawler")}>Crawler</button>
         <button className={"tab-btn" + (tab === "scanner" ? " active" : "")} onClick={() => setTab("scanner")}>Test Lead</button>
         <button className={"tab-btn" + (tab === "specialists" ? " active" : "")} onClick={() => setTab("specialists")}>Specialist Agents</button>
         <button className={"tab-btn" + (tab === "validator" ? " active" : "")} onClick={() => setTab("validator")}>Validator</button>
-        <button className={"tab-btn" + (tab === "crawler" ? " active" : "")} onClick={() => setTab("crawler")}>Crawler</button>
         <button className={"tab-btn" + (tab === "reporting" ? " active" : "")} onClick={() => setTab("reporting")}>Reporting</button>
       </div>
       <div className="scroll-content" style={{
@@ -36,10 +36,10 @@ export function ScanPolicyPage() {
         paddingBottom: 28
       }}>
         {tab === "global" && <GlobalPolicySettings />}
+        {tab === "crawler" && <CrawlerSettings />}
         {tab === "scanner" && <ScannerPolicySettings />}
         {tab === "specialists" && <SpecialistAgentSettings />}
         {tab === "validator" && <ValidatorSettings />}
-        {tab === "crawler" && <CrawlerSettings />}
         {tab === "reporting" && <ReportingSettings />}
       </div>
     </div></>;

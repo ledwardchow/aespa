@@ -1160,9 +1160,10 @@ def test_explicitly_public_endpoints_are_not_flagged_by_auth_matrix():
     for url in public_urls:
         # req_auth=True simulates what classify_http_exchange sets for endpoints
         # discovered during an authenticated crawl phase.
-        assert scanner._target_requires_auth_or_sensitive(
-            {"url": url, "req_auth": True}
-        ) is False, f"Expected {url} to be excluded as explicitly public"
+        assert (
+            scanner._target_requires_auth_or_sensitive({"url": url, "req_auth": True})
+            is False
+        ), f"Expected {url} to be excluded as explicitly public"
 
 
 def test_explicitly_public_check_does_not_suppress_protected_endpoints():
@@ -1171,13 +1172,14 @@ def test_explicitly_public_check_does_not_suppress_protected_endpoints():
     for url in (
         "http://app.local/api/users",
         "http://app.local/api/admin/settings",
-        "http://app.local/api/config",          # /config marker
+        "http://app.local/api/config",  # /config marker
         "http://app.local/api/dashboard",
-        "http://app.local/api/publications",    # 'publications' ≠ 'public'
+        "http://app.local/api/publications",  # 'publications' ≠ 'public'
     ):
-        assert scanner._target_requires_auth_or_sensitive(
-            {"url": url, "req_auth": True}
-        ) is True, f"Expected {url} to still be treated as sensitive"
+        assert (
+            scanner._target_requires_auth_or_sensitive({"url": url, "req_auth": True})
+            is True
+        ), f"Expected {url} to still be treated as sensitive"
 
 
 def test_deterministic_result_analysis_detects_sql_error():

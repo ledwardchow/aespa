@@ -45,7 +45,10 @@ _SIGNATURES: list[WafSignature] = [
         confidence="high",
         cookie_names=("__cf_bm", "cf_clearance"),
         header_markers=(("server", "cloudflare"), ("cf-ray", "")),
-        body_markers=("attention required! | cloudflare", "checking your browser before accessing"),
+        body_markers=(
+            "attention required! | cloudflare",
+            "checking your browser before accessing",
+        ),
     ),
     WafSignature(
         provider="Imperva / Incapsula",
@@ -62,7 +65,9 @@ _SIGNATURES: list[WafSignature] = [
     WafSignature(
         provider="F5 BIG-IP ASM",
         confidence="medium",
-        body_markers=("the requested url was rejected. please consult with your administrator",),
+        body_markers=(
+            "the requested url was rejected. please consult with your administrator",
+        ),
     ),
     WafSignature(
         provider="Sucuri CloudProxy",

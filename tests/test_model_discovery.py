@@ -31,9 +31,7 @@ def test_discover_openai_models():
             return mock_response
 
     with patch("httpx.AsyncClient", _MockClient):
-        models = asyncio.run(
-            model_discovery.discover_openai_models(api_key="test-key")
-        )
+        models = asyncio.run(model_discovery.discover_openai_models(api_key="test-key"))
         assert models == ["gpt-4o", "gpt-4o-mini"]
 
 
@@ -72,8 +70,14 @@ def test_discover_google_models():
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "models": [
-            {"name": "models/gemini-2.0-flash-exp", "supportedGenerationMethods": ["generateContent"]},
-            {"name": "models/gemini-1.5-pro", "supportedGenerationMethods": ["generateContent"]},
+            {
+                "name": "models/gemini-2.0-flash-exp",
+                "supportedGenerationMethods": ["generateContent"],
+            },
+            {
+                "name": "models/gemini-1.5-pro",
+                "supportedGenerationMethods": ["generateContent"],
+            },
         ]
     }
     mock_response.raise_for_status = MagicMock()
@@ -93,7 +97,5 @@ def test_discover_google_models():
             return mock_response
 
     with patch("httpx.AsyncClient", _MockClient):
-        models = asyncio.run(
-            model_discovery.discover_google_models(api_key="test-key")
-        )
+        models = asyncio.run(model_discovery.discover_google_models(api_key="test-key"))
         assert models == ["gemini-2.0-flash-exp", "gemini-1.5-pro"]
